@@ -21,12 +21,40 @@ pub enum AgentStatus {
     Error(String),
 }
 
+/// Worker role configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRole {
+    pub role_type: String,          // "backend", "frontend", "coherence", "simplify", or custom
+    pub label: String,              // Display name
+    pub default_cli: String,        // Default CLI for this role
+    pub prompt_template: Option<String>, // Path to template or inline prompt
+}
+
+impl WorkerRole {
+    pub fn new(role_type: &str, label: &str, default_cli: &str) -> Self {
+        Self {
+            role_type: role_type.to_string(),
+            label: label.to_string(),
+            default_cli: default_cli.to_string(),
+            prompt_template: None,
+        }
+    }
+}
+
+impl Default for WorkerRole {
+    fn default() -> Self {
+        Self::new("general", "General", "claude")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub cli: String,              // "claude", "gemini", "opencode", "codex"
     pub model: Option<String>,    // "opus", "gemini-3-pro", etc.
     pub flags: Vec<String>,       // Additional CLI flags
     pub label: Option<String>,    // Display name
+    pub role: Option<WorkerRole>, // Worker role assignment
+    pub initial_prompt: Option<String>, // Prompt to inject on spawn
 }
 
 impl Default for AgentConfig {
@@ -36,6 +64,8 @@ impl Default for AgentConfig {
             model: Some("opus".to_string()),
             flags: vec![],
             label: None,
+            role: None,
+            initial_prompt: None,
         }
     }
 }
@@ -118,9 +148,29 @@ impl PtySession {
             })
             .map_err(|e| PtyError::CreateError(e.to_string()))?;
 
-        let mut cmd = CommandBuilder::new(command);
-        cmd.args(args);
+        // On Windows, wrap non-exe commands in cmd.exe to handle npm batch files
+        // Commands like gemini, opencode, codex are .cmd batch files on Windows
+        let cmd = if cfg!(windows) && !command.ends_with(".exe") && command != "cmd" && command != "cmd.exe" {
+            // Build full command string for cmd.exe /c
+            let full_cmd = if args.is_empty() {
+                command.to_string()
+            } else {
+                format!("{} {}", command, args.iter()
+                    .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.to_string() })
+                    .collect::<Vec<_>>()
+                    .join(" "))
+            };
+            tracing::info!("Wrapping command for Windows: cmd.exe /c {}", full_cmd);
+            let mut cmd = CommandBuilder::new("cmd.exe");
+            cmd.args(&["/c", &full_cmd]);
+            cmd
+        } else {
+            let mut cmd = CommandBuilder::new(command);
+            cmd.args(args);
+            cmd
+        };
 
+        let mut cmd = cmd;
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }

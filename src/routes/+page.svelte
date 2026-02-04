@@ -4,13 +4,26 @@
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import StatusPanel from '$lib/components/StatusPanel.svelte';
   import AgentTree from '$lib/components/AgentTree.svelte';
+  import CoordinationPanel from '$lib/components/CoordinationPanel.svelte';
+  import QueenControls from '$lib/components/QueenControls.svelte';
+  import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
   import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
+  import { coordination } from '$lib/stores/coordination';
 
   let showStatusPanel = $state(true);
+  let showCoordinationPanel = $state(true);
+  let showAddWorkerDialog = $state(false);
   let focusedAgentId = $state<string | null>(null);
 
   onMount(() => {
     sessions.loadSessions();
+  });
+
+  // Load coordination when session changes
+  $effect(() => {
+    if ($activeSession?.id) {
+      coordination.setSessionId($activeSession.id);
+    }
   });
 
   // Auto-select first agent when session changes
@@ -40,6 +53,18 @@
     showStatusPanel = !showStatusPanel;
   }
 
+  function toggleCoordinationPanel() {
+    showCoordinationPanel = !showCoordinationPanel;
+  }
+
+  function openAddWorkerDialog() {
+    showAddWorkerDialog = true;
+  }
+
+  function closeAddWorkerDialog() {
+    showAddWorkerDialog = false;
+  }
+
   function handleAgentSelect(e: CustomEvent<string>) {
     focusedAgentId = e.detail;
   }
@@ -50,6 +75,11 @@
     if (event.ctrlKey && event.key === 'j') {
       event.preventDefault();
       toggleStatusPanel();
+    }
+    // Ctrl+K to toggle coordination panel
+    if (event.ctrlKey && event.key === 'k') {
+      event.preventDefault();
+      toggleCoordinationPanel();
     }
     // Ctrl+N for new session
     if (event.ctrlKey && event.key === 'n') {
@@ -92,6 +122,9 @@
           selectedId={focusedAgentId}
           on:select={handleAgentSelect}
         />
+      </div>
+      <div class="queen-controls-section">
+        <QueenControls on:openAddWorker={openAddWorkerDialog} />
       </div>
     </aside>
   {/if}
@@ -161,7 +194,15 @@
   {#if showStatusPanel}
     <StatusPanel />
   {/if}
+
+  {#if showCoordinationPanel && $activeSession}
+    <aside class="coordination-sidebar">
+      <CoordinationPanel />
+    </aside>
+  {/if}
 </div>
+
+<AddWorkerDialog bind:open={showAddWorkerDialog} on:close={closeAddWorkerDialog} />
 
 <style>
   :global(*) {
@@ -382,5 +423,20 @@
   .terminal-container {
     flex: 1;
     min-height: 0;
+  }
+
+  .queen-controls-section {
+    border-top: 1px solid var(--color-border);
+    padding: 8px;
+  }
+
+  .coordination-sidebar {
+    width: 320px;
+    min-width: 280px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--color-surface);
+    border-left: 1px solid var(--color-border);
   }
 </style>

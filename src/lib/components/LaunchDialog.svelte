@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, PlannerConfig } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
@@ -13,6 +13,15 @@
   }>();
 
   type SessionMode = 'hive' | 'swarm';
+
+  // Predefined roles with default CLIs (all default to claude for compatibility)
+  const predefinedRoles = [
+    { type: 'backend', label: 'Backend', cli: 'claude' },
+    { type: 'frontend', label: 'Frontend', cli: 'claude' },
+    { type: 'coherence', label: 'Coherence', cli: 'claude' },
+    { type: 'simplify', label: 'Simplify', cli: 'claude' },
+    { type: 'general', label: 'General', cli: 'claude' },
+  ];
 
   let mode: SessionMode = 'hive';
   let projectPath = '';
@@ -27,30 +36,59 @@
     label: undefined,
   };
 
-  // Hive workers
-  let hiveWorkers: AgentConfig[] = [
-    { cli: 'claude', flags: [], label: undefined },
-    { cli: 'claude', flags: [], label: undefined },
+  // Hive workers with roles
+  let hiveWorkers: (AgentConfig & { selectedRole: string })[] = [
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
+    { cli: 'gemini', flags: [], label: undefined, selectedRole: 'frontend' },
   ];
 
   // Swarm planners with their workers
-  let swarmPlanners: { config: AgentConfig; domain: string; workers: AgentConfig[] }[] = [
+  let swarmPlanners: { config: AgentConfig; domain: string; workers: (AgentConfig & { selectedRole: string })[] }[] = [
     {
       config: { cli: 'claude', flags: [], label: undefined },
       domain: 'frontend',
       workers: [
-        { cli: 'claude', flags: [], label: undefined },
+        { cli: 'claude', flags: [], label: undefined, selectedRole: 'general' },
       ],
     },
   ];
 
-  function createDefaultConfig(): AgentConfig {
-    return { cli: 'claude', flags: [], label: undefined };
+  function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
+    const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
+    return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
+  }
+
+  function updateWorkerCli(workerIndex: number) {
+    const worker = hiveWorkers[workerIndex];
+    const role = predefinedRoles.find(r => r.type === worker.selectedRole);
+    if (role) {
+      hiveWorkers[workerIndex].cli = role.cli;
+      hiveWorkers = [...hiveWorkers];
+    }
+  }
+
+  function updatePlannerWorkerCli(plannerIndex: number, workerIndex: number) {
+    const worker = swarmPlanners[plannerIndex].workers[workerIndex];
+    const role = predefinedRoles.find(r => r.type === worker.selectedRole);
+    if (role) {
+      swarmPlanners[plannerIndex].workers[workerIndex].cli = role.cli;
+      swarmPlanners = [...swarmPlanners];
+    }
+  }
+
+  function buildWorkerRole(roleType: string): WorkerRole {
+    const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
+    return {
+      role_type: role.type,
+      label: role.label,
+      default_cli: role.cli,
+      prompt_template: null,
+    };
   }
 
   function addHiveWorker() {
     if (hiveWorkers.length < 6) {
-      hiveWorkers = [...hiveWorkers, createDefaultConfig()];
+      hiveWorkers = [...hiveWorkers, createDefaultConfig('general')];
     }
   }
 
@@ -65,9 +103,9 @@
       swarmPlanners = [
         ...swarmPlanners,
         {
-          config: createDefaultConfig(),
+          config: { cli: 'claude', flags: [], label: undefined },
           domain: '',
-          workers: [createDefaultConfig()],
+          workers: [createDefaultConfig('general')],
         },
       ];
     }
@@ -83,7 +121,7 @@
     if (swarmPlanners[plannerIndex].workers.length < 4) {
       swarmPlanners[plannerIndex].workers = [
         ...swarmPlanners[plannerIndex].workers,
-        createDefaultConfig(),
+        createDefaultConfig('general'),
       ];
       swarmPlanners = [...swarmPlanners];
     }
@@ -117,10 +155,18 @@
 
     try {
       if (mode === 'hive') {
+        // Build worker configs with roles
+        const workersWithRoles: AgentConfig[] = hiveWorkers.map((w) => ({
+          cli: w.cli,
+          flags: w.flags,
+          label: w.label,
+          role: buildWorkerRole(w.selectedRole),
+        }));
+
         const config: HiveLaunchConfig = {
           project_path: projectPath,
           queen_config: queenConfig,
-          workers: hiveWorkers,
+          workers: workersWithRoles,
           prompt: prompt || undefined,
         };
         dispatch('launchHive', config);
@@ -131,7 +177,12 @@
           planners: swarmPlanners.map((p) => ({
             config: p.config,
             domain: p.domain,
-            workers: p.workers,
+            workers: p.workers.map((w) => ({
+              cli: w.cli,
+              flags: w.flags,
+              label: w.label,
+              role: buildWorkerRole(w.selectedRole),
+            })),
           })),
           prompt: prompt || undefined,
         };
@@ -233,6 +284,19 @@
                       Remove
                     </button>
                   </div>
+                  <div class="role-selector">
+                    <label for="role-{i}">Role</label>
+                    <select
+                      id="role-{i}"
+                      bind:value={worker.selectedRole}
+                      on:change={() => updateWorkerCli(i)}
+                      class="role-select"
+                    >
+                      {#each predefinedRoles as role}
+                        <option value={role.type}>{role.label}</option>
+                      {/each}
+                    </select>
+                  </div>
                   <AgentConfigEditor bind:config={worker} showLabel={true} />
                 </div>
               {/each}
@@ -295,6 +359,19 @@
                           >
                             Remove
                           </button>
+                        </div>
+                        <div class="role-selector small">
+                          <label for="planner-role-{pi}-{wi}">Role</label>
+                          <select
+                            id="planner-role-{pi}-{wi}"
+                            bind:value={worker.selectedRole}
+                            on:change={() => updatePlannerWorkerCli(pi, wi)}
+                            class="role-select"
+                          >
+                            {#each predefinedRoles as role}
+                              <option value={role.type}>{role.label}</option>
+                            {/each}
+                          </select>
                         </div>
                         <AgentConfigEditor bind:config={worker} showLabel={false} />
                       </div>
@@ -660,5 +737,47 @@
     color: var(--color-error, #f7768e);
     font-size: 13px;
     word-break: break-word;
+  }
+
+  .role-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+
+  .role-selector label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }
+
+  .role-selector.small {
+    margin-bottom: 8px;
+  }
+
+  .role-selector.small label {
+    font-size: 11px;
+  }
+
+  .role-select {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 13px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .role-select:focus {
+    outline: none;
+    border-color: var(--color-accent, #8b5cf6);
+  }
+
+  .role-selector.small .role-select {
+    padding: 6px 8px;
+    font-size: 12px;
   }
 </style>

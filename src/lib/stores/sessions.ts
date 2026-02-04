@@ -10,11 +10,20 @@ export type AgentRole =
 
 export type AgentStatus = 'Starting' | 'Running' | 'WaitingForInput' | 'Completed' | { Error: string };
 
+export interface WorkerRole {
+  role_type: string;
+  label: string;
+  default_cli: string;
+  prompt_template: string | null;
+}
+
 export interface AgentConfig {
   cli: string;
   model?: string;
   flags: string[];
   label?: string;
+  role?: WorkerRole;
+  initial_prompt?: string;
 }
 
 export interface AgentInfo {

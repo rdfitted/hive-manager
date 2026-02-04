@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager};
+use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
+use crate::storage::SessionStorage;
+use crate::coordination::{StateManager, HierarchyNode, WorkerStateInfo};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
@@ -76,6 +78,7 @@ pub struct SessionController {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     pty_manager: Arc<RwLock<PtyManager>>,
     app_handle: Option<AppHandle>,
+    storage: Option<Arc<SessionStorage>>,
 }
 
 // Explicitly implement Send + Sync
@@ -88,6 +91,7 @@ impl SessionController {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             pty_manager,
             app_handle: None,
+            storage: None,
         }
     }
 
@@ -95,6 +99,10 @@ impl SessionController {
         self.app_handle = Some(handle.clone());
         let mut pty_manager = self.pty_manager.write();
         pty_manager.set_app_handle(handle);
+    }
+
+    pub fn set_storage(&mut self, storage: Arc<SessionStorage>) {
+        self.storage = Some(storage);
     }
 
     pub fn launch_hive(
@@ -124,10 +132,9 @@ impl SessionController {
             let queen_id = format!("{}-queen", session_id);
             let mut queen_args = base_args.clone();
 
-            // Add prompt arg if provided and command is claude
+            // Add prompt as positional argument if provided and command is claude
             if cmd == "claude" && !prompt_str.is_empty() {
-                queen_args.push("-p");
-                // Note: prompt would need special handling for spaces
+                queen_args.push(&prompt_str);
             }
 
             tracing::info!("Launching Queen agent: {} {:?} in {:?}", cmd, queen_args, project_path);
@@ -153,6 +160,8 @@ impl SessionController {
                 model: if cmd == "claude" { Some("opus".to_string()) } else { None },
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
+                role: None,
+                initial_prompt: None,
             };
 
             agents.push(AgentInfo {
@@ -191,6 +200,8 @@ impl SessionController {
                     model: if cmd == "claude" { Some("opus".to_string()) } else { None },
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
+                    role: None,
+                    initial_prompt: None,
                 };
 
                 agents.push(AgentInfo {
@@ -287,28 +298,189 @@ impl SessionController {
     }
 
     /// Build command and args from AgentConfig
+    /// Build command and args, returning (command, args, needs_prompt_flag)
+    /// The needs_prompt_flag indicates if this CLI needs a special flag before the prompt
     fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
         let mut args = Vec::new();
 
-        // Add model flag if specified
-        if let Some(ref model) = config.model {
-            match config.cli.as_str() {
-                "claude" => {
+        // Add CLI-specific flags
+        match config.cli.as_str() {
+            "claude" => {
+                // Claude CLI requires --dangerously-skip-permissions for automated use
+                args.push("--dangerously-skip-permissions".to_string());
+                if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
-                "gemini" | "opencode" | "codex" => {
+            }
+            _ => {
+                // For other CLIs, just add model flag if specified
+                if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
-                _ => {}
             }
         }
 
-        // Add any extra flags
+        // Add any extra flags from config
         args.extend(config.flags.clone());
 
         (config.cli.clone(), args)
+    }
+
+    /// Build the Queen's master prompt with worker information
+    fn build_queen_master_prompt(session_id: &str, workers: &[AgentConfig], user_prompt: Option<&str>) -> String {
+        let mut worker_list = String::new();
+        for (i, worker_config) in workers.iter().enumerate() {
+            let index = i + 1;
+            let worker_id = format!("{}-worker-{}", session_id, index);
+            let role_label = worker_config.role.as_ref()
+                .map(|r| format!("Worker {} ({})", index, r.label))
+                .unwrap_or_else(|| format!("Worker {}", index));
+            worker_list.push_str(&format!("- {}: {} (CLI: {})\n", worker_id, role_label, worker_config.cli));
+        }
+
+        format!(
+r#"You are the Queen agent orchestrating a multi-agent coding session in Hive Manager.
+
+## Your Workers
+
+{}
+## How to Coordinate
+
+When you need a worker to do something, tell the operator which worker and what task. The operator will use the Hive Manager UI to inject your message into that worker's terminal.
+
+Example: "Please tell Worker 1 (Backend) to implement the user authentication API."
+
+## Your Task
+
+{}"#,
+            worker_list,
+            user_prompt.unwrap_or("Awaiting instructions from the operator.")
+        )
+    }
+
+    /// Build a worker's role prompt
+    fn build_worker_prompt(index: u8, config: &AgentConfig, queen_id: &str) -> String {
+        let role_name = config.role.as_ref()
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| format!("Worker {}", index));
+
+        let role_description = config.role.as_ref()
+            .map(|r| match r.role_type.to_lowercase().as_str() {
+                "backend" => "You specialize in server-side logic, APIs, databases, and backend infrastructure.",
+                "frontend" => "You specialize in UI components, state management, styling, and user experience.",
+                "coherence" => "You specialize in ensuring code consistency, API contracts, and cross-component integration.",
+                "simplify" => "You specialize in code simplification, refactoring, and reducing complexity.",
+                _ => "You handle general development tasks as assigned.",
+            })
+            .unwrap_or("You handle general development tasks as assigned.");
+
+        let initial_task = config.initial_prompt.as_deref().unwrap_or("Awaiting task assignment from the Queen.");
+
+        format!(
+r#"You are Worker {} ({}) in a multi-agent Hive session.
+
+## Your Role
+
+{}
+
+## Your Queen
+
+Your coordinator is: {}
+
+## How This Works
+
+The Queen orchestrates tasks through the Hive Manager operator. You will receive task instructions injected into your terminal. Complete your assigned tasks and report progress.
+
+## Your Current Task
+
+{}"#,
+            index, role_name, role_description, queen_id, initial_task
+        )
+    }
+
+    /// Build a planner's role prompt
+    fn build_planner_prompt(index: u8, config: &PlannerConfig, queen_id: &str) -> String {
+        let mut worker_list = String::new();
+        for (i, worker_config) in config.workers.iter().enumerate() {
+            let worker_index = i + 1;
+            let role_label = worker_config.role.as_ref()
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| format!("Worker {}", worker_index));
+            worker_list.push_str(&format!("- Worker {}: {} (CLI: {})\n", worker_index, role_label, worker_config.cli));
+        }
+
+        format!(
+r#"You are Planner {} in a multi-agent Swarm session, managing the {} domain.
+
+## Your Domain
+
+{}
+
+## Your Workers
+
+{}
+## Your Queen
+
+Your coordinator is: {}
+
+## How This Works
+
+You manage workers within your domain. The Queen coordinates high-level tasks through the Hive Manager operator. Break down domain tasks and coordinate your workers to complete them.
+
+## Your Current Task
+
+Awaiting task assignment from the Queen."#,
+            index, config.domain, config.domain, worker_list, queen_id
+        )
+    }
+
+    /// Build the Queen's master prompt for Swarm mode with planner information
+    fn build_swarm_queen_prompt(session_id: &str, planners: &[PlannerConfig], user_prompt: Option<&str>) -> String {
+        let mut planner_list = String::new();
+        for (i, planner_config) in planners.iter().enumerate() {
+            let index = i + 1;
+            let planner_id = format!("{}-planner-{}", session_id, index);
+            planner_list.push_str(&format!("- {}: Planner {} - {} (CLI: {}, {} workers)\n",
+                planner_id, index, planner_config.domain, planner_config.config.cli, planner_config.workers.len()));
+        }
+
+        format!(
+r#"You are the Queen agent orchestrating a Swarm session in Hive Manager.
+
+## Your Planners
+
+{}
+## Swarm Architecture
+
+In Swarm mode, you coordinate Planners who each manage their own domain and workers. Each Planner handles a specific area of the codebase.
+
+## How to Coordinate
+
+When you need something done, tell the operator which Planner or worker should handle it. The operator will use the Hive Manager UI to inject your message into that agent's terminal.
+
+Example: "Please tell Planner 1 (Backend) to have their workers implement the user authentication API."
+
+## Your Task
+
+{}"#,
+            planner_list,
+            user_prompt.unwrap_or("Awaiting instructions from the operator.")
+        )
+    }
+
+    /// Write a prompt file to the session's prompts directory
+    fn write_prompt_file(project_path: &PathBuf, session_id: &str, filename: &str, content: &str) -> Result<PathBuf, String> {
+        let prompts_dir = project_path.join(".hive-manager").join(session_id).join("prompts");
+        std::fs::create_dir_all(&prompts_dir)
+            .map_err(|e| format!("Failed to create prompts directory: {}", e))?;
+
+        let file_path = prompts_dir.join(filename);
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write prompt file: {}", e))?;
+
+        Ok(file_path)
     }
 
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
@@ -324,12 +496,12 @@ impl SessionController {
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
-            // Add prompt if provided
-            if let Some(ref prompt) = config.prompt {
-                if cmd == "claude" && !prompt.is_empty() {
-                    args.push("-p".to_string());
-                    args.push(prompt.clone());
-                }
+            // Write Queen prompt to file and pass "Read [file] and execute." command
+            if cmd == "claude" {
+                let master_prompt = Self::build_queen_master_prompt(&session_id, &config.workers, config.prompt.as_deref());
+                let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+                let prompt_path = prompt_file.to_string_lossy().to_string();
+                args.push(format!("Read {} and execute.", prompt_path));
             }
 
             tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, cwd);
@@ -358,7 +530,16 @@ impl SessionController {
             for (i, worker_config) in config.workers.iter().enumerate() {
                 let index = (i + 1) as u8;
                 let worker_id = format!("{}-worker-{}", session_id, index);
-                let (cmd, args) = Self::build_command(worker_config);
+                let (cmd, mut args) = Self::build_command(worker_config);
+
+                // Write worker prompt to file and pass "Read [file] and execute." command
+                if cmd == "claude" {
+                    let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id);
+                    let filename = format!("worker-{}-prompt.md", index);
+                    let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
+                    let prompt_path = prompt_file.to_string_lossy().to_string();
+                    args.push(format!("Read {} and execute.", prompt_path));
+                }
 
                 tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, cwd);
 
@@ -404,6 +585,9 @@ impl SessionController {
             });
         }
 
+        // Initialize session storage
+        self.init_session_storage(&session);
+
         Ok(session)
     }
 
@@ -420,11 +604,12 @@ impl SessionController {
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
-            if let Some(ref prompt) = config.prompt {
-                if cmd == "claude" && !prompt.is_empty() {
-                    args.push("-p".to_string());
-                    args.push(prompt.clone());
-                }
+            // Write Queen prompt to file and pass "Read [file] and execute." command
+            if cmd == "claude" {
+                let master_prompt = Self::build_swarm_queen_prompt(&session_id, &config.planners, config.prompt.as_deref());
+                let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+                let prompt_path = prompt_file.to_string_lossy().to_string();
+                args.push(format!("Read {} and execute.", prompt_path));
             }
 
             tracing::info!("Launching Queen agent (swarm): {} {:?} in {:?}", cmd, args, cwd);
@@ -453,7 +638,16 @@ impl SessionController {
             for (planner_idx, planner_config) in config.planners.iter().enumerate() {
                 let planner_index = (planner_idx + 1) as u8;
                 let planner_id = format!("{}-planner-{}", session_id, planner_index);
-                let (cmd, args) = Self::build_command(&planner_config.config);
+                let (cmd, mut args) = Self::build_command(&planner_config.config);
+
+                // Write planner prompt to file and pass "Read [file] and execute." command
+                if cmd == "claude" {
+                    let planner_prompt = Self::build_planner_prompt(planner_index, planner_config, &queen_id);
+                    let filename = format!("planner-{}-prompt.md", planner_index);
+                    let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &planner_prompt)?;
+                    let prompt_path = prompt_file.to_string_lossy().to_string();
+                    args.push(format!("Read {} and execute.", prompt_path));
+                }
 
                 tracing::info!("Launching Planner {} ({}) agent: {} {:?} in {:?}",
                     planner_index, planner_config.domain, cmd, args, cwd);
@@ -482,7 +676,16 @@ impl SessionController {
                 for (worker_idx, worker_config) in planner_config.workers.iter().enumerate() {
                     let worker_index = (worker_idx + 1) as u8;
                     let worker_id = format!("{}-planner-{}-worker-{}", session_id, planner_index, worker_index);
-                    let (cmd, args) = Self::build_command(worker_config);
+                    let (cmd, mut args) = Self::build_command(worker_config);
+
+                    // Write worker prompt to file and pass "Read [file] and execute." command
+                    if cmd == "claude" {
+                        let worker_prompt = Self::build_worker_prompt(worker_index, worker_config, &planner_id);
+                        let filename = format!("planner-{}-worker-{}-prompt.md", planner_index, worker_index);
+                        let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
+                        let prompt_path = prompt_file.to_string_lossy().to_string();
+                        args.push(format!("Read {} and execute.", prompt_path));
+                    }
 
                     tracing::info!("Launching Worker {}.{} agent: {} {:?} in {:?}",
                         planner_index, worker_index, cmd, args, cwd);
@@ -530,7 +733,214 @@ impl SessionController {
             });
         }
 
+        // Initialize session storage if available
+        self.init_session_storage(&session);
+
         Ok(session)
+    }
+
+    /// Add a worker to an existing session
+    pub fn add_worker(
+        &self,
+        session_id: &str,
+        config: AgentConfig,
+        role: WorkerRole,
+        parent_id: Option<String>,
+    ) -> Result<AgentInfo, String> {
+        // Get session and validate
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }.ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if session.state != SessionState::Running {
+            return Err("Cannot add worker to non-running session".to_string());
+        }
+
+        // Determine worker index
+        let existing_workers = session.agents.iter()
+            .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
+            .count();
+        let worker_index = (existing_workers + 1) as u8;
+
+        // Determine parent (default to Queen)
+        let actual_parent_id = parent_id.unwrap_or_else(|| format!("{}-queen", session_id));
+
+        // Generate worker ID
+        let worker_id = format!("{}-worker-{}", session_id, worker_index);
+
+        // Build command
+        let (cmd, args) = Self::build_command(&config);
+
+        // Get project path
+        let cwd = session.project_path.to_str().unwrap_or(".");
+
+        tracing::info!(
+            "Adding Worker {} ({}) to session {}: {} {:?}",
+            worker_index,
+            role.label,
+            session_id,
+            cmd,
+            args
+        );
+
+        // Spawn PTY
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    worker_id.clone(),
+                    AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) },
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Worker {}: {}", worker_index, e))?;
+        }
+
+        // Create agent info with role
+        let mut agent_config = config;
+        agent_config.role = Some(role);
+
+        let agent_info = AgentInfo {
+            id: worker_id.clone(),
+            role: AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) },
+            status: AgentStatus::Running,
+            config: agent_config,
+            parent_id: Some(actual_parent_id),
+        };
+
+        // Update session
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.agents.push(agent_info.clone());
+            }
+        }
+
+        // Emit session update
+        if let Some(ref app_handle) = self.app_handle {
+            let sessions = self.sessions.read();
+            if let Some(session) = sessions.get(session_id) {
+                let _ = app_handle.emit("session-update", SessionUpdate {
+                    session: session.clone(),
+                });
+            }
+        }
+
+        // Update session storage
+        self.update_session_storage(session_id);
+
+        Ok(agent_info)
+    }
+
+    /// Initialize session storage for a new session
+    fn init_session_storage(&self, session: &Session) {
+        if let Some(ref storage) = self.storage {
+            // Create session directory
+            if let Err(e) = storage.create_session_dir(&session.id) {
+                tracing::warn!("Failed to create session directory: {}", e);
+                return;
+            }
+
+            // Build hierarchy nodes
+            let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
+                let role_str = match &agent.role {
+                    AgentRole::Queen => "Queen".to_string(),
+                    AgentRole::Planner { index } => format!("Planner-{}", index),
+                    AgentRole::Worker { index, .. } => format!("Worker-{}", index),
+                    AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
+                };
+
+                let children: Vec<String> = session.agents.iter()
+                    .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
+                    .map(|a| a.id.clone())
+                    .collect();
+
+                HierarchyNode {
+                    id: agent.id.clone(),
+                    role: role_str,
+                    parent_id: agent.parent_id.clone(),
+                    children,
+                }
+            }).collect();
+
+            // Build worker state info
+            let workers: Vec<WorkerStateInfo> = session.agents.iter()
+                .filter(|a| !matches!(a.role, AgentRole::Queen))
+                .map(|a| WorkerStateInfo {
+                    id: a.id.clone(),
+                    role: a.config.role.clone().unwrap_or_default(),
+                    cli: a.config.cli.clone(),
+                    status: format!("{:?}", a.status),
+                    current_task: None,
+                    last_update: Utc::now(),
+                })
+                .collect();
+
+            // Update state files
+            let state_manager = StateManager::new(storage.session_dir(&session.id));
+            if let Err(e) = state_manager.update_hierarchy(&hierarchy) {
+                tracing::warn!("Failed to update hierarchy: {}", e);
+            }
+            if let Err(e) = state_manager.update_workers_file(&workers) {
+                tracing::warn!("Failed to update workers file: {}", e);
+            }
+        }
+    }
+
+    /// Update session storage after changes
+    fn update_session_storage(&self, session_id: &str) {
+        if let Some(ref storage) = self.storage {
+            let sessions = self.sessions.read();
+            if let Some(session) = sessions.get(session_id) {
+                // Build hierarchy nodes
+                let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
+                    let role_str = match &agent.role {
+                        AgentRole::Queen => "Queen".to_string(),
+                        AgentRole::Planner { index } => format!("Planner-{}", index),
+                        AgentRole::Worker { index, .. } => format!("Worker-{}", index),
+                        AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
+                    };
+
+                    let children: Vec<String> = session.agents.iter()
+                        .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
+                        .map(|a| a.id.clone())
+                        .collect();
+
+                    HierarchyNode {
+                        id: agent.id.clone(),
+                        role: role_str,
+                        parent_id: agent.parent_id.clone(),
+                        children,
+                    }
+                }).collect();
+
+                // Build worker state info
+                let workers: Vec<WorkerStateInfo> = session.agents.iter()
+                    .filter(|a| !matches!(a.role, AgentRole::Queen))
+                    .map(|a| WorkerStateInfo {
+                        id: a.id.clone(),
+                        role: a.config.role.clone().unwrap_or_default(),
+                        cli: a.config.cli.clone(),
+                        status: format!("{:?}", a.status),
+                        current_task: None,
+                        last_update: Utc::now(),
+                    })
+                    .collect();
+
+                // Update state files
+                let state_manager = StateManager::new(storage.session_dir(session_id));
+                if let Err(e) = state_manager.update_hierarchy(&hierarchy) {
+                    tracing::warn!("Failed to update hierarchy: {}", e);
+                }
+                if let Err(e) = state_manager.update_workers_file(&workers) {
+                    tracing::warn!("Failed to update workers file: {}", e);
+                }
+            }
+        }
     }
 }
 
