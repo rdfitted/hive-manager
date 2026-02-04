@@ -110,23 +110,32 @@
   }
 
   async function handlePaste() {
+    let text: string | null = null;
+
+    // Try Tauri API first
     try {
-      const text = await readText();
-      if (text) {
-        sendToPty(text);
-      }
+      text = await readText();
+      console.log('[Paste] Tauri readText result:', text);
     } catch (err) {
-      console.error('Paste failed with Tauri API:', err);
-      // Fallback to browser API
+      console.error('[Paste] Tauri API failed:', err);
+    }
+
+    // Fallback to browser API if Tauri didn't work
+    if (!text) {
       try {
-        const text = await navigator.clipboard.readText();
-        if (text) {
-          sendToPty(text);
-        }
+        text = await navigator.clipboard.readText();
+        console.log('[Paste] Browser readText result:', text);
       } catch (browserErr) {
-        console.error('Paste failed with browser API:', browserErr);
+        console.error('[Paste] Browser API failed:', browserErr);
       }
     }
+
+    if (text) {
+      sendToPty(text);
+    } else {
+      console.warn('[Paste] No text to paste');
+    }
+
     closeContextMenu();
     term?.focus();
   }
@@ -248,18 +257,26 @@
 
       // Ctrl+Shift+V or Ctrl+V = Paste
       if (event.ctrlKey && (event.key === 'V' || (event.key === 'v' && event.shiftKey))) {
-        readText().then((text: string) => {
+        (async () => {
+          let text: string | null = null;
+          try {
+            text = await readText();
+            console.log('[Ctrl+V] Tauri readText:', text);
+          } catch (err) {
+            console.error('[Ctrl+V] Tauri failed:', err);
+          }
+          if (!text) {
+            try {
+              text = await navigator.clipboard.readText();
+              console.log('[Ctrl+V] Browser readText:', text);
+            } catch (err) {
+              console.error('[Ctrl+V] Browser failed:', err);
+            }
+          }
           if (text && term) {
             sendToPty(text);
           }
-        }).catch((err: unknown) => {
-          console.error('Paste failed with Tauri:', err);
-          navigator.clipboard.readText().then((text: string) => {
-            if (text && term) {
-              sendToPty(text);
-            }
-          }).catch(console.error);
-        });
+        })();
         return false;
       }
 
