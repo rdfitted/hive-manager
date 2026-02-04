@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use crate::pty::{AgentRole, AgentStatus, PtyManager};
+use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
@@ -30,6 +30,31 @@ pub struct AgentInfo {
     pub id: String,
     pub role: AgentRole,
     pub status: AgentStatus,
+    pub config: AgentConfig,
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HiveLaunchConfig {
+    pub project_path: String,
+    pub queen_config: AgentConfig,
+    pub workers: Vec<AgentConfig>,
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwarmLaunchConfig {
+    pub project_path: String,
+    pub queen_config: AgentConfig,
+    pub planners: Vec<PlannerConfig>,
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerConfig {
+    pub config: AgentConfig,
+    pub domain: String,
+    pub workers: Vec<AgentConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,10 +148,19 @@ impl SessionController {
                     err_msg
                 })?;
 
+            let queen_config = AgentConfig {
+                cli: cmd.to_string(),
+                model: if cmd == "claude" { Some("opus".to_string()) } else { None },
+                flags: base_args.iter().map(|s| s.to_string()).collect(),
+                label: None,
+            };
+
             agents.push(AgentInfo {
                 id: queen_id,
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
+                config: queen_config,
+                parent_id: None,
             });
 
             // Create Worker agents
@@ -152,10 +186,19 @@ impl SessionController {
                         err_msg
                     })?;
 
+                let worker_config = AgentConfig {
+                    cli: cmd.to_string(),
+                    model: if cmd == "claude" { Some("opus".to_string()) } else { None },
+                    flags: worker_args.iter().map(|s| s.to_string()).collect(),
+                    label: None,
+                };
+
                 agents.push(AgentInfo {
-                    id: worker_id,
-                    role: AgentRole::Worker { index: i, parent: None },
+                    id: worker_id.clone(),
+                    role: AgentRole::Worker { index: i, parent: Some(format!("{}-queen", session_id)) },
                     status: AgentStatus::Running,
+                    config: worker_config,
+                    parent_id: Some(format!("{}-queen", session_id)),
                 });
             }
         }
@@ -243,6 +286,252 @@ impl SessionController {
         Ok(())
     }
 
+    /// Build command and args from AgentConfig
+    fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
+        let mut args = Vec::new();
+
+        // Add model flag if specified
+        if let Some(ref model) = config.model {
+            match config.cli.as_str() {
+                "claude" => {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+                "gemini" | "opencode" | "codex" => {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+                _ => {}
+            }
+        }
+
+        // Add any extra flags
+        args.extend(config.flags.clone());
+
+        (config.cli.clone(), args)
+    }
+
+    pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        let session_id = Uuid::new_v4().to_string();
+        let mut agents = Vec::new();
+        let project_path = PathBuf::from(&config.project_path);
+        let cwd = config.project_path.as_str();
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            // Create Queen agent
+            let queen_id = format!("{}-queen", session_id);
+            let (cmd, mut args) = Self::build_command(&config.queen_config);
+
+            // Add prompt if provided
+            if let Some(ref prompt) = config.prompt {
+                if cmd == "claude" && !prompt.is_empty() {
+                    args.push("-p".to_string());
+                    args.push(prompt.clone());
+                }
+            }
+
+            tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    queen_id.clone(),
+                    AgentRole::Queen,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
+
+            agents.push(AgentInfo {
+                id: queen_id.clone(),
+                role: AgentRole::Queen,
+                status: AgentStatus::Running,
+                config: config.queen_config.clone(),
+                parent_id: None,
+            });
+
+            // Create Worker agents
+            for (i, worker_config) in config.workers.iter().enumerate() {
+                let index = (i + 1) as u8;
+                let worker_id = format!("{}-worker-{}", session_id, index);
+                let (cmd, args) = Self::build_command(worker_config);
+
+                tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, cwd);
+
+                pty_manager
+                    .create_session(
+                        worker_id.clone(),
+                        AgentRole::Worker { index, parent: Some(queen_id.clone()) },
+                        &cmd,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        Some(cwd),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| format!("Failed to spawn Worker {}: {}", index, e))?;
+
+                agents.push(AgentInfo {
+                    id: worker_id,
+                    role: AgentRole::Worker { index, parent: Some(queen_id.clone()) },
+                    status: AgentStatus::Running,
+                    config: worker_config.clone(),
+                    parent_id: Some(queen_id.clone()),
+                });
+            }
+        }
+
+        let session = Session {
+            id: session_id.clone(),
+            session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
+            project_path,
+            state: SessionState::Running,
+            created_at: Utc::now(),
+            agents,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session.clone());
+        }
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: session.clone(),
+            });
+        }
+
+        Ok(session)
+    }
+
+    pub fn launch_swarm(&self, config: SwarmLaunchConfig) -> Result<Session, String> {
+        let session_id = Uuid::new_v4().to_string();
+        let mut agents = Vec::new();
+        let project_path = PathBuf::from(&config.project_path);
+        let cwd = config.project_path.as_str();
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            // Create Queen agent
+            let queen_id = format!("{}-queen", session_id);
+            let (cmd, mut args) = Self::build_command(&config.queen_config);
+
+            if let Some(ref prompt) = config.prompt {
+                if cmd == "claude" && !prompt.is_empty() {
+                    args.push("-p".to_string());
+                    args.push(prompt.clone());
+                }
+            }
+
+            tracing::info!("Launching Queen agent (swarm): {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    queen_id.clone(),
+                    AgentRole::Queen,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
+
+            agents.push(AgentInfo {
+                id: queen_id.clone(),
+                role: AgentRole::Queen,
+                status: AgentStatus::Running,
+                config: config.queen_config.clone(),
+                parent_id: None,
+            });
+
+            // Create Planner agents and their Workers
+            for (planner_idx, planner_config) in config.planners.iter().enumerate() {
+                let planner_index = (planner_idx + 1) as u8;
+                let planner_id = format!("{}-planner-{}", session_id, planner_index);
+                let (cmd, args) = Self::build_command(&planner_config.config);
+
+                tracing::info!("Launching Planner {} ({}) agent: {} {:?} in {:?}",
+                    planner_index, planner_config.domain, cmd, args, cwd);
+
+                pty_manager
+                    .create_session(
+                        planner_id.clone(),
+                        AgentRole::Planner { index: planner_index },
+                        &cmd,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        Some(cwd),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| format!("Failed to spawn Planner {}: {}", planner_index, e))?;
+
+                agents.push(AgentInfo {
+                    id: planner_id.clone(),
+                    role: AgentRole::Planner { index: planner_index },
+                    status: AgentStatus::Running,
+                    config: planner_config.config.clone(),
+                    parent_id: Some(queen_id.clone()),
+                });
+
+                // Create Workers for this Planner
+                for (worker_idx, worker_config) in planner_config.workers.iter().enumerate() {
+                    let worker_index = (worker_idx + 1) as u8;
+                    let worker_id = format!("{}-planner-{}-worker-{}", session_id, planner_index, worker_index);
+                    let (cmd, args) = Self::build_command(worker_config);
+
+                    tracing::info!("Launching Worker {}.{} agent: {} {:?} in {:?}",
+                        planner_index, worker_index, cmd, args, cwd);
+
+                    pty_manager
+                        .create_session(
+                            worker_id.clone(),
+                            AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
+                            &cmd,
+                            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                            Some(cwd),
+                            120,
+                            30,
+                        )
+                        .map_err(|e| format!("Failed to spawn Worker {}.{}: {}", planner_index, worker_index, e))?;
+
+                    agents.push(AgentInfo {
+                        id: worker_id,
+                        role: AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
+                        status: AgentStatus::Running,
+                        config: worker_config.clone(),
+                        parent_id: Some(planner_id.clone()),
+                    });
+                }
+            }
+        }
+
+        let session = Session {
+            id: session_id.clone(),
+            session_type: SessionType::Swarm { planner_count: config.planners.len() as u8 },
+            project_path,
+            state: SessionState::Running,
+            created_at: Utc::now(),
+            agents,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session.clone());
+        }
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: session.clone(),
+            });
+        }
+
+        Ok(session)
+    }
 }
 
 impl Default for SessionController {

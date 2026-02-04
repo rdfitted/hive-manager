@@ -10,10 +10,39 @@ export type AgentRole =
 
 export type AgentStatus = 'Starting' | 'Running' | 'WaitingForInput' | 'Completed' | { Error: string };
 
+export interface AgentConfig {
+  cli: string;
+  model?: string;
+  flags: string[];
+  label?: string;
+}
+
 export interface AgentInfo {
   id: string;
   role: AgentRole;
   status: AgentStatus;
+  config: AgentConfig;
+  parent_id: string | null;
+}
+
+export interface HiveLaunchConfig {
+  project_path: string;
+  queen_config: AgentConfig;
+  workers: AgentConfig[];
+  prompt?: string;
+}
+
+export interface PlannerConfig {
+  config: AgentConfig;
+  domain: string;
+  workers: AgentConfig[];
+}
+
+export interface SwarmLaunchConfig {
+  project_path: string;
+  queen_config: AgentConfig;
+  planners: PlannerConfig[];
+  prompt?: string;
 }
 
 export interface Session {
@@ -75,12 +104,16 @@ function createSessionsStore() {
           command,
           prompt,
         });
-        update((state) => ({
-          ...state,
-          sessions: [...state.sessions, session],
-          activeSessionId: session.id,
-          loading: false,
-        }));
+        update((state) => {
+          // Only add if not already present (event listener may have added it)
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
         return session;
       } catch (err) {
         update((state) => ({ ...state, loading: false, error: String(err) }));
@@ -100,6 +133,46 @@ function createSessionsStore() {
         });
       } catch (err) {
         update((state) => ({ ...state, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async launchHiveV2(config: HiveLaunchConfig) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('launch_hive_v2', { config });
+        update((state) => {
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async launchSwarm(config: SwarmLaunchConfig) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('launch_swarm', { config });
+        update((state) => {
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
         throw err;
       }
     },

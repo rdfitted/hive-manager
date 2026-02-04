@@ -3,20 +3,45 @@
   import Terminal from '$lib/components/Terminal.svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import StatusPanel from '$lib/components/StatusPanel.svelte';
-  import { sessions, activeSession, activeAgents } from '$lib/stores/sessions';
+  import AgentTree from '$lib/components/AgentTree.svelte';
+  import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
 
   let showStatusPanel = $state(true);
+  let focusedAgentId = $state<string | null>(null);
 
   onMount(() => {
     sessions.loadSessions();
+  });
+
+  // Auto-select first agent when session changes
+  $effect(() => {
+    if ($activeAgents.length > 0 && !focusedAgentId) {
+      focusedAgentId = $activeAgents[0].id;
+    }
+    // Reset focused agent if it's no longer in the active session
+    if (focusedAgentId && !$activeAgents.find(a => a.id === focusedAgentId)) {
+      focusedAgentId = $activeAgents[0]?.id ?? null;
+    }
   });
 
   async function handleLaunch(projectPath: string, workerCount: number, command: string, prompt?: string): Promise<void> {
     await sessions.launchHive(projectPath, workerCount, command, prompt);
   }
 
+  async function handleLaunchHiveV2(config: HiveLaunchConfig): Promise<void> {
+    await sessions.launchHiveV2(config);
+  }
+
+  async function handleLaunchSwarm(config: SwarmLaunchConfig): Promise<void> {
+    await sessions.launchSwarm(config);
+  }
+
   function toggleStatusPanel() {
     showStatusPanel = !showStatusPanel;
+  }
+
+  function handleAgentSelect(e: CustomEvent<string>) {
+    focusedAgentId = e.detail;
   }
 
   // Keyboard shortcuts
@@ -31,13 +56,45 @@
       event.preventDefault();
       // Focus the new session button - handled by SessionSidebar
     }
+    // Navigate agents with arrow keys when tree is focused
+    if ($activeAgents.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+      const currentIndex = $activeAgents.findIndex(a => a.id === focusedAgentId);
+      if (currentIndex !== -1) {
+        event.preventDefault();
+        const nextIndex = event.key === 'ArrowUp'
+          ? Math.max(0, currentIndex - 1)
+          : Math.min($activeAgents.length - 1, currentIndex + 1);
+        focusedAgentId = $activeAgents[nextIndex].id;
+      }
+    }
   }
+
+  let focusedAgent = $derived($activeAgents.find(a => a.id === focusedAgentId));
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="app">
-  <SessionSidebar onLaunch={handleLaunch} />
+  <SessionSidebar
+    onLaunch={handleLaunch}
+    onLaunchHiveV2={handleLaunchHiveV2}
+    onLaunchSwarm={handleLaunchSwarm}
+  />
+
+  {#if $activeSession}
+    <aside class="hierarchy-sidebar">
+      <div class="sidebar-header">
+        <h2>Hierarchy</h2>
+      </div>
+      <div class="sidebar-content">
+        <AgentTree
+          agents={$activeAgents}
+          selectedId={focusedAgentId}
+          on:select={handleAgentSelect}
+        />
+      </div>
+    </aside>
+  {/if}
 
   <main class="main-content">
     {#if !$activeSession}
@@ -47,8 +104,12 @@
           <p>Orchestrate and monitor Claude Code multi-agent workflows</p>
           <div class="features">
             <div class="feature">
-              <span class="feature-icon">🐝</span>
-              <span class="feature-text">Launch Hive sessions with multiple workers</span>
+              <span class="feature-icon">♕</span>
+              <span class="feature-text">Launch Hive or Swarm sessions with hierarchical agents</span>
+            </div>
+            <div class="feature">
+              <span class="feature-icon">⚙</span>
+              <span class="feature-text">Configure each agent with different commands</span>
             </div>
             <div class="feature">
               <span class="feature-icon">📊</span>
@@ -68,41 +129,30 @@
           <div class="no-agents">
             <p>No agents in this session</p>
           </div>
-        {:else if $activeAgents.length === 1}
-          <div class="single-terminal">
-            <div class="terminal-header">
-              <span class="terminal-title">
-                {$activeAgents[0].role === 'Queen' ? 'Queen' :
-                 typeof $activeAgents[0].role === 'object' && 'Planner' in $activeAgents[0].role ? `Planner ${$activeAgents[0].role.Planner.index}` :
-                 typeof $activeAgents[0].role === 'object' && 'Worker' in $activeAgents[0].role ? `Worker ${$activeAgents[0].role.Worker.index}` :
-                 'Agent'}
-              </span>
-            </div>
-            <div class="terminal-container">
-              <Terminal agentId={$activeAgents[0].id} />
-            </div>
-          </div>
         {:else}
-          <div class="terminal-grid" class:two={$activeAgents.length === 2} class:four={$activeAgents.length >= 3}>
-            {#each $activeAgents.slice(0, 4) as agent}
-              <div class="terminal-panel">
-                <div class="terminal-header">
-                  <span class="terminal-title">
-                    {agent.role === 'Queen' ? 'Queen' :
-                     typeof agent.role === 'object' && 'Planner' in agent.role ? `Planner ${agent.role.Planner.index}` :
-                     typeof agent.role === 'object' && 'Worker' in agent.role ? `Worker ${agent.role.Worker.index}` :
-                     'Agent'}
-                  </span>
+          <!-- Render all terminals, show only the focused one -->
+          {#each $activeAgents as agent (agent.id)}
+            {@const isVisible = agent.id === focusedAgentId}
+            {@const roleName = agent.config?.label ||
+              (agent.role === 'Queen' ? 'Queen' :
+               typeof agent.role === 'object' && 'Planner' in agent.role ? `Planner ${agent.role.Planner.index}` :
+               typeof agent.role === 'object' && 'Worker' in agent.role ? `Worker ${agent.role.Worker.index}` :
+               'Agent')}
+            <div class="focused-terminal" class:hidden={!isVisible}>
+              <div class="terminal-header">
+                <span class="terminal-title">{roleName}</span>
+                <div class="terminal-meta">
+                  <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
                   <span class="terminal-status" class:running={agent.status === 'Running'} class:waiting={agent.status === 'WaitingForInput'} class:completed={agent.status === 'Completed'}>
                     {agent.status === 'Running' ? '█' : agent.status === 'WaitingForInput' ? '⏳' : agent.status === 'Completed' ? '✓' : '○'}
                   </span>
                 </div>
-                <div class="terminal-container">
-                  <Terminal agentId={agent.id} />
-                </div>
               </div>
-            {/each}
-          </div>
+              <div class="terminal-container">
+                <Terminal agentId={agent.id} />
+              </div>
+            </div>
+          {/each}
         {/if}
       </div>
     {/if}
@@ -135,6 +185,8 @@
     --color-accent: #7aa2f7;
     --color-accent-bright: #89b4fa;
     --color-accent-dim: rgba(122, 162, 247, 0.15);
+    --color-primary: #8b5cf6;
+    --color-primary-muted: rgba(139, 92, 246, 0.15);
     --color-success: #9ece6a;
     --color-warning: #e0af68;
     --color-error: #f7768e;
@@ -148,6 +200,36 @@
     background: var(--color-bg);
     color: var(--color-text);
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  .hierarchy-sidebar {
+    width: 200px;
+    min-width: 200px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--color-surface);
+    border-right: 1px solid var(--color-border);
+  }
+
+  .hierarchy-sidebar .sidebar-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .hierarchy-sidebar .sidebar-header h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .hierarchy-sidebar .sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
   }
 
   .main-content {
@@ -221,10 +303,8 @@
 
   .terminal-area {
     flex: 1;
-    display: flex;
-    flex-direction: column;
+    position: relative;
     padding: 16px;
-    gap: 16px;
     overflow: hidden;
   }
 
@@ -236,8 +316,9 @@
     color: var(--color-text-muted);
   }
 
-  .single-terminal {
-    flex: 1;
+  .focused-terminal {
+    position: absolute;
+    inset: 0;
     display: flex;
     flex-direction: column;
     border: 1px solid var(--color-border);
@@ -245,28 +326,9 @@
     overflow: hidden;
   }
 
-  .terminal-grid {
-    flex: 1;
-    display: grid;
-    gap: 16px;
-    overflow: hidden;
-  }
-
-  .terminal-grid.two {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .terminal-grid.four {
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-  }
-
-  .terminal-panel {
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    overflow: hidden;
+  .focused-terminal.hidden {
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .terminal-header {
@@ -284,6 +346,21 @@
     color: var(--color-text);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+  }
+
+  .terminal-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .cli-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    background: var(--color-border);
+    border-radius: 3px;
+    color: var(--color-text-muted);
+    text-transform: lowercase;
   }
 
   .terminal-status {

@@ -21,6 +21,25 @@ pub enum AgentStatus {
     Error(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    pub cli: String,              // "claude", "gemini", "opencode", "codex"
+    pub model: Option<String>,    // "opus", "gemini-3-pro", etc.
+    pub flags: Vec<String>,       // Additional CLI flags
+    pub label: Option<String>,    // Display name
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            cli: "claude".to_string(),
+            model: Some("opus".to_string()),
+            flags: vec![],
+            label: None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PtyError {
     #[error("Failed to create PTY: {0}")]

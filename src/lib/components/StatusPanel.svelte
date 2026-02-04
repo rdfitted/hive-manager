@@ -1,5 +1,6 @@
 <script lang="ts">
   import { activeSession, activeAgents, type AgentInfo, type Session } from '$lib/stores/sessions';
+  import AgentTree from './AgentTree.svelte';
 
   function getSessionStateClass(state: Session['state']): string {
     if (typeof state === 'string') return state.toLowerCase();
@@ -13,33 +14,6 @@
     return 'Unknown';
   }
 
-  function getStatusIcon(status: AgentInfo['status']): string {
-    if (status === 'Running') return '█';
-    if (status === 'WaitingForInput') return '⏳';
-    if (status === 'Completed') return '✓';
-    if (status === 'Starting') return '○';
-    if (typeof status === 'object' && 'Error' in status) return '✗';
-    return '?';
-  }
-
-  function getStatusColor(status: AgentInfo['status']): string {
-    if (status === 'Running') return 'var(--color-running)';
-    if (status === 'WaitingForInput') return 'var(--color-warning)';
-    if (status === 'Completed') return 'var(--color-success)';
-    if (status === 'Starting') return 'var(--color-text-muted)';
-    if (typeof status === 'object' && 'Error' in status) return 'var(--color-error)';
-    return 'var(--color-text)';
-  }
-
-  function getStatusText(status: AgentInfo['status']): string {
-    if (status === 'Running') return 'Running';
-    if (status === 'WaitingForInput') return 'Waiting for input';
-    if (status === 'Completed') return 'Completed';
-    if (status === 'Starting') return 'Starting';
-    if (typeof status === 'object' && 'Error' in status) return `Error: ${status.Error}`;
-    return 'Unknown';
-  }
-
   function getRoleName(role: AgentInfo['role']): string {
     if (role === 'Queen') return 'Queen';
     if (typeof role === 'object') {
@@ -50,14 +24,8 @@
     return 'Agent';
   }
 
-  function getRoleIcon(role: AgentInfo['role']): string {
-    if (role === 'Queen') return '♕';
-    if (typeof role === 'object') {
-      if ('Planner' in role) return '◆';
-      if ('Worker' in role) return '●';
-      if ('Fusion' in role) return '◎';
-    }
-    return '○';
+  function getAgentLabel(agent: AgentInfo): string {
+    return agent.config?.label || getRoleName(agent.role);
   }
 </script>
 
@@ -74,18 +42,8 @@
   {:else}
     <div class="panel-content">
       <section class="section">
-        <h3>Hierarchy</h3>
-        <div class="hierarchy">
-          {#each $activeAgents as agent}
-            <div class="hierarchy-item">
-              <span class="role-icon">{getRoleIcon(agent.role)}</span>
-              <span class="role-name">{getRoleName(agent.role)}</span>
-              <span class="status-badge" style="color: {getStatusColor(agent.status)}">
-                {getStatusIcon(agent.status)}
-              </span>
-            </div>
-          {/each}
-        </div>
+        <h3>Agents</h3>
+        <AgentTree agents={$activeAgents} selectedId={null} />
       </section>
 
       <section class="section">
@@ -94,7 +52,7 @@
           {#each $activeAgents.filter(a => a.status === 'WaitingForInput') as agent}
             <div class="alert warning">
               <span class="alert-icon">⚠</span>
-              <span class="alert-text">{getRoleName(agent.role)} needs input</span>
+              <span class="alert-text">{getAgentLabel(agent)} needs input</span>
             </div>
           {:else}
             <p class="no-alerts">No alerts</p>
@@ -192,36 +150,6 @@
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-  }
-
-  .hierarchy {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .hierarchy-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    background: var(--color-bg);
-    border-radius: 4px;
-  }
-
-  .role-icon {
-    font-size: 12px;
-    opacity: 0.7;
-  }
-
-  .role-name {
-    flex: 1;
-    font-size: 13px;
-    color: var(--color-text);
-  }
-
-  .status-badge {
-    font-size: 10px;
   }
 
   .alerts {

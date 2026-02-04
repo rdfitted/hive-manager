@@ -1,3 +1,5 @@
 mod controller;
 
-pub use controller::{Session, SessionController};
+pub use controller::{
+    Session, SessionController, HiveLaunchConfig, SwarmLaunchConfig,
+};

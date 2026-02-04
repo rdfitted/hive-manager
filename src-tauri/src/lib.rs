@@ -8,7 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, resize_pty, write_to_pty,
-    launch_hive, get_session, list_sessions, stop_session, stop_agent,
+    launch_hive, launch_hive_v2, launch_swarm, get_session, list_sessions, stop_session, stop_agent,
     PtyManagerState, SessionControllerState,
 };
 use pty::PtyManager;
@@ -50,6 +50,8 @@ pub fn run() {
             list_ptys,
             // Session commands
             launch_hive,
+            launch_hive_v2,
+            launch_swarm,
             get_session,
             list_sessions,
             stop_session,

@@ -1,21 +1,17 @@
 <script lang="ts">
-  import { sessions, activeSession, type Session, type AgentInfo } from '$lib/stores/sessions';
-  import { settings } from '$lib/stores/settings';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { sessions, activeSession, type Session, type AgentInfo, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
+  import LaunchDialog from './LaunchDialog.svelte';
 
   interface Props {
     onLaunch: (projectPath: string, workerCount: number, command: string, prompt?: string) => Promise<void>;
+    onLaunchHiveV2?: (config: HiveLaunchConfig) => Promise<void>;
+    onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
   }
 
-  let { onLaunch }: Props = $props();
+  let { onLaunch, onLaunchHiveV2, onLaunchSwarm }: Props = $props();
 
   let showLaunchDialog = $state(false);
-  let projectPath = $state('');
-  let workerCount = $state(2);
-  let command = $state('claude');  // Default to claude, but user can change
-  let prompt = $state('');
   let launching = $state(false);
-  let launchError = $state('');
 
   function getStatusIcon(status: AgentInfo['status']): string {
     if (status === 'Running') return '█';
@@ -52,34 +48,45 @@
     return 'Session';
   }
 
-  async function handleLaunch() {
-    if (!projectPath.trim() || !command.trim()) return;
+  function selectSession(sessionId: string) {
+    sessions.setActiveSession(sessionId);
+  }
+
+  async function handleLaunchHive(e: CustomEvent<HiveLaunchConfig>) {
     launching = true;
-    launchError = '';
     try {
-      await onLaunch(projectPath, workerCount, command, prompt || undefined);
+      if (onLaunchHiveV2) {
+        await onLaunchHiveV2(e.detail);
+      } else {
+        // Fallback to old launch method
+        await onLaunch(
+          e.detail.project_path,
+          e.detail.workers.length,
+          e.detail.queen_config.cli,
+          e.detail.prompt
+        );
+      }
       showLaunchDialog = false;
-      projectPath = '';
-      prompt = '';
     } catch (err) {
-      launchError = String(err);
+      console.error('Launch failed:', err);
     } finally {
       launching = false;
     }
   }
 
-  function selectSession(sessionId: string) {
-    sessions.setActiveSession(sessionId);
-  }
-
-  async function browseForFolder() {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: 'Select Project Folder'
-    });
-    if (selected && typeof selected === 'string') {
-      projectPath = selected;
+  async function handleLaunchSwarm(e: CustomEvent<SwarmLaunchConfig>) {
+    launching = true;
+    try {
+      if (onLaunchSwarm) {
+        await onLaunchSwarm(e.detail);
+        showLaunchDialog = false;
+      } else {
+        console.error('Swarm launch not supported');
+      }
+    } catch (err) {
+      console.error('Launch failed:', err);
+    } finally {
+      launching = false;
     }
   }
 </script>
@@ -103,14 +110,19 @@
                 <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
               </button>
               <ul class="agent-list">
-                {#each session.agents as agent}
+                {#each session.agents.slice(0, 4) as agent}
                   <li class="agent-item">
                     <span class="agent-status" style="color: {getStatusColor(agent.status)}">
                       {getStatusIcon(agent.status)}
                     </span>
-                    <span class="agent-name">{getRoleName(agent.role)}</span>
+                    <span class="agent-name">{agent.config?.label || getRoleName(agent.role)}</span>
                   </li>
                 {/each}
+                {#if session.agents.length > 4}
+                  <li class="agent-item more">
+                    <span class="agent-name">+{session.agents.length - 4} more</span>
+                  </li>
+                {/if}
               </ul>
             </li>
           {/each}
@@ -138,83 +150,18 @@
   </div>
 
   <div class="sidebar-footer">
-    <button class="launch-button" onclick={() => { showLaunchDialog = true; launchError = ''; }}>
+    <button class="launch-button" onclick={() => showLaunchDialog = true}>
       <span class="icon">+</span> New Session
     </button>
   </div>
 </aside>
 
-{#if showLaunchDialog}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="dialog-overlay" onclick={() => showLaunchDialog = false} role="presentation">
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
-      <h2>Launch New Session</h2>
-      <form onsubmit={(e) => { e.preventDefault(); handleLaunch(); }}>
-        <div class="form-group">
-          <label for="projectPath">Project Path</label>
-          <div class="path-picker">
-            <input
-              id="projectPath"
-              type="text"
-              bind:value={projectPath}
-              placeholder="Select a project folder..."
-              readonly
-              required
-            />
-            <button type="button" class="browse-button" onclick={browseForFolder}>
-              Browse
-            </button>
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="command">Command</label>
-          <input
-            id="command"
-            type="text"
-            bind:value={command}
-            placeholder="claude, cmd.exe, powershell, or any .bat"
-          />
-        </div>
-        <div class="form-group">
-          <label for="workerCount">Workers</label>
-          <div class="worker-buttons">
-            {#each [2, 3, 4] as count}
-              <button
-                type="button"
-                class="worker-button"
-                class:selected={workerCount === count}
-                onclick={() => workerCount = count}
-              >
-                {count}
-              </button>
-            {/each}
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="prompt">Initial Prompt (optional)</label>
-          <textarea
-            id="prompt"
-            bind:value={prompt}
-            placeholder="Enter a task for the hive..."
-            rows="3"
-          ></textarea>
-        </div>
-        {#if launchError}
-          <div class="error-message">{launchError}</div>
-        {/if}
-        <div class="dialog-actions">
-          <button type="button" class="cancel-button" onclick={() => showLaunchDialog = false} disabled={launching}>
-            Cancel
-          </button>
-          <button type="submit" class="submit-button" disabled={launching || !projectPath.trim()}>
-            {launching ? 'Launching...' : 'Launch'}
-          </button>
-        </div>
-      </form>
-    </div>
-  </div>
-{/if}
+<LaunchDialog
+  show={showLaunchDialog}
+  on:close={() => showLaunchDialog = false}
+  on:launchHive={handleLaunchHive}
+  on:launchSwarm={handleLaunchSwarm}
+/>
 
 <style>
   .sidebar {
@@ -333,6 +280,11 @@
     font-size: 12px;
   }
 
+  .agent-item.more {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
   .agent-status {
     font-size: 10px;
   }
@@ -370,174 +322,5 @@
   .launch-button .icon {
     font-size: 16px;
     font-weight: 400;
-  }
-
-  /* Dialog styles */
-  .dialog-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-
-  .dialog {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 24px;
-    width: 420px;
-    max-width: 90vw;
-  }
-
-  .dialog h2 {
-    margin: 0 0 20px 0;
-    font-size: 18px;
-    color: var(--color-text);
-  }
-
-  .form-group {
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    display: block;
-    margin-bottom: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--color-text);
-  }
-
-  .form-group input,
-  .form-group textarea {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    background: var(--color-bg);
-    color: var(--color-text);
-    font-size: 14px;
-    font-family: inherit;
-  }
-
-  .form-group input:focus,
-  .form-group textarea:focus {
-    outline: none;
-    border-color: var(--color-accent);
-  }
-
-  .path-picker {
-    display: flex;
-    gap: 8px;
-  }
-
-  .path-picker input {
-    flex: 1;
-    cursor: pointer;
-  }
-
-  .path-picker input:read-only {
-    background: var(--color-surface);
-  }
-
-  .browse-button {
-    padding: 10px 16px;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    background: var(--color-surface-hover);
-    color: var(--color-text);
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.15s ease;
-  }
-
-  .browse-button:hover {
-    background: var(--color-border);
-    border-color: var(--color-accent);
-  }
-
-  .worker-buttons {
-    display: flex;
-    gap: 8px;
-  }
-
-  .worker-button {
-    flex: 1;
-    padding: 10px;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    background: var(--color-bg);
-    color: var(--color-text);
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .worker-button:hover {
-    border-color: var(--color-accent);
-  }
-
-  .worker-button.selected {
-    background: var(--color-accent);
-    border-color: var(--color-accent);
-    color: var(--color-bg);
-  }
-
-  .dialog-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 12px;
-    margin-top: 24px;
-  }
-
-  .cancel-button,
-  .submit-button {
-    padding: 10px 20px;
-    border: none;
-    border-radius: 6px;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .cancel-button {
-    background: var(--color-surface-hover);
-    color: var(--color-text);
-  }
-
-  .cancel-button:hover {
-    background: var(--color-border);
-  }
-
-  .submit-button {
-    background: var(--color-accent);
-    color: var(--color-bg);
-  }
-
-  .submit-button:hover:not(:disabled) {
-    background: var(--color-accent-bright);
-  }
-
-  .submit-button:disabled,
-  .cancel-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .error-message {
-    padding: 12px;
-    margin-bottom: 16px;
-    background: rgba(247, 118, 142, 0.15);
-    border: 1px solid var(--color-error);
-    border-radius: 6px;
-    color: var(--color-error);
-    font-size: 13px;
-    word-break: break-word;
   }
 </style>
