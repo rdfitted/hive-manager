@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, untrack, tick } from 'svelte';
   import Terminal from '$lib/components/Terminal.svelte';
   import TerminalGrid from '$lib/components/TerminalGrid.svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
@@ -25,16 +25,39 @@
     sessions.loadSessions();
   });
 
-  // Track previous session ID to detect changes
+  // Track previous session ID and state to detect changes
   let prevSessionId: string | null = null;
+  let prevSessionState: string | null = null;
+  let isTransitioning = false;
 
   // Handle session changes and coordination loading
   $effect(() => {
-    const sessionId = $activeSession?.id ?? null;
+    const session = $activeSession;
+    const sessionId = session?.id ?? null;
+    const sessionState = session ? (typeof session.state === 'string' ? session.state : Object.keys(session.state)[0]) : null;
+
     if (sessionId && sessionId !== prevSessionId) {
       prevSessionId = sessionId;
       coordination.setSessionId(sessionId);
     }
+
+    // Detect Planning -> Running transition to focus Queen
+    if (sessionState === 'Running' && prevSessionState === 'Planning') {
+      untrack(() => {
+        if (!isTransitioning) {
+          isTransitioning = true;
+          tick().then(() => {
+            const queen = $activeAgents.find(a => a.role === 'Queen' || a.id.endsWith('-queen'));
+            if (queen) {
+              ui.setFocusedAgent(queen.id);
+            }
+            isTransitioning = false;
+          });
+        }
+      });
+    }
+
+    prevSessionState = sessionState;
   });
 
   // Handle agent list changes - use untrack to avoid infinite loops

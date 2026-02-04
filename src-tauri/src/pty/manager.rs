@@ -53,6 +53,12 @@ impl PtyManager {
     ) -> Result<String, PtyError> {
         let session = Arc::new(PtySession::new(id.clone(), role, command, args, cwd, cols, rows)?);
 
+        // Insert session BEFORE spawning reader thread (fixes race condition)
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(id.clone(), Arc::clone(&session));
+        }
+
         // Start the output reader thread
         if let Some(ref app_handle) = self.app_handle {
             let session_clone = Arc::clone(&session);
@@ -106,10 +112,7 @@ impl PtyManager {
             });
         }
 
-        {
-            let mut sessions = self.sessions.write();
-            sessions.insert(id.clone(), session);
-        }
+        // Session already inserted before thread spawn (see above)
 
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("pty-status", PtyStatusChange {

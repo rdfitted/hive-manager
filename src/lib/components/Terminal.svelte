@@ -24,6 +24,8 @@
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  let lastDims = { cols: 0, rows: 0 };
+  let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // Context menu state
   let showContextMenu = $state(false);
@@ -309,25 +311,37 @@
     });
 
     // Handle resize
-    resizeObserver = new ResizeObserver(() => {
+    const handleResize = () => {
       if (fitAddon && term) {
-        fitAddon.fit();
-        const dims = fitAddon.proposeDimensions();
-        if (dims) {
-          invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
+        try {
+          fitAddon.fit();
+          const dims = fitAddon.proposeDimensions();
+          if (dims && dims.cols > 0 && dims.rows > 0) {
+            if (dims.cols !== lastDims.cols || dims.rows !== lastDims.rows) {
+              lastDims = { cols: dims.cols, rows: dims.rows };
+              invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
+            }
+          }
+        } catch (e) {
+          console.error('Failed to fit terminal:', e);
         }
       }
+    };
+
+    resizeObserver = new ResizeObserver(() => {
+      if (resizeTimeout) clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(handleResize, 100);
     });
     resizeObserver.observe(terminalContainer);
 
-    // Report initial size
-    const dims = fitAddon.proposeDimensions();
-    if (dims) {
-      await invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
-    }
+    // Report initial size after container is likely ready
+    requestAnimationFrame(() => {
+      handleResize();
+    });
   });
 
   onDestroy(() => {
+    if (resizeTimeout) clearTimeout(resizeTimeout);
     document.removeEventListener('click', handleGlobalClick);
     document.removeEventListener('paste', handleGlobalPaste);
     terminalContainer?.removeEventListener('paste', handlePasteEvent);
