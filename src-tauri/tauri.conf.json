@@ -46,7 +46,7 @@
       "endpoints": [
         "https://github.com/rdfitted/hive-manager/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_YOUR_PUBLIC_KEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIyMEExNjU3RDcyNkVGMEYKUldRUDd5YlhWeFlLc3ZxSE9ObHE2eTFxZ1RVM1lFYnZaQk8zdXN5Zk1NMm5LMEFFcm1PNkYydUIK"
     }
   }
 }
