@@ -7,8 +7,16 @@
 
   const dispatch = createEventDispatcher<{ change: AgentConfig }>();
 
+  // Predefined CLI options with descriptions
+  const cliOptions = [
+    { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.5)' },
+    { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
+    { value: 'opencode', label: 'OpenCode', description: 'Grok, BigPickle, GLM' },
+    { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.2' },
+  ];
+
   function handleCliChange(e: Event) {
-    const target = e.target as HTMLInputElement;
+    const target = e.target as HTMLSelectElement;
     config = {
       ...config,
       cli: target.value,
@@ -41,14 +49,22 @@
   {/if}
 
   <div class="field">
-    <label for="cli">Command</label>
-    <input
+    <label for="cli">CLI</label>
+    <select
       id="cli"
-      type="text"
-      placeholder="claude, gemini, opencode..."
       value={config.cli}
-      on:input={handleCliChange}
-    />
+      on:change={handleCliChange}
+      class="cli-select"
+    >
+      {#each cliOptions as cli}
+        <option value={cli.value} title={cli.description}>
+          {cli.label}
+        </option>
+      {/each}
+    </select>
+    <span class="cli-description">
+      {cliOptions.find(c => c.value === config.cli)?.description || ''}
+    </span>
   </div>
 </div>
 
@@ -71,7 +87,8 @@
     color: var(--color-text-muted);
   }
 
-  input {
+  input,
+  .cli-select {
     width: 100%;
     padding: 8px 10px;
     font-size: 13px;
@@ -81,12 +98,28 @@
     color: var(--color-text);
   }
 
+  .cli-select {
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239ca3af' d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 30px;
+  }
+
+  .cli-description {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    opacity: 0.7;
+  }
+
   input::placeholder {
     color: var(--color-text-muted);
     opacity: 0.6;
   }
 
-  input:focus {
+  input:focus,
+  .cli-select:focus {
     outline: none;
     border-color: var(--color-primary, #8b5cf6);
   }

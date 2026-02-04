@@ -19,6 +19,14 @@
     { type: 'custom', label: 'Custom', cli: 'claude', description: 'Define your own role' },
   ];
 
+  // CLI options
+  const cliOptions = [
+    { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.5)' },
+    { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
+    { value: 'opencode', label: 'OpenCode', description: 'Grok, BigPickle, GLM' },
+    { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.2' },
+  ];
+
   let selectedRoleType = 'backend';
   let customRoleName = '';
   let selectedCli = 'claude';
@@ -140,14 +148,19 @@
         </div>
 
         <div class="form-section">
-          <label class="section-label" for="cli-input">Command</label>
-          <input
-            id="cli-input"
-            type="text"
+          <label class="section-label" for="cli-select">CLI</label>
+          <select
+            id="cli-select"
             bind:value={selectedCli}
-            placeholder="e.g., claude, gemini, or full command..."
             class="select-input"
-          />
+          >
+            {#each cliOptions as cli}
+              <option value={cli.value}>{cli.label}</option>
+            {/each}
+          </select>
+          <span class="cli-description">
+            {cliOptions.find(c => c.value === selectedCli)?.description || ''}
+          </span>
         </div>
 
         {#if parentOptions.length > 1}
@@ -328,6 +341,13 @@
     resize: vertical;
     min-height: 60px;
     font-family: inherit;
+  }
+
+  .cli-description {
+    font-size: 11px;
+    color: var(--text-secondary, #565f89);
+    margin-top: 4px;
+    display: block;
   }
 
   .error-message {
