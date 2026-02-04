@@ -203,15 +203,6 @@ impl SessionController {
         Ok(())
     }
 
-    pub fn update_agent_status(&self, agent_id: &str, status: AgentStatus) {
-        let mut sessions = self.sessions.write();
-        for session in sessions.values_mut() {
-            if let Some(agent) = session.agents.iter_mut().find(|a| a.id == agent_id) {
-                agent.status = status.clone();
-                break;
-            }
-        }
-    }
 }
 
 impl Default for SessionController {

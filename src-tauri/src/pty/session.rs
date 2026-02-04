@@ -31,8 +31,6 @@ pub enum PtyError {
     IoError(#[from] std::io::Error),
     #[error("PTY session not found: {0}")]
     NotFound(String),
-    #[error("PTY already closed")]
-    Closed,
 }
 
 // Wrapper to make the reader/writer Send
@@ -45,14 +43,11 @@ unsafe impl Send for SendWriter {}
 unsafe impl Sync for SendWriter {}
 
 pub struct PtySession {
-    pub id: String,
     pub role: AgentRole,
     pub status: AgentStatus,
     writer: Arc<Mutex<SendWriter>>,
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
-    cols: u16,
-    rows: u16,
 }
 
 // Make PtySession Send + Sync
@@ -61,7 +56,7 @@ unsafe impl Sync for PtySession {}
 
 impl PtySession {
     pub fn new(
-        id: String,
+        _id: String,
         role: AgentRole,
         command: &str,
         args: &[&str],
@@ -108,14 +103,11 @@ impl PtySession {
         drop(pty_pair);
 
         Ok(Self {
-            id,
             role,
             status: AgentStatus::Starting,
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
-            cols,
-            rows,
         })
     }
 
@@ -124,28 +116,6 @@ impl PtySession {
         writer.0.write_all(data)?;
         writer.0.flush()?;
         Ok(())
-    }
-
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
-        let mut reader = self.reader.lock();
-        match reader.0.read(buf) {
-            Ok(n) => Ok(n),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(0),
-            Err(e) => Err(PtyError::IoError(e)),
-        }
-    }
-
-    pub fn is_alive(&self) -> bool {
-        let mut child = self.child.lock();
-        if let Some(ref mut c) = *child {
-            match c.try_wait() {
-                Ok(Some(_)) => false,
-                Ok(None) => true,
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
     }
 
     pub fn kill(&self) -> Result<(), PtyError> {

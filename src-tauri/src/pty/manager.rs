@@ -140,13 +140,6 @@ impl PtyManager {
         Ok(())
     }
 
-    pub fn remove(&self, id: &str) {
-        let mut sessions = self.sessions.write();
-        if let Some(session) = sessions.remove(id) {
-            let _ = session.kill();
-        }
-    }
-
     pub fn get_status(&self, id: &str) -> Option<AgentStatus> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|s| s.status.clone())
