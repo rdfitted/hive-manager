@@ -8,6 +8,7 @@
   import CoordinationPanel from '$lib/components/CoordinationPanel.svelte';
   import QueenControls from '$lib/components/QueenControls.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
+  import UpdateChecker from '$lib/components/UpdateChecker.svelte';
   import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
@@ -244,6 +245,7 @@
 </div>
 
 <AddWorkerDialog bind:open={showAddWorkerDialog} on:close={closeAddWorkerDialog} />
+<UpdateChecker />
 
 <style>
   :global(*) {
