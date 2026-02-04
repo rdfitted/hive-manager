@@ -17,6 +17,7 @@
     summary: string;
     tasks: PlanTask[];
     generatedAt: string;
+    rawContent: string;
   }
 
   let plan: Plan | null = $state(null);
@@ -223,40 +224,59 @@
   {:else}
     <div class="plan-header">
       <h3>{plan.title}</h3>
-      <p class="summary">{plan.summary}</p>
-      <span class="timestamp">Generated: {new Date(plan.generatedAt).toLocaleString()}</span>
+      {#if plan.summary}
+        <p class="summary">{plan.summary}</p>
+      {/if}
+      <span class="timestamp">Last updated: {new Date(plan.generatedAt).toLocaleString()}</span>
     </div>
 
-    <div class="tasks-header">
-      <span class="tasks-title">Tasks</span>
-      <span class="tasks-count">{plan.tasks.filter(t => t.status === 'completed').length}/{plan.tasks.length}</span>
-    </div>
+    {#if plan.tasks.length > 0}
+      <div class="tasks-header">
+        <span class="tasks-title">Tasks</span>
+        <span class="tasks-count">{plan.tasks.filter(t => t.status === 'completed').length}/{plan.tasks.length}</span>
+      </div>
 
-    <div class="tasks-list">
-      {#each plan.tasks as task (task.id)}
-        <div class="task-item" class:completed={task.status === 'completed'}>
-          <span class="task-status" style="color: {getStatusColor(task.status)}">
-            {getStatusIcon(task.status)}
-          </span>
-          <div class="task-content">
-            <div class="task-header">
-              <span class="task-title">{task.title}</span>
-              {#if task.priority}
-                <span class="priority-badge" style="background: {getPriorityColor(task.priority)}">
-                  {getPriorityBadge(task.priority)}
-                </span>
+      <div class="tasks-list">
+        {#each plan.tasks as task (task.id)}
+          <div class="task-item" class:completed={task.status === 'completed'}>
+            <span class="task-status" style="color: {getStatusColor(task.status)}">
+              {getStatusIcon(task.status)}
+            </span>
+            <div class="task-content">
+              <div class="task-header">
+                <span class="task-title">{task.title}</span>
+                {#if task.priority}
+                  <span class="priority-badge" style="background: {getPriorityColor(task.priority)}">
+                    {getPriorityBadge(task.priority)}
+                  </span>
+                {/if}
+              </div>
+              {#if task.description}
+                <p class="task-description">{task.description}</p>
+              {/if}
+              {#if task.assignee}
+                <span class="task-assignee">→ {task.assignee}</span>
               {/if}
             </div>
-            {#if task.description}
-              <p class="task-description">{task.description}</p>
-            {/if}
-            {#if task.assignee}
-              <span class="task-assignee">→ {task.assignee}</span>
-            {/if}
           </div>
+        {/each}
+      </div>
+    {:else}
+      <!-- Show raw markdown when no tasks parsed yet (plan in progress) -->
+      <div class="raw-content">
+        <div class="raw-header">
+          <span class="raw-icon">📄</span>
+          <span class="raw-label">Plan Content</span>
+          {#if isPlanning()}
+            <span class="writing-indicator">
+              <span class="spinner">◐</span>
+              Writing...
+            </span>
+          {/if}
         </div>
-      {/each}
-    </div>
+        <pre class="raw-markdown">{plan.rawContent}</pre>
+      </div>
+    {/if}
 
     {#if isPlanning() || isPlanReady()}
       <div class="plan-actions">
@@ -490,6 +510,55 @@
     border-radius: 6px;
     font-size: 12px;
     margin-top: 12px;
+  }
+
+  /* Raw content display (for plans in progress) */
+  .raw-content {
+    margin-top: 12px;
+  }
+
+  .raw-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color, #414868);
+  }
+
+  .raw-icon {
+    font-size: 16px;
+  }
+
+  .raw-label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-secondary, #565f89);
+  }
+
+  .writing-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--accent-color, #7aa2f7);
+  }
+
+  .raw-markdown {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg-tertiary, #24283b);
+    border-radius: 6px;
+    font-size: 12px;
+    font-family: 'Fira Code', 'Monaco', monospace;
+    color: var(--text-primary, #c0caf5);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+    line-height: 1.5;
   }
 
   /* Planning state styles */

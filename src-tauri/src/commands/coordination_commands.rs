@@ -260,16 +260,43 @@ pub struct SessionPlan {
     pub summary: String,
     pub tasks: Vec<PlanTask>,
     pub generated_at: String,
+    pub raw_content: String,  // Raw markdown content for display
 }
 
 /// Get the session plan (parsed from plan.md)
+/// Looks in project-local .hive-manager/{session_id}/plan.md first,
+/// then falls back to app storage
 #[tauri::command]
 pub async fn get_session_plan(
+    session_state: State<'_, super::SessionControllerState>,
     storage_state: State<'_, StorageState>,
     session_id: String,
 ) -> Result<Option<SessionPlan>, String> {
-    let session_path = storage_state.0.session_dir(&session_id);
-    let plan_path = session_path.join("plan.md");
+    // First, try to get the project path from the active session
+    let project_plan_path = {
+        let controller = session_state.0.read();
+        if let Some(session) = controller.get_session(&session_id) {
+            let project_path = &session.project_path;
+            Some(project_path.join(".hive-manager").join(&session_id).join("plan.md"))
+        } else {
+            None
+        }
+    };
+
+    // Try project-local path first
+    let plan_path = if let Some(ref path) = project_plan_path {
+        if path.exists() {
+            path.clone()
+        } else {
+            // Fall back to app storage
+            let session_path = storage_state.0.session_dir(&session_id);
+            session_path.join("plan.md")
+        }
+    } else {
+        // No session found, try app storage
+        let session_path = storage_state.0.session_dir(&session_id);
+        session_path.join("plan.md")
+    };
 
     if !plan_path.exists() {
         return Ok(None);
@@ -278,13 +305,14 @@ pub async fn get_session_plan(
     let content = std::fs::read_to_string(&plan_path)
         .map_err(|e| format!("Failed to read plan.md: {}", e))?;
 
-    // Parse the plan.md content
-    let plan = parse_plan_markdown(&content)?;
+    // Parse the plan.md content, include raw content
+    let plan = parse_plan_markdown(&content);
     Ok(Some(plan))
 }
 
 /// Parse plan.md markdown content into structured plan
-fn parse_plan_markdown(content: &str) -> Result<SessionPlan, String> {
+/// Never fails - returns what it can parse, includes raw content
+fn parse_plan_markdown(content: &str) -> SessionPlan {
     let mut title = String::new();
     let mut summary = String::new();
     let mut tasks: Vec<PlanTask> = Vec::new();
@@ -331,17 +359,18 @@ fn parse_plan_markdown(content: &str) -> Result<SessionPlan, String> {
         }
     }
 
-    // If no title found, use default
+    // If no title found, use "Plan in Progress"
     if title.is_empty() {
-        title = "Session Plan".to_string();
+        title = "Plan in Progress...".to_string();
     }
 
-    Ok(SessionPlan {
+    SessionPlan {
         title,
         summary,
         tasks,
         generated_at: chrono::Utc::now().to_rfc3339(),
-    })
+        raw_content: content.to_string(),
+    }
 }
 
 /// Parse a single task line
