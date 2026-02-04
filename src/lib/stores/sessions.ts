@@ -66,12 +66,13 @@ function createSessionsStore() {
       }
     },
 
-    async launchHive(projectPath: string, workerCount: number, prompt?: string) {
+    async launchHive(projectPath: string, workerCount: number, command: string, prompt?: string) {
       update((state) => ({ ...state, loading: true, error: null }));
       try {
         const session = await invoke<Session>('launch_hive', {
           projectPath,
           workerCount,
+          command,
           prompt,
         });
         update((state) => ({

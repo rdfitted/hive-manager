@@ -16,10 +16,11 @@ pub async fn launch_hive(
     state: State<'_, SessionControllerState>,
     project_path: String,
     worker_count: u8,
+    command: String,
     prompt: Option<String>,
 ) -> Result<Session, String> {
     let controller = state.0.read();
-    controller.launch_hive(PathBuf::from(project_path), worker_count, prompt)
+    controller.launch_hive(PathBuf::from(project_path), worker_count, &command, prompt)
 }
 
 #[tauri::command]

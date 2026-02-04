@@ -9,38 +9,126 @@
 
 ### Vision
 
-A native desktop application for orchestrating and monitoring Claude Code multi-agent workflows (Hives, Swarms, and Fusions). Provides embedded terminals with full interactivity, allowing users to monitor, steer, and respond to agent prompts from a unified interface.
+A native desktop application for orchestrating and monitoring Claude Code multi-agent workflows (Hives, Swarms, and Fusions). Replaces Windows Terminal tab sprawl with a unified interface featuring embedded terminals, real-time hierarchy visualization, and cross-agent coordination.
 
 ### Problem Statement
 
-Currently, multi-agent workflows spawn multiple Windows Terminal tabs. Users must:
-- Manually track which tab belongs to which agent
-- Switch between tabs to monitor progress
-- Risk missing agent prompts buried in background tabs
-- Have no unified view of session state
+Currently, multi-agent workflows spawn 10-20+ Windows Terminal tabs:
+- Queen, Planners (A-D), Workers (1a-4a, 1b-4b...), Reviewers, Testers, Integration Team
+- No unified view of session hierarchy or state
+- Easy to miss agent prompts buried in background tabs
+- Manual tracking of which agent owns which domain/files
+- Coordination logs scattered across files
+- Different CLIs (claude, agent, gemini, opencode, codex) with different behaviors
 
 ### Solution
 
-A single-window application with:
-- Embedded terminal panels for each agent
-- Real-time session state visualization
-- Unified prompt/input handling
-- Session history and log access
+A single-window application that:
+- Embeds all agent terminals in a managed grid/tree layout
+- Visualizes the Queen → Planner → Worker hierarchy in real-time
+- Alerts when any agent requests input (across all CLI types)
+- Parses coordination.log and displays structured state
+- Tracks file ownership matrix visually
+- Supports steering individual agents mid-task
 
 ---
 
-## User Personas
+## Agent Architecture Support
 
-### Primary: Power User (You)
-- Runs complex multi-agent workflows daily
-- Needs to monitor 2-10+ agents simultaneously
-- Requires ability to intervene/steer agents mid-task
-- Values efficiency and keyboard-driven workflows
+### Tier 1: Queen (1 per session)
+| Property | Value |
+|----------|-------|
+| CLI | `claude --model opus` |
+| Role | Top-level orchestrator |
+| Spawns | Planners only |
+| Owns | Branch, commits, PR, integration |
+| Can Modify Code | No |
 
-### Secondary: Team Member (Future)
-- Occasional multi-agent usage
-- Prefers visual overview over terminal diving
-- May not understand agent internals
+### Tier 2: Planners (1-10 per session)
+| Property | Value |
+|----------|-------|
+| CLI | `claude --model opus` |
+| Role | Domain orchestrator |
+| Spawns | Workers, Reviewer, Tester |
+| Owns | Task files, worker coordination, review cycle |
+| Can Modify Code | No |
+
+### Tier 3: Workers (2-4 per Planner)
+| Worker | CLI | Model | Role |
+|--------|-----|-------|------|
+| Worker 1X (Backend) | `agent` via WSL | Cursor/Opus | Backend implementation |
+| Worker 2X (Frontend) | `gemini` | Gemini 3 Pro | Frontend implementation |
+| Worker 3X (Coherence) | `opencode` | Grok Code | Cross-cutting coherence |
+| Worker 4X (Simplify) | `codex` | GPT-5.2 | Simplification pass |
+
+### Support Agents
+| Agent | CLI | Model | Role |
+|-------|-----|-------|------|
+| Reviewer | `opencode` | BigPickle | Code review |
+| Tester | `codex` | GPT-5.2 | Test execution |
+| Integration Reviewer | `opencode` | BigPickle | Cross-domain review |
+| Integration Tester | `codex` | GPT-5.2 | Integration tests |
+
+### CLI Reference
+| CLI | Auto-Approve Flag | Model Flag | Platform |
+|-----|-------------------|------------|----------|
+| `claude` | `--dangerously-skip-permissions` | `--model opus` | Windows |
+| `agent` | `--force` | (global) | WSL Ubuntu |
+| `gemini` | `-y` | `-m gemini-3-pro-preview` | Windows |
+| `opencode` | env `OPENCODE_YOLO=true` | `-m opencode/MODEL` | Windows |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m gpt-5.2` | Windows |
+
+---
+
+## Session Types
+
+### Hive (B-Thread)
+```
+Queen (Opus)
+├── Worker 1 (mixed)
+├── Worker 2 (mixed)
+├── Worker 3 (mixed)
+└── Worker 4 (mixed)
+    └── Reviewer + Tester
+```
+- 1 Queen + 1-4 Workers
+- Single domain focus
+- Sequential or parallel workers
+
+### Swarm (S-Thread)
+```
+Queen (Opus)
+├── Planner A (Domain A)
+│   ├── Worker 1a (Backend)
+│   ├── Worker 2a (Frontend)
+│   ├── Worker 3a (Coherence)
+│   └── Worker 4a (Simplify)
+│       └── Reviewer A + Tester A
+├── Planner B (Domain B)
+│   ├── Worker 1b...
+│   └── ...
+└── Integration Team
+    ├── Integration Reviewer
+    └── Integration Tester
+```
+- 1 Queen + 2-4 Planners + 2-4 Workers each
+- Multi-domain parallel execution
+- File ownership matrix prevents conflicts
+
+### Swarm Long-Horizon
+- Same as Swarm but Planners deployed in waves (1-2 at a time)
+- Later Planners benefit from earlier discoveries
+- Up to 10 Planners (A-J)
+
+### Fusion (F-Thread)
+```
+Judge (You)
+├── Variant A (worktree)
+├── Variant B (worktree)
+└── Variant C (worktree)
+```
+- Competing implementations in separate git worktrees
+- Human or automated judge picks winner
 
 ---
 
@@ -50,165 +138,200 @@ A single-window application with:
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| F1.1 | Launch new Hive session (1-4 workers) | P0 |
-| F1.2 | Launch new Swarm session (Queen + Planners + Workers) | P0 |
-| F1.3 | Launch new Fusion session (competing implementations) | P1 |
-| F1.4 | Stop/terminate individual agents | P0 |
-| F1.5 | Stop/terminate entire session | P0 |
-| F1.6 | Pause/resume agent (if supported by CLI) | P2 |
-| F1.7 | View historical sessions | P1 |
+| F1.1 | Launch Hive session (Queen + 1-4 Workers) | P0 |
+| F1.2 | Launch Swarm session (Queen + 2-4 Planners) | P0 |
+| F1.3 | Launch Swarm Long-Horizon (sequential waves) | P1 |
+| F1.4 | Launch Fusion session (competing worktrees) | P1 |
+| F1.5 | Stop individual agent | P0 |
+| F1.6 | Stop entire session (cascade) | P0 |
+| F1.7 | View session history | P1 |
 | F1.8 | Resume interrupted session | P2 |
+| F1.9 | Clone session config for new task | P2 |
 
-### F2: Embedded Terminals
-
-| ID | Requirement | Priority |
-|----|-------------|----------|
-| F2.1 | Render agent output in real-time via xterm.js | P0 |
-| F2.2 | Send keyboard input to agent | P0 |
-| F2.3 | Support ANSI colors and formatting | P0 |
-| F2.4 | Auto-scroll with lock/unlock option | P0 |
-| F2.5 | Search within terminal output | P1 |
-| F2.6 | Copy/paste support | P0 |
-| F2.7 | Terminal resize (responsive panels) | P0 |
-| F2.8 | Multiple layout options (tabs, grid, split) | P1 |
-
-### F3: Session Monitoring
+### F2: Embedded Terminals (Multi-CLI Support)
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| F3.1 | Display session hierarchy (Queen → Planners → Workers) | P0 |
-| F3.2 | Show agent status (running, waiting, completed, error) | P0 |
-| F3.3 | Parse and display task assignments | P1 |
-| F3.4 | Show file ownership matrix (Swarm) | P1 |
-| F3.5 | Display coordination.log in formatted view | P1 |
-| F3.6 | Alert when agent requests input | P0 |
-| F3.7 | Show token/cost usage per agent (if available) | P2 |
+| F2.1 | Spawn and render `claude` CLI via PTY | P0 |
+| F2.2 | Spawn and render `agent` via WSL PTY | P0 |
+| F2.3 | Spawn and render `gemini` CLI via PTY | P0 |
+| F2.4 | Spawn and render `opencode` CLI via PTY | P0 |
+| F2.5 | Spawn and render `codex` CLI via PTY | P0 |
+| F2.6 | Full ANSI color/formatting support | P0 |
+| F2.7 | Send keyboard input to focused terminal | P0 |
+| F2.8 | Terminal resize (responsive panels) | P0 |
+| F2.9 | Search within terminal output | P1 |
+| F2.10 | Copy/paste support | P0 |
+| F2.11 | Auto-scroll with lock/unlock | P0 |
 
-### F4: Agent Interaction
-
-| ID | Requirement | Priority |
-|----|-------------|----------|
-| F4.1 | Focus on agent requesting input | P0 |
-| F4.2 | Send text input to agent | P0 |
-| F4.3 | Send common responses (y/n, approve, reject) via hotkey | P1 |
-| F4.4 | Broadcast message to all agents in session | P2 |
-| F4.5 | Inject context/instructions mid-session | P2 |
-
-### F5: Configuration
+### F3: Hierarchy Visualization
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| F5.1 | Configure default worker count | P1 |
-| F5.2 | Configure default models per agent role | P1 |
-| F5.3 | Set session directory paths | P1 |
-| F5.4 | Configure keyboard shortcuts | P1 |
-| F5.5 | Theme selection (dark/light) | P2 |
+| F3.1 | Display live hierarchy tree (Queen → Planners → Workers) | P0 |
+| F3.2 | Show agent status badges (starting, running, waiting, complete, error) | P0 |
+| F3.3 | Indicate which agent is focused | P0 |
+| F3.4 | Click hierarchy node to focus terminal | P0 |
+| F3.5 | Show Planner domain assignment | P1 |
+| F3.6 | Show Worker role (Backend/Frontend/Coherence/Simplify) | P1 |
+| F3.7 | Collapse/expand hierarchy branches | P1 |
 
-### F6: Updates & Maintenance
+### F4: Session State Monitoring
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| F6.1 | Check for updates on startup | P0 |
-| F6.2 | Download and apply updates automatically | P1 |
-| F6.3 | Manual update check via menu | P0 |
-| F6.4 | Show changelog before update | P1 |
-| F6.5 | Rollback to previous version | P2 |
-| F6.6 | Update without losing active sessions | P2 |
+| F4.1 | Parse and display `coordination.log` messages | P0 |
+| F4.2 | Parse `state/responsibility-matrix.md` | P1 |
+| F4.3 | Parse `state/file-ownership.md` and display matrix | P1 |
+| F4.4 | Track task files in `tasks/planner-{X}/` | P1 |
+| F4.5 | Show wave progress (long-horizon) | P1 |
+| F4.6 | Display phase progress (Planning → Execution → Review → Integration) | P1 |
+
+### F5: Agent Interaction
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| F5.1 | Visual + audio alert when any agent requests input | P0 |
+| F5.2 | Auto-focus terminal requesting input | P0 |
+| F5.3 | Send text input to agent | P0 |
+| F5.4 | Quick response buttons (y/n, approve, reject) | P1 |
+| F5.5 | Broadcast message to all agents (via coordination.log) | P2 |
+
+### F6: Layout Options
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| F6.1 | Grid layout (2x2, 3x3, 4x4) | P0 |
+| F6.2 | Tree layout (hierarchy-based, indented) | P1 |
+| F6.3 | Tabbed layout (one terminal at a time) | P0 |
+| F6.4 | Focus mode (single terminal fullscreen) | P0 |
+| F6.5 | Custom split layouts | P2 |
+| F6.6 | Save/restore layout preferences | P1 |
+
+### F7: Configuration
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| F7.1 | Configure default Planner count | P1 |
+| F7.2 | Configure Worker models per role | P1 |
+| F7.3 | Configure CLI paths and flags | P1 |
+| F7.4 | Configure session directory paths | P1 |
+| F7.5 | Keyboard shortcut customization | P1 |
+| F7.6 | Theme selection (dark/light) | P2 |
+
+### F8: Updates & Maintenance
+
+| ID | Requirement | Priority |
+|----|-------------|----------|
+| F8.1 | Check for updates on startup | P0 |
+| F8.2 | Show changelog before update | P1 |
+| F8.3 | Download in background, install on exit | P1 |
+| F8.4 | Manual update check via menu | P0 |
+| F8.5 | Rollback to previous version | P2 |
 
 ---
 
 ## Technical Architecture
 
-### System Architecture
+### System Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        HIVE MANAGER                             │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                    SVELTE FRONTEND                        │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐   │  │
-│  │  │  Sidebar    │  │  Terminal   │  │  Status Panel   │   │  │
-│  │  │  - Sessions │  │  Grid/Tabs  │  │  - Hierarchy    │   │  │
-│  │  │  - History  │  │  (xterm.js) │  │  - Tasks        │   │  │
-│  │  │  - Settings │  │             │  │  - Alerts       │   │  │
-│  │  └─────────────┘  └─────────────┘  └─────────────────┘   │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                              │                                   │
-│                    Tauri IPC + Events                           │
-│                              │                                   │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                     RUST BACKEND                          │  │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  │  │
-│  │  │ PTY Manager  │  │ Session      │  │ File Watcher   │  │  │
-│  │  │ (portable-   │  │ Controller   │  │ (notify)       │  │  │
-│  │  │  pty)        │  │              │  │                │  │  │
-│  │  └──────────────┘  └──────────────┘  └────────────────┘  │  │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  │  │
-│  │  │ Update       │  │ Config       │  │ Log Parser     │  │  │
-│  │  │ Manager      │  │ Store        │  │                │  │  │
-│  │  └──────────────┘  └──────────────┘  └────────────────┘  │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-        ┌──────────┐   ┌──────────┐    ┌──────────┐
-        │  Queen   │   │ Worker 1 │    │ Worker N │
-        │  (PTY)   │   │  (PTY)   │    │  (PTY)   │
-        └──────────┘   └──────────┘    └──────────┘
-              │               │               │
-              └───────────────┴───────────────┘
-                    claude CLI processes
+┌─────────────────────────────────────────────────────────────────────┐
+│                          HIVE MANAGER                               │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                      SVELTE FRONTEND                          │  │
+│  │  ┌──────────┐  ┌────────────────────┐  ┌──────────────────┐  │  │
+│  │  │ Sidebar  │  │   Terminal Grid    │  │   Status Panel   │  │  │
+│  │  │          │  │   ┌────┐ ┌────┐    │  │                  │  │  │
+│  │  │ Sessions │  │   │ Q  │ │ Pa │    │  │ Hierarchy Tree   │  │  │
+│  │  │ History  │  │   └────┘ └────┘    │  │ ├─ Queen         │  │  │
+│  │  │ Settings │  │   ┌────┐ ┌────┐    │  │ ├─ Planner A     │  │  │
+│  │  │          │  │   │W1a │ │W2a │    │  │ │  ├─ W1a █      │  │  │
+│  │  │          │  │   └────┘ └────┘    │  │ │  └─ W2a ⏳     │  │  │
+│  │  │ [+] New  │  │      (xterm.js)    │  │ └─ Planner B     │  │  │
+│  │  └──────────┘  └────────────────────┘  └──────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                │                                     │
+│                      Tauri IPC + Events                             │
+│                                │                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                       RUST BACKEND                            │  │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────┐ │  │
+│  │  │   PTY Manager    │  │ Session Manager  │  │ File Watch  │ │  │
+│  │  │  - Windows PTY   │  │  - Hive          │  │  - notify   │ │  │
+│  │  │  - WSL PTY       │  │  - Swarm         │  │  - parser   │ │  │
+│  │  │  - Multi-CLI     │  │  - Fusion        │  │             │ │  │
+│  │  └──────────────────┘  └──────────────────┘  └─────────────┘ │  │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌─────────────┐ │  │
+│  │  │  Agent Registry  │  │  Config Store    │  │  Updater    │ │  │
+│  │  │  - Hierarchy     │  │  - CLI paths     │  │  - GitHub   │ │  │
+│  │  │  - Status        │  │  - Defaults      │  │  - Rollback │ │  │
+│  │  └──────────────────┘  └──────────────────┘  └─────────────┘ │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+   ┌─────────┐            ┌─────────┐            ┌─────────┐
+   │ claude  │            │  agent  │            │ gemini  │
+   │  (PTY)  │            │ (WSL)   │            │  (PTY)  │
+   └─────────┘            └─────────┘            └─────────┘
+        ▼                       ▼                       ▼
+   ┌─────────┐            ┌─────────┐
+   │opencode │            │  codex  │
+   │  (PTY)  │            │  (PTY)  │
+   └─────────┘            └─────────┘
 ```
 
 ### Rust Backend Components
 
 #### PTY Manager (`src-tauri/src/pty/`)
+
 ```rust
-// Core responsibilities:
-// - Spawn claude CLI with PTY
-// - Manage PTY I/O streams
-// - Handle resize events
-// - Clean shutdown
+pub struct PtyManager {
+    sessions: HashMap<String, PtySession>,
+    wsl_available: bool,
+}
 
 pub struct PtySession {
     id: String,
-    role: AgentRole,
-    pty: Box<dyn PtyProcess>,
-    reader: AsyncReader,
-    writer: AsyncWriter,
+    agent_type: AgentType,
+    pty: Box<dyn portable_pty::MasterPty>,
+    child: Box<dyn portable_pty::Child>,
     status: AgentStatus,
 }
 
-pub enum AgentRole {
-    Queen,
-    Planner { index: u8 },
-    Worker { index: u8, parent: Option<String> },
-    Fusion { variant: String },
+pub enum AgentType {
+    Claude { model: String },           // claude --model opus
+    CursorAgent,                        // WSL: agent --force
+    Gemini { model: String },           // gemini -m MODEL -y
+    OpenCode { model: String },         // OPENCODE_YOLO=true opencode -m MODEL
+    Codex { model: String },            // codex --dangerously-bypass...
 }
 
 pub enum AgentStatus {
     Starting,
     Running,
-    WaitingForInput,
+    WaitingForInput,  // Detected via output patterns
     Completed,
     Error(String),
 }
 ```
 
-#### Session Controller (`src-tauri/src/session/`)
+#### Session Manager (`src-tauri/src/session/`)
+
 ```rust
-// Core responsibilities:
-// - Orchestrate multi-agent sessions
-// - Track session state
-// - Handle session lifecycle
+pub struct SessionManager {
+    active_sessions: HashMap<String, Session>,
+    history: Vec<SessionSummary>,
+}
 
 pub struct Session {
     id: String,
     session_type: SessionType,
     project_path: PathBuf,
-    agents: HashMap<String, PtySession>,
+    agents: AgentHierarchy,
     state: SessionState,
     created_at: DateTime<Utc>,
 }
@@ -216,163 +339,249 @@ pub struct Session {
 pub enum SessionType {
     Hive { worker_count: u8 },
     Swarm { planner_count: u8 },
+    SwarmLongHorizon { max_planners: u8, current_wave: u8 },
     Fusion { variants: Vec<String> },
+}
+
+pub struct AgentHierarchy {
+    queen: AgentNode,
+    planners: Vec<PlannerNode>,
+}
+
+pub struct PlannerNode {
+    agent: AgentNode,
+    domain: String,
+    workers: Vec<AgentNode>,
+    reviewer: Option<AgentNode>,
+    tester: Option<AgentNode>,
 }
 ```
 
 #### File Watcher (`src-tauri/src/watcher/`)
+
 ```rust
-// Core responsibilities:
-// - Watch .hive/sessions/ and .swarm/sessions/
-// - Parse coordination.log changes
-// - Parse task file updates
-// - Emit structured events to frontend
+pub struct SessionWatcher {
+    watchers: HashMap<String, RecommendedWatcher>,
+}
+
+// Watch paths:
+// - .hive/sessions/{id}/coordination.log
+// - .swarm/sessions/{id}/logs/*.log
+// - .swarm/sessions/{id}/state/*.md
+// - .swarm/sessions/{id}/tasks/**/*.md
+
+pub enum WatchEvent {
+    CoordinationMessage { from: String, message_type: String, content: String },
+    AgentLogUpdate { agent_id: String, lines: Vec<String> },
+    StateFileChanged { file: String, content: String },
+    TaskFileCreated { planner: String, task_file: String },
+}
 ```
 
-#### Update Manager (`src-tauri/src/updater/`)
+#### Agent Spawner (`src-tauri/src/spawner/`)
+
 ```rust
-// Core responsibilities:
-// - Check GitHub releases for updates
-// - Download update packages
-// - Apply updates (Tauri updater plugin)
-// - Manage rollback capability
+pub struct AgentSpawner;
+
+impl AgentSpawner {
+    pub fn spawn_claude(
+        &self,
+        model: &str,
+        prompt_file: &Path,
+        cwd: &Path,
+    ) -> Result<PtySession>;
+
+    pub fn spawn_wsl_agent(
+        &self,
+        prompt_file: &Path,
+        cwd: &Path,
+    ) -> Result<PtySession>;
+
+    pub fn spawn_gemini(
+        &self,
+        model: &str,
+        prompt_file: &Path,
+        cwd: &Path,
+    ) -> Result<PtySession>;
+
+    pub fn spawn_opencode(
+        &self,
+        model: &str,
+        prompt_file: &Path,
+        cwd: &Path,
+    ) -> Result<PtySession>;
+
+    pub fn spawn_codex(
+        &self,
+        model: &str,
+        prompt_file: &Path,
+        cwd: &Path,
+    ) -> Result<PtySession>;
+}
 ```
 
 ### Frontend Components
 
 #### Terminal Component (`src/lib/components/Terminal.svelte`)
-```svelte
-<!-- Wraps xterm.js -->
-<!-- Props: agentId, onInput, onResize -->
-<!-- Events: input, resize, focus -->
-```
+- Wraps xterm.js
+- Receives output events from Rust backend
+- Sends input to Rust backend
+- Displays status badge overlay
 
-#### Session Sidebar (`src/lib/components/SessionSidebar.svelte`)
-```svelte
-<!-- Lists active and historical sessions -->
-<!-- Expandable tree view for agents -->
-<!-- Status indicators -->
-```
+#### Hierarchy Tree (`src/lib/components/HierarchyTree.svelte`)
+- Renders Queen → Planner → Worker tree
+- Status indicators per node
+- Click to focus terminal
+- Expandable/collapsible
 
-#### Terminal Grid (`src/lib/components/TerminalGrid.svelte`)
-```svelte
-<!-- Manages terminal panel layout -->
-<!-- Supports: tabs, 2x2 grid, horizontal split, vertical split -->
-<!-- Drag-to-resize panels -->
-```
+#### Coordination Log (`src/lib/components/CoordinationLog.svelte`)
+- Parses coordination.log
+- Colored by agent (Queen=purple, Planner=blue, etc.)
+- Auto-scroll with pause
 
-#### Status Panel (`src/lib/components/StatusPanel.svelte`)
-```svelte
-<!-- Shows session hierarchy -->
-<!-- Task assignments -->
-<!-- File ownership (Swarm) -->
-<!-- Input alerts -->
-```
+#### File Ownership Matrix (`src/lib/components/OwnershipMatrix.svelte`)
+- Parses file-ownership.md
+- Visual grid of files × planners
+- Highlights conflicts
 
 ### Data Flow
 
-#### Agent Output → Frontend
+#### Spawning an Agent
 ```
-1. Claude writes to PTY stdout
-2. Rust PtySession reads bytes
-3. Rust emits Tauri event: { agent_id, data: bytes }
-4. Frontend receives event
-5. xterm.js writes bytes to terminal
+1. User clicks "Launch Swarm"
+2. Frontend → Tauri command: launch_swarm(project, planner_count)
+3. Rust creates session directory structure
+4. Rust copies templates, generates prompts
+5. Rust spawns Queen PTY
+6. Rust returns session_id to frontend
+7. Frontend subscribes to session events
+8. Queen output streams via Tauri events
+9. xterm.js renders output
 ```
 
-#### User Input → Agent
+#### Agent Output Detection
+```
+1. PTY reader receives bytes
+2. Rust buffers and scans for patterns:
+   - "?" at line end → WaitingForInput
+   - "PLANNER_COMPLETE" → status update
+   - Log format "[HH:MM:SS] AGENT:" → parse for coordination
+3. Rust emits typed events to frontend
+4. Frontend updates hierarchy status
+5. If WaitingForInput → trigger alert
+```
+
+#### User Input
 ```
 1. User types in xterm.js
-2. xterm.js onData callback fires
-3. Frontend invokes Tauri command: write_to_agent(id, bytes)
-4. Rust PtySession writes bytes to PTY stdin
-5. Claude CLI receives input
-```
-
-#### Session File Changes → Frontend
-```
-1. Agent writes to .hive/sessions/{id}/tasks/
-2. notify crate detects file change
-3. Rust parses file content
-4. Rust emits Tauri event: { session_id, event_type, data }
-5. Frontend updates state store
-6. UI reactively updates
+2. xterm.js onData fires
+3. Frontend → Tauri command: write_to_agent(agent_id, bytes)
+4. Rust writes bytes to PTY stdin
+5. Agent receives input
 ```
 
 ---
 
 ## UI/UX Specifications
 
-### Layout
+### Main Layout
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  [≡] Hive Manager                              [_] [□] [×]       │
-├────────┬─────────────────────────────────────────────┬───────────┤
-│        │  ┌─────────────────┐ ┌─────────────────┐    │           │
-│ ACTIVE │  │ Queen           │ │ Worker 1        │    │  STATUS   │
-│        │  │ █ Running       │ │ ⏳ Waiting      │    │           │
-│ > Hive │  │                 │ │                 │    │ Hierarchy │
-│   2024 │  │ $ claude...     │ │ Waiting for     │    │ ├─ Queen  │
-│        │  │ > Analyzing...  │ │ task from Queen │    │ ├─ W1 ⏳  │
-│        │  │                 │ │                 │    │ └─ W2 █   │
-│ RECENT │  └─────────────────┘ └─────────────────┘    │           │
-│        │  ┌─────────────────┐ ┌─────────────────┐    │ Tasks     │
-│ - Swarm│  │ Worker 2        │ │ Worker 3        │    │ □ Task 1  │
-│ - Hive │  │ █ Running       │ │ ✓ Complete      │    │ ■ Task 2  │
-│        │  │                 │ │                 │    │ □ Task 3  │
-│        │  │ Implementing... │ │ Done: auth.ts   │    │           │
-│ [+] New│  │                 │ │                 │    │ ⚠ W1 needs│
-│        │  └─────────────────┘ └─────────────────┘    │   input   │
-├────────┴─────────────────────────────────────────────┴───────────┤
-│ [Hive ▼] Workers: [2] [3] [4]  Model: [sonnet ▼]  [Launch]       │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  [≡] Hive Manager                                        [_] [□] [×]     │
+├────────┬───────────────────────────────────────────────────┬─────────────┤
+│        │  ┌─────────────────────┐ ┌─────────────────────┐  │             │
+│ ACTIVE │  │ Queen           [█] │ │ Planner A       [█] │  │  HIERARCHY  │
+│        │  │                     │ │                     │  │             │
+│ > Swarm│  │ Phase 2: Spawning   │ │ Domain: Backend     │  │  Queen █    │
+│   auth │  │ planners...         │ │ Spawning Worker 1a  │  │  ├─ Pa █    │
+│        │  │                     │ │                     │  │  │  ├─W1a ⏳│
+│        │  └─────────────────────┘ └─────────────────────┘  │  │  ├─W2a   │
+│ RECENT │  ┌─────────────────────┐ ┌─────────────────────┐  │  │  └─W3a   │
+│        │  │ Worker 1a       [⏳] │ │ Worker 2a       [░] │  │  └─ Pb ░    │
+│ - hive │  │                     │ │                     │  │             │
+│ - swarm│  │ Reading task...     │ │ (not started)       │  │ ───────────│
+│        │  │                     │ │                     │  │ COORDINATION│
+│        │  └─────────────────────┘ └─────────────────────┘  │ Pa: [STATUS]│
+│ [+] New│                                                   │ Starting w1a│
+├────────┴───────────────────────────────────────────────────┴─────────────┤
+│ Type: [Swarm ▼]  Planners: [2][3][4]  Project: D:/Code/myapp  [Launch]   │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Status Badges
+
+| Badge | Meaning | Color |
+|-------|---------|-------|
+| █ | Running | Blue `#7aa2f7` |
+| ⏳ | Waiting for input | Yellow `#e0af68` |
+| ✓ | Completed | Green `#9ece6a` |
+| ✗ | Error | Red `#f7768e` |
+| ░ | Not started | Gray `#414868` |
+| ◐ | Starting | Cyan `#7dcfff` |
 
 ### Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+1-9` | Focus terminal 1-9 |
+| `Ctrl+1-9` | Focus terminal by position |
+| `Ctrl+Q` | Focus Queen |
+| `Ctrl+A/B/C/D` | Focus Planner A/B/C/D |
 | `Ctrl+Tab` | Cycle terminals |
 | `Ctrl+Shift+Tab` | Cycle reverse |
 | `Ctrl+N` | New session dialog |
-| `Ctrl+W` | Close focused terminal |
+| `Ctrl+W` | Stop focused agent |
 | `Ctrl+Shift+W` | Stop entire session |
 | `F11` | Toggle fullscreen terminal |
-| `Ctrl+F` | Search in terminal |
-| `Ctrl+,` | Open settings |
-| `Ctrl+J` | Toggle status panel |
+| `Ctrl+G` | Toggle grid/tree layout |
+| `Ctrl+L` | Toggle coordination log panel |
+| `Ctrl+F` | Search in focused terminal |
+| `Ctrl+,` | Settings |
+| `Escape` | Exit fullscreen / close dialog |
 
-### Color Scheme (Dark Theme - Tokyo Night)
+### Color Scheme (Tokyo Night)
 
 | Element | Color |
 |---------|-------|
 | Background | `#1a1b26` |
 | Surface | `#24283b` |
+| Surface Hover | `#292e42` |
 | Border | `#414868` |
 | Text | `#c0caf5` |
-| Accent | `#7aa2f7` |
-| Success | `#9ece6a` |
-| Warning | `#e0af68` |
-| Error | `#f7768e` |
-| Running | `#7aa2f7` |
-| Waiting | `#e0af68` |
-| Complete | `#9ece6a` |
+| Text Muted | `#565f89` |
+| Accent (Blue) | `#7aa2f7` |
+| Success (Green) | `#9ece6a` |
+| Warning (Yellow) | `#e0af68` |
+| Error (Red) | `#f7768e` |
+| Info (Cyan) | `#7dcfff` |
+| Purple | `#bb9af7` |
+
+### Agent Colors (for hierarchy/logs)
+
+| Agent | Color |
+|-------|-------|
+| Queen | Purple `#bb9af7` |
+| Planner | Blue `#7aa2f7` |
+| Worker (Backend) | Cyan `#7dcfff` |
+| Worker (Frontend) | Green `#9ece6a` |
+| Worker (Coherence) | Yellow `#e0af68` |
+| Worker (Simplify) | Orange `#ff9e64` |
+| Reviewer | Magenta `#ff007c` |
+| Tester | Teal `#1abc9c` |
 
 ---
 
 ## Update Strategy
 
-### Update Distribution
+### Distribution
 
 | Component | Location |
 |-----------|----------|
-| Releases | GitHub Releases |
-| Update manifest | `https://github.com/{user}/hive-manager/releases/latest/download/latest.json` |
-| Installers | `.msi` (Windows), `.dmg` (macOS), `.AppImage` (Linux) |
+| Releases | GitHub Releases (private repo) |
+| Manifest | `https://github.com/{user}/hive-manager/releases/latest/download/latest.json` |
+| Installer | `.msi` (Windows) |
 
-### Tauri Updater Configuration
+### Tauri Updater Config
 
 ```json
 {
@@ -392,49 +601,25 @@ pub enum SessionType {
 ### Update Flow
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ App Starts  │────▶│ Check for   │────▶│ Update      │
-│             │     │ Updates     │     │ Available?  │
-└─────────────┘     └─────────────┘     └──────┬──────┘
-                                               │
-                    ┌──────────────────────────┼──────────────────────┐
-                    │ Yes                      │                  No  │
-                    ▼                          │                      ▼
-           ┌─────────────────┐                 │             ┌─────────────┐
-           │ Show Changelog  │                 │             │ Continue    │
-           │ Dialog          │                 │             │ Normal      │
-           └────────┬────────┘                 │             └─────────────┘
-                    │                          │
-         ┌──────────┴──────────┐               │
-         │ Update Now    Later │               │
-         ▼                     ▼               │
-┌─────────────────┐   ┌─────────────────┐      │
-│ Download in BG  │   │ Remind Next     │      │
-│ Install on Exit │   │ Launch          │      │
-└─────────────────┘   └─────────────────┘      │
+App Start → Check Updates → Available?
+                              │
+              ┌───────────────┴───────────────┐
+              │ Yes                           │ No
+              ▼                               ▼
+    Show Changelog Dialog              Continue Normal
+              │
+    ┌─────────┴─────────┐
+    │ Now         Later │
+    ▼                   ▼
+Download in BG    Remind Next Launch
+Install on Exit
 ```
 
-### Versioning
+### Rollback
 
-- **Semantic Versioning:** `MAJOR.MINOR.PATCH`
-- **Major:** Breaking changes, major UI overhaul
-- **Minor:** New features, non-breaking
-- **Patch:** Bug fixes, minor improvements
-
-### Release Channels (Future)
-
-| Channel | Purpose |
-|---------|---------|
-| `stable` | Production releases |
-| `beta` | Pre-release testing |
-| `dev` | Nightly builds |
-
-### Rollback Strategy
-
-1. Keep previous version installer in `%APPDATA%/hive-manager/backups/`
-2. Settings stored separately from app binary
-3. "Rollback" option in settings restores previous version
-4. Session data never modified by updates
+1. Previous installer saved to `%APPDATA%/hive-manager/backups/`
+2. Settings stored separately (never overwritten)
+3. "Rollback" in Settings → restores previous version
 
 ---
 
@@ -442,27 +627,31 @@ pub enum SessionType {
 
 ```
 D:/Code Projects/hive-manager/
-├── src/                          # Svelte frontend
+├── src/                              # Svelte frontend
 │   ├── lib/
 │   │   ├── components/
-│   │   │   ├── Terminal.svelte
-│   │   │   ├── TerminalGrid.svelte
+│   │   │   ├── Terminal.svelte       # xterm.js wrapper
+│   │   │   ├── TerminalGrid.svelte   # Grid layout manager
+│   │   │   ├── HierarchyTree.svelte  # Agent hierarchy view
+│   │   │   ├── CoordinationLog.svelte
+│   │   │   ├── OwnershipMatrix.svelte
 │   │   │   ├── SessionSidebar.svelte
-│   │   │   ├── StatusPanel.svelte
 │   │   │   ├── LaunchDialog.svelte
-│   │   │   └── SettingsDialog.svelte
+│   │   │   ├── SettingsDialog.svelte
+│   │   │   └── StatusBadge.svelte
 │   │   ├── stores/
-│   │   │   ├── sessions.ts
-│   │   │   ├── terminals.ts
-│   │   │   └── settings.ts
+│   │   │   ├── sessions.ts           # Session state
+│   │   │   ├── agents.ts             # Agent hierarchy state
+│   │   │   ├── terminals.ts          # Terminal instances
+│   │   │   └── settings.ts           # User preferences
 │   │   └── utils/
-│   │       ├── tauri.ts
-│   │       └── terminal.ts
+│   │       ├── tauri.ts              # Tauri IPC wrappers
+│   │       └── terminal.ts           # xterm.js helpers
 │   ├── routes/
 │   │   └── +page.svelte
 │   ├── app.html
 │   └── app.css
-├── src-tauri/                    # Rust backend
+├── src-tauri/                        # Rust backend
 │   ├── src/
 │   │   ├── main.rs
 │   │   ├── lib.rs
@@ -472,10 +661,17 @@ D:/Code Projects/hive-manager/
 │   │   │   └── session.rs
 │   │   ├── session/
 │   │   │   ├── mod.rs
-│   │   │   ├── controller.rs
+│   │   │   ├── manager.rs
 │   │   │   ├── hive.rs
 │   │   │   ├── swarm.rs
 │   │   │   └── fusion.rs
+│   │   ├── spawner/
+│   │   │   ├── mod.rs
+│   │   │   ├── claude.rs
+│   │   │   ├── cursor.rs
+│   │   │   ├── gemini.rs
+│   │   │   ├── opencode.rs
+│   │   │   └── codex.rs
 │   │   ├── watcher/
 │   │   │   ├── mod.rs
 │   │   │   └── parser.rs
@@ -484,7 +680,7 @@ D:/Code Projects/hive-manager/
 │   │   ├── commands/
 │   │   │   ├── mod.rs
 │   │   │   ├── session.rs
-│   │   │   ├── terminal.rs
+│   │   │   ├── agent.rs
 │   │   │   └── settings.rs
 │   │   └── config/
 │   │       └── mod.rs
@@ -512,17 +708,20 @@ tauri = { version = "2", features = ["shell-open"] }
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 portable-pty = "0.8"
 notify = "6"
+notify-debouncer-mini = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 directories = "5"
+regex = "1"
 ```
 
 ### Node (package.json)
@@ -540,6 +739,8 @@ directories = "5"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-updater": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
     "@xterm/xterm": "^5",
     "@xterm/addon-fit": "^0.10",
     "@xterm/addon-webgl": "^0.18",
@@ -552,108 +753,122 @@ directories = "5"
 
 ## Milestones
 
-### M1: Foundation (MVP)
+### M1: Foundation
 - [ ] Tauri + Svelte project scaffold
-- [ ] Single PTY terminal working
-- [ ] Basic session launch (Hive only)
-- [ ] Terminal input/output functional
-- [ ] Minimal UI (sidebar + single terminal)
+- [ ] Single PTY terminal (claude CLI)
+- [ ] Basic terminal input/output
+- [ ] Minimal UI shell
 
-### M2: Multi-Agent
-- [ ] Multiple PTY sessions
-- [ ] Terminal grid layout
-- [ ] Session hierarchy display
-- [ ] Agent status tracking
-- [ ] Input alert notifications
+### M2: Multi-CLI Support
+- [ ] WSL PTY for agent CLI
+- [ ] gemini CLI spawning
+- [ ] opencode CLI spawning
+- [ ] codex CLI spawning
+- [ ] Agent type detection
 
-### M3: Full Session Types
-- [ ] Swarm session support
-- [ ] Fusion session support
-- [ ] File watcher integration
-- [ ] Task parsing and display
+### M3: Hive Sessions
+- [ ] Hive session launch
+- [ ] Queen + Workers hierarchy
+- [ ] Basic hierarchy tree view
+- [ ] Session sidebar
+
+### M4: Swarm Sessions
+- [ ] Swarm session launch
+- [ ] Planner prompt generation
+- [ ] File ownership parsing
 - [ ] Coordination log viewer
 
-### M4: Polish
+### M5: Polish
+- [ ] Input detection + alerts
 - [ ] Keyboard shortcuts
+- [ ] Layout options (grid/tree/tabs)
 - [ ] Settings persistence
 - [ ] Theme support
-- [ ] Terminal search
-- [ ] Session history
 
-### M5: Updates & Distribution
+### M6: Distribution
 - [ ] GitHub releases setup
 - [ ] Tauri updater integration
 - [ ] Auto-update flow
-- [ ] Installer generation
-- [ ] Rollback capability
+- [ ] MSI installer generation
 
 ---
 
 ## Future Considerations (v2+)
 
-### A2A Protocol Integration
+### A2A Protocol
 - Replace file-based coordination with real-time messaging
 - MCP server embedded in app
-- Structured agent-to-agent communication
-- Message history and replay
+- Structured agent communication
 
-### Multi-Machine Support
-- Remote agent monitoring
-- SSH tunnel for remote PTY
-- Centralized session management
-
-### Analytics Dashboard
-- Token usage tracking
+### Analytics
+- Token usage per agent
 - Session duration metrics
-- Success/failure rates
+- Success/failure tracking
 - Cost estimation
 
-### Plugin System
-- Custom session types
-- Third-party integrations
-- Custom status parsers
-
----
-
-## Open Questions
-
-1. **Session persistence:** Should we save/restore terminal scroll history between app restarts?
-2. **Multi-project:** Support multiple projects open simultaneously?
-3. **Log export:** Export session logs to file?
-4. **Notifications:** System tray notifications for agent prompts when app is minimized?
-5. **Collaboration:** Share session view with another user? (v2+)
+### Remote Agents
+- SSH tunnel for remote PTY
+- Multi-machine coordination
 
 ---
 
 ## Appendix: Session Directory Structures
 
-### Hive Session
+### Hive
 ```
 .hive/sessions/{SESSION_ID}/
 ├── session.json
 ├── coordination.log
+├── queen-prompt.md
 ├── tasks/
-│   ├── task-001.json
-│   └── task-002.json
-└── state/
-    └── current.json
+│   ├── worker-1-task.md
+│   └── worker-2-task.md
+├── state/
+│   └── current.json
+└── spawn/
+    ├── queen.bat
+    └── worker-*.bat
 ```
 
-### Swarm Session
+### Swarm
 ```
 .swarm/sessions/{SESSION_ID}/
 ├── docs/
-│   ├── scope.md
-│   └── architecture.md
+│   ├── model-selection.md
+│   ├── spawn-templates.md
+│   └── log-protocol.md
 ├── phases/
 │   ├── phase-1-planning.md
-│   └── phase-2-execution.md
+│   ├── phase-2-execution.md
+│   ├── phase-3-review.md
+│   ├── phase-4-integration.md
+│   └── phase-5-commit.md
 ├── state/
-│   ├── ownership-matrix.json
-│   └── current.json
+│   ├── context.md
+│   ├── responsibility-matrix.md
+│   ├── file-ownership.md
+│   ├── session-guidelines.md
+│   └── tasks.json
 ├── tasks/
-└── logs/
-    └── coordination.log
+│   ├── planner-a/
+│   │   ├── worker-1a-task.md
+│   │   └── worker-2a-task.md
+│   └── planner-b/
+│       └── ...
+├── logs/
+│   ├── queen.log
+│   ├── coordination.log
+│   ├── planner-a.log
+│   └── planner-b.log
+├── spawn/
+│   ├── queen.bat
+│   ├── planner-a.bat
+│   ├── worker-1a.bat
+│   └── ...
+├── queen-prompt.md
+├── planner-a-prompt.md
+├── planner-b-prompt.md
+└── launch.ps1
 ```
 
 ---

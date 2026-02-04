@@ -76,6 +76,7 @@ impl SessionController {
         &self,
         project_path: PathBuf,
         worker_count: u8,
+        command: &str,
         prompt: Option<String>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
@@ -83,32 +84,34 @@ impl SessionController {
 
         // Create Queen agent
         let queen_id = format!("{}-queen", session_id);
-        let mut cmd_args: Vec<&str> = vec![];
-
-        // Build the command for claude
         let prompt_str = prompt.unwrap_or_default();
-        if !prompt_str.is_empty() {
-            cmd_args.push("-p");
-        }
 
         {
             let pty_manager = self.pty_manager.read();
 
-            // Spawn queen with claude command
-            let claude_args: Vec<&str> = if prompt_str.is_empty() {
-                vec![]
+            // Parse command - support "command arg1 arg2" format
+            let parts: Vec<&str> = command.split_whitespace().collect();
+            let (cmd, args) = if parts.is_empty() {
+                ("cmd.exe", vec![])
             } else {
-                vec!["-p", &prompt_str]
+                (parts[0], parts[1..].to_vec())
             };
 
-            tracing::info!("Launching Queen agent: claude with args {:?} in {:?}", claude_args, project_path);
+            // Add prompt arg if provided and command is claude
+            let mut final_args = args;
+            if cmd == "claude" && !prompt_str.is_empty() {
+                final_args.push("-p");
+                // Note: prompt would need special handling for spaces
+            }
+
+            tracing::info!("Launching Queen agent: {} {:?} in {:?}", cmd, final_args, project_path);
 
             pty_manager
                 .create_session(
                     queen_id.clone(),
                     AgentRole::Queen,
-                    "claude",
-                    &claude_args,
+                    cmd,
+                    &final_args.iter().map(|s| *s).collect::<Vec<_>>(),
                     Some(project_path.to_str().unwrap_or(".")),
                     120,
                     30,

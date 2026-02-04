@@ -87,11 +87,14 @@ impl PtyManager {
                     };
 
                     if bytes_read > 0 {
+                        tracing::debug!("PTY {} read {} bytes", id_clone, bytes_read);
                         let output = PtyOutput {
                             id: id_clone.clone(),
                             data: buf[..bytes_read].to_vec(),
                         };
-                        let _ = app_handle_clone.emit("pty-output", output);
+                        if let Err(e) = app_handle_clone.emit("pty-output", output) {
+                            tracing::error!("Failed to emit pty-output: {}", e);
+                        }
                     }
                 }
 

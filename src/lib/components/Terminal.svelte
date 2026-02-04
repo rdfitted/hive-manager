@@ -48,6 +48,8 @@
   };
 
   onMount(async () => {
+    console.log('[Terminal] Mounting terminal for agent:', agentId);
+
     // Create terminal instance
     term = new XTerm({
       theme: tokyoNightTheme,
@@ -80,12 +82,18 @@
     // Fit to container
     fitAddon.fit();
 
+    // Focus terminal immediately
+    term.focus();
+    console.log('[Terminal] Terminal focused');
+
     // Handle terminal input
     term.onData(async (data) => {
+      console.log('[Terminal] Input:', data, 'bytes:', data.length);
       try {
         const encoder = new TextEncoder();
         const bytes = Array.from(encoder.encode(data));
         await invoke('write_to_pty', { id: agentId, data: bytes });
+        console.log('[Terminal] Sent to PTY:', bytes.length, 'bytes');
       } catch (err) {
         console.error('Failed to write to PTY:', err);
       }
@@ -93,9 +101,11 @@
 
     // Listen for PTY output
     unlistenOutput = await listen<{ id: string; data: number[] }>('pty-output', (event) => {
+      console.log('[Terminal] PTY output event:', event.payload.id, 'bytes:', event.payload.data.length);
       if (event.payload.id === agentId && term) {
         const decoder = new TextDecoder();
         const text = decoder.decode(new Uint8Array(event.payload.data));
+        console.log('[Terminal] Writing to xterm:', text.substring(0, 100));
         term.write(text);
       }
     });

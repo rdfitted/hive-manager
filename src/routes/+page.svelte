@@ -11,8 +11,8 @@
     sessions.loadSessions();
   });
 
-  async function handleLaunch(projectPath: string, workerCount: number, prompt?: string): Promise<void> {
-    await sessions.launchHive(projectPath, workerCount, prompt);
+  async function handleLaunch(projectPath: string, workerCount: number, command: string, prompt?: string): Promise<void> {
+    await sessions.launchHive(projectPath, workerCount, command, prompt);
   }
 
   function toggleStatusPanel() {

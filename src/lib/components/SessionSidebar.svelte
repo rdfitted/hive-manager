@@ -4,7 +4,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
 
   interface Props {
-    onLaunch: (projectPath: string, workerCount: number, prompt?: string) => Promise<void>;
+    onLaunch: (projectPath: string, workerCount: number, command: string, prompt?: string) => Promise<void>;
   }
 
   let { onLaunch }: Props = $props();
@@ -12,6 +12,7 @@
   let showLaunchDialog = $state(false);
   let projectPath = $state('');
   let workerCount = $state(2);
+  let command = $state('claude');  // Default to claude, but user can change
   let prompt = $state('');
   let launching = $state(false);
   let launchError = $state('');
@@ -52,11 +53,11 @@
   }
 
   async function handleLaunch() {
-    if (!projectPath.trim()) return;
+    if (!projectPath.trim() || !command.trim()) return;
     launching = true;
     launchError = '';
     try {
-      await onLaunch(projectPath, workerCount, prompt || undefined);
+      await onLaunch(projectPath, workerCount, command, prompt || undefined);
       showLaunchDialog = false;
       projectPath = '';
       prompt = '';
@@ -165,6 +166,15 @@
               Browse
             </button>
           </div>
+        </div>
+        <div class="form-group">
+          <label for="command">Command</label>
+          <input
+            id="command"
+            type="text"
+            bind:value={command}
+            placeholder="claude, cmd.exe, powershell, or any .bat"
+          />
         </div>
         <div class="form-group">
           <label for="workerCount">Workers</label>

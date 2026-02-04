@@ -42,12 +42,19 @@ unsafe impl Sync for SendReader {}
 unsafe impl Send for SendWriter {}
 unsafe impl Sync for SendWriter {}
 
+// Wrapper to keep the master PTY alive
+struct MasterPty(Box<dyn portable_pty::MasterPty + Send>);
+unsafe impl Send for MasterPty {}
+unsafe impl Sync for MasterPty {}
+
 pub struct PtySession {
     pub role: AgentRole,
     pub status: AgentStatus,
     writer: Arc<Mutex<SendWriter>>,
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
+    #[allow(dead_code)]
+    master: Arc<Mutex<MasterPty>>,  // Keep master alive!
 }
 
 // Make PtySession Send + Sync
@@ -101,8 +108,8 @@ impl PtySession {
             .try_clone_reader()
             .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
-        // Drop the pty_pair - we only need the reader/writer now
-        drop(pty_pair);
+        // Keep the master alive - dropping it closes the PTY!
+        let master = pty_pair.master;
 
         Ok(Self {
             role,
@@ -110,6 +117,7 @@ impl PtySession {
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
+            master: Arc::new(Mutex::new(MasterPty(master))),
         })
     }
 
