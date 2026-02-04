@@ -133,9 +133,35 @@
     }
   }
 
+  // Handle paste events from external tools (like Wispr Flow)
+  function handlePasteEvent(event: ClipboardEvent) {
+    const text = event.clipboardData?.getData('text');
+    if (text && term) {
+      event.preventDefault();
+      sendToPty(text);
+    }
+  }
+
+  // Global paste handler for when terminal has focus but paste targets document
+  function handleGlobalPaste(event: ClipboardEvent) {
+    // Only handle if this terminal is focused
+    if (!isFocused || !term) return;
+
+    // Check if target is already our terminal (avoid double handling)
+    if (terminalContainer?.contains(event.target as Node)) return;
+
+    const text = event.clipboardData?.getData('text');
+    if (text) {
+      event.preventDefault();
+      sendToPty(text);
+    }
+  }
+
   onMount(async () => {
     // Add global click listener
     document.addEventListener('click', handleGlobalClick);
+    // Add global paste listener for tools like Wispr Flow
+    document.addEventListener('paste', handleGlobalPaste);
     // Create terminal instance
     term = new XTerm({
       theme: tokyoNightTheme,
@@ -159,6 +185,9 @@
 
     // Open terminal in container
     term.open(terminalContainer);
+
+    // Add paste event listener for external tools like Wispr Flow
+    terminalContainer.addEventListener('paste', handlePasteEvent);
 
     // Try to load WebGL addon for better performance
     try {
@@ -264,6 +293,8 @@
 
   onDestroy(() => {
     document.removeEventListener('click', handleGlobalClick);
+    document.removeEventListener('paste', handleGlobalPaste);
+    terminalContainer?.removeEventListener('paste', handlePasteEvent);
     if (unlistenOutput) unlistenOutput();
     if (unlistenStatus) unlistenStatus();
     if (resizeObserver) resizeObserver.disconnect();
