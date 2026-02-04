@@ -27,6 +27,7 @@ pub fn run() {
     let session_controller = Arc::new(RwLock::new(SessionController::new(Arc::clone(&pty_manager))));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .manage(PtyManagerState(Arc::clone(&pty_manager)))

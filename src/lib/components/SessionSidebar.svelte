@@ -1,6 +1,7 @@
 <script lang="ts">
   import { sessions, activeSession, type Session, type AgentInfo } from '$lib/stores/sessions';
   import { settings } from '$lib/stores/settings';
+  import { open } from '@tauri-apps/plugin-dialog';
 
   interface Props {
     onLaunch: (projectPath: string, workerCount: number, prompt?: string) => void;
@@ -56,6 +57,17 @@
 
   function selectSession(sessionId: string) {
     sessions.setActiveSession(sessionId);
+  }
+
+  async function browseForFolder() {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: 'Select Project Folder'
+    });
+    if (selected && typeof selected === 'string') {
+      projectPath = selected;
+    }
   }
 </script>
 
@@ -128,13 +140,19 @@
       <form onsubmit={(e) => { e.preventDefault(); handleLaunch(); }}>
         <div class="form-group">
           <label for="projectPath">Project Path</label>
-          <input
-            id="projectPath"
-            type="text"
-            bind:value={projectPath}
-            placeholder="D:/Code Projects/my-project"
-            required
-          />
+          <div class="path-picker">
+            <input
+              id="projectPath"
+              type="text"
+              bind:value={projectPath}
+              placeholder="Select a project folder..."
+              readonly
+              required
+            />
+            <button type="button" class="browse-button" onclick={browseForFolder}>
+              Browse
+            </button>
+          </div>
         </div>
         <div class="form-group">
           <label for="workerCount">Workers</label>
@@ -382,6 +400,38 @@
   .form-group input:focus,
   .form-group textarea:focus {
     outline: none;
+    border-color: var(--color-accent);
+  }
+
+  .path-picker {
+    display: flex;
+    gap: 8px;
+  }
+
+  .path-picker input {
+    flex: 1;
+    cursor: pointer;
+  }
+
+  .path-picker input:read-only {
+    background: var(--color-surface);
+  }
+
+  .browse-button {
+    padding: 10px 16px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+  }
+
+  .browse-button:hover {
+    background: var(--color-border);
     border-color: var(--color-accent);
   }
 
