@@ -84,6 +84,46 @@ impl InjectionManager {
         Ok(())
     }
 
+    /// Queen initiates a branch switch for all workers
+    pub fn queen_switch_branch(
+        &self,
+        session_id: &str,
+        queen_id: &str,
+        worker_ids: &[String],
+        branch: &str,
+    ) -> Result<Vec<(String, Result<(), InjectionError>)>, InjectionError> {
+        // Validate sender is Queen (ID should end with -queen)
+        if !queen_id.ends_with("-queen") {
+            return Err(InjectionError::NotAuthorized(
+                "Only Queen can initiate branch switches".to_string(),
+            ));
+        }
+
+        let message = format!("[BRANCH SWITCH] Switching all workers to branch: {}", branch);
+        self.log_system_message(session_id, "ALL", &message)?;
+
+        // Ctrl+C first to interrupt any running command
+        let git_command = format!("\x03git switch {}", branch);
+
+        let mut results = Vec::new();
+        for worker_id in worker_ids {
+            let result = self.write_to_agent(worker_id, &git_command);
+
+            let status = if result.is_ok() { "initiated" } else { "failed" };
+            let log_msg = format!(
+                "[BRANCH SWITCH] Worker {} switch to '{}': {}",
+                format_agent_display(worker_id),
+                branch,
+                status
+            );
+            let _ = self.log_system_message(session_id, &format_agent_display(worker_id), &log_msg);
+
+            results.push((worker_id.clone(), result));
+        }
+
+        Ok(results)
+    }
+
     /// Write a message to an agent's PTY and press Enter to submit
     pub fn write_to_agent(&self, agent_id: &str, message: &str) -> Result<(), InjectionError> {
         let pty_manager = self.pty_manager.read();

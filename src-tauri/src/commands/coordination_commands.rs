@@ -7,7 +7,7 @@ use tauri::State;
 use crate::coordination::{
     CoordinationMessage, InjectionManager, StateManager, WorkerStateInfo,
 };
-use crate::pty::{AgentConfig, WorkerRole};
+use crate::pty::{AgentConfig, AgentRole, WorkerRole};
 use crate::session::AgentInfo;
 use crate::storage::SessionStorage;
 
@@ -50,6 +50,40 @@ pub async fn queen_inject(
             &request.message,
         )
         .map_err(|e: crate::coordination::InjectionError| e.to_string())
+}
+
+/// Queen initiates a branch switch for all workers
+#[tauri::command]
+pub async fn queen_switch_branch(
+    session_id: String,
+    queen_id: String,
+    branch: String,
+    state: State<'_, CoordinationState>,
+    session_state: State<'_, super::SessionControllerState>,
+) -> Result<Vec<(String, bool)>, String> {
+    let worker_ids = {
+        let controller = session_state.0.read();
+        controller
+            .get_session(&session_id)
+            .map(|s| {
+                s.agents
+                    .iter()
+                    .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
+                    .map(|a| a.id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .ok_or("Session not found")?
+    };
+
+    let manager = state.0.read();
+    let results = manager
+        .queen_switch_branch(&session_id, &queen_id, &worker_ids, &branch)
+        .map_err(|e| e.to_string())?;
+
+    Ok(results
+        .into_iter()
+        .map(|(id, r)| (id, r.is_ok()))
+        .collect())
 }
 
 /// Request for operator injection
