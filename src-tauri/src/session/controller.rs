@@ -81,38 +81,39 @@ impl SessionController {
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
-
-        // Create Queen agent
-        let queen_id = format!("{}-queen", session_id);
         let prompt_str = prompt.unwrap_or_default();
+        let cwd = project_path.to_str().unwrap_or(".");
+
+        // Parse command - support "command arg1 arg2" format
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        let (cmd, base_args) = if parts.is_empty() {
+            ("cmd.exe", vec![])
+        } else {
+            (parts[0], parts[1..].to_vec())
+        };
 
         {
             let pty_manager = self.pty_manager.read();
 
-            // Parse command - support "command arg1 arg2" format
-            let parts: Vec<&str> = command.split_whitespace().collect();
-            let (cmd, args) = if parts.is_empty() {
-                ("cmd.exe", vec![])
-            } else {
-                (parts[0], parts[1..].to_vec())
-            };
+            // Create Queen agent
+            let queen_id = format!("{}-queen", session_id);
+            let mut queen_args = base_args.clone();
 
             // Add prompt arg if provided and command is claude
-            let mut final_args = args;
             if cmd == "claude" && !prompt_str.is_empty() {
-                final_args.push("-p");
+                queen_args.push("-p");
                 // Note: prompt would need special handling for spaces
             }
 
-            tracing::info!("Launching Queen agent: {} {:?} in {:?}", cmd, final_args, project_path);
+            tracing::info!("Launching Queen agent: {} {:?} in {:?}", cmd, queen_args, project_path);
 
             pty_manager
                 .create_session(
                     queen_id.clone(),
                     AgentRole::Queen,
                     cmd,
-                    &final_args.iter().map(|s| *s).collect::<Vec<_>>(),
-                    Some(project_path.to_str().unwrap_or(".")),
+                    &queen_args.iter().map(|s| *s).collect::<Vec<_>>(),
+                    Some(cwd),
                     120,
                     30,
                 )
@@ -121,13 +122,43 @@ impl SessionController {
                     tracing::error!("{}", err_msg);
                     err_msg
                 })?;
-        }
 
-        agents.push(AgentInfo {
-            id: queen_id,
-            role: AgentRole::Queen,
-            status: AgentStatus::Running,
-        });
+            agents.push(AgentInfo {
+                id: queen_id,
+                role: AgentRole::Queen,
+                status: AgentStatus::Running,
+            });
+
+            // Create Worker agents
+            for i in 1..=worker_count {
+                let worker_id = format!("{}-worker-{}", session_id, i);
+                let worker_args = base_args.clone();
+
+                tracing::info!("Launching Worker {} agent: {} {:?} in {:?}", i, cmd, worker_args, project_path);
+
+                pty_manager
+                    .create_session(
+                        worker_id.clone(),
+                        AgentRole::Worker { index: i, parent: None },
+                        cmd,
+                        &worker_args.iter().map(|s| *s).collect::<Vec<_>>(),
+                        Some(cwd),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| {
+                        let err_msg = format!("Failed to spawn Worker {}: {}", i, e);
+                        tracing::error!("{}", err_msg);
+                        err_msg
+                    })?;
+
+                agents.push(AgentInfo {
+                    id: worker_id,
+                    role: AgentRole::Worker { index: i, parent: None },
+                    status: AgentStatus::Running,
+                });
+            }
+        }
 
         let session = Session {
             id: session_id.clone(),
