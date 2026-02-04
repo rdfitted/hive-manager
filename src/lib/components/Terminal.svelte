@@ -4,7 +4,6 @@
   import { FitAddon } from '@xterm/addon-fit';
   import { WebglAddon } from '@xterm/addon-webgl';
   import { SearchAddon } from '@xterm/addon-search';
-  import { ClipboardAddon } from '@xterm/addon-clipboard';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
@@ -200,9 +199,6 @@
 
     const searchAddon = new SearchAddon();
     term.loadAddon(searchAddon);
-
-    const clipboardAddon = new ClipboardAddon();
-    term.loadAddon(clipboardAddon);
 
     // Open terminal in container
     term.open(terminalContainer);
