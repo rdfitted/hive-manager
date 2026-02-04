@@ -376,8 +376,86 @@ impl SessionController {
         }
     }
 
+    /// Build the Master Planner's prompt for initial planning phase
+    fn build_master_planner_prompt(session_id: &str, user_prompt: &str) -> String {
+        format!(
+r#"# Master Planner - Hive Session Planning
+
+You are the **Master Planner** responsible for analyzing the task and creating a detailed implementation plan.
+
+## Session Info
+
+- **Session ID**: {session_id}
+- **Plan Output**: `.hive-manager/{session_id}/plan.md`
+
+## Your Mission
+
+1. **Understand the Task**: Analyze the user's request thoroughly
+2. **Scout the Codebase**: Use Glob/Grep to find relevant files
+3. **Create a Plan**: Write a structured plan.md with clear tasks
+4. **Exit**: Once plan.md is written, your job is complete
+
+## Tools Available
+
+You have full access to Claude Code tools:
+- **Read/Glob/Grep** - Explore the codebase
+- **Bash** - Run commands to understand the project structure
+- **Task** - Spawn scout agents if needed
+
+**You should NOT write or edit code files.** Your job is only to plan.
+
+## Plan Format
+
+Write your plan to `.hive-manager/{session_id}/plan.md` using this format:
+
+```markdown
+# [Plan Title]
+
+## Summary
+[1-2 sentence overview of what needs to be done]
+
+## Tasks
+
+- [ ] [HIGH] Task 1 description -> Worker 1
+- [ ] [MEDIUM] Task 2 description -> Worker 2
+- [ ] Task 3 description -> Worker 1
+- [ ] [LOW] Task 4 description -> Worker 2
+
+## Files to Modify
+- `path/to/file1.ts` - [what changes]
+- `path/to/file2.rs` - [what changes]
+
+## Dependencies
+[Any task dependencies or ordering requirements]
+
+## Notes
+[Any additional context for the Queen]
+```
+
+### Task Format Rules
+- Use `- [ ]` for pending tasks (checkboxes)
+- Use `[HIGH]`, `[MEDIUM]`, or `[LOW]` for priority
+- Use `-> Worker N` or `-> Queen` to suggest assignment
+- Keep task titles concise but descriptive
+
+## Your Task
+
+{task}
+
+## Begin
+
+1. First, explore the codebase to understand the current structure
+2. Identify the files that will need to be modified
+3. Break down the task into clear, actionable subtasks
+4. Write the plan to `.hive-manager/{session_id}/plan.md`
+5. When done, say "PLANNING COMPLETE" so the Queen can take over"#,
+            session_id = session_id,
+            task = user_prompt
+        )
+    }
+
     /// Build the Queen's master prompt with worker information
-    fn build_queen_master_prompt(session_id: &str, workers: &[AgentConfig], user_prompt: Option<&str>) -> String {
+    fn build_queen_master_prompt(session_id: &str, workers: &[AgentConfig], user_prompt: Option<&str>, has_plan: bool) -> String {
         let mut worker_list = String::new();
         for (i, worker_config) in workers.iter().enumerate() {
             let index = i + 1;
@@ -388,6 +466,22 @@ impl SessionController {
             worker_list.push_str(&format!("| {} | {} | {} |\n", worker_id, role_label, worker_config.cli));
         }
 
+        let plan_section = if has_plan {
+            format!(
+r#"## Implementation Plan
+
+**IMPORTANT**: A plan has been generated for this session. Read it first:
+```
+.hive-manager/{}/plan.md
+```
+
+Follow the plan's task breakdown when assigning work to workers."#,
+                session_id
+            )
+        } else {
+            String::new()
+        };
+
         format!(
 r#"# Queen Agent - Hive Manager Session
 
@@ -397,6 +491,9 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 
 - **Session ID**: {session_id}
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
+- **Tasks Directory**: `.hive-manager/{session_id}/tasks/`
+
+{plan_section}
 
 ## Your Workers
 
@@ -414,33 +511,25 @@ You have full access to all Claude Code tools:
 - **WebFetch/WebSearch** - Access web resources
 
 ### Claude Code Commands
-You can use any /commands in `~/.claude/commands/`, including:
-- `/scout` - Search codebase for relevant files
-- `/plan` - Generate implementation plans
-- `/commit` - Create git commits
-- And any custom commands available
+You can use any /commands in `~/.claude/commands/`
 
 ### Hive Coordination
-To assign tasks to workers, you have two options:
+To assign tasks to workers, update their task files:
 
-**Option 1: File-Based Tasks (Recommended)**
-Write task files that workers will receive:
+**Update task file status from STANDBY to ACTIVE:**
 ```
-Write to: .hive-manager/{session_id}/prompts/worker-N-task.md
+Edit: .hive-manager/{session_id}/tasks/worker-N-task.md
+Change Status: STANDBY -> ACTIVE
+Add task instructions
 ```
-The operator will inject the task into the worker's terminal.
 
-**Option 2: Direct Request**
-Tell the operator what to inject:
-```
-@Operator: Please tell Worker 1 to implement the user auth API
-```
+Workers are polling their task files and will start working when they see ACTIVE status.
 
 ## Coordination Protocol
 
-1. **Plan the work** - Break down the task into worker assignments
-2. **Write task files** - Create detailed task files for each worker
-3. **Monitor progress** - Workers will update their status
+1. **Read the plan** - Check `.hive-manager/{session_id}/plan.md` if it exists
+2. **Assign tasks** - Update worker task files with specific assignments
+3. **Monitor progress** - Watch for workers to mark tasks COMPLETED
 4. **Review & integrate** - Review worker output and coordinate integration
 5. **Commit & push** - You handle final commits (workers don't push)
 
@@ -448,8 +537,9 @@ Tell the operator what to inject:
 
 {task}"#,
             session_id = session_id,
+            plan_section = plan_section,
             worker_list = worker_list,
-            task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
+            task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
         )
     }
 
@@ -725,8 +815,12 @@ Last updated: {timestamp}
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
+            // Check if plan.md exists (from previous planning phase)
+            let plan_path = project_path.join(".hive-manager").join(&session_id).join("plan.md");
+            let has_plan = plan_path.exists();
+
             // Write Queen prompt to file and pass to CLI
-            let master_prompt = Self::build_queen_master_prompt(&session_id, &config.workers, config.prompt.as_deref());
+            let master_prompt = Self::build_queen_master_prompt(&session_id, &config.workers, config.prompt.as_deref(), has_plan);
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -1089,6 +1183,7 @@ Last updated: {timestamp}
             // Build hierarchy nodes
             let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
                 let role_str = match &agent.role {
+                    AgentRole::MasterPlanner => "MasterPlanner".to_string(),
                     AgentRole::Queen => "Queen".to_string(),
                     AgentRole::Planner { index } => format!("Planner-{}", index),
                     AgentRole::Worker { index, .. } => format!("Worker-{}", index),
@@ -1140,6 +1235,7 @@ Last updated: {timestamp}
                 // Build hierarchy nodes
                 let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
                     let role_str = match &agent.role {
+                        AgentRole::MasterPlanner => "MasterPlanner".to_string(),
                         AgentRole::Queen => "Queen".to_string(),
                         AgentRole::Planner { index } => format!("Planner-{}", index),
                         AgentRole::Worker { index, .. } => format!("Worker-{}", index),

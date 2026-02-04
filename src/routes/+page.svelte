@@ -5,7 +5,7 @@
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import StatusPanel from '$lib/components/StatusPanel.svelte';
   import AgentTree from '$lib/components/AgentTree.svelte';
-  import CoordinationPanel from '$lib/components/CoordinationPanel.svelte';
+  import RightDrawer from '$lib/components/RightDrawer.svelte';
   import QueenControls from '$lib/components/QueenControls.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
@@ -239,7 +239,7 @@
 
   {#if showCoordinationPanel && $activeSession}
     <aside class="coordination-sidebar">
-      <CoordinationPanel />
+      <RightDrawer />
     </aside>
   {/if}
 </div>

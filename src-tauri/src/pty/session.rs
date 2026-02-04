@@ -6,6 +6,7 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
+    MasterPlanner,  // Initial planning agent that generates plan.md
     Queen,
     Planner { index: u8 },
     Worker { index: u8, parent: Option<String> },

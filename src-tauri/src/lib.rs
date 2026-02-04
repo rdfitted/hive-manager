@@ -15,7 +15,7 @@ use commands::{
     launch_hive, launch_hive_v2, launch_swarm, get_session, list_sessions, stop_session, stop_agent,
     queen_inject, operator_inject, add_worker_to_session, get_coordination_log, log_coordination_message,
     get_workers_state, assign_task, get_session_storage_path, list_stored_sessions,
-    get_app_config, update_app_config,
+    get_app_config, update_app_config, get_session_plan,
     PtyManagerState, SessionControllerState, CoordinationState, StorageState,
 };
 use pty::PtyManager;
@@ -99,6 +99,7 @@ pub fn run() {
             list_stored_sessions,
             get_app_config,
             update_app_config,
+            get_session_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

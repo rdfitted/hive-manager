@@ -240,3 +240,189 @@ pub async fn update_app_config(
 ) -> Result<(), String> {
     storage_state.0.save_config(&config).map_err(|e| e.to_string())
 }
+
+/// Plan task structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanTask {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub assignee: Option<String>,
+    pub priority: Option<String>,
+}
+
+/// Session plan structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPlan {
+    pub title: String,
+    pub summary: String,
+    pub tasks: Vec<PlanTask>,
+    pub generated_at: String,
+}
+
+/// Get the session plan (parsed from plan.md)
+#[tauri::command]
+pub async fn get_session_plan(
+    storage_state: State<'_, StorageState>,
+    session_id: String,
+) -> Result<Option<SessionPlan>, String> {
+    let session_path = storage_state.0.session_dir(&session_id);
+    let plan_path = session_path.join("plan.md");
+
+    if !plan_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&plan_path)
+        .map_err(|e| format!("Failed to read plan.md: {}", e))?;
+
+    // Parse the plan.md content
+    let plan = parse_plan_markdown(&content)?;
+    Ok(Some(plan))
+}
+
+/// Parse plan.md markdown content into structured plan
+fn parse_plan_markdown(content: &str) -> Result<SessionPlan, String> {
+    let mut title = String::new();
+    let mut summary = String::new();
+    let mut tasks: Vec<PlanTask> = Vec::new();
+    let mut current_section = "";
+    let mut task_counter = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Parse title (first H1)
+        if trimmed.starts_with("# ") && title.is_empty() {
+            title = trimmed[2..].trim().to_string();
+            continue;
+        }
+
+        // Detect sections
+        if trimmed.starts_with("## ") {
+            let section_name = trimmed[3..].trim().to_lowercase();
+            if section_name.contains("summary") || section_name.contains("overview") {
+                current_section = "summary";
+            } else if section_name.contains("task") || section_name.contains("plan") {
+                current_section = "tasks";
+            } else {
+                current_section = "";
+            }
+            continue;
+        }
+
+        // Parse summary
+        if current_section == "summary" && !trimmed.is_empty() && !trimmed.starts_with("#") {
+            if !summary.is_empty() {
+                summary.push(' ');
+            }
+            summary.push_str(trimmed);
+            continue;
+        }
+
+        // Parse tasks (look for list items or numbered items)
+        if current_section == "tasks" {
+            // Match patterns like: - [ ] Task, - [x] Task, 1. Task, - Task
+            if let Some(task) = parse_task_line(trimmed, &mut task_counter) {
+                tasks.push(task);
+            }
+        }
+    }
+
+    // If no title found, use default
+    if title.is_empty() {
+        title = "Session Plan".to_string();
+    }
+
+    Ok(SessionPlan {
+        title,
+        summary,
+        tasks,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Parse a single task line
+fn parse_task_line(line: &str, counter: &mut i32) -> Option<PlanTask> {
+    let trimmed = line.trim();
+
+    // Skip empty lines and headers
+    if trimmed.is_empty() || trimmed.starts_with("#") {
+        return None;
+    }
+
+    // Check for checkbox format: - [ ] or - [x]
+    let (status, rest) = if trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]") {
+        ("pending", trimmed[5..].trim())
+    } else if trimmed.starts_with("- [x]") || trimmed.starts_with("* [x]")
+           || trimmed.starts_with("- [X]") || trimmed.starts_with("* [X]") {
+        ("completed", trimmed[5..].trim())
+    } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+        ("pending", trimmed[2..].trim())
+    } else if trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        // Numbered list: 1. Task
+        if let Some(pos) = trimmed.find(". ") {
+            ("pending", trimmed[pos + 2..].trim())
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    if rest.is_empty() {
+        return None;
+    }
+
+    *counter += 1;
+
+    // Extract priority from brackets like [HIGH], [P1], etc.
+    let (title, priority) = extract_priority(rest);
+
+    // Extract assignee from arrow notation: -> Worker 1
+    let (title, assignee) = extract_assignee(&title);
+
+    Some(PlanTask {
+        id: format!("task-{}", counter),
+        title: title.trim().to_string(),
+        description: String::new(),
+        status: status.to_string(),
+        assignee,
+        priority,
+    })
+}
+
+/// Extract priority from task title
+fn extract_priority(text: &str) -> (String, Option<String>) {
+    let priorities = [
+        ("[HIGH]", "high"), ("[P1]", "high"), ("[CRITICAL]", "high"),
+        ("[MEDIUM]", "medium"), ("[P2]", "medium"), ("[MED]", "medium"),
+        ("[LOW]", "low"), ("[P3]", "low"),
+    ];
+
+    for (marker, priority) in priorities {
+        if text.to_uppercase().contains(marker) {
+            let cleaned = text.replace(marker, "").replace(&marker.to_lowercase(), "");
+            return (cleaned, Some(priority.to_string()));
+        }
+    }
+
+    (text.to_string(), None)
+}
+
+/// Extract assignee from task title
+fn extract_assignee(text: &str) -> (String, Option<String>) {
+    // Look for patterns like "-> Worker 1" or "→ Queen"
+    if let Some(pos) = text.find("->") {
+        let (title, assignee) = text.split_at(pos);
+        return (title.to_string(), Some(assignee[2..].trim().to_string()));
+    }
+    if let Some(pos) = text.find("→") {
+        let (title, assignee) = text.split_at(pos);
+        return (title.to_string(), Some(assignee[3..].trim().to_string())); // → is 3 bytes
+    }
+
+    (text.to_string(), None)
+}
