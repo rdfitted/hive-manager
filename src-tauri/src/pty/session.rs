@@ -42,10 +42,24 @@ unsafe impl Sync for SendReader {}
 unsafe impl Send for SendWriter {}
 unsafe impl Sync for SendWriter {}
 
-// Wrapper to keep the master PTY alive
-struct MasterPty(Box<dyn portable_pty::MasterPty + Send>);
-unsafe impl Send for MasterPty {}
-unsafe impl Sync for MasterPty {}
+// Wrapper to keep the master PTY alive and allow resize
+pub(crate) struct MasterPtyHandle(Box<dyn portable_pty::MasterPty + Send>);
+unsafe impl Send for MasterPtyHandle {}
+unsafe impl Sync for MasterPtyHandle {}
+
+impl MasterPtyHandle {
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
+        use portable_pty::PtySize;
+        self.0
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+}
 
 pub struct PtySession {
     pub role: AgentRole,
@@ -53,8 +67,7 @@ pub struct PtySession {
     writer: Arc<Mutex<SendWriter>>,
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
-    #[allow(dead_code)]
-    master: Arc<Mutex<MasterPty>>,  // Keep master alive!
+    master: Arc<Mutex<MasterPtyHandle>>,
 }
 
 // Make PtySession Send + Sync
@@ -117,7 +130,7 @@ impl PtySession {
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
-            master: Arc::new(Mutex::new(MasterPty(master))),
+            master: Arc::new(Mutex::new(MasterPtyHandle(master))),
         })
     }
 
@@ -134,6 +147,11 @@ impl PtySession {
             c.kill().map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
         }
         Ok(())
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
+        let master = self.master.lock();
+        master.resize(cols, rows)
     }
 
     pub fn get_reader(&self) -> Arc<Mutex<SendReader>> {

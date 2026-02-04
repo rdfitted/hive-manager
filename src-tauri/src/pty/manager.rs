@@ -127,12 +127,11 @@ impl PtyManager {
         session.write(data)
     }
 
-    pub fn resize(&self, id: &str, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+    pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
         let sessions = self.sessions.read();
-        let _session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
-        // Note: portable-pty resize requires the master handle which we dropped
-        // For now, we'll skip resize functionality - it can be added later with a different approach
-        Ok(())
+        let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        tracing::debug!("Resizing PTY {} to {}x{}", id, cols, rows);
+        session.resize(cols, rows)
     }
 
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
