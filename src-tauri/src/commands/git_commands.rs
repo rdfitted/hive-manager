@@ -2,6 +2,12 @@ use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BranchInfo {
     pub name: String,
@@ -15,9 +21,14 @@ fn run_git_in_dir(args: &[&str], project_path: &str) -> Result<String, String> {
         return Err(format!("Project path does not exist: {}", project_path));
     }
 
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(path);
+
+    // Prevent console window from flashing on Windows
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run git: {}", e))?;
 

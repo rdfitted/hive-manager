@@ -725,6 +725,37 @@ Workers are polling their task files and will start working when they see ACTIVE
 
         let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index);
 
+        // Issue #3: Codex and OpenCode CLIs do not automatically poll for task file
+        // changes like Claude and Gemini do. We must include explicit bash polling
+        // instructions in their worker prompts to ensure they detect ACTIVE status.
+        let polling_instructions = match config.cli.as_str() {
+            "codex" | "opencode" => format!(r#"
+
+## Polling Protocol (CRITICAL - You MUST follow this)
+
+Your CLI requires explicit polling. Run this bash loop to wait for activation:
+
+```bash
+while true; do
+  STATUS=$(grep "^## Status:" "{task_file}" | head -1)
+  echo "[Worker {index}] Checking status: $STATUS"
+  if [[ "$STATUS" == *"ACTIVE"* ]]; then
+    echo "[Worker {index}] Task is ACTIVE - beginning work"
+    break
+  fi
+  if [[ "$STATUS" == *"COMPLETED"* ]] || [[ "$STATUS" == *"BLOCKED"* ]]; then
+    echo "[Worker {index}] Task already finished"
+    break
+  fi
+  sleep 30
+done
+```
+
+Do NOT simply "wait" conceptually. You MUST run the actual bash loop above."#,
+                task_file = task_file, index = index),
+            _ => String::new() // Claude and Gemini handle polling implicitly
+        };
+
         format!(
 r#"# Worker {index} ({role_name}) - Hive Session
 
@@ -768,12 +799,13 @@ Your task assignments are in: `{task_file}`
 
 Read your task file now: `{task_file}`
 
-If the status is STANDBY, wait for the Queen to assign you a task by updating that file."#,
+If the status is STANDBY, wait for the Queen to assign you a task by updating that file.{polling_instructions}"#,
             index = index,
             role_name = role_name,
             role_description = role_description,
             queen_id = queen_id,
-            task_file = task_file
+            task_file = task_file,
+            polling_instructions = polling_instructions
         )
     }
 
@@ -1276,6 +1308,19 @@ Last updated: {timestamp}
             .map_err(|e| format!("Failed to read pending config: {}", e))?;
         let config: HiveLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending config: {}", e))?;
+
+        // Clean up Master Planner PTY before spawning Queen (fixes terminal corruption)
+        let planner_id = format!("{}-master-planner", session_id);
+        if let Err(e) = self.stop_agent(session_id, &planner_id) {
+            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
+        } else {
+            tracing::info!("Stopped Master Planner {} before spawning Queen", planner_id);
+            // Remove Master Planner from agents list to prevent resource leaks
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.retain(|a| a.id != planner_id);
+            }
+        }
 
         let mut new_agents = Vec::new();
 
