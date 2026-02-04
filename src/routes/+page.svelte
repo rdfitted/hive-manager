@@ -16,6 +16,7 @@
   let showStatusPanel = $state(true);
   let showCoordinationPanel = $state(true);
   let showAddWorkerDialog = $state(false);
+  let hierarchyCollapsed = $state(true);
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
@@ -142,20 +143,25 @@
   />
 
   {#if $activeSession}
-    <aside class="hierarchy-sidebar">
-      <div class="sidebar-header">
-        <h2>Hierarchy</h2>
-      </div>
-      <div class="sidebar-content">
-        <AgentTree
-          agents={$activeAgents}
-          selectedId={focusedAgentId}
-          on:select={handleAgentSelect}
-        />
-      </div>
-      <div class="queen-controls-section">
-        <QueenControls on:openAddWorker={openAddWorkerDialog} />
-      </div>
+    <aside class="hierarchy-sidebar" class:collapsed={hierarchyCollapsed}>
+      <button class="sidebar-header" onclick={() => hierarchyCollapsed = !hierarchyCollapsed} title={hierarchyCollapsed ? "Expand Hierarchy" : "Collapse Hierarchy"}>
+        <span class="sidebar-icon">🌳</span>
+        {#if !hierarchyCollapsed}
+          <h2>Hierarchy</h2>
+        {/if}
+      </button>
+      {#if !hierarchyCollapsed}
+        <div class="sidebar-content">
+          <AgentTree
+            agents={$activeAgents}
+            selectedId={focusedAgentId}
+            on:select={handleAgentSelect}
+          />
+        </div>
+        <div class="queen-controls-section">
+          <QueenControls on:openAddWorker={openAddWorkerDialog} />
+        </div>
+      {/if}
     </aside>
   {/if}
 
@@ -294,11 +300,36 @@
     flex-direction: column;
     background: var(--color-surface);
     border-right: 1px solid var(--color-border);
+    transition: width 0.2s ease, min-width 0.2s ease;
+  }
+
+  .hierarchy-sidebar.collapsed {
+    width: 52px;
+    min-width: 52px;
   }
 
   .hierarchy-sidebar .sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     padding: 16px;
     border-bottom: 1px solid var(--color-border);
+    background: none;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+  }
+
+  .hierarchy-sidebar .sidebar-header:hover {
+    background: var(--color-surface-hover);
+  }
+
+  .hierarchy-sidebar .sidebar-icon {
+    font-size: 18px;
+    flex-shrink: 0;
   }
 
   .hierarchy-sidebar .sidebar-header h2 {
@@ -308,6 +339,7 @@
     color: var(--color-text);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    white-space: nowrap;
   }
 
   .hierarchy-sidebar .sidebar-content {
@@ -474,12 +506,21 @@
   }
 
   .coordination-sidebar {
-    width: 320px;
-    min-width: 280px;
     height: 100%;
     display: flex;
     flex-direction: column;
     background: var(--color-surface);
     border-left: 1px solid var(--color-border);
+  }
+
+  .coordination-sidebar :global(.right-drawer) {
+    width: 320px;
+    min-width: 320px;
+    transition: width 0.2s ease, min-width 0.2s ease;
+  }
+
+  .coordination-sidebar :global(.right-drawer.collapsed) {
+    width: 52px;
+    min-width: 52px;
   }
 </style>

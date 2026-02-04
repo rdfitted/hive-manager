@@ -12,6 +12,9 @@
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
+  let sidebarCollapsed = $state(true);
+  let activeCollapsed = $state(false);
+  let recentCollapsed = $state(true);
 
   function getStatusIcon(status: AgentInfo['status']): string {
     if (status === 'Running') return '█';
@@ -91,67 +94,85 @@
   }
 </script>
 
-<aside class="sidebar">
-  <div class="sidebar-header">
-    <h2>Sessions</h2>
-  </div>
+<aside class="sidebar" class:collapsed={sidebarCollapsed}>
+  <button class="sidebar-header" onclick={() => sidebarCollapsed = !sidebarCollapsed} title={sidebarCollapsed ? "Expand Sessions" : "Collapse Sessions"}>
+    <span class="sidebar-icon">📋</span>
+    {#if !sidebarCollapsed}
+      <h2>Sessions</h2>
+    {/if}
+  </button>
 
+  {#if !sidebarCollapsed}
   <div class="sidebar-content">
     <section class="section">
-      <h3>Active</h3>
-      {#if $sessions.sessions.filter(s => s.state === 'Running' || s.state === 'Starting').length === 0}
-        <p class="empty-state">No active sessions</p>
-      {:else}
-        <ul class="session-list">
-          {#each $sessions.sessions.filter(s => s.state === 'Running' || s.state === 'Starting') as session}
-            <li class="session-item" class:active={$activeSession?.id === session.id}>
-              <button class="session-button" onclick={() => selectSession(session.id)}>
-                <span class="session-type">{getSessionTypeName(session)}</span>
-                <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-              </button>
-              <ul class="agent-list">
-                {#each session.agents.slice(0, 4) as agent}
-                  <li class="agent-item">
-                    <span class="agent-status" style="color: {getStatusColor(agent.status)}">
-                      {getStatusIcon(agent.status)}
-                    </span>
-                    <span class="agent-name">{agent.config?.label || getRoleName(agent.role)}</span>
-                  </li>
-                {/each}
-                {#if session.agents.length > 4}
-                  <li class="agent-item more">
-                    <span class="agent-name">+{session.agents.length - 4} more</span>
-                  </li>
-                {/if}
-              </ul>
-            </li>
-          {/each}
-        </ul>
+      <button class="section-header" onclick={() => activeCollapsed = !activeCollapsed}>
+        <span class="chevron" class:collapsed={activeCollapsed}>▼</span>
+        <h3>Active</h3>
+      </button>
+      {#if !activeCollapsed}
+        {#if $sessions.sessions.filter(s => s.state === 'Running' || s.state === 'Starting').length === 0}
+          <p class="empty-state">No active sessions</p>
+        {:else}
+          <ul class="session-list">
+            {#each $sessions.sessions.filter(s => s.state === 'Running' || s.state === 'Starting') as session}
+              <li class="session-item" class:active={$activeSession?.id === session.id}>
+                <button class="session-button" onclick={() => selectSession(session.id)}>
+                  <span class="session-type">{getSessionTypeName(session)}</span>
+                  <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                </button>
+                <ul class="agent-list">
+                  {#each session.agents.slice(0, 4) as agent}
+                    <li class="agent-item">
+                      <span class="agent-status" style="color: {getStatusColor(agent.status)}">
+                        {getStatusIcon(agent.status)}
+                      </span>
+                      <span class="agent-name">{agent.config?.label || getRoleName(agent.role)}</span>
+                    </li>
+                  {/each}
+                  {#if session.agents.length > 4}
+                    <li class="agent-item more">
+                      <span class="agent-name">+{session.agents.length - 4} more</span>
+                    </li>
+                  {/if}
+                </ul>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       {/if}
     </section>
 
     <section class="section">
-      <h3>Recent</h3>
-      {#if $sessions.sessions.filter(s => s.state === 'Completed').length === 0}
-        <p class="empty-state">No recent sessions</p>
-      {:else}
-        <ul class="session-list">
-          {#each $sessions.sessions.filter(s => s.state === 'Completed').slice(0, 5) as session}
-            <li class="session-item completed">
-              <button class="session-button" onclick={() => selectSession(session.id)}>
-                <span class="session-type">{getSessionTypeName(session)}</span>
-                <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-              </button>
-            </li>
-          {/each}
-        </ul>
+      <button class="section-header" onclick={() => recentCollapsed = !recentCollapsed}>
+        <span class="chevron" class:collapsed={recentCollapsed}>▼</span>
+        <h3>Recent</h3>
+      </button>
+      {#if !recentCollapsed}
+        {#if $sessions.sessions.filter(s => s.state === 'Completed').length === 0}
+          <p class="empty-state">No recent sessions</p>
+        {:else}
+          <ul class="session-list">
+            {#each $sessions.sessions.filter(s => s.state === 'Completed').slice(0, 5) as session}
+              <li class="session-item completed">
+                <button class="session-button" onclick={() => selectSession(session.id)}>
+                  <span class="session-type">{getSessionTypeName(session)}</span>
+                  <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       {/if}
     </section>
   </div>
+  {/if}
 
   <div class="sidebar-footer">
-    <button class="launch-button" onclick={() => showLaunchDialog = true}>
-      <span class="icon">+</span> New Session
+    <button class="launch-button" onclick={() => showLaunchDialog = true} title="New Session">
+      <span class="icon">+</span>
+      {#if !sidebarCollapsed}
+        New Session
+      {/if}
     </button>
   </div>
 </aside>
@@ -172,11 +193,36 @@
     flex-direction: column;
     background: var(--color-surface);
     border-right: 1px solid var(--color-border);
+    transition: width 0.2s ease, min-width 0.2s ease;
+  }
+
+  .sidebar.collapsed {
+    width: 52px;
+    min-width: 52px;
   }
 
   .sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     padding: 16px;
     border-bottom: 1px solid var(--color-border);
+    background: none;
+    border-left: none;
+    border-right: none;
+    border-top: none;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+  }
+
+  .sidebar-header:hover {
+    background: var(--color-surface-hover);
+  }
+
+  .sidebar-icon {
+    font-size: 18px;
+    flex-shrink: 0;
   }
 
   .sidebar-header h2 {
@@ -186,6 +232,7 @@
     color: var(--color-text);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    white-space: nowrap;
   }
 
   .sidebar-content {
@@ -199,14 +246,40 @@
     margin-bottom: 16px;
   }
 
-  .section h3 {
-    margin: 0 0 8px 0;
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
     padding: 4px 0;
+    margin-bottom: 8px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .section-header:hover h3 {
+    color: var(--color-text);
+  }
+
+  .section-header h3 {
+    margin: 0;
     font-size: 11px;
     font-weight: 600;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+  }
+
+  .chevron {
+    font-size: 8px;
+    color: var(--color-text-muted);
+    transition: transform 0.2s ease;
+  }
+
+  .chevron.collapsed {
+    transform: rotate(-90deg);
   }
 
   .empty-state {
@@ -313,6 +386,12 @@
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s ease;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .sidebar.collapsed .launch-button {
+    padding: 10px 8px;
   }
 
   .launch-button:hover {
@@ -322,5 +401,6 @@
   .launch-button .icon {
     font-size: 16px;
     font-weight: 400;
+    flex-shrink: 0;
   }
 </style>
