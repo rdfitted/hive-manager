@@ -20,6 +20,8 @@ pub enum SessionType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
+    Planning,      // Master Planner is running
+    PlanReady,     // Plan generated, waiting for user to continue
     Starting,
     Running,
     Paused,
@@ -42,14 +44,24 @@ pub struct HiveLaunchConfig {
     pub queen_config: AgentConfig,
     pub workers: Vec<AgentConfig>,
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub with_planning: bool,  // If true, spawn Master Planner first
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmLaunchConfig {
     pub project_path: String,
     pub queen_config: AgentConfig,
-    pub planners: Vec<PlannerConfig>,
+    pub planner_count: u8,                    // How many planners
+    pub planner_config: AgentConfig,          // Config shared by all planners
+    pub workers_per_planner: Vec<AgentConfig>, // Workers shared config (applied to each planner)
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub with_planning: bool,  // If true, spawn Master Planner first
+
+    // Legacy support - if planners vec is provided, use it instead
+    #[serde(default)]
+    pub planners: Vec<PlannerConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,9 +391,9 @@ impl SessionController {
     /// Build the Master Planner's prompt for initial planning phase
     fn build_master_planner_prompt(session_id: &str, user_prompt: &str) -> String {
         format!(
-r#"# Master Planner - Hive Session Planning
+r#"# Master Planner - Multi-Agent Codebase Investigation
 
-You are the **Master Planner** responsible for analyzing the task and creating a detailed implementation plan.
+You are the **Master Planner** orchestrating a multi-agent investigation to create a detailed implementation plan.
 
 ## Session Info
 
@@ -390,23 +402,115 @@ You are the **Master Planner** responsible for analyzing the task and creating a
 
 ## Your Mission
 
-1. **Understand the Task**: Analyze the user's request thoroughly
-2. **Scout the Codebase**: Use Glob/Grep to find relevant files
-3. **Create a Plan**: Write a structured plan.md with clear tasks
-4. **Exit**: Once plan.md is written, your job is complete
+1. **Spawn Scout Agents**: Launch parallel investigation agents using external CLIs
+2. **Synthesize Findings**: Merge and deduplicate file discoveries
+3. **Create Plan**: Write comprehensive plan.md with clear tasks
+4. **Wait for Approval**: User will review and may request refinements
 
-## Tools Available
+---
 
-You have full access to Claude Code tools:
-- **Read/Glob/Grep** - Explore the codebase
-- **Bash** - Run commands to understand the project structure
-- **Task** - Spawn scout agents if needed
+## PHASE 1: Multi-Agent Investigation (MANDATORY)
 
-**You should NOT write or edit code files.** Your job is only to plan.
+You MUST spawn Task agents that call external CLI tools via Bash. This provides diverse model perspectives and comprehensive coverage.
 
-## Plan Format
+**Launch ALL scouts in PARALLEL (single message, multiple Task calls):**
 
-Write your plan to `.hive-manager/{session_id}/plan.md` using this format:
+### Scout 1 - OpenCode BigPickle (Deep Analysis)
+```
+Task(
+  subagent_type="general-purpose",
+  prompt="You are a codebase investigation agent using OpenCode BigPickle.
+
+IMMEDIATELY use the Bash tool to run this EXACT command (3 minute timeout):
+
+OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle \"Investigate codebase for task: {task}. Find all relevant files, architecture patterns, entry points, and implementation approach. Return file paths with line numbers and relevance notes.\"
+
+After the command completes, format the results as:
+## Files Found
+- <file_path>:<line_range> - Relevance: HIGH/MEDIUM/LOW - <why relevant>
+
+## Architecture Analysis
+[BigPickle's analysis of the codebase structure]
+
+## Recommended Approach
+[BigPickle's implementation recommendation]"
+)
+```
+
+### Scout 2 - OpenCode GLM 4.7 (Pattern Recognition)
+```
+Task(
+  subagent_type="general-purpose",
+  prompt="You are a codebase investigation agent using OpenCode GLM 4.7.
+
+IMMEDIATELY use the Bash tool to run this EXACT command (3 minute timeout):
+
+OPENCODE_YOLO=true opencode run --format default -m opencode/glm-4.7-free \"Analyze codebase for task: {task}. Focus on code patterns, affected components, configuration files, and dependencies. Return file paths with observations.\"
+
+After the command completes, format the results as:
+## Files Found
+- <file_path>:<line_range> - <observations>
+
+## Code Patterns
+[Patterns and conventions identified]
+
+## Key Components
+[Main modules and their relationships]"
+)
+```
+
+### Scout 3 - OpenCode Grok Code (Quick Search)
+```
+Task(
+  subagent_type="general-purpose",
+  prompt="You are a codebase investigation agent using OpenCode Grok Code.
+
+IMMEDIATELY use the Bash tool to run this EXACT command (3 minute timeout):
+
+OPENCODE_YOLO=true opencode run --format default -m opencode/grok-code \"Scout codebase for task: {task}. Identify entry points, test files, type definitions, and implementation surface area. Return file paths with notes.\"
+
+After the command completes, format the results as:
+## Files Found
+- <file_path>:<line_range> - <notes>
+
+## Entry Points
+[Where changes should start]
+
+## Test Coverage
+[Relevant test files]"
+)
+```
+
+**CRITICAL RULES:**
+- Launch ALL 3 scouts in PARALLEL using a SINGLE message with multiple Task tool calls
+- Each scout MUST use `subagent_type="general-purpose"`
+- Each scout prompt MUST include the literal Bash command
+- Wait for ALL scouts to complete before proceeding
+
+---
+
+## PHASE 2: Synthesize Findings
+
+After all scouts return, synthesize the results:
+
+1. **Deduplicate files** - Merge overlapping discoveries
+2. **Rank by consensus** - Files found by 2-3 scouts = higher confidence
+3. **Categorize**:
+   - Core files to modify (HIGH priority)
+   - Supporting files (MEDIUM priority)
+   - Test files to update
+   - Configuration changes
+
+4. **Identify**:
+   - Implementation approach (consensus from scouts)
+   - File modification order
+   - Potential risks or blockers
+
+---
+
+## PHASE 3: Write Plan
+
+Write your plan to `.hive-manager/{session_id}/plan.md`:
 
 ```markdown
 # [Plan Title]
@@ -414,41 +518,69 @@ Write your plan to `.hive-manager/{session_id}/plan.md` using this format:
 ## Summary
 [1-2 sentence overview of what needs to be done]
 
+## Investigation Results
+- **Scouts Used**: 3 (BigPickle, GLM 4.7, Grok Code)
+- **Files Identified**: [count]
+- **Consensus Level**: HIGH/MEDIUM/LOW
+
 ## Tasks
 
 - [ ] [HIGH] Task 1 description -> Worker 1
-- [ ] [MEDIUM] Task 2 description -> Worker 2
-- [ ] Task 3 description -> Worker 1
+- [ ] [HIGH] Task 2 description -> Worker 2
+- [ ] [MEDIUM] Task 3 description -> Worker 1
 - [ ] [LOW] Task 4 description -> Worker 2
 
-## Files to Modify
-- `path/to/file1.ts` - [what changes]
-- `path/to/file2.rs` - [what changes]
+## Files to Modify (by consensus)
+| File | Priority | Scouts Found | Changes Needed |
+|------|----------|--------------|----------------|
+| `path/to/file1.ts` | HIGH | 3/3 | [changes] |
+| `path/to/file2.rs` | MEDIUM | 2/3 | [changes] |
 
 ## Dependencies
-[Any task dependencies or ordering requirements]
+[Task ordering requirements]
 
-## Notes
-[Any additional context for the Queen]
+## Risks & Considerations
+[Potential issues and mitigations]
+
+## Notes for Queen
+[Additional context for orchestration]
 ```
 
 ### Task Format Rules
 - Use `- [ ]` for pending tasks (checkboxes)
 - Use `[HIGH]`, `[MEDIUM]`, or `[LOW]` for priority
 - Use `-> Worker N` or `-> Queen` to suggest assignment
-- Keep task titles concise but descriptive
+- Tasks should be atomic and independently completable
+
+---
+
+## PHASE 4: Await User Feedback
+
+After writing plan.md, inform the user:
+
+**"PLAN READY FOR REVIEW"**
+
+The user may:
+1. **Approve** the plan → Queen and Workers will spawn
+2. **Request refinements** → You will receive their feedback and update the plan
+
+Stay ready to refine the plan based on user feedback. When the user approves, they will click "Approve & Continue" in the UI.
+
+---
 
 ## Your Task
 
 {task}
 
-## Begin
+---
 
-1. First, explore the codebase to understand the current structure
-2. Identify the files that will need to be modified
-3. Break down the task into clear, actionable subtasks
-4. Write the plan to `.hive-manager/{session_id}/plan.md`
-5. When done, say "PLANNING COMPLETE" so the Queen can take over"#,
+## Begin Now
+
+1. Launch ALL 3 scout agents in PARALLEL (single message, 3 Task calls)
+2. Wait for all scouts to return
+3. Synthesize findings
+4. Write plan to `.hive-manager/{session_id}/plan.md`
+5. Say "PLAN READY FOR REVIEW" and await feedback"#,
             session_id = session_id,
             task = user_prompt
         )
@@ -808,6 +940,11 @@ Last updated: {timestamp}
         let project_path = PathBuf::from(&config.project_path);
         let cwd = config.project_path.as_str();
 
+        // If with_planning is true, spawn Master Planner first
+        if config.with_planning {
+            return self.launch_planning_phase(session_id, config);
+        }
+
         {
             let pty_manager = self.pty_manager.read();
 
@@ -913,8 +1050,508 @@ Last updated: {timestamp}
         Ok(session)
     }
 
+    /// Launch the planning phase - spawns Master Planner only
+    fn launch_planning_phase(&self, session_id: String, config: HiveLaunchConfig) -> Result<Session, String> {
+        let project_path = PathBuf::from(&config.project_path);
+        let cwd = config.project_path.as_str();
+        let mut agents = Vec::new();
+
+        let prompt = config.prompt.as_deref().unwrap_or("Analyze the codebase and create a plan.");
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            // Create Master Planner agent
+            let planner_id = format!("{}-master-planner", session_id);
+            let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
+
+            // Write Master Planner prompt to file
+            let planner_prompt = Self::build_master_planner_prompt(&session_id, prompt);
+            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!("Launching Master Planner: {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    planner_id.clone(),
+                    AgentRole::MasterPlanner,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
+
+            agents.push(AgentInfo {
+                id: planner_id,
+                role: AgentRole::MasterPlanner,
+                status: AgentStatus::Running,
+                config: config.queen_config.clone(),
+                parent_id: None,
+            });
+        }
+
+        // Store the pending config for later continuation
+        let pending_config_path = project_path.join(".hive-manager").join(&session_id).join("pending-config.json");
+        std::fs::create_dir_all(pending_config_path.parent().unwrap())
+            .map_err(|e| format!("Failed to create session directory: {}", e))?;
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        std::fs::write(&pending_config_path, config_json)
+            .map_err(|e| format!("Failed to write pending config: {}", e))?;
+
+        let session = Session {
+            id: session_id.clone(),
+            session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
+            project_path,
+            state: SessionState::Planning,
+            created_at: Utc::now(),
+            agents,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session.clone());
+        }
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: session.clone(),
+            });
+        }
+
+        self.init_session_storage(&session);
+
+        Ok(session)
+    }
+
+    /// Launch the planning phase for Swarm - spawns Master Planner only
+    fn launch_swarm_planning_phase(&self, session_id: String, config: SwarmLaunchConfig) -> Result<Session, String> {
+        let project_path = PathBuf::from(&config.project_path);
+        let cwd = config.project_path.as_str();
+        let mut agents = Vec::new();
+
+        let prompt = config.prompt.as_deref().unwrap_or("Analyze the codebase and create a plan.");
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            // Create Master Planner agent
+            let planner_id = format!("{}-master-planner", session_id);
+            let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
+
+            // Write Master Planner prompt to file
+            let planner_prompt = Self::build_master_planner_prompt(&session_id, prompt);
+            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!("Launching Master Planner (swarm): {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    planner_id.clone(),
+                    AgentRole::MasterPlanner,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
+
+            agents.push(AgentInfo {
+                id: planner_id,
+                role: AgentRole::MasterPlanner,
+                status: AgentStatus::Running,
+                config: config.queen_config.clone(),
+                parent_id: None,
+            });
+        }
+
+        // Store the pending Swarm config for later continuation
+        let pending_config_path = project_path.join(".hive-manager").join(&session_id).join("pending-swarm-config.json");
+        std::fs::create_dir_all(pending_config_path.parent().unwrap())
+            .map_err(|e| format!("Failed to create session directory: {}", e))?;
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        std::fs::write(&pending_config_path, config_json)
+            .map_err(|e| format!("Failed to write pending config: {}", e))?;
+
+        let session = Session {
+            id: session_id.clone(),
+            session_type: SessionType::Swarm { planner_count: if config.planners.is_empty() { config.planner_count } else { config.planners.len() as u8 } },
+            project_path,
+            state: SessionState::Planning,
+            created_at: Utc::now(),
+            agents,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session.clone());
+        }
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: session.clone(),
+            });
+        }
+
+        self.init_session_storage(&session);
+
+        Ok(session)
+    }
+
+    /// Continue a session after planning phase - spawns Queen + Workers/Planners
+    pub fn continue_after_planning(&self, session_id: &str) -> Result<Session, String> {
+        // Get the session
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }.ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        // Verify session is in Planning or PlanReady state
+        if session.state != SessionState::Planning && session.state != SessionState::PlanReady {
+            return Err(format!("Session is not in planning phase: {:?}", session.state));
+        }
+
+        // Dispatch based on session type
+        match &session.session_type {
+            SessionType::Swarm { .. } => {
+                return self.continue_swarm_after_planning(session_id, &session);
+            }
+            _ => {} // Continue with Hive logic below
+        }
+
+        let cwd = session.project_path.to_str().unwrap_or(".");
+
+        // Load the pending config
+        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-config.json");
+        let config_json = std::fs::read_to_string(&pending_config_path)
+            .map_err(|e| format!("Failed to read pending config: {}", e))?;
+        let config: HiveLaunchConfig = serde_json::from_str(&config_json)
+            .map_err(|e| format!("Failed to parse pending config: {}", e))?;
+
+        let mut new_agents = Vec::new();
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            // Create Queen agent
+            let queen_id = format!("{}-queen", session_id);
+            let (cmd, mut args) = Self::build_command(&config.queen_config);
+
+            // Plan should exist now
+            let has_plan = session.project_path.join(".hive-manager").join(session_id).join("plan.md").exists();
+
+            // Write Queen prompt with plan reference
+            let master_prompt = Self::build_queen_master_prompt(session_id, &config.workers, config.prompt.as_deref(), has_plan);
+            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!("Launching Queen agent (after planning): {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    queen_id.clone(),
+                    AgentRole::Queen,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
+
+            new_agents.push(AgentInfo {
+                id: queen_id.clone(),
+                role: AgentRole::Queen,
+                status: AgentStatus::Running,
+                config: config.queen_config.clone(),
+                parent_id: None,
+            });
+
+            // Create Worker agents
+            for (i, worker_config) in config.workers.iter().enumerate() {
+                let index = (i + 1) as u8;
+                let worker_id = format!("{}-worker-{}", session_id, index);
+                let (cmd, mut args) = Self::build_command(worker_config);
+
+                // Write task file for this worker
+                Self::write_task_file(&session.project_path, session_id, index, worker_config.initial_prompt.as_deref())?;
+
+                // Write worker prompt
+                let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id, session_id);
+                let filename = format!("worker-{}-prompt.md", index);
+                let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+                let prompt_path = prompt_file.to_string_lossy().to_string();
+                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+                tracing::info!("Launching Worker {} (after planning): {} {:?} in {:?}", index, cmd, args, cwd);
+
+                pty_manager
+                    .create_session(
+                        worker_id.clone(),
+                        AgentRole::Worker { index, parent: Some(queen_id.clone()) },
+                        &cmd,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        Some(cwd),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| format!("Failed to spawn Worker {}: {}", index, e))?;
+
+                new_agents.push(AgentInfo {
+                    id: worker_id,
+                    role: AgentRole::Worker { index, parent: Some(queen_id.clone()) },
+                    status: AgentStatus::Running,
+                    config: worker_config.clone(),
+                    parent_id: Some(queen_id.clone()),
+                });
+            }
+        }
+
+        // Update session with new agents and Running state
+        let updated_session = {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.extend(new_agents);
+                s.state = SessionState::Running;
+                s.clone()
+            } else {
+                return Err("Session disappeared".to_string());
+            }
+        };
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: updated_session.clone(),
+            });
+        }
+
+        // Update storage
+        self.update_session_storage(session_id);
+
+        // Clean up pending config file
+        let _ = std::fs::remove_file(&pending_config_path);
+
+        Ok(updated_session)
+    }
+
+    /// Mark a planning session as ready (plan generated)
+    pub fn mark_plan_ready(&self, session_id: &str) -> Result<(), String> {
+        let mut sessions = self.sessions.write();
+        if let Some(session) = sessions.get_mut(session_id) {
+            if session.state == SessionState::Planning {
+                session.state = SessionState::PlanReady;
+
+                if let Some(ref app_handle) = self.app_handle {
+                    let _ = app_handle.emit("session-update", SessionUpdate {
+                        session: session.clone(),
+                    });
+                }
+                Ok(())
+            } else {
+                Err(format!("Session is not in planning state: {:?}", session.state))
+            }
+        } else {
+            Err(format!("Session not found: {}", session_id))
+        }
+    }
+
+    /// Continue a Swarm session after planning phase
+    fn continue_swarm_after_planning(&self, session_id: &str, session: &Session) -> Result<Session, String> {
+        let cwd = session.project_path.to_str().unwrap_or(".");
+
+        // Load the pending Swarm config
+        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-swarm-config.json");
+        let config_json = std::fs::read_to_string(&pending_config_path)
+            .map_err(|e| format!("Failed to read pending swarm config: {}", e))?;
+        let config: SwarmLaunchConfig = serde_json::from_str(&config_json)
+            .map_err(|e| format!("Failed to parse pending swarm config: {}", e))?;
+
+        // Generate planners from simplified config (or use legacy planners if provided)
+        let planners: Vec<PlannerConfig> = if !config.planners.is_empty() {
+            config.planners.clone()
+        } else {
+            (0..config.planner_count)
+                .map(|i| PlannerConfig {
+                    config: config.planner_config.clone(),
+                    domain: format!("domain-{}", i + 1),
+                    workers: config.workers_per_planner.clone(),
+                })
+                .collect()
+        };
+
+        let mut new_agents = Vec::new();
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            // Create Queen agent
+            let queen_id = format!("{}-queen", session_id);
+            let (cmd, mut args) = Self::build_command(&config.queen_config);
+
+            // Write Queen prompt with plan reference
+            let master_prompt = Self::build_swarm_queen_prompt(session_id, &planners, config.prompt.as_deref());
+            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!("Launching Queen agent (swarm, after planning): {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    queen_id.clone(),
+                    AgentRole::Queen,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
+
+            new_agents.push(AgentInfo {
+                id: queen_id.clone(),
+                role: AgentRole::Queen,
+                status: AgentStatus::Running,
+                config: config.queen_config.clone(),
+                parent_id: None,
+            });
+
+            // Create Planner agents with their Workers
+            for (pi, planner_config) in planners.iter().enumerate() {
+                let planner_index = (pi + 1) as u8;
+                let planner_id = format!("{}-planner-{}", session_id, planner_index);
+                let (cmd, mut args) = Self::build_command(&planner_config.config);
+
+                // Build planner prompt
+                let planner_prompt = Self::build_planner_prompt(
+                    planner_index,
+                    planner_config,
+                    &queen_id,
+                );
+                let filename = format!("planner-{}-prompt.md", planner_index);
+                let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &planner_prompt)?;
+                let prompt_path = prompt_file.to_string_lossy().to_string();
+                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+                tracing::info!("Launching Planner {} (swarm, after planning): {} {:?}", planner_index, cmd, args);
+
+                pty_manager
+                    .create_session(
+                        planner_id.clone(),
+                        AgentRole::Planner { index: planner_index },
+                        &cmd,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        Some(cwd),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| format!("Failed to spawn Planner {}: {}", planner_index, e))?;
+
+                new_agents.push(AgentInfo {
+                    id: planner_id.clone(),
+                    role: AgentRole::Planner { index: planner_index },
+                    status: AgentStatus::Running,
+                    config: planner_config.config.clone(),
+                    parent_id: Some(queen_id.clone()),
+                });
+
+                // Create Workers for this Planner
+                for (wi, worker_config) in planner_config.workers.iter().enumerate() {
+                    let worker_index = (wi + 1) as u8;
+                    let worker_id = format!("{}-planner-{}-worker-{}", session_id, planner_index, worker_index);
+                    let (cmd, mut args) = Self::build_command(worker_config);
+
+                    let worker_prompt = Self::build_worker_prompt(
+                        worker_index,
+                        worker_config,
+                        &planner_id,
+                        session_id,
+                    );
+                    let filename = format!("planner-{}-worker-{}-prompt.md", planner_index, worker_index);
+                    let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+                    let prompt_path = prompt_file.to_string_lossy().to_string();
+                    Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+                    pty_manager
+                        .create_session(
+                            worker_id.clone(),
+                            AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
+                            &cmd,
+                            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                            Some(cwd),
+                            120,
+                            30,
+                        )
+                        .map_err(|e| format!("Failed to spawn Worker {}: {}", worker_index, e))?;
+
+                    new_agents.push(AgentInfo {
+                        id: worker_id,
+                        role: AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
+                        status: AgentStatus::Running,
+                        config: worker_config.clone(),
+                        parent_id: Some(planner_id.clone()),
+                    });
+                }
+            }
+        }
+
+        // Update session with new agents and Running state
+        let updated_session = {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.agents.extend(new_agents);
+                session.state = SessionState::Running;
+                session.clone()
+            } else {
+                return Err("Session disappeared".to_string());
+            }
+        };
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: updated_session.clone(),
+            });
+        }
+
+        // Update storage
+        self.update_session_storage(session_id);
+
+        // Clean up pending config file
+        let _ = std::fs::remove_file(&pending_config_path);
+
+        Ok(updated_session)
+    }
+
     pub fn launch_swarm(&self, config: SwarmLaunchConfig) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
+
+        // If with_planning is true, spawn Master Planner first
+        if config.with_planning {
+            return self.launch_swarm_planning_phase(session_id, config);
+        }
+
+        // Generate planners from simplified config (or use legacy planners if provided)
+        let planners: Vec<PlannerConfig> = if !config.planners.is_empty() {
+            config.planners.clone()
+        } else {
+            (0..config.planner_count)
+                .map(|i| PlannerConfig {
+                    config: config.planner_config.clone(),
+                    domain: format!("domain-{}", i + 1),
+                    workers: config.workers_per_planner.clone(),
+                })
+                .collect()
+        };
+
         let mut agents = Vec::new();
         let project_path = PathBuf::from(&config.project_path);
         let cwd = config.project_path.as_str();
@@ -927,7 +1564,7 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Write Queen prompt to file and pass to CLI
-            let master_prompt = Self::build_swarm_queen_prompt(&session_id, &config.planners, config.prompt.as_deref());
+            let master_prompt = Self::build_swarm_queen_prompt(&session_id, &planners, config.prompt.as_deref());
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -955,7 +1592,7 @@ Last updated: {timestamp}
             });
 
             // Create Planner agents and their Workers
-            for (planner_idx, planner_config) in config.planners.iter().enumerate() {
+            for (planner_idx, planner_config) in planners.iter().enumerate() {
                 let planner_index = (planner_idx + 1) as u8;
                 let planner_id = format!("{}-planner-{}", session_id, planner_index);
                 let (cmd, mut args) = Self::build_command(&planner_config.config);
@@ -1036,7 +1673,7 @@ Last updated: {timestamp}
 
         let session = Session {
             id: session_id.clone(),
-            session_type: SessionType::Swarm { planner_count: config.planners.len() as u8 },
+            session_type: SessionType::Swarm { planner_count: planners.len() as u8 },
             project_path,
             state: SessionState::Running,
             created_at: Utc::now(),

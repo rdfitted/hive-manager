@@ -45,6 +45,7 @@ export interface HiveLaunchConfig {
   queen_config: AgentConfig;
   workers: AgentConfig[];
   prompt?: string;
+  with_planning?: boolean;
 }
 
 export interface PlannerConfig {
@@ -56,15 +57,27 @@ export interface PlannerConfig {
 export interface SwarmLaunchConfig {
   project_path: string;
   queen_config: AgentConfig;
-  planners: PlannerConfig[];
+  planner_count: number;                  // How many planners
+  planner_config: AgentConfig;            // Config shared by all planners
+  workers_per_planner: AgentConfig[];     // Workers config (applied to each planner)
   prompt?: string;
+  with_planning?: boolean;
 }
+
+export type SessionState =
+  | 'Planning'
+  | 'PlanReady'
+  | 'Starting'
+  | 'Running'
+  | 'Paused'
+  | 'Completed'
+  | { Failed: string };
 
 export interface Session {
   id: string;
   session_type: { Hive: { worker_count: number } } | { Swarm: { planner_count: number } } | { Fusion: { variants: string[] } };
   project_path: string;
-  state: 'Starting' | 'Running' | 'Paused' | 'Completed' | { Failed: string };
+  state: SessionState;
   created_at: string;
   agents: AgentInfo[];
 }
@@ -202,6 +215,40 @@ function createSessionsStore() {
         sessions: state.sessions.filter((s) => s.id !== sessionId),
         activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
       }));
+    },
+
+    async continueAfterPlanning(sessionId: string) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('continue_after_planning', { sessionId });
+        update((state) => {
+          const idx = state.sessions.findIndex((s) => s.id === session.id);
+          if (idx >= 0) {
+            state.sessions[idx] = session;
+          }
+          return { ...state, loading: false };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async markPlanReady(sessionId: string) {
+      try {
+        await invoke('mark_plan_ready', { sessionId });
+        update((state) => {
+          const session = state.sessions.find((s) => s.id === sessionId);
+          if (session) {
+            session.state = 'PlanReady';
+          }
+          return { ...state };
+        });
+      } catch (err) {
+        update((state) => ({ ...state, error: String(err) }));
+        throw err;
+      }
     },
   };
 }

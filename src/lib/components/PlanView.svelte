@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { activeSession } from '$lib/stores/sessions';
-  import { onMount } from 'svelte';
+  import { activeSession, sessions } from '$lib/stores/sessions';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   interface PlanTask {
@@ -21,18 +21,117 @@
 
   let plan: Plan | null = $state(null);
   let loading = $state(false);
+  let continuing = $state(false);
+  let sendingRefinement = $state(false);
+  let refinementInput = $state('');
   let error = $state<string | null>(null);
   let lastSessionId: string | null = null;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-  // Load plan when session changes
+  // Check if session is in a planning-related state
+  function isPlanning(): boolean {
+    return $activeSession?.state === 'Planning';
+  }
+
+  function isPlanReady(): boolean {
+    return $activeSession?.state === 'PlanReady';
+  }
+
+  // Check if we're in an interactive planning state (Planning or PlanReady with Master Planner still running)
+  function canRefine(): boolean {
+    if (!$activeSession) return false;
+    const state = $activeSession.state;
+    if (state !== 'Planning' && state !== 'PlanReady') return false;
+    // Check if Master Planner agent exists and is running
+    const masterPlanner = $activeSession.agents.find(a => a.role === 'MasterPlanner');
+    return masterPlanner?.status === 'Running';
+  }
+
+  async function handleContinue() {
+    if (!$activeSession) return;
+    continuing = true;
+    error = null;
+    try {
+      await sessions.continueAfterPlanning($activeSession.id);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      continuing = false;
+    }
+  }
+
+  async function handleRefinement() {
+    if (!$activeSession || !refinementInput.trim()) return;
+
+    sendingRefinement = true;
+    error = null;
+
+    try {
+      // Find the Master Planner agent
+      const masterPlanner = $activeSession.agents.find(a => a.role === 'MasterPlanner');
+      if (!masterPlanner) {
+        throw new Error('Master Planner not found');
+      }
+
+      // Send refinement request to Master Planner's PTY
+      const message = `\n\n---\n**User Feedback**: ${refinementInput.trim()}\n\nPlease refine the plan based on this feedback and update plan.md.\n---\n\n`;
+      await invoke('write_to_pty', { id: masterPlanner.id, data: message });
+
+      refinementInput = '';
+    } catch (e) {
+      error = String(e);
+    } finally {
+      sendingRefinement = false;
+    }
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleRefinement();
+    }
+  }
+
+  // Start polling for plan when in Planning state
+  function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(() => {
+      if ($activeSession?.id) {
+        loadPlan($activeSession.id);
+      }
+    }, 2000); // Poll every 2 seconds
+  }
+
+  function stopPolling() {
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  }
+
+  onDestroy(() => {
+    stopPolling();
+  });
+
+  // Load plan when session changes and manage polling
   $effect(() => {
     const sessionId = $activeSession?.id;
+    const state = $activeSession?.state;
+
     if (sessionId && sessionId !== lastSessionId) {
       lastSessionId = sessionId;
       loadPlan(sessionId);
     } else if (!sessionId) {
       plan = null;
       lastSessionId = null;
+      stopPolling();
+    }
+
+    // Start/stop polling based on state
+    if (state === 'Planning' || state === 'PlanReady') {
+      startPolling();
+    } else {
+      stopPolling();
     }
   });
 
@@ -101,6 +200,20 @@
       <span class="icon">📋</span>
       <p>No active session</p>
     </div>
+  {:else if isPlanning() && !plan}
+    <div class="planning-state">
+      <div class="planning-header">
+        <span class="planning-icon">🧠</span>
+        <h3>Master Planner Working</h3>
+      </div>
+      <p class="planning-description">
+        The Master Planner is analyzing your project and creating a detailed implementation plan...
+      </p>
+      <div class="planning-progress">
+        <span class="spinner large">◐</span>
+        <span>Generating plan.md</span>
+      </div>
+    </div>
   {:else if !plan}
     <div class="empty-state">
       <span class="icon">📝</span>
@@ -144,6 +257,61 @@
         </div>
       {/each}
     </div>
+
+    {#if isPlanning() || isPlanReady()}
+      <div class="plan-actions">
+        {#if canRefine()}
+          <div class="refinement-section">
+            <p class="refinement-hint">
+              Not quite right? Ask the Master Planner to refine the plan:
+            </p>
+            <div class="refinement-input-group">
+              <input
+                type="text"
+                class="refinement-input"
+                placeholder="e.g., Focus more on the backend API..."
+                bind:value={refinementInput}
+                onkeydown={handleKeydown}
+                disabled={sendingRefinement}
+              />
+              <button
+                class="refinement-button"
+                onclick={handleRefinement}
+                disabled={sendingRefinement || !refinementInput.trim()}
+              >
+                {#if sendingRefinement}
+                  <span class="spinner">◐</span>
+                {:else}
+                  Refine
+                {/if}
+              </button>
+            </div>
+          </div>
+        {/if}
+
+        <div class="approve-section">
+          <p class="plan-ready-hint">
+            {#if isPlanning()}
+              Happy with the plan? Approve it to spawn the Queen and Workers.
+            {:else}
+              Review the plan above. When ready, click Continue to spawn the Queen and Workers.
+            {/if}
+          </p>
+          <button
+            class="continue-button"
+            onclick={handleContinue}
+            disabled={continuing}
+          >
+            {#if continuing}
+              <span class="spinner">◐</span>
+              Launching...
+            {:else}
+              Approve & Continue
+            {/if}
+          </button>
+        </div>
+      </div>
+    {/if}
   {/if}
 
   {#if error}
@@ -322,5 +490,176 @@
     border-radius: 6px;
     font-size: 12px;
     margin-top: 12px;
+  }
+
+  /* Planning state styles */
+  .planning-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+    text-align: center;
+  }
+
+  .planning-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .planning-icon {
+    font-size: 32px;
+  }
+
+  .planning-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary, #c0caf5);
+  }
+
+  .planning-description {
+    margin: 0 0 24px 0;
+    color: var(--text-secondary, #a9b1d6);
+    font-size: 14px;
+    max-width: 300px;
+    line-height: 1.5;
+  }
+
+  .planning-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 20px;
+    background: var(--bg-tertiary, #24283b);
+    border-radius: 8px;
+    color: var(--accent-color, #7aa2f7);
+    font-size: 13px;
+  }
+
+  .spinner.large {
+    font-size: 18px;
+  }
+
+  /* Plan actions */
+  .plan-actions {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border-color, #414868);
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .refinement-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .refinement-hint {
+    margin: 0;
+    color: var(--text-secondary, #a9b1d6);
+    font-size: 12px;
+  }
+
+  .refinement-input-group {
+    display: flex;
+    gap: 8px;
+  }
+
+  .refinement-input {
+    flex: 1;
+    padding: 10px 12px;
+    background: var(--bg-tertiary, #24283b);
+    border: 1px solid var(--border-color, #414868);
+    border-radius: 6px;
+    color: var(--text-primary, #c0caf5);
+    font-size: 13px;
+  }
+
+  .refinement-input:focus {
+    outline: none;
+    border-color: var(--accent-color, #7aa2f7);
+  }
+
+  .refinement-input::placeholder {
+    color: var(--text-muted, #565f89);
+  }
+
+  .refinement-input:disabled {
+    opacity: 0.6;
+  }
+
+  .refinement-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 16px;
+    background: var(--bg-tertiary, #24283b);
+    border: 1px solid var(--border-color, #414868);
+    border-radius: 6px;
+    color: var(--text-primary, #c0caf5);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .refinement-button:hover:not(:disabled) {
+    border-color: var(--accent-color, #7aa2f7);
+    background: var(--bg-secondary, #1f2335);
+  }
+
+  .refinement-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .approve-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding-top: 16px;
+    border-top: 1px dashed var(--border-color, #414868);
+  }
+
+  .plan-ready-hint {
+    margin: 0;
+    text-align: center;
+    color: var(--text-secondary, #a9b1d6);
+    font-size: 13px;
+    max-width: 280px;
+    line-height: 1.5;
+  }
+
+  .continue-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px 28px;
+    background: var(--color-success, #9ece6a);
+    color: var(--bg-primary, #1a1b26);
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+
+  .continue-button:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .continue-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 </style>

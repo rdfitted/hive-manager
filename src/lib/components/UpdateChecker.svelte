@@ -30,11 +30,17 @@
       const update = await check();
       if (!update) return;
 
+      let totalBytes = 0;
+      let downloadedBytes = 0;
+
       await update.downloadAndInstall((event) => {
-        if (event.event === 'Started' && event.data.contentLength) {
+        if (event.event === 'Started') {
+          totalBytes = event.data.contentLength ?? 0;
+          downloadedBytes = 0;
           progress = 0;
         } else if (event.event === 'Progress') {
-          progress = Math.round((event.data.chunkLength / (event.data.contentLength || 1)) * 100);
+          downloadedBytes += event.data.chunkLength;
+          progress = totalBytes > 0 ? Math.round((downloadedBytes / totalBytes) * 100) : 0;
         } else if (event.event === 'Finished') {
           progress = 100;
         }

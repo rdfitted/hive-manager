@@ -13,6 +13,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, resize_pty, write_to_pty, inject_to_pty,
     launch_hive, launch_hive_v2, launch_swarm, get_session, list_sessions, stop_session, stop_agent,
+    continue_after_planning, mark_plan_ready,
     queen_inject, operator_inject, add_worker_to_session, get_coordination_log, log_coordination_message,
     get_workers_state, assign_task, get_session_storage_path, list_stored_sessions,
     get_app_config, update_app_config, get_session_plan,
@@ -100,6 +101,9 @@ pub fn run() {
             get_app_config,
             update_app_config,
             get_session_plan,
+            // Planning phase commands
+            continue_after_planning,
+            mark_plan_ready,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

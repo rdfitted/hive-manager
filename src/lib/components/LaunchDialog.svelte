@@ -26,6 +26,7 @@
   let mode: SessionMode = 'hive';
   let projectPath = '';
   let prompt = '';
+  let withPlanning = true; // Enable planning phase by default
   let launching = false;
   let error = '';
 
@@ -42,15 +43,12 @@
     { cli: 'gemini', flags: [], label: undefined, selectedRole: 'frontend' },
   ];
 
-  // Swarm planners with their workers
-  let swarmPlanners: { config: AgentConfig; domain: string; workers: (AgentConfig & { selectedRole: string })[] }[] = [
-    {
-      config: { cli: 'claude', flags: [], label: undefined },
-      domain: 'frontend',
-      workers: [
-        { cli: 'claude', flags: [], label: undefined, selectedRole: 'general' },
-      ],
-    },
+  // Simplified Swarm config - same config for all planners
+  let plannerCount = 2;
+  let plannerConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
+  let workersPerPlanner: (AgentConfig & { selectedRole: string })[] = [
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
+    { cli: 'gemini', flags: [], label: undefined, selectedRole: 'frontend' },
   ];
 
   function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
@@ -67,12 +65,12 @@
     }
   }
 
-  function updatePlannerWorkerCli(plannerIndex: number, workerIndex: number) {
-    const worker = swarmPlanners[plannerIndex].workers[workerIndex];
+  function updateSwarmWorkerCli(workerIndex: number) {
+    const worker = workersPerPlanner[workerIndex];
     const role = predefinedRoles.find(r => r.type === worker.selectedRole);
     if (role) {
-      swarmPlanners[plannerIndex].workers[workerIndex].cli = role.cli;
-      swarmPlanners = [...swarmPlanners];
+      workersPerPlanner[workerIndex].cli = role.cli;
+      workersPerPlanner = [...workersPerPlanner];
     }
   }
 
@@ -98,41 +96,15 @@
     }
   }
 
-  function addPlanner() {
-    if (swarmPlanners.length < 4) {
-      swarmPlanners = [
-        ...swarmPlanners,
-        {
-          config: { cli: 'claude', flags: [], label: undefined },
-          domain: '',
-          workers: [createDefaultConfig('general')],
-        },
-      ];
+  function addSwarmWorker() {
+    if (workersPerPlanner.length < 4) {
+      workersPerPlanner = [...workersPerPlanner, createDefaultConfig('general')];
     }
   }
 
-  function removePlanner(index: number) {
-    if (swarmPlanners.length > 1) {
-      swarmPlanners = swarmPlanners.filter((_, i) => i !== index);
-    }
-  }
-
-  function addPlannerWorker(plannerIndex: number) {
-    if (swarmPlanners[plannerIndex].workers.length < 4) {
-      swarmPlanners[plannerIndex].workers = [
-        ...swarmPlanners[plannerIndex].workers,
-        createDefaultConfig('general'),
-      ];
-      swarmPlanners = [...swarmPlanners];
-    }
-  }
-
-  function removePlannerWorker(plannerIndex: number, workerIndex: number) {
-    if (swarmPlanners[plannerIndex].workers.length > 1) {
-      swarmPlanners[plannerIndex].workers = swarmPlanners[plannerIndex].workers.filter(
-        (_, i) => i !== workerIndex
-      );
-      swarmPlanners = [...swarmPlanners];
+  function removeSwarmWorker(index: number) {
+    if (workersPerPlanner.length > 1) {
+      workersPerPlanner = workersPerPlanner.filter((_, i) => i !== index);
     }
   }
 
@@ -168,23 +140,26 @@
           queen_config: queenConfig,
           workers: workersWithRoles,
           prompt: prompt || undefined,
+          with_planning: withPlanning,
         };
         dispatch('launchHive', config);
       } else {
+        // Build workers config with roles
+        const workersWithRoles: AgentConfig[] = workersPerPlanner.map((w) => ({
+          cli: w.cli,
+          flags: w.flags,
+          label: w.label,
+          role: buildWorkerRole(w.selectedRole),
+        }));
+
         const config: SwarmLaunchConfig = {
           project_path: projectPath,
           queen_config: queenConfig,
-          planners: swarmPlanners.map((p) => ({
-            config: p.config,
-            domain: p.domain,
-            workers: p.workers.map((w) => ({
-              cli: w.cli,
-              flags: w.flags,
-              label: w.label,
-              role: buildWorkerRole(w.selectedRole),
-            })),
-          })),
+          planner_count: plannerCount,
+          planner_config: plannerConfig,
+          workers_per_planner: workersWithRoles,
           prompt: prompt || undefined,
+          with_planning: withPlanning,
         };
         dispatch('launchSwarm', config);
       }
@@ -304,81 +279,63 @@
           </div>
         {:else}
           <div class="form-section">
-            <div class="section-header">
-              <h3>Planners ({swarmPlanners.length})</h3>
-              <button type="button" class="add-button" on:click={addPlanner} disabled={swarmPlanners.length >= 4}>
-                + Add Planner
-              </button>
-            </div>
-            <div class="planners-list">
-              {#each swarmPlanners as planner, pi (pi)}
-                <div class="planner-card">
-                  <div class="card-header">
-                    <span class="card-title">Planner {pi + 1}</span>
-                    <button
-                      type="button"
-                      class="remove-button"
-                      on:click={() => removePlanner(pi)}
-                      disabled={swarmPlanners.length <= 1}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                  <div class="field">
-                    <label for="domain-{pi}">Domain</label>
-                    <input
-                      id="domain-{pi}"
-                      type="text"
-                      bind:value={planner.domain}
-                      placeholder="e.g., frontend, backend, testing"
-                    />
-                  </div>
-                  <AgentConfigEditor bind:config={planner.config} showLabel={true} />
+            <h3>Swarm Configuration</h3>
+            <p class="section-description">All planners share the same configuration. Each planner gets its own set of workers.</p>
 
-                  <div class="planner-workers">
-                    <div class="section-header">
-                      <h4>Workers ({planner.workers.length})</h4>
+            <div class="field">
+              <label for="planner-count">Number of Planners</label>
+              <select id="planner-count" bind:value={plannerCount} class="role-select">
+                <option value={1}>1 Planner</option>
+                <option value={2}>2 Planners</option>
+                <option value={3}>3 Planners</option>
+                <option value={4}>4 Planners</option>
+              </select>
+            </div>
+
+            <div class="subsection">
+              <h4>Planner Config (shared by all)</h4>
+              <AgentConfigEditor bind:config={plannerConfig} showLabel={true} />
+            </div>
+
+            <div class="subsection">
+              <div class="section-header">
+                <h4>Workers per Planner ({workersPerPlanner.length})</h4>
+                <button type="button" class="add-button small" on:click={addSwarmWorker} disabled={workersPerPlanner.length >= 4}>
+                  + Add
+                </button>
+              </div>
+              <p class="section-description">Each planner will get this set of workers.</p>
+              <div class="workers-list">
+                {#each workersPerPlanner as worker, i (i)}
+                  <div class="worker-card">
+                    <div class="card-header">
+                      <span class="card-title">Worker {i + 1}</span>
                       <button
                         type="button"
-                        class="add-button small"
-                        on:click={() => addPlannerWorker(pi)}
-                        disabled={planner.workers.length >= 4}
+                        class="remove-button"
+                        on:click={() => removeSwarmWorker(i)}
+                        disabled={workersPerPlanner.length <= 1}
                       >
-                        + Add
+                        Remove
                       </button>
                     </div>
-                    {#each planner.workers as worker, wi (wi)}
-                      <div class="worker-mini-card">
-                        <div class="card-header">
-                          <span class="card-title">Worker {wi + 1}</span>
-                          <button
-                            type="button"
-                            class="remove-button small"
-                            on:click={() => removePlannerWorker(pi, wi)}
-                            disabled={planner.workers.length <= 1}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                        <div class="role-selector small">
-                          <label for="planner-role-{pi}-{wi}">Role</label>
-                          <select
-                            id="planner-role-{pi}-{wi}"
-                            bind:value={worker.selectedRole}
-                            on:change={() => updatePlannerWorkerCli(pi, wi)}
-                            class="role-select"
-                          >
-                            {#each predefinedRoles as role}
-                              <option value={role.type}>{role.label}</option>
-                            {/each}
-                          </select>
-                        </div>
-                        <AgentConfigEditor bind:config={worker} showLabel={false} />
-                      </div>
-                    {/each}
+                    <div class="role-selector">
+                      <label for="swarm-role-{i}">Role</label>
+                      <select
+                        id="swarm-role-{i}"
+                        bind:value={worker.selectedRole}
+                        on:change={() => updateSwarmWorkerCli(i)}
+                        class="role-select"
+                      >
+                        {#each predefinedRoles as role}
+                          <option value={role.type}>{role.label}</option>
+                        {/each}
+                      </select>
+                    </div>
+                    <AgentConfigEditor bind:config={worker} showLabel={true} />
                   </div>
-                </div>
-              {/each}
+                {/each}
+              </div>
             </div>
           </div>
         {/if}
@@ -391,6 +348,21 @@
             placeholder="Enter a task for the session..."
             rows="3"
           ></textarea>
+        </div>
+
+        <div class="form-group checkbox-group">
+          <label class="checkbox-label">
+            <input
+              type="checkbox"
+              bind:checked={withPlanning}
+            />
+            <span class="checkbox-text">
+              <span class="checkbox-title">Enable Planning Phase</span>
+              <span class="checkbox-description">
+                A Master Planner agent will analyze the task and create a detailed plan before spawning {mode === 'hive' ? 'workers' : 'planners'}.
+              </span>
+            </span>
+          </label>
         </div>
 
         {#if error}
@@ -551,6 +523,23 @@
     font-size: 12px;
     font-weight: 500;
     color: var(--color-text-muted);
+  }
+
+  .section-description {
+    margin: 0 0 12px 0;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
+  .subsection {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .subsection h4 {
+    margin-bottom: 10px;
   }
 
   .section-header {
@@ -779,5 +768,51 @@
   .role-selector.small .role-select {
     padding: 6px 8px;
     font-size: 12px;
+  }
+
+  .checkbox-group {
+    margin-top: 8px;
+  }
+
+  .checkbox-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    cursor: pointer;
+    padding: 12px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    transition: all 0.15s ease;
+  }
+
+  .checkbox-label:hover {
+    border-color: var(--color-accent, #8b5cf6);
+  }
+
+  .checkbox-label input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    accent-color: var(--color-accent, #8b5cf6);
+    cursor: pointer;
+  }
+
+  .checkbox-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .checkbox-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .checkbox-description {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    line-height: 1.4;
   }
 </style>

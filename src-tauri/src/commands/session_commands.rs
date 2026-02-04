@@ -76,3 +76,21 @@ pub async fn launch_swarm(
     let controller = state.0.read();
     controller.launch_swarm(config)
 }
+
+#[tauri::command]
+pub async fn continue_after_planning(
+    state: State<'_, SessionControllerState>,
+    session_id: String,
+) -> Result<Session, String> {
+    let controller = state.0.read();
+    controller.continue_after_planning(&session_id)
+}
+
+#[tauri::command]
+pub async fn mark_plan_ready(
+    state: State<'_, SessionControllerState>,
+    session_id: String,
+) -> Result<(), String> {
+    let controller = state.0.read();
+    controller.mark_plan_ready(&session_id)
+}
