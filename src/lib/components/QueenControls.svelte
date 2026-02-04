@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { activeSession, activeAgents, type AgentStatus } from '$lib/stores/sessions';
+  import BranchSelector from './BranchSelector.svelte';
 
   const dispatch = createEventDispatcher<{
     openAddWorker: void;
@@ -43,6 +44,9 @@
   {:else if $activeAgents.length === 0}
     <div class="no-workers">No agents available</div>
   {:else}
+    <div class="branch-section">
+      <BranchSelector />
+    </div>
     <div class="agents-status">
       <div class="status-header">Agent Status</div>
       {#each $activeAgents as agent (agent.id)}

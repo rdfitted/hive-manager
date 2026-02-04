@@ -264,3 +264,12 @@ export const activeSession = derived(sessions, ($sessions) =>
 export const activeAgents = derived(activeSession, ($activeSession) =>
   $activeSession?.agents ?? []
 );
+
+export interface BranchInfo {
+  name: string;
+  short_hash: string;
+  is_current: boolean;
+}
+
+export const currentBranch = writable<string>('');
+export const availableBranches = writable<BranchInfo[]>([]);
