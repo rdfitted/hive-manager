@@ -4,6 +4,7 @@
   import { FitAddon } from '@xterm/addon-fit';
   import { WebglAddon } from '@xterm/addon-webgl';
   import { SearchAddon } from '@xterm/addon-search';
+  import { ClipboardAddon } from '@xterm/addon-clipboard';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { activeAgents } from '$lib/stores/sessions';
@@ -93,6 +94,9 @@
     const searchAddon = new SearchAddon();
     term.loadAddon(searchAddon);
 
+    const clipboardAddon = new ClipboardAddon();
+    term.loadAddon(clipboardAddon);
+
     // Open terminal in container
     term.open(terminalContainer);
 
@@ -109,6 +113,21 @@
 
     // Focus terminal immediately
     term.focus();
+
+    // Custom key handler for Shift+Enter
+    term.attachCustomKeyEventHandler((event) => {
+      // Shift+Enter inserts newline without submitting
+      if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey) {
+        if (term) {
+          // Write newline character to the terminal display
+          term.write('\r\n');
+          // Send newline to PTY (not carriage return which submits)
+          sendToPty('\n');
+        }
+        return false; // Prevent default handling
+      }
+      return true; // Allow normal handling for other keys
+    });
 
     // Handle terminal input
     term.onData(async (data) => {
