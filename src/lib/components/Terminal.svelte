@@ -69,12 +69,9 @@
 
   async function sendToPty(data: string) {
     try {
-      console.log('[sendToPty] Sending data:', JSON.stringify(data), 'length:', data.length);
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
-      console.log('[sendToPty] Bytes:', bytes.slice(0, 50), bytes.length > 50 ? '...' : '');
       await invoke('write_to_pty', { id: agentId, data: bytes });
-      console.log('[sendToPty] Success');
     } catch (err) {
       console.error('[Terminal] Failed to write to PTY:', err);
     }
@@ -118,25 +115,21 @@
     // Try Tauri API first
     try {
       text = await readText();
-      console.log('[Paste] Tauri readText result:', text);
-    } catch (err) {
-      console.error('[Paste] Tauri API failed:', err);
+    } catch {
+      // Tauri API failed
     }
 
     // Fallback to browser API if Tauri didn't work
     if (!text) {
       try {
         text = await navigator.clipboard.readText();
-        console.log('[Paste] Browser readText result:', text);
-      } catch (browserErr) {
-        console.error('[Paste] Browser API failed:', browserErr);
+      } catch {
+        // Browser API also failed
       }
     }
 
     if (text) {
       sendToPty(text);
-    } else {
-      console.warn('[Paste] No text to paste');
     }
 
     closeContextMenu();
@@ -235,11 +228,6 @@
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
 
-      // Log all Ctrl key combos for debugging
-      if (event.ctrlKey) {
-        console.log('[KeyHandler] Ctrl combo:', event.key, 'code:', event.code, 'shift:', event.shiftKey);
-      }
-
       // Shift+Enter inserts newline without submitting
       if (event.key === 'Enter' && event.shiftKey) {
         if (term) {
@@ -265,30 +253,22 @@
 
       // Ctrl+Shift+V or Ctrl+V = Paste
       if (event.ctrlKey && (event.key === 'V' || event.key === 'v')) {
-        console.log('[KeyHandler] Ctrl+V detected, key:', event.key, 'shiftKey:', event.shiftKey);
         (async () => {
           let text: string | null = null;
           try {
-            console.log('[Ctrl+V] Calling Tauri readText...');
             text = await readText();
-            console.log('[Ctrl+V] Tauri readText result:', text);
-          } catch (err) {
-            console.error('[Ctrl+V] Tauri failed:', err);
+          } catch {
+            // Tauri API failed, try browser
           }
           if (!text) {
             try {
-              console.log('[Ctrl+V] Calling browser readText...');
               text = await navigator.clipboard.readText();
-              console.log('[Ctrl+V] Browser readText result:', text);
-            } catch (err) {
-              console.error('[Ctrl+V] Browser failed:', err);
+            } catch {
+              // Browser API also failed
             }
           }
           if (text && term) {
-            console.log('[Ctrl+V] Sending to PTY:', text.substring(0, 50));
             sendToPty(text);
-          } else {
-            console.warn('[Ctrl+V] No text to paste or no terminal');
           }
         })();
         return false;
