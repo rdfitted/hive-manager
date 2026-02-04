@@ -390,6 +390,63 @@ impl SessionController {
 
     /// Build the Master Planner's prompt for initial planning phase
     fn build_master_planner_prompt(session_id: &str, user_prompt: &str) -> String {
+        // Determine phase 0 based on whether a task was provided
+        let phase0 = if user_prompt.trim().is_empty() {
+            String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
+
+**No task was provided.** You must first ask the user what they want to work on.
+
+Ask the user: "What would you like me to help you with today? You can:
+- Provide a GitHub issue number (e.g., #42 or just 42)
+- Describe a feature you want to implement
+- Describe a bug you want to fix
+- Describe code you want to refactor"
+
+**If user provides a GitHub Issue number:**
+1. Fetch issue details using: gh issue view <number> --json number,title,body,labels,state
+2. Extract requirements and acceptance criteria from the issue body
+
+**Once you have the task, proceed to PHASE 1.**
+
+---
+
+"#)
+        } else if user_prompt.trim().starts_with('#') || user_prompt.trim().parse::<u32>().is_ok() {
+            // Looks like a GitHub issue number
+            let issue_num = user_prompt.trim().trim_start_matches('#');
+            format!(r#"## PHASE 0: Fetch GitHub Issue
+
+The user wants to work on GitHub issue: **#{}**
+
+**Fetch the issue details now:**
+```bash
+gh issue view {} --json number,title,body,labels,state
+```
+
+Extract from the response:
+- Issue title and full description
+- Acceptance criteria (look for checkboxes in the body)
+- Labels (bug, feature, enhancement, etc.)
+
+**Once you have the full context, proceed to PHASE 1.**
+
+---
+
+"#, issue_num, issue_num)
+        } else {
+            format!(r#"## PHASE 0: Task Provided
+
+The user wants to work on:
+
+**{}**
+
+**Proceed directly to PHASE 1.**
+
+---
+
+"#, user_prompt)
+        };
+
         format!(
 r#"# Master Planner - Multi-Agent Codebase Investigation
 
@@ -402,187 +459,97 @@ You are the **Master Planner** orchestrating a multi-agent investigation to crea
 
 ## Your Mission
 
-1. **Spawn Scout Agents**: Launch parallel investigation agents using external CLIs
-2. **Synthesize Findings**: Merge and deduplicate file discoveries
-3. **Create Plan**: Write comprehensive plan.md with clear tasks
-4. **Wait for Approval**: User will review and may request refinements
+1. **Gather Task**: Understand what the user wants (GitHub issue or custom task)
+2. **Spawn Scout Agents**: Launch parallel investigation agents using external CLIs
+3. **Synthesize Findings**: Merge and deduplicate file discoveries
+4. **Create Plan**: Write comprehensive plan.md with clear tasks
+5. **Wait for Approval**: User will review and may request refinements
 
 ---
 
-## PHASE 1: Multi-Agent Investigation (MANDATORY)
+{phase0}## PHASE 1: Multi-Agent Investigation (MANDATORY)
 
 You MUST spawn Task agents that call external CLI tools via Bash. This provides diverse model perspectives and comprehensive coverage.
 
 **Launch ALL scouts in PARALLEL (single message, multiple Task calls):**
 
 ### Scout 1 - OpenCode BigPickle (Deep Analysis)
-```
-Task(
-  subagent_type="general-purpose",
-  prompt="You are a codebase investigation agent using OpenCode BigPickle.
 
-IMMEDIATELY use the Bash tool to run this EXACT command (3 minute timeout):
-
-OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle \"Investigate codebase for task: {task}. Find all relevant files, architecture patterns, entry points, and implementation approach. Return file paths with line numbers and relevance notes.\"
-
-After the command completes, format the results as:
-## Files Found
-- <file_path>:<line_range> - Relevance: HIGH/MEDIUM/LOW - <why relevant>
-
-## Architecture Analysis
-[BigPickle's analysis of the codebase structure]
-
-## Recommended Approach
-[BigPickle's implementation recommendation]"
-)
-```
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
 
 ### Scout 2 - OpenCode GLM 4.7 (Pattern Recognition)
-```
-Task(
-  subagent_type="general-purpose",
-  prompt="You are a codebase investigation agent using OpenCode GLM 4.7.
 
-IMMEDIATELY use the Bash tool to run this EXACT command (3 minute timeout):
-
-OPENCODE_YOLO=true opencode run --format default -m opencode/glm-4.7-free \"Analyze codebase for task: {task}. Focus on code patterns, affected components, configuration files, and dependencies. Return file paths with observations.\"
-
-After the command completes, format the results as:
-## Files Found
-- <file_path>:<line_range> - <observations>
-
-## Code Patterns
-[Patterns and conventions identified]
-
-## Key Components
-[Main modules and their relationships]"
-)
-```
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/glm-4.7-free 'Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.' Return file paths with observations.")
 
 ### Scout 3 - OpenCode Grok Code (Quick Search)
-```
-Task(
-  subagent_type="general-purpose",
-  prompt="You are a codebase investigation agent using OpenCode Grok Code.
 
-IMMEDIATELY use the Bash tool to run this EXACT command (3 minute timeout):
-
-OPENCODE_YOLO=true opencode run --format default -m opencode/grok-code \"Scout codebase for task: {task}. Identify entry points, test files, type definitions, and implementation surface area. Return file paths with notes.\"
-
-After the command completes, format the results as:
-## Files Found
-- <file_path>:<line_range> - <notes>
-
-## Entry Points
-[Where changes should start]
-
-## Test Coverage
-[Relevant test files]"
-)
-```
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/grok-code 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
 
 **CRITICAL RULES:**
-- Launch ALL 3 scouts in PARALLEL using a SINGLE message with multiple Task tool calls
-- Each scout MUST use `subagent_type="general-purpose"`
-- Each scout prompt MUST include the literal Bash command
+- Replace [TASK] with the actual task description from Phase 0
+- Launch ALL 3 scouts in PARALLEL using a SINGLE message
 - Wait for ALL scouts to complete before proceeding
 
 ---
 
 ## PHASE 2: Synthesize Findings
 
-After all scouts return, synthesize the results:
-
-1. **Deduplicate files** - Merge overlapping discoveries
-2. **Rank by consensus** - Files found by 2-3 scouts = higher confidence
-3. **Categorize**:
-   - Core files to modify (HIGH priority)
-   - Supporting files (MEDIUM priority)
-   - Test files to update
-   - Configuration changes
-
-4. **Identify**:
-   - Implementation approach (consensus from scouts)
-   - File modification order
-   - Potential risks or blockers
+After all scouts return:
+1. Deduplicate files - merge overlapping discoveries
+2. Rank by consensus - files found by 2-3 scouts = higher priority
+3. Categorize: core files, supporting files, test files, config files
+4. Identify implementation approach and potential risks
 
 ---
 
 ## PHASE 3: Write Plan
 
-Write your plan to `.hive-manager/{session_id}/plan.md`:
+Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
 
-```markdown
 # [Plan Title]
 
 ## Summary
-[1-2 sentence overview of what needs to be done]
+[1-2 sentence overview]
 
 ## Investigation Results
-- **Scouts Used**: 3 (BigPickle, GLM 4.7, Grok Code)
-- **Files Identified**: [count]
-- **Consensus Level**: HIGH/MEDIUM/LOW
+- Scouts Used: 3 (BigPickle, GLM 4.7, Grok Code)
+- Files Identified: [count]
+- Consensus Level: HIGH/MEDIUM/LOW
 
 ## Tasks
+- [ ] [HIGH] Task 1 -> Worker 1
+- [ ] [MEDIUM] Task 2 -> Worker 2
+(use checkboxes, priority tags, and worker assignments)
 
-- [ ] [HIGH] Task 1 description -> Worker 1
-- [ ] [HIGH] Task 2 description -> Worker 2
-- [ ] [MEDIUM] Task 3 description -> Worker 1
-- [ ] [LOW] Task 4 description -> Worker 2
-
-## Files to Modify (by consensus)
-| File | Priority | Scouts Found | Changes Needed |
-|------|----------|--------------|----------------|
-| `path/to/file1.ts` | HIGH | 3/3 | [changes] |
-| `path/to/file2.rs` | MEDIUM | 2/3 | [changes] |
+## Files to Modify
+| File | Priority | Changes Needed |
+|------|----------|----------------|
 
 ## Dependencies
-[Task ordering requirements]
+[Task ordering]
 
-## Risks & Considerations
-[Potential issues and mitigations]
-
-## Notes for Queen
-[Additional context for orchestration]
-```
-
-### Task Format Rules
-- Use `- [ ]` for pending tasks (checkboxes)
-- Use `[HIGH]`, `[MEDIUM]`, or `[LOW]` for priority
-- Use `-> Worker N` or `-> Queen` to suggest assignment
-- Tasks should be atomic and independently completable
+## Risks
+[Potential issues]
 
 ---
 
 ## PHASE 4: Await User Feedback
 
-After writing plan.md, inform the user:
+After writing plan.md, say: **"PLAN READY FOR REVIEW"**
 
-**"PLAN READY FOR REVIEW"**
-
-The user may:
-1. **Approve** the plan → Queen and Workers will spawn
-2. **Request refinements** → You will receive their feedback and update the plan
-
-Stay ready to refine the plan based on user feedback. When the user approves, they will click "Approve & Continue" in the UI.
-
----
-
-## Your Task
-
-{task}
+The user may approve or request refinements. Stay ready to update the plan.
 
 ---
 
 ## Begin Now
 
-1. Launch ALL 3 scout agents in PARALLEL (single message, 3 Task calls)
-2. Wait for all scouts to return
+1. Complete PHASE 0 (gather task if needed)
+2. Launch ALL 3 scout agents in PARALLEL
 3. Synthesize findings
 4. Write plan to `.hive-manager/{session_id}/plan.md`
-5. Say "PLAN READY FOR REVIEW" and await feedback"#,
+5. Say "PLAN READY FOR REVIEW""#,
             session_id = session_id,
-            task = user_prompt
+            phase0 = phase0
         )
     }
 
