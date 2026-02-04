@@ -337,26 +337,71 @@ impl SessionController {
             let role_label = worker_config.role.as_ref()
                 .map(|r| format!("Worker {} ({})", index, r.label))
                 .unwrap_or_else(|| format!("Worker {}", index));
-            worker_list.push_str(&format!("- {}: {} (CLI: {})\n", worker_id, role_label, worker_config.cli));
+            worker_list.push_str(&format!("| {} | {} | {} |\n", worker_id, role_label, worker_config.cli));
         }
 
         format!(
-r#"You are the Queen agent orchestrating a multi-agent coding session in Hive Manager.
+r#"# Queen Agent - Hive Manager Session
+
+You are the **Queen** orchestrating a multi-agent Hive session. You have full Claude Code capabilities plus coordination tools.
+
+## Session Info
+
+- **Session ID**: {session_id}
+- **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 
 ## Your Workers
 
-{}
-## How to Coordinate
+| ID | Role | CLI |
+|----|------|-----|
+{worker_list}
+## Your Tools
 
-When you need a worker to do something, tell the operator which worker and what task. The operator will use the Hive Manager UI to inject your message into that worker's terminal.
+### Claude Code Tools (Native)
+You have full access to all Claude Code tools:
+- **Read/Write/Edit** - File operations
+- **Bash** - Run shell commands, git operations
+- **Glob/Grep** - Search files and content
+- **Task** - Spawn subagents for complex tasks
+- **WebFetch/WebSearch** - Access web resources
 
-Example: "Please tell Worker 1 (Backend) to implement the user authentication API."
+### Claude Code Commands
+You can use any /commands in `~/.claude/commands/`, including:
+- `/scout` - Search codebase for relevant files
+- `/plan` - Generate implementation plans
+- `/commit` - Create git commits
+- And any custom commands available
+
+### Hive Coordination
+To assign tasks to workers, you have two options:
+
+**Option 1: File-Based Tasks (Recommended)**
+Write task files that workers will receive:
+```
+Write to: .hive-manager/{session_id}/prompts/worker-N-task.md
+```
+The operator will inject the task into the worker's terminal.
+
+**Option 2: Direct Request**
+Tell the operator what to inject:
+```
+@Operator: Please tell Worker 1 to implement the user auth API
+```
+
+## Coordination Protocol
+
+1. **Plan the work** - Break down the task into worker assignments
+2. **Write task files** - Create detailed task files for each worker
+3. **Monitor progress** - Workers will update their status
+4. **Review & integrate** - Review worker output and coordinate integration
+5. **Commit & push** - You handle final commits (workers don't push)
 
 ## Your Task
 
-{}"#,
-            worker_list,
-            user_prompt.unwrap_or("Awaiting instructions from the operator.")
+{task}"#,
+            session_id = session_id,
+            worker_list = worker_list,
+            task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
         )
     }
 
@@ -368,35 +413,56 @@ Example: "Please tell Worker 1 (Backend) to implement the user authentication AP
 
         let role_description = config.role.as_ref()
             .map(|r| match r.role_type.to_lowercase().as_str() {
-                "backend" => "You specialize in server-side logic, APIs, databases, and backend infrastructure.",
-                "frontend" => "You specialize in UI components, state management, styling, and user experience.",
-                "coherence" => "You specialize in ensuring code consistency, API contracts, and cross-component integration.",
-                "simplify" => "You specialize in code simplification, refactoring, and reducing complexity.",
-                _ => "You handle general development tasks as assigned.",
+                "backend" => "Server-side logic, APIs, databases, and backend infrastructure.",
+                "frontend" => "UI components, state management, styling, and user experience.",
+                "coherence" => "Code consistency, API contracts, and cross-component integration.",
+                "simplify" => "Code simplification, refactoring, and reducing complexity.",
+                _ => "General development tasks as assigned.",
             })
-            .unwrap_or("You handle general development tasks as assigned.");
+            .unwrap_or("General development tasks as assigned.");
 
         let initial_task = config.initial_prompt.as_deref().unwrap_or("Awaiting task assignment from the Queen.");
 
         format!(
-r#"You are Worker {} ({}) in a multi-agent Hive session.
+r#"# Worker {index} ({role_name}) - Hive Session
 
-## Your Role
+You are a **Worker** in a multi-agent Hive session, coordinated by the Queen.
 
-{}
+## Your Specialization
 
-## Your Queen
+{role_description}
 
-Your coordinator is: {}
+## Your Tools
 
-## How This Works
+You have full access to Claude Code tools:
+- **Read/Write/Edit** - File operations
+- **Bash** - Run shell commands
+- **Glob/Grep** - Search files and content
+- **Task** - Spawn subagents if needed
 
-The Queen orchestrates tasks through the Hive Manager operator. You will receive task instructions injected into your terminal. Complete your assigned tasks and report progress.
+## Coordination Protocol
+
+- **Queen**: {queen_id}
+- You will receive task injections from the Queen via the operator
+- Complete your assigned tasks within your specialization
+- Report completion by outputting: `[COMPLETED] Brief summary of what was done`
+- If blocked, output: `[BLOCKED] Description of the blocker`
+
+## Important Rules
+
+1. **Stay in your lane** - Focus on your specialization
+2. **Don't push to git** - Only the Queen commits and pushes
+3. **Report progress** - Use [COMPLETED] or [BLOCKED] markers
+4. **Ask for clarification** - If task is unclear, ask
 
 ## Your Current Task
 
-{}"#,
-            index, role_name, role_description, queen_id, initial_task
+{initial_task}"#,
+            index = index,
+            role_name = role_name,
+            role_description = role_description,
+            queen_id = queen_id,
+            initial_task = initial_task
         )
     }
 
@@ -408,31 +474,54 @@ The Queen orchestrates tasks through the Hive Manager operator. You will receive
             let role_label = worker_config.role.as_ref()
                 .map(|r| r.label.clone())
                 .unwrap_or_else(|| format!("Worker {}", worker_index));
-            worker_list.push_str(&format!("- Worker {}: {} (CLI: {})\n", worker_index, role_label, worker_config.cli));
+            worker_list.push_str(&format!("| Worker {} | {} | {} |\n", worker_index, role_label, worker_config.cli));
         }
 
         format!(
-r#"You are Planner {} in a multi-agent Swarm session, managing the {} domain.
+r#"# Planner {index} - {domain} Domain
+
+You are a **Planner** in a multi-agent Swarm session, managing the {domain} domain.
 
 ## Your Domain
 
-{}
+{domain}
 
 ## Your Workers
 
-{}
-## Your Queen
+| ID | Role | CLI |
+|----|------|-----|
+{worker_list}
+## Your Tools
 
-Your coordinator is: {}
+You have full access to Claude Code tools:
+- **Read/Write/Edit** - File operations
+- **Bash** - Run shell commands
+- **Glob/Grep** - Search files and content
+- **Task** - Spawn subagents for complex tasks
 
-## How This Works
+## Coordination
 
-You manage workers within your domain. The Queen coordinates high-level tasks through the Hive Manager operator. Break down domain tasks and coordinate your workers to complete them.
+- **Queen**: {queen_id}
+- Break down domain tasks into worker assignments
+- Write task files for your workers
+- Monitor worker progress via [COMPLETED] / [BLOCKED] markers
+- Report to Queen when domain work is complete
+
+## Protocol
+
+1. Receive domain task from Queen
+2. Break into worker subtasks
+3. Write task files to assign work
+4. Monitor and coordinate
+5. Report `[DOMAIN_COMPLETE]` when done
 
 ## Your Current Task
 
 Awaiting task assignment from the Queen."#,
-            index, config.domain, config.domain, worker_list, queen_id
+            index = index,
+            domain = config.domain,
+            worker_list = worker_list,
+            queen_id = queen_id
         )
     }
 
@@ -442,31 +531,62 @@ Awaiting task assignment from the Queen."#,
         for (i, planner_config) in planners.iter().enumerate() {
             let index = i + 1;
             let planner_id = format!("{}-planner-{}", session_id, index);
-            planner_list.push_str(&format!("- {}: Planner {} - {} (CLI: {}, {} workers)\n",
-                planner_id, index, planner_config.domain, planner_config.config.cli, planner_config.workers.len()));
+            planner_list.push_str(&format!("| {} | {} | {} | {} workers |\n",
+                planner_id, index, planner_config.domain, planner_config.workers.len()));
         }
 
         format!(
-r#"You are the Queen agent orchestrating a Swarm session in Hive Manager.
+r#"# Queen Agent - Swarm Session
+
+You are the **Queen** orchestrating a multi-agent Swarm session. You coordinate Planners who each manage their own domain.
+
+## Session Info
+
+- **Session ID**: {session_id}
+- **Mode**: Swarm (hierarchical)
+- **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 
 ## Your Planners
 
-{}
-## Swarm Architecture
+| ID | # | Domain | Workers |
+|----|---|--------|---------|
+{planner_list}
+## Your Tools
 
-In Swarm mode, you coordinate Planners who each manage their own domain and workers. Each Planner handles a specific area of the codebase.
+### Claude Code Tools (Native)
+You have full access to all Claude Code tools:
+- **Read/Write/Edit** - File operations
+- **Bash** - Run shell commands, git operations
+- **Glob/Grep** - Search files and content
+- **Task** - Spawn subagents for complex tasks
+- **WebFetch/WebSearch** - Access web resources
 
-## How to Coordinate
+### Claude Code Commands
+You can use any /commands in `~/.claude/commands/`
 
-When you need something done, tell the operator which Planner or worker should handle it. The operator will use the Hive Manager UI to inject your message into that agent's terminal.
+### Swarm Coordination
+Assign domain-level tasks to Planners. Each Planner will break down the task and coordinate their workers.
 
-Example: "Please tell Planner 1 (Backend) to have their workers implement the user authentication API."
+**Task Assignment:**
+Write domain tasks to planner prompt files or tell the operator:
+```
+@Operator: Tell Planner 1 to handle the backend API implementation
+```
+
+## Swarm Protocol
+
+1. **Analyze task** - Identify which domains are involved
+2. **Assign to Planners** - Give each Planner their domain scope
+3. **Monitor progress** - Watch for [DOMAIN_COMPLETE] from Planners
+4. **Integration** - Coordinate cross-domain integration
+5. **Commit & push** - You handle final commits (only you push)
 
 ## Your Task
 
-{}"#,
-            planner_list,
-            user_prompt.unwrap_or("Awaiting instructions from the operator.")
+{task}"#,
+            session_id = session_id,
+            planner_list = planner_list,
+            task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
         )
     }
 

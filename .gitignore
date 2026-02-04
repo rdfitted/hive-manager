@@ -29,3 +29,5 @@ logs/
 # Session data
 .hive/
 .swarm/
+.hive-manager/
+nul
