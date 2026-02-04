@@ -14,13 +14,16 @@
 
   type SessionMode = 'hive' | 'swarm';
 
-  // Predefined roles with default CLIs (all default to claude for compatibility)
+  // Predefined roles with default CLIs and descriptions
   const predefinedRoles = [
-    { type: 'backend', label: 'Backend', cli: 'claude' },
-    { type: 'frontend', label: 'Frontend', cli: 'claude' },
-    { type: 'coherence', label: 'Coherence', cli: 'claude' },
-    { type: 'simplify', label: 'Simplify', cli: 'claude' },
-    { type: 'general', label: 'General', cli: 'claude' },
+    { type: 'backend', label: 'Backend', cli: 'claude', description: 'Backend code, APIs, databases' },
+    { type: 'frontend', label: 'Frontend', cli: 'claude', description: 'UI components, styling, UX' },
+    { type: 'coherence', label: 'Coherence', cli: 'claude', description: 'Ensures code consistency' },
+    { type: 'simplify', label: 'Simplify', cli: 'claude', description: 'Refactors and simplifies code' },
+    { type: 'reviewer', label: 'Reviewer', cli: 'claude', description: 'Reviews code for issues' },
+    { type: 'resolver', label: 'Resolver', cli: 'claude', description: 'Resolves reviewer issues' },
+    { type: 'code-quality', label: 'Code Quality', cli: 'claude', description: 'PR comments, linting, tests' },
+    { type: 'general', label: 'General', cli: 'claude', description: 'General purpose worker' },
   ];
 
   let mode: SessionMode = 'hive';
@@ -37,10 +40,14 @@
     label: undefined,
   };
 
-  // Hive workers with roles
+  // Hive workers with roles - preset team of 6
   let hiveWorkers: (AgentConfig & { selectedRole: string })[] = [
     { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
-    { cli: 'gemini', flags: [], label: undefined, selectedRole: 'frontend' },
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'frontend' },
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'coherence' },
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'simplify' },
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'reviewer' },
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'resolver' },
   ];
 
   // Simplified Swarm config - same config for all planners
@@ -48,7 +55,8 @@
   let plannerConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
   let workersPerPlanner: (AgentConfig & { selectedRole: string })[] = [
     { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
-    { cli: 'gemini', flags: [], label: undefined, selectedRole: 'frontend' },
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'frontend' },
+    { cli: 'claude', flags: [], label: undefined, selectedRole: 'reviewer' },
   ];
 
   function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
@@ -272,9 +280,10 @@
                       bind:value={worker.selectedRole}
                       on:change={() => updateWorkerCli(i)}
                       class="role-select"
+                      title={predefinedRoles.find(r => r.type === worker.selectedRole)?.description}
                     >
                       {#each predefinedRoles as role}
-                        <option value={role.type}>{role.label}</option>
+                        <option value={role.type} title={role.description}>{role.label}</option>
                       {/each}
                     </select>
                   </div>
@@ -332,9 +341,10 @@
                         bind:value={worker.selectedRole}
                         on:change={() => updateSwarmWorkerCli(i)}
                         class="role-select"
+                        title={predefinedRoles.find(r => r.type === worker.selectedRole)?.description}
                       >
                         {#each predefinedRoles as role}
-                          <option value={role.type}>{role.label}</option>
+                          <option value={role.type} title={role.description}>{role.label}</option>
                         {/each}
                       </select>
                     </div>
