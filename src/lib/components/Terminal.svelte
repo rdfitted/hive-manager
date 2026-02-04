@@ -7,6 +7,7 @@
   import { ClipboardAddon } from '@xterm/addon-clipboard';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
   import { activeAgents } from '$lib/stores/sessions';
   import '@xterm/xterm/css/xterm.css';
 
@@ -96,7 +97,13 @@
   async function handleCopy() {
     const selection = term?.getSelection();
     if (selection) {
-      await navigator.clipboard.writeText(selection);
+      try {
+        await writeText(selection);
+      } catch (err) {
+        console.error('Copy failed:', err);
+        // Fallback to browser API
+        navigator.clipboard.writeText(selection).catch(console.error);
+      }
     }
     closeContextMenu();
     term?.focus();
@@ -104,12 +111,21 @@
 
   async function handlePaste() {
     try {
-      const text = await navigator.clipboard.readText();
+      const text = await readText();
       if (text) {
         sendToPty(text);
       }
     } catch (err) {
-      console.error('Paste failed:', err);
+      console.error('Paste failed with Tauri API:', err);
+      // Fallback to browser API
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          sendToPty(text);
+        }
+      } catch (browserErr) {
+        console.error('Paste failed with browser API:', browserErr);
+      }
     }
     closeContextMenu();
     term?.focus();
@@ -220,7 +236,10 @@
       if (event.ctrlKey && (event.key === 'C' || (event.key === 'c' && event.shiftKey))) {
         const selection = term?.getSelection();
         if (selection) {
-          navigator.clipboard.writeText(selection);
+          writeText(selection).catch((err: unknown) => {
+            console.error('Copy failed:', err);
+            navigator.clipboard.writeText(selection).catch(console.error);
+          });
           return false;
         }
         // If no selection, let Ctrl+C pass through as interrupt
@@ -229,11 +248,18 @@
 
       // Ctrl+Shift+V or Ctrl+V = Paste
       if (event.ctrlKey && (event.key === 'V' || (event.key === 'v' && event.shiftKey))) {
-        navigator.clipboard.readText().then((text) => {
+        readText().then((text: string) => {
           if (text && term) {
             sendToPty(text);
           }
-        }).catch(console.error);
+        }).catch((err: unknown) => {
+          console.error('Paste failed with Tauri:', err);
+          navigator.clipboard.readText().then((text: string) => {
+            if (text && term) {
+              sendToPty(text);
+            }
+          }).catch(console.error);
+        });
         return false;
       }
 
@@ -241,7 +267,10 @@
       if (event.ctrlKey && event.key === 'c' && !event.shiftKey) {
         const selection = term?.getSelection();
         if (selection) {
-          navigator.clipboard.writeText(selection);
+          writeText(selection).catch((err: unknown) => {
+            console.error('Copy failed:', err);
+            navigator.clipboard.writeText(selection).catch(console.error);
+          });
           return false;
         }
         // No selection, pass through as interrupt signal

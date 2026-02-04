@@ -56,6 +56,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(PtyManagerState(Arc::clone(&pty_manager)))
         .manage(SessionControllerState(Arc::clone(&session_controller)))
         .manage(CoordinationState(Arc::clone(&injection_manager)))

@@ -10,6 +10,7 @@
     "frontendDist": "../build"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Hive Manager",
@@ -18,7 +19,8 @@
         "minWidth": 800,
         "minHeight": 600,
         "decorations": true,
-        "resizable": true
+        "resizable": true,
+        "devtools": true
       }
     ],
     "security": {
