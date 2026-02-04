@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
-  import { currentBranch, availableBranches } from '$lib/stores/sessions';
+  import { currentBranch, availableBranches, activeSession } from '$lib/stores/sessions';
 
   interface BranchInfo {
     name: string;
@@ -13,11 +12,27 @@
   let pulling = $state(false);
   let error = $state<string | null>(null);
 
+  // Get project path from active session
+  let projectPath = $derived($activeSession?.project_path);
+
+  // Reload branches when project path changes
+  $effect(() => {
+    if (projectPath) {
+      loadBranches();
+    } else {
+      // Clear branches when no session
+      availableBranches.set([]);
+      currentBranch.set('');
+    }
+  });
+
   async function loadBranches() {
+    if (!projectPath) return;
+
     loading = true;
     error = null;
     try {
-      const branches: BranchInfo[] = await invoke('list_branches');
+      const branches: BranchInfo[] = await invoke('list_branches', { projectPath });
       availableBranches.set(branches);
       const current = branches.find(b => b.is_current);
       if (current) {
@@ -31,13 +46,15 @@
   }
 
   async function handleBranchChange(event: Event) {
+    if (!projectPath) return;
+
     const target = event.target as HTMLSelectElement;
     const branch = target.value;
-    
+
     loading = true;
     error = null;
     try {
-      await invoke('switch_branch', { branch });
+      await invoke('switch_branch', { projectPath, branch });
       await loadBranches();
     } catch (e) {
       error = String(e);
@@ -49,10 +66,12 @@
   }
 
   async function handlePull() {
+    if (!projectPath) return;
+
     pulling = true;
     error = null;
     try {
-      await invoke('git_pull');
+      await invoke('git_pull', { projectPath });
       await loadBranches();
     } catch (e) {
       error = String(e);
@@ -60,20 +79,19 @@
       pulling = false;
     }
   }
-
-  onMount(() => {
-    loadBranches();
-  });
 </script>
 
 <div class="branch-selector">
-  <label>Branch:</label>
+  <label for="branch-select">Branch:</label>
   {#if loading}
     <span class="loading">Loading...</span>
   {:else if error}
-    <span class="error">{error}</span>
+    <span class="error" title={error}>{error.slice(0, 30)}{error.length > 30 ? '...' : ''}</span>
+    <button class="action-btn refresh-btn" onclick={loadBranches} title="Retry">↻</button>
+  {:else if !projectPath}
+    <span class="loading">No session</span>
   {:else}
-    <select value={$currentBranch} onchange={handleBranchChange}>
+    <select id="branch-select" value={$currentBranch} onchange={handleBranchChange}>
       {#each $availableBranches as branch}
         <option value={branch.name}>
           {branch.name} ({branch.short_hash})
@@ -96,6 +114,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: wrap;
   }
 
   .branch-selector label {
@@ -107,6 +126,7 @@
 
   .branch-selector select {
     flex: 1;
+    min-width: 120px;
     max-width: 200px;
     padding: 4px 8px;
     font-size: 11px;
@@ -191,5 +211,9 @@
   .error {
     font-size: 11px;
     color: var(--color-error, #f7768e);
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

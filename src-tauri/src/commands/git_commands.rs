@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::env;
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
@@ -9,11 +9,15 @@ pub struct BranchInfo {
     pub is_current: bool,
 }
 
-fn run_git(args: &[&str]) -> Result<String, String> {
-    let cwd = env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+fn run_git_in_dir(args: &[&str], project_path: &str) -> Result<String, String> {
+    let path = Path::new(project_path);
+    if !path.exists() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+
     let output = Command::new("git")
         .args(args)
-        .current_dir(cwd)
+        .current_dir(path)
         .output()
         .map_err(|e| format!("Failed to run git: {}", e))?;
 
@@ -32,12 +36,15 @@ fn run_git(args: &[&str]) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn list_branches() -> Result<Vec<BranchInfo>, String> {
-    let output = run_git(&[
-        "branch",
-        "--list",
-        "--format=%(refname:short)|%(objectname:short)|%(HEAD)",
-    ])?;
+pub async fn list_branches(project_path: String) -> Result<Vec<BranchInfo>, String> {
+    let output = run_git_in_dir(
+        &[
+            "branch",
+            "--list",
+            "--format=%(refname:short)|%(objectname:short)|%(HEAD)",
+        ],
+        &project_path,
+    )?;
 
     let mut branches = Vec::new();
     for line in output.lines() {
@@ -65,8 +72,8 @@ pub async fn list_branches() -> Result<Vec<BranchInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn get_current_branch() -> Result<String, String> {
-    let output = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+pub async fn get_current_branch(project_path: String) -> Result<String, String> {
+    let output = run_git_in_dir(&["rev-parse", "--abbrev-ref", "HEAD"], &project_path)?;
     let branch = output.trim();
     if branch.is_empty() {
         return Err("Unable to determine current branch".to_string());
@@ -75,41 +82,44 @@ pub async fn get_current_branch() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn switch_branch(branch: String) -> Result<(), String> {
+pub async fn switch_branch(project_path: String, branch: String) -> Result<(), String> {
     let branch = branch.trim();
     if branch.is_empty() {
         return Err("Branch name cannot be empty".to_string());
     }
 
-    let status = run_git(&["status", "--porcelain"])?;
+    let status = run_git_in_dir(&["status", "--porcelain"], &project_path)?;
     if !status.trim().is_empty() {
-        return Err("Uncommitted changes detected. Please commit or stash before switching branches.".to_string());
+        return Err(
+            "Uncommitted changes detected. Please commit or stash before switching branches."
+                .to_string(),
+        );
     }
 
-    run_git(&["switch", branch])?;
+    run_git_in_dir(&["switch", branch], &project_path)?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn git_pull() -> Result<String, String> {
+pub async fn git_pull(project_path: String) -> Result<String, String> {
     // Check for uncommitted changes first
-    let status = run_git(&["status", "--porcelain"])?;
+    let status = run_git_in_dir(&["status", "--porcelain"], &project_path)?;
     if !status.trim().is_empty() {
         return Err("Uncommitted changes detected. Please commit or stash before pulling.".to_string());
     }
 
-    let output = run_git(&["pull"])?;
+    let output = run_git_in_dir(&["pull"], &project_path)?;
     Ok(output.trim().to_string())
 }
 
 #[tauri::command]
-pub async fn git_push() -> Result<String, String> {
-    let output = run_git(&["push"])?;
+pub async fn git_push(project_path: String) -> Result<String, String> {
+    let output = run_git_in_dir(&["push"], &project_path)?;
     Ok(output.trim().to_string())
 }
 
 #[tauri::command]
-pub async fn git_fetch() -> Result<String, String> {
-    let output = run_git(&["fetch", "--all"])?;
+pub async fn git_fetch(project_path: String) -> Result<String, String> {
+    let output = run_git_in_dir(&["fetch", "--all"], &project_path)?;
     Ok(output.trim().to_string())
 }
