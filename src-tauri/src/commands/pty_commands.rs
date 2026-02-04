@@ -45,6 +45,32 @@ pub async fn write_to_pty(
     pty_manager.write(&id, &data).map_err(|e| e.to_string())
 }
 
+/// Write a string message to a PTY and optionally send Enter
+#[tauri::command]
+pub async fn inject_to_pty(
+    state: State<'_, PtyManagerState>,
+    id: String,
+    message: String,
+    send_enter: bool,
+) -> Result<(), String> {
+    let pty_manager = state.0.read();
+
+    tracing::info!("inject_to_pty: id={}, message={:?}, send_enter={}", id, message, send_enter);
+
+    if send_enter {
+        // Send message + carriage return together
+        // Use \r (0x0D) which is what xterm.js sends for Enter key
+        let message_with_enter = format!("{}\r", message);
+        tracing::info!("Sending message with CR (\\r) to {}: {:?}", id, message_with_enter.as_bytes());
+        pty_manager.write(&id, message_with_enter.as_bytes()).map_err(|e| e.to_string())?;
+    } else {
+        // Write just the message
+        pty_manager.write(&id, message.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn resize_pty(
     state: State<'_, PtyManagerState>,

@@ -15,7 +15,7 @@
 
   function getStatusIcon(status: AgentInfo['status']): string {
     if (status === 'Running') return '█';
-    if (status === 'WaitingForInput') return '⏳';
+    if (typeof status === 'object' && 'WaitingForInput' in status) return '⏳';
     if (status === 'Completed') return '✓';
     if (status === 'Starting') return '○';
     if (typeof status === 'object' && 'Error' in status) return '✗';
@@ -24,7 +24,7 @@
 
   function getStatusColor(status: AgentInfo['status']): string {
     if (status === 'Running') return 'var(--color-running)';
-    if (status === 'WaitingForInput') return 'var(--color-warning)';
+    if (typeof status === 'object' && 'WaitingForInput' in status) return 'var(--color-warning)';
     if (status === 'Completed') return 'var(--color-success)';
     if (status === 'Starting') return 'var(--color-text-muted)';
     if (typeof status === 'object' && 'Error' in status) return 'var(--color-error)';

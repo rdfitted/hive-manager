@@ -84,17 +84,58 @@ impl InjectionManager {
         Ok(())
     }
 
-    /// Write a message to an agent's PTY
+    /// Write a message to an agent's PTY and press Enter to submit
     pub fn write_to_agent(&self, agent_id: &str, message: &str) -> Result<(), InjectionError> {
         let pty_manager = self.pty_manager.read();
 
-        // Format message with carriage return to simulate Enter key press
-        // PTY expects \r (carriage return) to submit, not \n
-        let formatted_message = format!("{}\r", message.trim_end_matches(&['\r', '\n'][..]));
+        // Strip any existing line endings first
+        let clean_message = message.trim_end_matches(&['\r', '\n'][..]);
+
+        tracing::info!("=== INJECTION START ===");
+        tracing::info!("Target agent: {}", agent_id);
+        tracing::info!("Message: {:?}", clean_message);
+        tracing::info!("Message bytes: {:?}", clean_message.as_bytes());
+
+        // Write the message content with Enter appended
+        // On Windows ConPTY, Enter is typically just \r, but some apps need \n
+        // We'll send both \r\n to maximize compatibility
+        let message_with_enter = format!("{}\r\n", clean_message);
+
+        tracing::info!("Full message with enter: {:?}", message_with_enter.as_bytes());
 
         pty_manager
-            .write(agent_id, formatted_message.as_bytes())
-            .map_err(|e| InjectionError::PtyError(e.to_string()))?;
+            .write(agent_id, message_with_enter.as_bytes())
+            .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
+
+        tracing::info!("=== INJECTION COMPLETE ===");
+
+        Ok(())
+    }
+
+    /// Direct injection from operator to any agent (bypasses Queen authorization)
+    pub fn operator_inject(
+        &self,
+        session_id: &str,
+        target_agent_id: &str,
+        message: &str,
+    ) -> Result<(), InjectionError> {
+        // Log to coordination.log
+        let coord_message = CoordinationMessage::system(
+            &format_agent_display(target_agent_id),
+            &format!("[OPERATOR] {}", message),
+        );
+
+        self.storage
+            .append_coordination_log(session_id, &coord_message)
+            .map_err(|e| InjectionError::StorageError(e.to_string()))?;
+
+        // Write to agent's PTY stdin
+        self.write_to_agent(target_agent_id, message)?;
+
+        // Emit event for UI
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("coordination-message", &coord_message);
+        }
 
         Ok(())
     }

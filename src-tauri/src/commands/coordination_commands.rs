@@ -52,6 +52,30 @@ pub async fn queen_inject(
         .map_err(|e: crate::coordination::InjectionError| e.to_string())
 }
 
+/// Request for operator injection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorInjectRequest {
+    pub session_id: String,
+    pub target_agent_id: String,
+    pub message: String,
+}
+
+/// Operator injects a message to any agent (including Queen)
+#[tauri::command]
+pub async fn operator_inject(
+    state: State<'_, CoordinationState>,
+    request: OperatorInjectRequest,
+) -> Result<(), String> {
+    let manager = state.0.read();
+    manager
+        .operator_inject(
+            &request.session_id,
+            &request.target_agent_id,
+            &request.message,
+        )
+        .map_err(|e: crate::coordination::InjectionError| e.to_string())
+}
+
 /// Add a worker to an existing session
 #[tauri::command]
 pub async fn add_worker_to_session(

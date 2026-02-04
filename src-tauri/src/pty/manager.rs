@@ -122,8 +122,14 @@ impl PtyManager {
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PtyManager::write called for session: {}", id);
         let sessions = self.sessions.read();
-        let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        tracing::debug!("Available sessions: {:?}", sessions.keys().collect::<Vec<_>>());
+        let session = sessions.get(id).ok_or_else(|| {
+            tracing::error!("PTY session not found: {}", id);
+            PtyError::NotFound(id.to_string())
+        })?;
+        tracing::debug!("Found session {}, calling write", id);
         session.write(data)
     }
 
@@ -144,14 +150,14 @@ impl PtyManager {
 
     pub fn get_status(&self, id: &str) -> Option<AgentStatus> {
         let sessions = self.sessions.read();
-        sessions.get(id).map(|s| s.status.clone())
+        sessions.get(id).map(|s| s.status.read().clone())
     }
 
     pub fn list_sessions(&self) -> Vec<(String, AgentRole, AgentStatus)> {
         let sessions = self.sessions.read();
         sessions
             .iter()
-            .map(|(id, session)| (id.clone(), session.role.clone(), session.status.clone()))
+            .map(|(id, session)| (id.clone(), session.role.clone(), session.status.read().clone()))
             .collect()
     }
 }

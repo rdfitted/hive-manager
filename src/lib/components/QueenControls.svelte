@@ -1,106 +1,38 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { coordination } from '$lib/stores/coordination';
-  import { activeSession, activeAgents } from '$lib/stores/sessions';
+  import { activeSession, activeAgents, type AgentStatus } from '$lib/stores/sessions';
 
   const dispatch = createEventDispatcher<{
     openAddWorker: void;
   }>();
 
-  let selectedWorkerId: string | null = null;
-  let messageInput = '';
-  let sending = false;
-  let error: string | null = null;
-
-  // Get Queen ID from active session
-  $: queenId = $activeSession ? `${$activeSession.id}-queen` : null;
-
-  // Get workers (non-Queen agents)
-  $: workers = $activeAgents.filter((a) => {
-    if (a.role === 'Queen') return false;
-    return true;
-  });
-
-  // Auto-select first worker if none selected
-  $: if (!selectedWorkerId && workers.length > 0) {
-    selectedWorkerId = workers[0].id;
-  }
-
-  async function handleSend() {
-    if (!$activeSession?.id || !queenId || !selectedWorkerId || !messageInput.trim()) {
-      return;
-    }
-
-    sending = true;
-    error = null;
-
-    try {
-      await coordination.queenInject(
-        $activeSession.id,
-        queenId,
-        selectedWorkerId,
-        messageInput.trim()
-      );
-      messageInput = '';
-    } catch (err) {
-      error = String(err);
-    } finally {
-      sending = false;
-    }
-  }
-
-  async function handleBroadcast() {
-    if (!$activeSession?.id || !queenId || !messageInput.trim()) {
-      return;
-    }
-
-    sending = true;
-    error = null;
-
-    try {
-      for (const worker of workers) {
-        await coordination.queenInject(
-          $activeSession.id,
-          queenId,
-          worker.id,
-          messageInput.trim()
-        );
-      }
-      messageInput = '';
-    } catch (err) {
-      error = String(err);
-    } finally {
-      sending = false;
-    }
-  }
-
-  function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      handleSend();
-    }
-  }
-
-  function getWorkerLabel(worker: { id: string; config: { label?: string }; role: unknown }): string {
-    if (worker.config.label) return worker.config.label;
-
-    // Extract role info
-    if (worker.role && typeof worker.role === 'object' && 'Worker' in worker.role) {
-      const idx = (worker.role as { Worker: { index: number } }).Worker.index;
+  function getAgentLabel(agent: { id: string; config: { label?: string }; role: unknown }): string {
+    if (agent.config?.label) return agent.config.label;
+    if (agent.role === 'Queen') return 'Queen';
+    if (agent.role && typeof agent.role === 'object' && 'Worker' in agent.role) {
+      const idx = (agent.role as { Worker: { index: number } }).Worker.index;
       return `Worker ${idx}`;
     }
-    if (worker.role && typeof worker.role === 'object' && 'Planner' in worker.role) {
-      const idx = (worker.role as { Planner: { index: number } }).Planner.index;
+    if (agent.role && typeof agent.role === 'object' && 'Planner' in agent.role) {
+      const idx = (agent.role as { Planner: { index: number } }).Planner.index;
       return `Planner ${idx}`;
     }
+    return agent.id.split('-').pop() || agent.id;
+  }
 
-    return worker.id.split('-').pop() || worker.id;
+  function getAgentStatusInfo(status: AgentStatus): { icon: string; color: string } {
+    if (status === 'Running') return { icon: '●', color: 'var(--color-running, #7aa2f7)' };
+    if (status === 'Completed') return { icon: '✓', color: 'var(--color-success, #9ece6a)' };
+    if (status === 'Starting') return { icon: '◐', color: 'var(--text-secondary, #565f89)' };
+    if (typeof status === 'object' && 'WaitingForInput' in status) return { icon: '⏳', color: 'var(--color-warning, #e0af68)' };
+    if (typeof status === 'object' && 'Error' in status) return { icon: '✗', color: 'var(--color-error, #f7768e)' };
+    return { icon: '○', color: 'var(--text-secondary, #565f89)' };
   }
 </script>
 
 <div class="queen-controls">
   <div class="controls-header">
-    <h4>Queen Controls</h4>
+    <h4>Session Controls</h4>
     <button class="add-worker-btn" on:click={() => dispatch('openAddWorker')} title="Add Worker">
       + Add Worker
     </button>
@@ -108,79 +40,23 @@
 
   {#if !$activeSession}
     <div class="no-session">No active session</div>
-  {:else if workers.length === 0}
-    <div class="no-workers">No workers available</div>
+  {:else if $activeAgents.length === 0}
+    <div class="no-workers">No agents available</div>
   {:else}
-    <div class="target-section">
-      <label for="target-select">Target:</label>
-      <select id="target-select" bind:value={selectedWorkerId} class="target-select">
-        {#each workers as worker (worker.id)}
-          <option value={worker.id}>
-            {getWorkerLabel(worker)}
-          </option>
-        {/each}
-      </select>
+    <div class="agents-status">
+      <div class="status-header">Agent Status</div>
+      {#each $activeAgents as agent (agent.id)}
+        {@const statusInfo = getAgentStatusInfo(agent.status)}
+        <div class="agent-row">
+          <span class="agent-icon" style="color: {statusInfo.color}">{statusInfo.icon}</span>
+          <span class="agent-name">{getAgentLabel(agent)}</span>
+          <span class="agent-cli">{agent.config?.cli || 'claude'}</span>
+        </div>
+      {/each}
     </div>
 
-    <div class="message-section">
-      <textarea
-        placeholder="Enter message for worker..."
-        bind:value={messageInput}
-        on:keydown={handleKeydown}
-        rows={2}
-        class="message-input"
-        disabled={sending}
-      ></textarea>
-    </div>
-
-    {#if error}
-      <div class="error">{error}</div>
-    {/if}
-
-    <div class="action-buttons">
-      <button
-        class="send-btn"
-        on:click={handleSend}
-        disabled={sending || !messageInput.trim()}
-      >
-        {sending ? 'Sending...' : 'Send'}
-      </button>
-      <button
-        class="broadcast-btn"
-        on:click={handleBroadcast}
-        disabled={sending || !messageInput.trim()}
-        title="Send to all workers"
-      >
-        Broadcast
-      </button>
-    </div>
-
-    <div class="quick-actions">
-      <span class="quick-label">Quick:</span>
-      <button
-        class="quick-btn"
-        on:click={() => {
-          messageInput = 'What is your current status?';
-        }}
-      >
-        Status
-      </button>
-      <button
-        class="quick-btn"
-        on:click={() => {
-          messageInput = 'Please pause your current work.';
-        }}
-      >
-        Pause
-      </button>
-      <button
-        class="quick-btn"
-        on:click={() => {
-          messageInput = 'Continue with your task.';
-        }}
-      >
-        Continue
-      </button>
+    <div class="info-note">
+      Agents coordinate via file-based polling. Click on an agent in the tree above to view its terminal.
     </div>
   {/if}
 </div>
@@ -230,133 +106,56 @@
     font-style: italic;
   }
 
-  .target-section {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 10px;
-  }
-
-  .target-section label {
-    font-size: 12px;
-    color: var(--text-secondary, #565f89);
-    flex-shrink: 0;
-  }
-
-  .target-select {
-    flex: 1;
-    padding: 6px 10px;
-    background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 4px;
-    color: var(--text-primary, #c0caf5);
-    font-size: 12px;
-  }
-
-  .target-select:focus {
-    outline: none;
-    border-color: var(--accent-color, #7aa2f7);
-  }
-
-  .message-section {
-    margin-bottom: 10px;
-  }
-
-  .message-input {
-    width: 100%;
-    padding: 8px 10px;
-    background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 4px;
-    color: var(--text-primary, #c0caf5);
-    font-size: 12px;
-    font-family: inherit;
-    resize: vertical;
-    min-height: 40px;
-  }
-
-  .message-input:focus {
-    outline: none;
-    border-color: var(--accent-color, #7aa2f7);
-  }
-
-  .message-input:disabled {
-    opacity: 0.6;
-  }
-
-  .error {
-    padding: 6px 10px;
-    background: var(--error-bg, #3b2030);
-    color: var(--error-text, #f7768e);
-    border-radius: 4px;
-    font-size: 11px;
-    margin-bottom: 10px;
-  }
-
-  .action-buttons {
-    display: flex;
-    gap: 8px;
+  .agents-status {
     margin-bottom: 12px;
   }
 
-  .send-btn,
-  .broadcast-btn {
-    flex: 1;
-    padding: 8px 12px;
-    border: none;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity 0.15s;
+  .status-header {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-secondary, #565f89);
+    margin-bottom: 8px;
   }
 
-  .send-btn {
-    background: var(--accent-color, #7aa2f7);
-    color: white;
-  }
-
-  .broadcast-btn {
-    background: var(--bg-tertiary, #24283b);
-    color: var(--text-primary, #c0caf5);
-    border: 1px solid var(--border-color, #414868);
-  }
-
-  .send-btn:hover:not(:disabled),
-  .broadcast-btn:hover:not(:disabled) {
-    opacity: 0.9;
-  }
-
-  .send-btn:disabled,
-  .broadcast-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .quick-actions {
+  .agent-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 8px;
+    background: var(--bg-tertiary, #24283b);
+    border-radius: 4px;
+    margin-bottom: 4px;
   }
 
-  .quick-label {
-    font-size: 11px;
+  .agent-row:last-child {
+    margin-bottom: 0;
+  }
+
+  .agent-icon {
+    font-size: 10px;
+  }
+
+  .agent-name {
+    flex: 1;
+    font-size: 12px;
+    color: var(--text-primary, #c0caf5);
+  }
+
+  .agent-cli {
+    font-size: 10px;
+    padding: 2px 6px;
+    background: var(--bg-secondary, #1a1b26);
+    border-radius: 3px;
     color: var(--text-secondary, #565f89);
   }
 
-  .quick-btn {
-    padding: 4px 8px;
-    font-size: 10px;
+  .info-note {
+    font-size: 11px;
+    color: var(--text-secondary, #565f89);
+    padding: 8px;
     background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
     border-radius: 4px;
-    color: var(--text-secondary, #a9b1d6);
-    cursor: pointer;
-  }
-
-  .quick-btn:hover {
-    background: var(--bg-hover, #292e42);
-    color: var(--text-primary, #c0caf5);
+    line-height: 1.4;
   }
 </style>

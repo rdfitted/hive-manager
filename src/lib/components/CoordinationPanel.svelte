@@ -6,17 +6,27 @@
   let logContainer: HTMLDivElement;
   let autoScroll = true;
   let searchQuery = '';
+  let lastLoadedSessionId: string | null = null;
+  let lastLogLength = 0;
 
-  // Subscribe to session changes and load coordination log
-  $: if ($activeSession?.id) {
-    coordination.loadLog($activeSession.id);
+  // Load coordination log when session changes (using simple reactive check)
+  $: {
+    const sessionId = $activeSession?.id;
+    if (sessionId && sessionId !== lastLoadedSessionId) {
+      lastLoadedSessionId = sessionId;
+      coordination.loadLog(sessionId);
+    }
   }
 
-  // Auto-scroll to bottom when new messages arrive
-  $: if ($coordination.log.length && autoScroll && logContainer) {
-    setTimeout(() => {
-      logContainer.scrollTop = logContainer.scrollHeight;
-    }, 0);
+  // Auto-scroll to bottom when new messages arrive (non-mutating check)
+  $: {
+    const logLength = $coordination.log.length;
+    if (logLength > lastLogLength && autoScroll && logContainer) {
+      lastLogLength = logLength;
+      setTimeout(() => {
+        logContainer.scrollTop = logContainer.scrollHeight;
+      }, 0);
+    }
   }
 
   function handleScroll() {

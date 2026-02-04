@@ -16,7 +16,7 @@ pub enum AgentRole {
 pub enum AgentStatus {
     Starting,
     Running,
-    WaitingForInput,
+    WaitingForInput(String),
     Completed,
     Error(String),
 }
@@ -112,7 +112,7 @@ impl MasterPtyHandle {
 
 pub struct PtySession {
     pub role: AgentRole,
-    pub status: AgentStatus,
+    pub status: Arc<parking_lot::RwLock<AgentStatus>>,
     writer: Arc<Mutex<SendWriter>>,
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
@@ -190,7 +190,7 @@ impl PtySession {
 
         Ok(Self {
             role,
-            status: AgentStatus::Starting,
+            status: Arc::new(parking_lot::RwLock::new(AgentStatus::Starting)),
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
@@ -199,9 +199,19 @@ impl PtySession {
     }
 
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PTY write: {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
         let mut writer = self.writer.lock();
-        writer.0.write_all(data)?;
-        writer.0.flush()?;
+        let result = writer.0.write_all(data);
+        if let Err(ref e) = result {
+            tracing::error!("PTY write_all failed: {}", e);
+        }
+        result?;
+        let flush_result = writer.0.flush();
+        if let Err(ref e) = flush_result {
+            tracing::error!("PTY flush failed: {}", e);
+        }
+        flush_result?;
+        tracing::debug!("PTY write complete");
         Ok(())
     }
 
@@ -226,6 +236,11 @@ impl PtySession {
     #[cfg(windows)]
     fn create_batch_content(command: &str, args: &[&str]) -> String {
         let mut lines = vec!["@echo off".to_string()];
+
+        // Add CLI-specific environment variables
+        if command == "opencode" {
+            lines.push("set OPENCODE_YOLO=true".to_string());
+        }
 
         // Build the command line with proper quoting
         let mut cmd_line = command.to_string();

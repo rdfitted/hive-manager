@@ -1,6 +1,11 @@
 <script lang="ts">
   import { activeSession, activeAgents, type AgentInfo, type Session } from '$lib/stores/sessions';
+  import { ui } from '$lib/stores/ui';
   import AgentTree from './AgentTree.svelte';
+
+  function handleAlertClick(agentId: string) {
+    ui.setFocusedAgent(agentId);
+  }
 
   function getSessionStateClass(state: Session['state']): string {
     if (typeof state === 'string') return state.toLowerCase();
@@ -49,11 +54,19 @@
       <section class="section">
         <h3>Alerts</h3>
         <div class="alerts">
-          {#each $activeAgents.filter(a => a.status === 'WaitingForInput') as agent}
-            <div class="alert warning">
-              <span class="alert-icon">⚠</span>
-              <span class="alert-text">{getAgentLabel(agent)} needs input</span>
-            </div>
+          {#each $activeAgents.filter(a => typeof a.status === 'object' && 'WaitingForInput' in a.status) as agent}
+            {@const lastLine = typeof agent.status === 'object' && 'WaitingForInput' in agent.status ? agent.status.WaitingForInput : ''}
+            <button class="alert warning clickable" onclick={() => handleAlertClick(agent.id)}>
+              <div class="alert-header">
+                <span class="alert-icon">⚠</span>
+                <span class="alert-title">{getAgentLabel(agent)} needs input</span>
+              </div>
+              {#if lastLine}
+                <div class="alert-body">
+                  <p class="last-line">{lastLine}</p>
+                </div>
+              {/if}
+            </button>
           {:else}
             <p class="no-alerts">No alerts</p>
           {/each}
@@ -160,8 +173,8 @@
 
   .alert {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
+    gap: 4px;
     padding: 10px 12px;
     border-radius: 4px;
     font-size: 12px;
@@ -170,6 +183,45 @@
   .alert.warning {
     background: rgba(224, 175, 104, 0.15);
     color: var(--color-warning);
+  }
+
+  .alert.clickable {
+    cursor: pointer;
+    border: 1px solid transparent;
+    width: 100%;
+    text-align: left;
+    transition: all 0.2s;
+  }
+
+  .alert.clickable:hover {
+    background: rgba(224, 175, 104, 0.25);
+    border-color: var(--color-warning);
+  }
+
+  .alert-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .alert-title {
+    font-weight: 600;
+  }
+
+  .alert-body {
+    padding-left: 22px;
+    margin-top: 2px;
+  }
+
+  .last-line {
+    margin: 0;
+    font-size: 11px;
+    font-family: 'Cascadia Code', Consolas, monospace;
+    opacity: 0.8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--color-text);
   }
 
   .alert-icon {

@@ -298,8 +298,7 @@ impl SessionController {
     }
 
     /// Build command and args from AgentConfig
-    /// Build command and args, returning (command, args, needs_prompt_flag)
-    /// The needs_prompt_flag indicates if this CLI needs a special flag before the prompt
+    /// Returns (command, args) with CLI-specific flags already added
     fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
         let mut args = Vec::new();
 
@@ -310,6 +309,29 @@ impl SessionController {
                 args.push("--dangerously-skip-permissions".to_string());
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "gemini" => {
+                // Gemini CLI uses -y for auto-approve
+                args.push("-y".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "codex" => {
+                // Codex CLI uses --dangerously-bypass-approvals-and-sandbox
+                args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "opencode" => {
+                // OpenCode relies on OPENCODE_YOLO=true env var (set in batch file)
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
                     args.push(model.clone());
                 }
             }
@@ -326,6 +348,32 @@ impl SessionController {
         args.extend(config.flags.clone());
 
         (config.cli.clone(), args)
+    }
+
+    /// Add prompt argument to args based on CLI type
+    /// Each CLI has different syntax for accepting initial prompts
+    fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
+        let prompt_arg = format!("Read {} and execute.", prompt_path);
+        match cli {
+            "claude" | "codex" => {
+                // Claude and Codex accept prompt as positional argument
+                args.push(prompt_arg);
+            }
+            "gemini" => {
+                // Gemini uses -i flag for initial prompt
+                args.push("-i".to_string());
+                args.push(prompt_arg);
+            }
+            "opencode" => {
+                // OpenCode uses --prompt flag
+                args.push("--prompt".to_string());
+                args.push(prompt_arg);
+            }
+            _ => {
+                // Default: try positional argument
+                args.push(prompt_arg);
+            }
+        }
     }
 
     /// Build the Queen's master prompt with worker information
@@ -406,7 +454,7 @@ Tell the operator what to inject:
     }
 
     /// Build a worker's role prompt
-    fn build_worker_prompt(index: u8, config: &AgentConfig, queen_id: &str) -> String {
+    fn build_worker_prompt(index: u8, config: &AgentConfig, queen_id: &str, session_id: &str) -> String {
         let role_name = config.role.as_ref()
             .map(|r| r.label.clone())
             .unwrap_or_else(|| format!("Worker {}", index));
@@ -417,11 +465,16 @@ Tell the operator what to inject:
                 "frontend" => "UI components, state management, styling, and user experience.",
                 "coherence" => "Code consistency, API contracts, and cross-component integration.",
                 "simplify" => "Code simplification, refactoring, and reducing complexity.",
+                "reviewer" => "Deep code review: edge cases, security, performance, architecture, breaking changes.",
+                "reviewer-quick" => "Quick code review: obvious bugs, code style, simple improvements.",
+                "resolver" => "Address all reviewer findings: fix HIGH/MEDIUM issues, document skipped items with rationale.",
+                "tester" => "Run test suite, fix failures, document difficulties that couldn't be resolved.",
+                "code-quality" => "Resolve PR comments from external reviewers, ensure code meets quality standards.",
                 _ => "General development tasks as assigned.",
             })
             .unwrap_or("General development tasks as assigned.");
 
-        let initial_task = config.initial_prompt.as_deref().unwrap_or("Awaiting task assignment from the Queen.");
+        let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index);
 
         format!(
 r#"# Worker {index} ({role_name}) - Hive Session
@@ -440,29 +493,38 @@ You have full access to Claude Code tools:
 - **Glob/Grep** - Search files and content
 - **Task** - Spawn subagents if needed
 
-## Coordination Protocol
+## Task File (File-Based Coordination)
 
-- **Queen**: {queen_id}
-- You will receive task injections from the Queen via the operator
-- Complete your assigned tasks within your specialization
-- Report completion by outputting: `[COMPLETED] Brief summary of what was done`
-- If blocked, output: `[BLOCKED] Description of the blocker`
+Your task assignments are in: `{task_file}`
+
+**Workflow:**
+1. Read your task file to check your current status
+2. If Status is `STANDBY` - wait and periodically re-check the file
+3. If Status is `ACTIVE` - execute the task described in the file
+4. When done, update the task file: change Status to `COMPLETED` and add your results
+5. If blocked, change Status to `BLOCKED` and describe the issue
 
 ## Important Rules
 
-1. **Stay in your lane** - Focus on your specialization
+1. **Stay in your lane** - Focus on your specialization ({role_name})
 2. **Don't push to git** - Only the Queen commits and pushes
-3. **Report progress** - Use [COMPLETED] or [BLOCKED] markers
-4. **Ask for clarification** - If task is unclear, ask
+3. **Update your task file** - Always update status when done or blocked
+4. **Ask for clarification** - If task is unclear, note it in the task file
 
-## Your Current Task
+## Coordinator
 
-{initial_task}"#,
+- **Queen**: {queen_id}
+
+## Initial Action
+
+Read your task file now: `{task_file}`
+
+If the status is STANDBY, wait for the Queen to assign you a task by updating that file."#,
             index = index,
             role_name = role_name,
             role_description = role_description,
             queen_id = queen_id,
-            initial_task = initial_task
+            task_file = task_file
         )
     }
 
@@ -603,6 +665,63 @@ Write domain tasks to planner prompt files or tell the operator:
         Ok(file_path)
     }
 
+    /// Write a task file for a worker (STANDBY by default)
+    fn write_task_file(project_path: &PathBuf, session_id: &str, worker_index: u8, initial_task: Option<&str>) -> Result<PathBuf, String> {
+        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+        std::fs::create_dir_all(&tasks_dir)
+            .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
+
+        let filename = format!("worker-{}-task.md", worker_index);
+        let file_path = tasks_dir.join(&filename);
+
+        let (status, task_content) = if let Some(task) = initial_task {
+            ("ACTIVE", task.to_string())
+        } else {
+            ("STANDBY", "Awaiting task assignment. Monitor this file for updates.".to_string())
+        };
+
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let content = format!(
+"# Task Assignment - Worker {worker_index}
+
+## Status: {status}
+
+## Instructions
+
+{task_content}
+
+## Completion Protocol
+
+When task is complete, update this file:
+1. Change Status to: COMPLETED
+2. Add a summary under a new Result section
+
+If blocked, change Status to: BLOCKED and describe the issue.
+
+---
+Last updated: {timestamp}
+",
+            worker_index = worker_index,
+            status = status,
+            task_content = task_content,
+            timestamp = timestamp
+        );
+
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write task file: {}", e))?;
+
+        Ok(file_path)
+    }
+
+    /// Get the task file path for a worker
+    fn get_task_file_path(project_path: &PathBuf, session_id: &str, worker_index: u8) -> PathBuf {
+        project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("tasks")
+            .join(format!("worker-{}-task.md", worker_index))
+    }
+
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
@@ -616,13 +735,11 @@ Write domain tasks to planner prompt files or tell the operator:
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
-            // Write Queen prompt to file and pass "Read [file] and execute." command
-            if cmd == "claude" {
-                let master_prompt = Self::build_queen_master_prompt(&session_id, &config.workers, config.prompt.as_deref());
-                let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
-                let prompt_path = prompt_file.to_string_lossy().to_string();
-                args.push(format!("Read {} and execute.", prompt_path));
-            }
+            // Write Queen prompt to file and pass to CLI
+            let master_prompt = Self::build_queen_master_prompt(&session_id, &config.workers, config.prompt.as_deref());
+            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -652,14 +769,15 @@ Write domain tasks to planner prompt files or tell the operator:
                 let worker_id = format!("{}-worker-{}", session_id, index);
                 let (cmd, mut args) = Self::build_command(worker_config);
 
-                // Write worker prompt to file and pass "Read [file] and execute." command
-                if cmd == "claude" {
-                    let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id);
-                    let filename = format!("worker-{}-prompt.md", index);
-                    let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
-                    let prompt_path = prompt_file.to_string_lossy().to_string();
-                    args.push(format!("Read {} and execute.", prompt_path));
-                }
+                // Write task file for this worker (STANDBY or with initial task)
+                Self::write_task_file(&project_path, &session_id, index, worker_config.initial_prompt.as_deref())?;
+
+                // Write worker prompt to file and pass to CLI
+                let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id, &session_id);
+                let filename = format!("worker-{}-prompt.md", index);
+                let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
+                let prompt_path = prompt_file.to_string_lossy().to_string();
+                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
                 tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, cwd);
 
@@ -724,13 +842,11 @@ Write domain tasks to planner prompt files or tell the operator:
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
-            // Write Queen prompt to file and pass "Read [file] and execute." command
-            if cmd == "claude" {
-                let master_prompt = Self::build_swarm_queen_prompt(&session_id, &config.planners, config.prompt.as_deref());
-                let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
-                let prompt_path = prompt_file.to_string_lossy().to_string();
-                args.push(format!("Read {} and execute.", prompt_path));
-            }
+            // Write Queen prompt to file and pass to CLI
+            let master_prompt = Self::build_swarm_queen_prompt(&session_id, &config.planners, config.prompt.as_deref());
+            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             tracing::info!("Launching Queen agent (swarm): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -760,14 +876,12 @@ Write domain tasks to planner prompt files or tell the operator:
                 let planner_id = format!("{}-planner-{}", session_id, planner_index);
                 let (cmd, mut args) = Self::build_command(&planner_config.config);
 
-                // Write planner prompt to file and pass "Read [file] and execute." command
-                if cmd == "claude" {
-                    let planner_prompt = Self::build_planner_prompt(planner_index, planner_config, &queen_id);
-                    let filename = format!("planner-{}-prompt.md", planner_index);
-                    let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &planner_prompt)?;
-                    let prompt_path = prompt_file.to_string_lossy().to_string();
-                    args.push(format!("Read {} and execute.", prompt_path));
-                }
+                // Write planner prompt to file and pass to CLI
+                let planner_prompt = Self::build_planner_prompt(planner_index, planner_config, &queen_id);
+                let filename = format!("planner-{}-prompt.md", planner_index);
+                let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &planner_prompt)?;
+                let prompt_path = prompt_file.to_string_lossy().to_string();
+                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
                 tracing::info!("Launching Planner {} ({}) agent: {} {:?} in {:?}",
                     planner_index, planner_config.domain, cmd, args, cwd);
@@ -795,17 +909,20 @@ Write domain tasks to planner prompt files or tell the operator:
                 // Create Workers for this Planner
                 for (worker_idx, worker_config) in planner_config.workers.iter().enumerate() {
                     let worker_index = (worker_idx + 1) as u8;
+                    // For swarm, use combined index for unique task file naming
+                    let combined_index = planner_index * 10 + worker_index;
                     let worker_id = format!("{}-planner-{}-worker-{}", session_id, planner_index, worker_index);
                     let (cmd, mut args) = Self::build_command(worker_config);
 
-                    // Write worker prompt to file and pass "Read [file] and execute." command
-                    if cmd == "claude" {
-                        let worker_prompt = Self::build_worker_prompt(worker_index, worker_config, &planner_id);
-                        let filename = format!("planner-{}-worker-{}-prompt.md", planner_index, worker_index);
-                        let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
-                        let prompt_path = prompt_file.to_string_lossy().to_string();
-                        args.push(format!("Read {} and execute.", prompt_path));
-                    }
+                    // Write task file for this worker (STANDBY or with initial task)
+                    Self::write_task_file(&project_path, &session_id, combined_index, worker_config.initial_prompt.as_deref())?;
+
+                    // Write worker prompt to file and pass to CLI (use combined_index for task file reference)
+                    let worker_prompt = Self::build_worker_prompt(combined_index, worker_config, &planner_id, &session_id);
+                    let filename = format!("planner-{}-worker-{}-prompt.md", planner_index, worker_index);
+                    let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
+                    let prompt_path = prompt_file.to_string_lossy().to_string();
+                    Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
                     tracing::info!("Launching Worker {}.{} agent: {} {:?} in {:?}",
                         planner_index, worker_index, cmd, args, cwd);
@@ -890,10 +1007,24 @@ Write domain tasks to planner prompt files or tell the operator:
         let worker_id = format!("{}-worker-{}", session_id, worker_index);
 
         // Build command
-        let (cmd, args) = Self::build_command(&config);
+        let (cmd, mut args) = Self::build_command(&config);
 
         // Get project path
         let cwd = session.project_path.to_str().unwrap_or(".");
+
+        // Create a temporary config with role for prompt generation
+        let mut config_with_role = config.clone();
+        config_with_role.role = Some(role.clone());
+
+        // Write task file for this worker (STANDBY or with initial task)
+        Self::write_task_file(&session.project_path, session_id, worker_index, config_with_role.initial_prompt.as_deref())?;
+
+        // Write worker prompt to file and add to args
+        let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
+        let filename = format!("worker-{}-prompt.md", worker_index);
+        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+        let prompt_path = prompt_file.to_string_lossy().to_string();
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         tracing::info!(
             "Adding Worker {} ({}) to session {}: {} {:?}",

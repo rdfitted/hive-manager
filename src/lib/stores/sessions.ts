@@ -8,7 +8,12 @@ export type AgentRole =
   | { Worker: { index: number; parent: string | null } }
   | { Fusion: { variant: string } };
 
-export type AgentStatus = 'Starting' | 'Running' | 'WaitingForInput' | 'Completed' | { Error: string };
+export type AgentStatus = 
+  | 'Starting' 
+  | 'Running' 
+  | { WaitingForInput: string } 
+  | 'Completed' 
+  | { Error: string };
 
 export interface WorkerRole {
   role_type: string;

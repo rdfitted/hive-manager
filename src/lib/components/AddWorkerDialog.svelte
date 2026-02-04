@@ -11,12 +11,20 @@
   }>();
 
   // Predefined roles (all default to claude for compatibility)
-  const predefinedRoles: { type: string; label: string; cli: string; description: string }[] = [
-    { type: 'backend', label: 'Backend', cli: 'claude', description: 'Server-side logic, APIs, databases' },
-    { type: 'frontend', label: 'Frontend', cli: 'claude', description: 'UI components, state management' },
-    { type: 'coherence', label: 'Coherence', cli: 'claude', description: 'Code consistency, API contracts' },
-    { type: 'simplify', label: 'Simplify', cli: 'claude', description: 'Code simplification, refactoring' },
-    { type: 'custom', label: 'Custom', cli: 'claude', description: 'Define your own role' },
+  const predefinedRoles: { type: string; label: string; cli: string; description: string; category: 'dev' | 'review' }[] = [
+    // Development roles
+    { type: 'backend', label: 'Backend', cli: 'claude', description: 'Server-side logic, APIs, databases', category: 'dev' },
+    { type: 'frontend', label: 'Frontend', cli: 'claude', description: 'UI components, state management', category: 'dev' },
+    { type: 'coherence', label: 'Coherence', cli: 'claude', description: 'Code consistency, API contracts', category: 'dev' },
+    { type: 'simplify', label: 'Simplify', cli: 'claude', description: 'Code simplification, refactoring', category: 'dev' },
+    // Review & QA roles
+    { type: 'reviewer', label: 'Reviewer', cli: 'claude', description: 'Deep code review: security, edge cases, architecture', category: 'review' },
+    { type: 'reviewer-quick', label: 'Quick Review', cli: 'claude', description: 'Fast review: obvious bugs, code style', category: 'review' },
+    { type: 'resolver', label: 'Resolver', cli: 'claude', description: 'Address review findings, fix issues', category: 'review' },
+    { type: 'tester', label: 'Tester', cli: 'claude', description: 'Run tests, fix failures, document issues', category: 'review' },
+    { type: 'code-quality', label: 'Code Quality', cli: 'claude', description: 'Resolve PR comments, ensure standards', category: 'review' },
+    // Custom
+    { type: 'custom', label: 'Custom', cli: 'claude', description: 'Define your own role', category: 'dev' },
   ];
 
   // CLI options
@@ -123,18 +131,39 @@
       <form on:submit|preventDefault={handleSubmit}>
         <div class="form-section">
           <span class="section-label" id="role-label">Role</span>
-          <div class="role-grid" role="group" aria-labelledby="role-label">
-            {#each predefinedRoles as role}
-              <button
-                type="button"
-                class="role-option"
-                class:selected={selectedRoleType === role.type}
-                on:click={() => (selectedRoleType = role.type)}
-              >
-                <span class="role-name">{role.label}</span>
-                <span class="role-desc">{role.description}</span>
-              </button>
-            {/each}
+
+          <div class="role-category">
+            <span class="category-label">Development</span>
+            <div class="role-grid" role="group" aria-labelledby="role-label">
+              {#each predefinedRoles.filter(r => r.category === 'dev') as role}
+                <button
+                  type="button"
+                  class="role-option"
+                  class:selected={selectedRoleType === role.type}
+                  on:click={() => (selectedRoleType = role.type)}
+                >
+                  <span class="role-name">{role.label}</span>
+                  <span class="role-desc">{role.description}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="role-category">
+            <span class="category-label">Review & QA</span>
+            <div class="role-grid" role="group" aria-labelledby="role-label">
+              {#each predefinedRoles.filter(r => r.category === 'review') as role}
+                <button
+                  type="button"
+                  class="role-option"
+                  class:selected={selectedRoleType === role.type}
+                  on:click={() => (selectedRoleType = role.type)}
+                >
+                  <span class="role-name">{role.label}</span>
+                  <span class="role-desc">{role.description}</span>
+                </button>
+              {/each}
+            </div>
           </div>
 
           {#if selectedRoleType === 'custom'}
@@ -272,6 +301,24 @@
     text-transform: uppercase;
     color: var(--text-secondary, #565f89);
     margin-bottom: 8px;
+  }
+
+  .role-category {
+    margin-bottom: 16px;
+  }
+
+  .role-category:last-of-type {
+    margin-bottom: 0;
+  }
+
+  .category-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-tertiary, #444b6a);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
 
   .role-grid {

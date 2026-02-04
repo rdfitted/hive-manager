@@ -6,14 +6,16 @@
   import { SearchAddon } from '@xterm/addon-search';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { activeAgents } from '$lib/stores/sessions';
   import '@xterm/xterm/css/xterm.css';
 
   interface Props {
     agentId: string;
+    isFocused?: boolean;
     onStatusChange?: (status: string) => void;
   }
 
-  let { agentId, onStatusChange }: Props = $props();
+  let { agentId, isFocused = false, onStatusChange }: Props = $props();
 
   let terminalContainer: HTMLDivElement;
   let term: XTerm | null = null;
@@ -21,6 +23,16 @@
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
   let resizeObserver: ResizeObserver | null = null;
+
+  // Track agent status from store
+  let agent = $derived($activeAgents.find(a => a.id === agentId));
+  let isWaiting = $derived(agent?.status && typeof agent.status === 'object' && 'WaitingForInput' in agent.status);
+
+  $effect(() => {
+    if (isFocused && term) {
+      term.focus();
+    }
+  });
 
   // Tokyo Night theme colors
   const tokyoNightTheme = {
@@ -46,6 +58,21 @@
     brightCyan: '#7dcfff',
     brightWhite: '#c0caf5',
   };
+
+  async function sendToPty(data: string) {
+    try {
+      const encoder = new TextEncoder();
+      const bytes = Array.from(encoder.encode(data));
+      await invoke('write_to_pty', { id: agentId, data: bytes });
+    } catch (err) {
+      console.error('[Terminal] Failed to write to PTY:', err);
+    }
+  }
+
+  function handleQuickAction(action: string) {
+    sendToPty(action + '\n');
+    term?.focus();
+  }
 
   onMount(async () => {
     // Create terminal instance
@@ -85,13 +112,7 @@
 
     // Handle terminal input
     term.onData(async (data) => {
-      try {
-        const encoder = new TextEncoder();
-        const bytes = Array.from(encoder.encode(data));
-        await invoke('write_to_pty', { id: agentId, data: bytes });
-      } catch (err) {
-        console.error('[Terminal] Failed to write to PTY:', err);
-      }
+      await sendToPty(data);
     });
 
     // Listen for PTY output
@@ -145,10 +166,23 @@
   }
 </script>
 
-<div class="terminal-wrapper" bind:this={terminalContainer}></div>
+<div class="terminal-wrapper" bind:this={terminalContainer}>
+  {#if isWaiting}
+    <div class="quick-response-overlay">
+      <div class="quick-response-bar">
+        <span class="prompt-text">Agent is waiting:</span>
+        <button class="action-btn" onclick={() => handleQuickAction('y')}>y</button>
+        <button class="action-btn" onclick={() => handleQuickAction('n')}>n</button>
+        <button class="action-btn approve" onclick={() => handleQuickAction('approve')}>Approve</button>
+        <button class="action-btn reject" onclick={() => handleQuickAction('reject')}>Reject</button>
+      </div>
+    </div>
+  {/if}
+</div>
 
 <style>
   .terminal-wrapper {
+    position: relative;
     width: 100%;
     height: 100%;
     background: #1a1b26;
@@ -163,5 +197,76 @@
 
   .terminal-wrapper :global(.xterm-viewport) {
     background: #1a1b26 !important;
+  }
+
+  .quick-response-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 8px 12px;
+    background: rgba(26, 27, 38, 0.85);
+    backdrop-filter: blur(4px);
+    border-top: 1px solid var(--color-warning);
+    z-index: 10;
+    display: flex;
+    justify-content: center;
+    animation: slideUp 0.2s ease-out;
+  }
+
+  @keyframes slideUp {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+
+  .quick-response-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .prompt-text {
+    font-size: 11px;
+    color: var(--color-warning);
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-right: 4px;
+  }
+
+  .action-btn {
+    padding: 4px 12px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    color: var(--color-text);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .action-btn:hover {
+    background: var(--color-surface-hover);
+    border-color: var(--color-accent);
+  }
+
+  .action-btn.approve {
+    background: rgba(158, 206, 106, 0.15);
+    border-color: var(--color-success);
+    color: var(--color-success);
+  }
+
+  .action-btn.approve:hover {
+    background: rgba(158, 206, 106, 0.25);
+  }
+
+  .action-btn.reject {
+    background: rgba(247, 118, 142, 0.15);
+    border-color: var(--color-error);
+    color: var(--color-error);
+  }
+
+  .action-btn.reject:hover {
+    background: rgba(247, 118, 142, 0.25);
   }
 </style>

@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import Terminal from '$lib/components/Terminal.svelte';
+  import TerminalGrid from '$lib/components/TerminalGrid.svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import StatusPanel from '$lib/components/StatusPanel.svelte';
   import AgentTree from '$lib/components/AgentTree.svelte';
@@ -9,31 +10,54 @@
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
   import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
+  import { ui } from '$lib/stores/ui';
 
   let showStatusPanel = $state(true);
   let showCoordinationPanel = $state(true);
   let showAddWorkerDialog = $state(false);
-  let focusedAgentId = $state<string | null>(null);
+
+  // Use UI store as single source of truth for focused agent
+  let focusedAgentId = $derived($ui.focusedAgentId);
 
   onMount(() => {
     sessions.loadSessions();
   });
 
-  // Load coordination when session changes
+  // Track previous session ID to detect changes
+  let prevSessionId: string | null = null;
+
+  // Handle session changes and coordination loading
   $effect(() => {
-    if ($activeSession?.id) {
-      coordination.setSessionId($activeSession.id);
+    const sessionId = $activeSession?.id ?? null;
+    if (sessionId && sessionId !== prevSessionId) {
+      prevSessionId = sessionId;
+      coordination.setSessionId(sessionId);
     }
   });
 
-  // Auto-select first agent when session changes
+  // Handle agent list changes - use untrack to avoid infinite loops
   $effect(() => {
-    if ($activeAgents.length > 0 && !focusedAgentId) {
-      focusedAgentId = $activeAgents[0].id;
+    const agents = $activeAgents;
+
+    // Read current focus ID without tracking it as a dependency
+    const currentFocusId = untrack(() => $ui.focusedAgentId);
+
+    // Auto-select first agent when agents are added and nothing is selected
+    if (agents.length > 0 && !currentFocusId) {
+      ui.setFocusedAgent(agents[0].id);
+      return;
     }
-    // Reset focused agent if it's no longer in the active session
-    if (focusedAgentId && !$activeAgents.find(a => a.id === focusedAgentId)) {
-      focusedAgentId = $activeAgents[0]?.id ?? null;
+
+    // Reset if focused agent no longer exists
+    if (currentFocusId && !agents.find(a => a.id === currentFocusId)) {
+      ui.setFocusedAgent(agents[0]?.id ?? null);
+      return;
+    }
+
+    // Auto-focus agent requesting input
+    const waitingAgent = agents.find(a => typeof a.status === 'object' && 'WaitingForInput' in a.status);
+    if (waitingAgent && currentFocusId !== waitingAgent.id) {
+      ui.setFocusedAgent(waitingAgent.id);
     }
   });
 
@@ -85,6 +109,11 @@
     if (event.ctrlKey && event.key === 'n') {
       event.preventDefault();
       // Focus the new session button - handled by SessionSidebar
+    }
+    // Ctrl+G to toggle grid layout
+    if (event.ctrlKey && event.key === 'g') {
+      event.preventDefault();
+      ui.toggleLayoutMode();
     }
     // Navigate agents with arrow keys when tree is focused
     if ($activeAgents.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
@@ -162,6 +191,12 @@
           <div class="no-agents">
             <p>No agents in this session</p>
           </div>
+        {:else if $ui.layoutMode === 'grid'}
+          <TerminalGrid
+            agents={$activeAgents}
+            {focusedAgentId}
+            onSelect={(id) => focusedAgentId = id}
+          />
         {:else}
           <!-- Render all terminals, show only the focused one -->
           {#each $activeAgents as agent (agent.id)}
@@ -176,13 +211,19 @@
                 <span class="terminal-title">{roleName}</span>
                 <div class="terminal-meta">
                   <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
-                  <span class="terminal-status" class:running={agent.status === 'Running'} class:waiting={agent.status === 'WaitingForInput'} class:completed={agent.status === 'Completed'}>
-                    {agent.status === 'Running' ? '█' : agent.status === 'WaitingForInput' ? '⏳' : agent.status === 'Completed' ? '✓' : '○'}
+                  <span class="terminal-status" 
+                    class:running={agent.status === 'Running'} 
+                    class:waiting={typeof agent.status === 'object' && 'WaitingForInput' in agent.status} 
+                    class:completed={agent.status === 'Completed'}
+                  >
+                    {agent.status === 'Running' ? '█' : 
+                     (typeof agent.status === 'object' && 'WaitingForInput' in agent.status) ? '⏳' : 
+                     agent.status === 'Completed' ? '✓' : '○'}
                   </span>
                 </div>
               </div>
               <div class="terminal-container">
-                <Terminal agentId={agent.id} />
+                <Terminal agentId={agent.id} isFocused={isVisible} />
               </div>
             </div>
           {/each}
