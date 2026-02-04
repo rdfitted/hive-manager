@@ -46,6 +46,7 @@ export interface HiveLaunchConfig {
   workers: AgentConfig[];
   prompt?: string;
   with_planning?: boolean;
+  smoke_test?: boolean;
 }
 
 export interface PlannerConfig {
@@ -62,6 +63,7 @@ export interface SwarmLaunchConfig {
   workers_per_planner: AgentConfig[];     // Workers config (applied to each planner)
   prompt?: string;
   with_planning?: boolean;
+  smoke_test?: boolean;
 }
 
 export type SessionState =

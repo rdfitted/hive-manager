@@ -46,6 +46,8 @@ pub struct HiveLaunchConfig {
     pub prompt: Option<String>,
     #[serde(default)]
     pub with_planning: bool,  // If true, spawn Master Planner first
+    #[serde(default)]
+    pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +60,8 @@ pub struct SwarmLaunchConfig {
     pub prompt: Option<String>,
     #[serde(default)]
     pub with_planning: bool,  // If true, spawn Master Planner first
+    #[serde(default)]
+    pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 
     // Legacy support - if planners vec is provided, use it instead
     #[serde(default)]
@@ -553,6 +557,62 @@ The user may approve or request refinements. Stay ready to update the plan.
         )
     }
 
+    /// Build a minimal smoke test prompt that creates a simple plan without real investigation
+    fn build_smoke_test_prompt(session_id: &str) -> String {
+        format!(
+r#"# Smoke Test - Quick Flow Validation
+
+You are running a **SMOKE TEST** to validate the Hive Manager flow.
+
+## Your Task
+
+Create a minimal test plan immediately. Do NOT spawn any investigation agents.
+Do NOT analyze the codebase. Just create a simple plan to test the flow.
+
+## Write This Plan Now
+
+Write the following to `.hive-manager/{session_id}/plan.md`:
+
+```markdown
+# Smoke Test Plan
+
+## Summary
+This is a smoke test to validate the planning flow works correctly.
+
+## Investigation Results
+- Scouts Used: 0 (smoke test - skipped)
+- Files Identified: 0
+- Consensus Level: N/A
+
+## Tasks
+- [ ] [HIGH] Smoke test task 1: Verify worker spawning -> Worker 1
+- [ ] [MEDIUM] Smoke test task 2: Verify Queen coordination -> Worker 2
+
+## Files to Modify
+| File | Priority | Changes Needed |
+|------|----------|----------------|
+| (smoke test - no real files) | N/A | N/A |
+
+## Dependencies
+Task 2 depends on Task 1 completing.
+
+## Risks
+None - this is a smoke test.
+
+## Notes
+Smoke test completed successfully. The planning phase flow is working.
+```
+
+After writing the plan, say: **"PLAN READY FOR REVIEW"**
+
+This tests that:
+1. Master Planner can write to the plan file
+2. User can see and approve the plan
+3. Flow continues to spawn Queen and Workers"#,
+            session_id = session_id
+        )
+    }
+
     /// Build the Queen's master prompt with worker information
     fn build_queen_master_prompt(session_id: &str, workers: &[AgentConfig], user_prompt: Option<&str>, has_plan: bool) -> String {
         let mut worker_list = String::new();
@@ -1023,8 +1083,15 @@ Last updated: {timestamp}
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
 
-        // Empty string means Master Planner will ask user what task they want
-        let prompt = config.prompt.as_deref().unwrap_or("");
+        // Build the appropriate prompt based on mode
+        let planner_prompt = if config.smoke_test {
+            tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
+            Self::build_smoke_test_prompt(&session_id)
+        } else {
+            // Empty string means Master Planner will ask user what task they want
+            let prompt = config.prompt.as_deref().unwrap_or("");
+            Self::build_master_planner_prompt(&session_id, prompt)
+        };
 
         {
             let pty_manager = self.pty_manager.read();
@@ -1034,7 +1101,6 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
 
             // Write Master Planner prompt to file
-            let planner_prompt = Self::build_master_planner_prompt(&session_id, prompt);
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -1102,8 +1168,15 @@ Last updated: {timestamp}
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
 
-        // Empty string means Master Planner will ask user what task they want
-        let prompt = config.prompt.as_deref().unwrap_or("");
+        // Build the appropriate prompt based on mode
+        let planner_prompt = if config.smoke_test {
+            tracing::info!("Running in SMOKE TEST mode (swarm) - skipping real investigation");
+            Self::build_smoke_test_prompt(&session_id)
+        } else {
+            // Empty string means Master Planner will ask user what task they want
+            let prompt = config.prompt.as_deref().unwrap_or("");
+            Self::build_master_planner_prompt(&session_id, prompt)
+        };
 
         {
             let pty_manager = self.pty_manager.read();
@@ -1113,7 +1186,6 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
 
             // Write Master Planner prompt to file
-            let planner_prompt = Self::build_master_planner_prompt(&session_id, prompt);
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);

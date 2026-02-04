@@ -119,7 +119,7 @@
     }
   }
 
-  async function handleSubmit() {
+  async function handleSubmit(smokeTest: boolean = false) {
     if (!projectPath.trim()) return;
 
     launching = true;
@@ -140,7 +140,8 @@
           queen_config: queenConfig,
           workers: workersWithRoles,
           prompt: prompt || undefined,
-          with_planning: withPlanning,
+          with_planning: smokeTest ? true : withPlanning, // Smoke test requires planning
+          smoke_test: smokeTest,
         };
         dispatch('launchHive', config);
       } else {
@@ -159,7 +160,8 @@
           planner_config: plannerConfig,
           workers_per_planner: workersWithRoles,
           prompt: prompt || undefined,
-          with_planning: withPlanning,
+          with_planning: smokeTest ? true : withPlanning, // Smoke test requires planning
+          smoke_test: smokeTest,
         };
         dispatch('launchSwarm', config);
       }
@@ -167,6 +169,10 @@
       error = String(err);
       launching = false;
     }
+  }
+
+  function handleSmokeTest() {
+    handleSubmit(true);
   }
 
   function handleClose() {
@@ -214,7 +220,7 @@
         </button>
       </div>
 
-      <form on:submit|preventDefault={handleSubmit}>
+      <form on:submit|preventDefault={() => handleSubmit(false)}>
         <div class="form-group">
           <label for="projectPath">Project Path</label>
           <div class="path-picker">
@@ -372,6 +378,15 @@
         <div class="dialog-actions">
           <button type="button" class="cancel-button" on:click={handleClose} disabled={launching}>
             Cancel
+          </button>
+          <button
+            type="button"
+            class="smoke-test-button"
+            on:click={handleSmokeTest}
+            disabled={launching || !projectPath.trim()}
+            title="Quick test to validate the entire flow without real investigation"
+          >
+            Smoke Test
           </button>
           <button type="submit" class="submit-button" disabled={launching || !projectPath.trim()}>
             {launching ? 'Launching...' : 'Launch'}
@@ -683,7 +698,8 @@
   }
 
   .cancel-button,
-  .submit-button {
+  .submit-button,
+  .smoke-test-button {
     padding: 10px 20px;
     border: none;
     border-radius: 6px;
@@ -702,6 +718,17 @@
     background: var(--color-border);
   }
 
+  .smoke-test-button {
+    background: transparent;
+    border: 1px dashed var(--color-warning, #e0af68);
+    color: var(--color-warning, #e0af68);
+  }
+
+  .smoke-test-button:hover:not(:disabled) {
+    background: rgba(224, 175, 104, 0.1);
+    border-style: solid;
+  }
+
   .submit-button {
     background: var(--color-accent, #8b5cf6);
     color: var(--color-bg);
@@ -712,7 +739,8 @@
   }
 
   .submit-button:disabled,
-  .cancel-button:disabled {
+  .cancel-button:disabled,
+  .smoke-test-button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
