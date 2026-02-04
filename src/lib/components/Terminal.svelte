@@ -25,6 +25,12 @@
   let unlistenStatus: UnlistenFn | null = null;
   let resizeObserver: ResizeObserver | null = null;
 
+  // Context menu state
+  let showContextMenu = $state(false);
+  let contextMenuX = $state(0);
+  let contextMenuY = $state(0);
+  let hasSelection = $state(false);
+
   // Track agent status from store
   let agent = $derived($activeAgents.find(a => a.id === agentId));
   let isWaiting = $derived(agent?.status && typeof agent.status === 'object' && 'WaitingForInput' in agent.status);
@@ -75,7 +81,61 @@
     term?.focus();
   }
 
+  function handleContextMenu(event: MouseEvent) {
+    event.preventDefault();
+    hasSelection = !!(term?.getSelection());
+    contextMenuX = event.clientX;
+    contextMenuY = event.clientY;
+    showContextMenu = true;
+  }
+
+  function closeContextMenu() {
+    showContextMenu = false;
+  }
+
+  async function handleCopy() {
+    const selection = term?.getSelection();
+    if (selection) {
+      await navigator.clipboard.writeText(selection);
+    }
+    closeContextMenu();
+    term?.focus();
+  }
+
+  async function handlePaste() {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        sendToPty(text);
+      }
+    } catch (err) {
+      console.error('Paste failed:', err);
+    }
+    closeContextMenu();
+    term?.focus();
+  }
+
+  function handleSelectAll() {
+    term?.selectAll();
+    closeContextMenu();
+  }
+
+  function handleClearSelection() {
+    term?.clearSelection();
+    closeContextMenu();
+    term?.focus();
+  }
+
+  // Close context menu when clicking elsewhere
+  function handleGlobalClick() {
+    if (showContextMenu) {
+      showContextMenu = false;
+    }
+  }
+
   onMount(async () => {
+    // Add global click listener
+    document.addEventListener('click', handleGlobalClick);
     // Create terminal instance
     term = new XTerm({
       theme: tokyoNightTheme,
@@ -114,18 +174,51 @@
     // Focus terminal immediately
     term.focus();
 
-    // Custom key handler for Shift+Enter
+    // Custom key handler for special keys
     term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true;
+
       // Shift+Enter inserts newline without submitting
-      if (event.type === 'keydown' && event.key === 'Enter' && event.shiftKey) {
+      if (event.key === 'Enter' && event.shiftKey) {
         if (term) {
-          // Write newline character to the terminal display
           term.write('\r\n');
-          // Send newline to PTY (not carriage return which submits)
           sendToPty('\n');
         }
-        return false; // Prevent default handling
+        return false;
       }
+
+      // Ctrl+Shift+C or Ctrl+C with selection = Copy
+      if (event.ctrlKey && (event.key === 'C' || (event.key === 'c' && event.shiftKey))) {
+        const selection = term?.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection);
+          return false;
+        }
+        // If no selection, let Ctrl+C pass through as interrupt
+        return true;
+      }
+
+      // Ctrl+Shift+V or Ctrl+V = Paste
+      if (event.ctrlKey && (event.key === 'V' || (event.key === 'v' && event.shiftKey))) {
+        navigator.clipboard.readText().then((text) => {
+          if (text && term) {
+            sendToPty(text);
+          }
+        }).catch(console.error);
+        return false;
+      }
+
+      // Ctrl+C without selection = send interrupt (let it pass through)
+      if (event.ctrlKey && event.key === 'c' && !event.shiftKey) {
+        const selection = term?.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection);
+          return false;
+        }
+        // No selection, pass through as interrupt signal
+        return true;
+      }
+
       return true; // Allow normal handling for other keys
     });
 
@@ -170,6 +263,7 @@
   });
 
   onDestroy(() => {
+    document.removeEventListener('click', handleGlobalClick);
     if (unlistenOutput) unlistenOutput();
     if (unlistenStatus) unlistenStatus();
     if (resizeObserver) resizeObserver.disconnect();
@@ -185,7 +279,13 @@
   }
 </script>
 
-<div class="terminal-wrapper" bind:this={terminalContainer}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="terminal-wrapper"
+  bind:this={terminalContainer}
+  oncontextmenu={handleContextMenu}
+  onclick={closeContextMenu}
+>
   {#if isWaiting}
     <div class="quick-response-overlay">
       <div class="quick-response-bar">
@@ -195,6 +295,32 @@
         <button class="action-btn approve" onclick={() => handleQuickAction('approve')}>Approve</button>
         <button class="action-btn reject" onclick={() => handleQuickAction('reject')}>Reject</button>
       </div>
+    </div>
+  {/if}
+
+  {#if showContextMenu}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="context-menu"
+      style="left: {contextMenuX}px; top: {contextMenuY}px;"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <button class="context-item" onclick={handleCopy} disabled={!hasSelection}>
+        <span class="context-icon">📋</span> Copy
+        <span class="context-shortcut">Ctrl+C</span>
+      </button>
+      <button class="context-item" onclick={handlePaste}>
+        <span class="context-icon">📄</span> Paste
+        <span class="context-shortcut">Ctrl+V</span>
+      </button>
+      <div class="context-divider"></div>
+      <button class="context-item" onclick={handleSelectAll}>
+        <span class="context-icon">☑</span> Select All
+        <span class="context-shortcut">Ctrl+A</span>
+      </button>
+      <button class="context-item" onclick={handleClearSelection} disabled={!hasSelection}>
+        <span class="context-icon">✕</span> Clear Selection
+      </button>
     </div>
   {/if}
 </div>
@@ -287,5 +413,59 @@
 
   .action-btn.reject:hover {
     background: rgba(247, 118, 142, 0.25);
+  }
+
+  /* Context Menu */
+  .context-menu {
+    position: fixed;
+    background: var(--color-surface, #24283b);
+    border: 1px solid var(--color-border, #414868);
+    border-radius: 6px;
+    padding: 4px;
+    min-width: 180px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+  }
+
+  .context-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--color-text, #c0caf5);
+    font-size: 13px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .context-item:hover:not(:disabled) {
+    background: var(--color-surface-hover, #2f3549);
+  }
+
+  .context-item:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .context-icon {
+    font-size: 14px;
+    width: 20px;
+    text-align: center;
+  }
+
+  .context-shortcut {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--color-text-muted, #565f89);
+  }
+
+  .context-divider {
+    height: 1px;
+    background: var(--color-border, #414868);
+    margin: 4px 8px;
   }
 </style>
