@@ -41,18 +41,22 @@
   }
 
   function getRoleName(role: AgentInfo['role']): string {
-    if ('Queen' in role) return 'Queen';
-    if ('Planner' in role) return `Planner ${role.Planner.index}`;
-    if ('Worker' in role) return `Worker ${role.Worker.index}`;
-    if ('Fusion' in role) return role.Fusion.variant;
+    if (role === 'Queen') return 'Queen';
+    if (typeof role === 'object') {
+      if ('Planner' in role) return `Planner ${role.Planner.index}`;
+      if ('Worker' in role) return `Worker ${role.Worker.index}`;
+      if ('Fusion' in role) return role.Fusion.variant;
+    }
     return 'Agent';
   }
 
   function getRoleIcon(role: AgentInfo['role']): string {
-    if ('Queen' in role) return '♕';
-    if ('Planner' in role) return '◆';
-    if ('Worker' in role) return '●';
-    if ('Fusion' in role) return '◎';
+    if (role === 'Queen') return '♕';
+    if (typeof role === 'object') {
+      if ('Planner' in role) return '◆';
+      if ('Worker' in role) return '●';
+      if ('Fusion' in role) return '◎';
+    }
     return '○';
   }
 </script>

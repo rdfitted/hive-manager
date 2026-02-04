@@ -11,12 +11,8 @@
     sessions.loadSessions();
   });
 
-  async function handleLaunch(projectPath: string, workerCount: number, prompt?: string) {
-    try {
-      await sessions.launchHive(projectPath, workerCount, prompt);
-    } catch (err) {
-      console.error('Failed to launch hive:', err);
-    }
+  async function handleLaunch(projectPath: string, workerCount: number, prompt?: string): Promise<void> {
+    await sessions.launchHive(projectPath, workerCount, prompt);
   }
 
   function toggleStatusPanel() {
@@ -76,9 +72,9 @@
           <div class="single-terminal">
             <div class="terminal-header">
               <span class="terminal-title">
-                {'Queen' in $activeAgents[0].role ? 'Queen' :
-                 'Planner' in $activeAgents[0].role ? `Planner ${$activeAgents[0].role.Planner.index}` :
-                 'Worker' in $activeAgents[0].role ? `Worker ${$activeAgents[0].role.Worker.index}` :
+                {$activeAgents[0].role === 'Queen' ? 'Queen' :
+                 typeof $activeAgents[0].role === 'object' && 'Planner' in $activeAgents[0].role ? `Planner ${$activeAgents[0].role.Planner.index}` :
+                 typeof $activeAgents[0].role === 'object' && 'Worker' in $activeAgents[0].role ? `Worker ${$activeAgents[0].role.Worker.index}` :
                  'Agent'}
               </span>
             </div>
@@ -92,9 +88,9 @@
               <div class="terminal-panel">
                 <div class="terminal-header">
                   <span class="terminal-title">
-                    {'Queen' in agent.role ? 'Queen' :
-                     'Planner' in agent.role ? `Planner ${agent.role.Planner.index}` :
-                     'Worker' in agent.role ? `Worker ${agent.role.Worker.index}` :
+                    {agent.role === 'Queen' ? 'Queen' :
+                     typeof agent.role === 'object' && 'Planner' in agent.role ? `Planner ${agent.role.Planner.index}` :
+                     typeof agent.role === 'object' && 'Worker' in agent.role ? `Worker ${agent.role.Worker.index}` :
                      'Agent'}
                   </span>
                   <span class="terminal-status" class:running={agent.status === 'Running'} class:waiting={agent.status === 'WaitingForInput'} class:completed={agent.status === 'Completed'}>

@@ -2,10 +2,18 @@ import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+export type AgentRole =
+  | 'Queen'
+  | { Planner: { index: number } }
+  | { Worker: { index: number; parent: string | null } }
+  | { Fusion: { variant: string } };
+
+export type AgentStatus = 'Starting' | 'Running' | 'WaitingForInput' | 'Completed' | { Error: string };
+
 export interface AgentInfo {
   id: string;
-  role: { Queen: null } | { Planner: { index: number } } | { Worker: { index: number; parent: string | null } } | { Fusion: { variant: string } };
-  status: 'Starting' | 'Running' | 'WaitingForInput' | 'Completed' | { Error: string };
+  role: AgentRole;
+  status: AgentStatus;
 }
 
 export interface Session {

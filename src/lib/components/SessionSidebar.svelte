@@ -4,7 +4,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
 
   interface Props {
-    onLaunch: (projectPath: string, workerCount: number, prompt?: string) => void;
+    onLaunch: (projectPath: string, workerCount: number, prompt?: string) => Promise<void>;
   }
 
   let { onLaunch }: Props = $props();
@@ -13,6 +13,8 @@
   let projectPath = $state('');
   let workerCount = $state(2);
   let prompt = $state('');
+  let launching = $state(false);
+  let launchError = $state('');
 
   function getStatusIcon(status: AgentInfo['status']): string {
     if (status === 'Running') return '█';
@@ -33,10 +35,12 @@
   }
 
   function getRoleName(role: AgentInfo['role']): string {
-    if ('Queen' in role) return 'Queen';
-    if ('Planner' in role) return `Planner ${role.Planner.index}`;
-    if ('Worker' in role) return `Worker ${role.Worker.index}`;
-    if ('Fusion' in role) return `Fusion: ${role.Fusion.variant}`;
+    if (role === 'Queen') return 'Queen';
+    if (typeof role === 'object') {
+      if ('Planner' in role) return `Planner ${role.Planner.index}`;
+      if ('Worker' in role) return `Worker ${role.Worker.index}`;
+      if ('Fusion' in role) return `Fusion: ${role.Fusion.variant}`;
+    }
     return 'Agent';
   }
 
@@ -47,12 +51,20 @@
     return 'Session';
   }
 
-  function handleLaunch() {
+  async function handleLaunch() {
     if (!projectPath.trim()) return;
-    onLaunch(projectPath, workerCount, prompt || undefined);
-    showLaunchDialog = false;
-    projectPath = '';
-    prompt = '';
+    launching = true;
+    launchError = '';
+    try {
+      await onLaunch(projectPath, workerCount, prompt || undefined);
+      showLaunchDialog = false;
+      projectPath = '';
+      prompt = '';
+    } catch (err) {
+      launchError = String(err);
+    } finally {
+      launching = false;
+    }
   }
 
   function selectSession(sessionId: string) {
@@ -125,7 +137,7 @@
   </div>
 
   <div class="sidebar-footer">
-    <button class="launch-button" onclick={() => showLaunchDialog = true}>
+    <button class="launch-button" onclick={() => { showLaunchDialog = true; launchError = ''; }}>
       <span class="icon">+</span> New Session
     </button>
   </div>
@@ -178,12 +190,15 @@
             rows="3"
           ></textarea>
         </div>
+        {#if launchError}
+          <div class="error-message">{launchError}</div>
+        {/if}
         <div class="dialog-actions">
-          <button type="button" class="cancel-button" onclick={() => showLaunchDialog = false}>
+          <button type="button" class="cancel-button" onclick={() => showLaunchDialog = false} disabled={launching}>
             Cancel
           </button>
-          <button type="submit" class="submit-button">
-            Launch
+          <button type="submit" class="submit-button" disabled={launching || !projectPath.trim()}>
+            {launching ? 'Launching...' : 'Launch'}
           </button>
         </div>
       </form>
@@ -495,7 +510,24 @@
     color: var(--color-bg);
   }
 
-  .submit-button:hover {
+  .submit-button:hover:not(:disabled) {
     background: var(--color-accent-bright);
+  }
+
+  .submit-button:disabled,
+  .cancel-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .error-message {
+    padding: 12px;
+    margin-bottom: 16px;
+    background: rgba(247, 118, 142, 0.15);
+    border: 1px solid var(--color-error);
+    border-radius: 6px;
+    color: var(--color-error);
+    font-size: 13px;
+    word-break: break-word;
   }
 </style>
