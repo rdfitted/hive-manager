@@ -737,7 +737,7 @@ Your CLI requires explicit polling. Run this bash loop to wait for activation:
 
 ```bash
 while true; do
-  STATUS=$(grep "^Status:" "{task_file}" | head -1)
+  STATUS=$(grep "^## Status:" "{task_file}" | head -1)
   echo "[Worker {index}] Checking status: $STATUS"
   if [[ "$STATUS" == *"ACTIVE"* ]]; then
     echo "[Worker {index}] Task is ACTIVE - beginning work"
