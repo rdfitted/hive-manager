@@ -712,16 +712,6 @@ Last updated: {timestamp}
 
         Ok(file_path)
     }
-
-    /// Get the task file path for a worker
-    fn get_task_file_path(project_path: &PathBuf, session_id: &str, worker_index: u8) -> PathBuf {
-        project_path
-            .join(".hive-manager")
-            .join(session_id)
-            .join("tasks")
-            .join(format!("worker-{}-task.md", worker_index))
-    }
-
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
