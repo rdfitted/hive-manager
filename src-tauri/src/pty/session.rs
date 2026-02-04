@@ -148,21 +148,17 @@ impl PtySession {
             })
             .map_err(|e| PtyError::CreateError(e.to_string()))?;
 
-        // On Windows, wrap non-exe commands in cmd.exe to handle npm batch files
-        // Commands like gemini, opencode, codex are .cmd batch files on Windows
-        let cmd = if cfg!(windows) && !command.ends_with(".exe") && command != "cmd" && command != "cmd.exe" {
-            // Build full command string for cmd.exe /c
-            let full_cmd = if args.is_empty() {
-                command.to_string()
-            } else {
-                format!("{} {}", command, args.iter()
-                    .map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.to_string() })
-                    .collect::<Vec<_>>()
-                    .join(" "))
-            };
-            tracing::info!("Wrapping command for Windows: cmd.exe /c {}", full_cmd);
+        // On Windows, create a batch file to avoid shell quoting issues
+        // This is the same pattern used by /hive command
+        let mut cmd = if cfg!(windows) {
+            // Create temp batch file with the full command
+            let batch_content = Self::create_batch_content(command, args);
+            let batch_path = Self::write_temp_batch(&batch_content)?;
+
+            tracing::info!("Created batch file: {} with content:\n{}", batch_path.display(), batch_content);
+
             let mut cmd = CommandBuilder::new("cmd.exe");
-            cmd.args(&["/c", &full_cmd]);
+            cmd.args(&["/c", &batch_path.to_string_lossy()]);
             cmd
         } else {
             let mut cmd = CommandBuilder::new(command);
@@ -170,7 +166,6 @@ impl PtySession {
             cmd
         };
 
-        let mut cmd = cmd;
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
@@ -225,6 +220,60 @@ impl PtySession {
 
     pub fn get_reader(&self) -> Arc<Mutex<SendReader>> {
         Arc::clone(&self.reader)
+    }
+
+    /// Create batch file content for Windows command execution
+    #[cfg(windows)]
+    fn create_batch_content(command: &str, args: &[&str]) -> String {
+        let mut lines = vec!["@echo off".to_string()];
+
+        // Build the command line with proper quoting
+        let mut cmd_line = command.to_string();
+        for arg in args {
+            // Quote args that contain spaces or special characters
+            if arg.contains(' ') || arg.contains('"') || arg.contains('&') || arg.contains('|') {
+                // Escape any existing quotes and wrap in quotes
+                let escaped = arg.replace('"', "\\\"");
+                cmd_line.push_str(&format!(" \"{}\"", escaped));
+            } else {
+                cmd_line.push_str(&format!(" {}", arg));
+            }
+        }
+
+        lines.push(cmd_line);
+        lines.join("\r\n")
+    }
+
+    #[cfg(not(windows))]
+    fn create_batch_content(_command: &str, _args: &[&str]) -> String {
+        String::new()
+    }
+
+    /// Write a temporary batch file and return its path
+    #[cfg(windows)]
+    fn write_temp_batch(content: &str) -> Result<std::path::PathBuf, PtyError> {
+        use std::io::Write;
+
+        let temp_dir = std::env::temp_dir().join("hive-manager");
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| PtyError::CreateError(format!("Failed to create temp dir: {}", e)))?;
+
+        // Generate unique filename
+        let filename = format!("agent-{}.bat", uuid::Uuid::new_v4());
+        let path = temp_dir.join(filename);
+
+        let mut file = std::fs::File::create(&path)
+            .map_err(|e| PtyError::CreateError(format!("Failed to create batch file: {}", e)))?;
+
+        file.write_all(content.as_bytes())
+            .map_err(|e| PtyError::CreateError(format!("Failed to write batch file: {}", e)))?;
+
+        Ok(path)
+    }
+
+    #[cfg(not(windows))]
+    fn write_temp_batch(_content: &str) -> Result<std::path::PathBuf, PtyError> {
+        Err(PtyError::CreateError("Batch files only supported on Windows".to_string()))
     }
 }
 
