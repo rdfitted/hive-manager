@@ -101,6 +101,8 @@ impl SessionController {
                 vec!["-p", &prompt_str]
             };
 
+            tracing::info!("Launching Queen agent: claude with args {:?} in {:?}", claude_args, project_path);
+
             pty_manager
                 .create_session(
                     queen_id.clone(),
@@ -111,7 +113,11 @@ impl SessionController {
                     120,
                     30,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    let err_msg = format!("Failed to spawn Queen: {}", e);
+                    tracing::error!("{}", err_msg);
+                    err_msg
+                })?;
         }
 
         agents.push(AgentInfo {

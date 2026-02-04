@@ -1,0 +1,101 @@
+## Description
+
+Implement M2: Multi-Agent Support to enable orchestration and monitoring of multiple Claude Code agents simultaneously. This milestone builds on M1's foundation (single Queen agent working) to deliver the core value proposition of Hive Manager: unified multi-agent session management.
+
+## Context
+
+**Type**: feature | **Scope**: large | **Complexity**: high | **Priority**: high
+
+M2 represents a **large-scale effort** spanning the full stack - from Rust PTY process management to Svelte reactive UI components. The infrastructure is 80% ready (M1 complete), but critical gaps prevent multi-agent scenarios.
+
+## Relevant Files
+
+Files identified by multi-agent investigation (6 scouts: Gemini Flash/Lite, Codex, 3 OpenCode):
+
+- **CRITICAL**: `src-tauri/src/session/controller.rs:80-144` - launch_hive() only spawns Queen, needs worker spawning loop
+- **CRITICAL**: `src/routes/+page.svelte:90-109` - Hardcoded 2x2 grid (max 4 agents), needs dynamic calculation
+- **HIGH**: `src-tauri/src/pty/manager.rs:127-133` - PTY resize disabled, causes display corruption
+- **HIGH**: `src/lib/components/StatusPanel.svelte:75-98` - Input alerts partial, needs clickable auto-focus
+- **MEDIUM**: `src/lib/components/SessionSidebar.svelte:74-94` - Flat list, needs tree visualization
+- **MEDIUM**: `src/lib/components/Terminal.svelte` - Needs focus() API and alert styling
+- **MEDIUM**: `src/lib/stores/sessions.ts` - Verify multi-agent reactivity
+
+## Analysis
+
+### Rationale
+M2 is the logical next step: (1) Core value blocked until multi-agent works, (2) Architecture already supports it (HashMap storage, Vec agents, role enums defined), (3) M1 left intentional gaps (worker_count parameter ignored)
+
+### Impact
+**Backward Compatible**: ✅ Single-agent sessions continue working (explicit case in +page.svelte, event filtering by ID)
+
+**Risks**: Memory pressure (N threads), event flooding, no focus management yet
+
+### Approach
+
+**Phase 1 - Backend**: Worker spawning loop, fix PTY resize, status propagation
+**Phase 2 - State**: Multi-agent store reactivity, focused terminal tracking
+**Phase 3 - UI Grid**: Dynamic CSS Grid (auto-fit), 2-25 agent support
+**Phase 4 - Polish**: Clickable alerts, tree hierarchy, focus management
+
+## Acceptance Criteria
+
+**Multiple PTY Sessions**
+- [ ] launch_hive(path, 4) spawns 5 PTYs (Queen + 4 Workers)
+- [ ] Unique IDs: {session_id}-{role}[-index]
+- [ ] Session isolation (input to Worker 2 ≠ Worker 3)
+
+**Terminal Grid Layout**
+- [ ] 2 agents: 1x2 | 3-4: 2x2 | 5-6: 2x3 | 7-9: 3x3 | 10+: scrollable
+- [ ] Responsive resize
+- [ ] Role headers (Queen, Worker 1, etc.)
+
+**Session Hierarchy**
+- [ ] Tree structure: Session → Queen → Workers
+- [ ] Status indicators (⚫ running / ⏳ waiting / ✓ done / ✗ error)
+- [ ] Click to focus
+- [ ] Real-time updates
+
+**Status Tracking**
+- [ ] Backend: Starting → Running → WaitingForInput → Completed/Error
+- [ ] pty-status events emit
+- [ ] Frontend reactive updates
+
+**Input Alerts**
+- [ ] Alert on WaitingForInput status
+- [ ] Show agent role + last line
+- [ ] Click to focus terminal
+- [ ] Auto-dismiss on input
+- [ ] Stack multiple alerts
+
+**Performance**
+- [ ] 10 workers launch < 5s
+- [ ] 60fps with 10 agents outputting
+- [ ] < 500MB memory, < 5% CPU (10 idle agents)
+
+**Stability**
+- [ ] Agent isolation (kill one ≠ affect others)
+- [ ] Clean session termination
+- [ ] Handle crashes gracefully
+- [ ] No leaks in rapid cycles
+
+## Testing
+
+**Unit**: spawn_workers creates N PTYs, resize works, status propagates
+**Integration**: 4 workers render, input isolation, kill isolation, resize works
+**Load**: 20 noisy agents perform, no leaks in 10 rapid cycles
+
+## Considerations
+
+**Security**: Same privileges, no sandboxing, same-origin IPC (low risk), no resource limits (add max agents config)
+
+**Performance** (10 agents): 10 threads, 1000 switches/sec, 10MB stack, 1000-5000 events/sec total
+
+**Optimizations**: Batch events (50ms), consider tokio async, terminal virtualization
+
+**Docs**: Architecture diagram, event schema, agent fleet config guide
+
+---
+
+**Investigation**: 9 agents (6 scouts + 3 planners) | 7 files | **HIGH confidence** - All converged
+
+*Created with multi-agent investigation (Scale 3) using Claude Code*

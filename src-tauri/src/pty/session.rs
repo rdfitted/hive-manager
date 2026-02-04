@@ -66,6 +66,8 @@ impl PtySession {
     ) -> Result<Self, PtyError> {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
+        tracing::info!("Creating PTY session: command={} args={:?} cwd={:?}", command, args, cwd);
+
         let pty_system = NativePtySystem::default();
 
         let pty_pair = pty_system
