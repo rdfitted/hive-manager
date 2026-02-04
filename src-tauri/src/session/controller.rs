@@ -1023,7 +1023,8 @@ Last updated: {timestamp}
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
 
-        let prompt = config.prompt.as_deref().unwrap_or("Analyze the codebase and create a plan.");
+        // Empty string means Master Planner will ask user what task they want
+        let prompt = config.prompt.as_deref().unwrap_or("");
 
         {
             let pty_manager = self.pty_manager.read();
@@ -1101,7 +1102,8 @@ Last updated: {timestamp}
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
 
-        let prompt = config.prompt.as_deref().unwrap_or("Analyze the codebase and create a plan.");
+        // Empty string means Master Planner will ask user what task they want
+        let prompt = config.prompt.as_deref().unwrap_or("");
 
         {
             let pty_manager = self.pty_manager.read();
