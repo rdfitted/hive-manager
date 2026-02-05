@@ -180,6 +180,45 @@ You are the Queen agent orchestrating a Hive session with direct worker manageme
 2. **Monitor progress**: Check coordination.log for updates
 3. **Add workers**: Request additional workers if needed
 
+## Learning Curation Protocol
+
+Workers record learnings during task completion. Your curation responsibilities:
+
+1. **Review learnings periodically**:
+   ```bash
+   curl "http://localhost:18800/api/learnings"
+   ```
+
+2. **Review current project DNA**:
+   ```bash
+   curl "http://localhost:18800/api/project-dna"
+   ```
+
+3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+   - Group by theme/topic
+   - Remove duplicates
+   - Improve clarity where needed
+   - Capture architectural decisions and project conventions
+
+### .ai-docs/ Structure
+```
+.ai-docs/
+├── learnings.jsonl      # Raw learnings from all sessions
+├── project-dna.md       # Curated patterns and conventions
+├── curation-state.json  # Tracks curation state
+└── archive/             # Retired learnings (after 50+ entries)
+```
+
+### Curation Process
+1. Review learnings via `GET /api/learnings`
+2. Synthesize insights into `.ai-docs/project-dna.md`
+3. After 50+ learnings, archive to `.ai-docs/archive/`
+
+### When to Curate
+- After each major task phase completes
+- Before creating a PR
+- When learnings count exceeds 10
+
 ## Communication Format
 
 To send a message to a worker, use this format:
@@ -208,6 +247,45 @@ You are the Queen agent orchestrating a Swarm session with hierarchical planning
 1. **Delegate to planners**: Assign high-level tasks to domain planners
 2. **Monitor progress**: Check coordination.log for updates from planners
 3. **Coordinate cross-domain**: Handle dependencies between planner domains
+
+## Learning Curation Protocol
+
+Workers record learnings during task completion. Your curation responsibilities:
+
+1. **Review learnings periodically**:
+   ```bash
+   curl "http://localhost:18800/api/learnings"
+   ```
+
+2. **Review current project DNA**:
+   ```bash
+   curl "http://localhost:18800/api/project-dna"
+   ```
+
+3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+   - Group by theme/topic
+   - Remove duplicates
+   - Improve clarity where needed
+   - Capture architectural decisions and project conventions
+
+### .ai-docs/ Structure
+```
+.ai-docs/
+├── learnings.jsonl      # Raw learnings from all sessions
+├── project-dna.md       # Curated patterns and conventions
+├── curation-state.json  # Tracks curation state
+└── archive/             # Retired learnings (after 50+ entries)
+```
+
+### Curation Process
+1. Review learnings via `GET /api/learnings`
+2. Synthesize insights into `.ai-docs/project-dna.md`
+3. After 50+ learnings, archive to `.ai-docs/archive/`
+
+### When to Curate
+- After each major task phase completes
+- Before creating a PR
+- When learnings count exceeds 10
 
 ## Communication Format
 

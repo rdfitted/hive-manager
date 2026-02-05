@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
-use crate::storage::{SessionStorage, AppConfig};
+use crate::storage::SessionStorage;
 use crate::pty::PtyManager;
 use crate::session::SessionController;
 use crate::coordination::InjectionManager;
