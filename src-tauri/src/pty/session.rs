@@ -225,6 +225,7 @@ impl PtySession {
     }
 
     /// Check if the process is still running
+    #[allow(dead_code)]
     pub fn is_alive(&self) -> bool {
         let mut child = self.child.lock();
         if let Some(ref mut c) = *child {
@@ -236,6 +237,7 @@ impl PtySession {
     }
 
     /// Gracefully terminate the process by sending Ctrl+C, waiting, then killing if needed
+    #[allow(dead_code)]
     pub async fn graceful_terminate(&self) -> Result<(), PtyError> {
         // Send Ctrl+C for CLI tools
         self.write(b"\x03")?;
