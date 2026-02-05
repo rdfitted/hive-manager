@@ -822,6 +822,7 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 - **Session ID**: {session_id}
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tasks Directory**: `.hive-manager/{session_id}/tasks/`
+- **Tools Directory**: `.hive-manager/{session_id}/tools/`
 
 {plan_section}
 
@@ -838,31 +839,48 @@ You have full access to all Claude Code tools:
 - **Read/Write/Edit** - File operations
 - **Bash** - Run shell commands, git operations
 - **Glob/Grep** - Search files and content
-- **Task** - Spawn subagents for complex tasks
+- **Task** - Spawn subagents for complex investigation (NOT for spawning workers)
 - **WebFetch/WebSearch** - Access web resources
 
 ### Claude Code Commands
 You can use any /commands in `~/.claude/commands/`
 
-### Hive Coordination
-To assign tasks to workers, update their task files:
+### Hive-Specific Tools
 
-**Update task file status from STANDBY to ACTIVE:**
+Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files for detailed usage:
+
+| Tool | File | Purpose |
+|------|------|---------|
+| Spawn Worker | `spawn-worker.md` | Spawn new workers via HTTP API (visible terminal windows) |
+| List Workers | `list-workers.md` | Get list of all workers and their status |
+
+**Quick Reference - Spawn Worker:**
+```bash
+curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"role_type": "backend", "cli": "claude"}}'
+```
+
+### Task Assignment
+To assign tasks to existing workers, update their task files:
+
 ```
 Edit: .hive-manager/{session_id}/tasks/worker-N-task.md
 Change Status: STANDBY -> ACTIVE
 Add task instructions
 ```
 
-Workers are polling their task files and will start working when they see ACTIVE status.
+Workers poll their task files and will start when they see ACTIVE status.
 
 ## Coordination Protocol
 
 1. **Read the plan** - Check `.hive-manager/{session_id}/plan.md` if it exists
-2. **Assign tasks** - Update worker task files with specific assignments
-3. **Monitor progress** - Watch for workers to mark tasks COMPLETED
-4. **Review & integrate** - Review worker output and coordinate integration
-5. **Commit & push** - You handle final commits (workers don't push)
+2. **Spawn workers** - Use the spawn-worker tool to create workers as needed
+3. **Assign tasks** - Update worker task files with specific assignments
+4. **Monitor progress** - Watch for workers to mark tasks COMPLETED
+5. **Spawn next worker** - When a task completes, spawn the next worker if needed
+6. **Review & integrate** - Review worker output and coordinate integration
+7. **Commit & push** - You handle final commits (workers don't push)
 
 ## Your Task
 
@@ -1095,6 +1113,7 @@ You are the **Queen** orchestrating a multi-agent Swarm session. You coordinate 
 - **Session ID**: {session_id}
 - **Mode**: Swarm (hierarchical)
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
+- **Tools Directory**: `.hive-manager/{session_id}/tools/`
 
 ## Your Planners
 
@@ -1108,11 +1127,20 @@ You have full access to all Claude Code tools:
 - **Read/Write/Edit** - File operations
 - **Bash** - Run shell commands, git operations
 - **Glob/Grep** - Search files and content
-- **Task** - Spawn subagents for complex tasks
+- **Task** - Spawn subagents for complex investigation (NOT for spawning workers)
 - **WebFetch/WebSearch** - Access web resources
 
 ### Claude Code Commands
 You can use any /commands in `~/.claude/commands/`
+
+### Hive-Specific Tools
+
+Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files for detailed usage:
+
+| Tool | File | Purpose |
+|------|------|---------|
+| Spawn Worker | `spawn-worker.md` | Spawn new workers via HTTP API (visible terminal windows) |
+| List Workers | `list-workers.md` | Get list of all workers and their status |
 
 ### Swarm Coordination
 Assign domain-level tasks to Planners. Each Planner will break down the task and coordinate their workers.
@@ -1152,6 +1180,134 @@ Write domain tasks to planner prompt files or tell the operator:
             .map_err(|e| format!("Failed to write prompt file: {}", e))?;
 
         Ok(file_path)
+    }
+
+    /// Write a tool documentation file to the session's tools directory
+    fn write_tool_file(project_path: &PathBuf, session_id: &str, filename: &str, content: &str) -> Result<PathBuf, String> {
+        let tools_dir = project_path.join(".hive-manager").join(session_id).join("tools");
+        std::fs::create_dir_all(&tools_dir)
+            .map_err(|e| format!("Failed to create tools directory: {}", e))?;
+
+        let file_path = tools_dir.join(filename);
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write tool file: {}", e))?;
+
+        Ok(file_path)
+    }
+
+    /// Write all standard tool documentation files for a session
+    fn write_tool_files(project_path: &PathBuf, session_id: &str) -> Result<(), String> {
+        // Spawn Worker tool
+        let spawn_worker_tool = format!(r#"# Spawn Worker Tool
+
+Spawn a new worker agent in a visible terminal window.
+
+## HTTP API
+
+**Endpoint:** `POST http://localhost:8377/api/sessions/{session_id}/workers`
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{{
+  "role_type": "backend",
+  "cli": "claude",
+  "initial_task": "Optional task description"
+}}
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality |
+| cli | string | No | CLI to use: claude (default), gemini, cursor, droid, qwen |
+| label | string | No | Custom label for the worker |
+| initial_task | string | No | Initial task/prompt for the worker |
+| parent_id | string | No | Parent agent ID (defaults to Queen) |
+
+## Example Usage
+
+```bash
+# Spawn a backend worker with claude
+curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"role_type": "backend", "cli": "claude"}}'
+
+# Spawn a frontend worker with an initial task
+curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"role_type": "frontend", "cli": "claude", "initial_task": "Implement the login form UI"}}'
+
+# Spawn a reviewer worker
+curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"role_type": "reviewer", "cli": "claude"}}'
+```
+
+## Response
+
+```json
+{{
+  "worker_id": "{session_id}-worker-N",
+  "role": "Backend",
+  "cli": "claude",
+  "status": "Running",
+  "task_file": ".hive-manager/{session_id}/tasks/worker-N-task.md"
+}}
+```
+
+## Notes
+
+- Workers spawn in a new Windows Terminal tab (visible window)
+- Each worker gets a task file you can update to assign work
+- Workers poll their task files for ACTIVE status
+- Use this to spawn workers sequentially as tasks complete
+"#, session_id = session_id);
+
+        Self::write_tool_file(project_path, session_id, "spawn-worker.md", &spawn_worker_tool)?;
+
+        // List Workers tool
+        let list_workers_tool = format!(r#"# List Workers Tool
+
+Get a list of all workers in the current session.
+
+## HTTP API
+
+**Endpoint:** `GET http://localhost:8377/api/sessions/{session_id}/workers`
+
+## Example Usage
+
+```bash
+curl "http://localhost:8377/api/sessions/{session_id}/workers"
+```
+
+## Response
+
+```json
+{{
+  "session_id": "{session_id}",
+  "workers": [
+    {{
+      "id": "{session_id}-worker-1",
+      "role": "Backend",
+      "cli": "claude",
+      "status": "Running",
+      "task_file": ".hive-manager/{session_id}/tasks/worker-1-task.md"
+    }}
+  ],
+  "count": 1
+}}
+```
+"#, session_id = session_id);
+
+        Self::write_tool_file(project_path, session_id, "list-workers.md", &list_workers_tool)?;
+
+        Ok(())
     }
 
     /// Write a task file for a worker (STANDBY by default)
@@ -1288,6 +1444,9 @@ Last updated: {timestamp}
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            // Write tool documentation files
+            Self::write_tool_files(&project_path, &session_id)?;
 
             tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -1734,6 +1893,9 @@ Last updated: {timestamp}
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
+            // Write tool documentation files
+            Self::write_tool_files(&session.project_path, session_id)?;
+
             tracing::info!("Launching Queen agent (after planning): {} {:?} in {:?}", cmd, args, cwd);
 
             pty_manager
@@ -1998,6 +2160,9 @@ Last updated: {timestamp}
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
+            // Write tool documentation files
+            Self::write_tool_files(&session.project_path, session_id)?;
+
             tracing::info!("Launching Queen agent (swarm, after planning): {} {:?} in {:?}", cmd, args, cwd);
 
             pty_manager
@@ -2164,6 +2329,9 @@ Last updated: {timestamp}
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            // Write tool documentation files
+            Self::write_tool_files(&project_path, &session_id)?;
 
             tracing::info!("Launching Queen agent (swarm): {} {:?} in {:?}", cmd, args, cwd);
 
