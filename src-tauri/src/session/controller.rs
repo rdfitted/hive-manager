@@ -384,7 +384,13 @@ impl SessionController {
         // Add any extra flags from config
         args.extend(config.flags.clone());
 
-        (config.cli.clone(), args)
+        // Determine the actual command to run
+        let command = match config.cli.as_str() {
+            "cursor" => "wsl".to_string(),  // Cursor runs via WSL
+            _ => config.cli.clone(),         // Others use CLI name as command
+        };
+
+        (command, args)
     }
 
     /// Add prompt argument to args based on CLI type
