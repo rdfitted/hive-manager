@@ -250,12 +250,40 @@ pub async fn get_session_storage_path(
     Ok(path.to_string_lossy().to_string())
 }
 
-/// List stored sessions
+/// Get current working directory
+#[tauri::command]
+pub async fn get_current_directory() -> Result<String, String> {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// List stored sessions, optionally filtered by project path
 #[tauri::command]
 pub async fn list_stored_sessions(
     storage_state: State<'_, StorageState>,
+    project_path: Option<String>,
 ) -> Result<Vec<crate::storage::SessionSummary>, String> {
-    storage_state.0.list_sessions().map_err(|e| e.to_string())
+    let sessions = storage_state.0.list_sessions().map_err(|e| e.to_string())?;
+
+    match project_path {
+        Some(path) => {
+            // Normalize paths for comparison (handle trailing slashes, case on Windows)
+            let normalize = |p: &str| -> String {
+                let p = p.trim_end_matches(['/', '\\']);
+                #[cfg(windows)]
+                { p.to_lowercase() }
+                #[cfg(not(windows))]
+                { p.to_string() }
+            };
+
+            let target = normalize(&path);
+            Ok(sessions.into_iter()
+                .filter(|s| normalize(&s.project_path) == target)
+                .collect())
+        }
+        None => Ok(sessions),
+    }
 }
 
 /// Get app config

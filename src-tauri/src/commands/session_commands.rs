@@ -94,3 +94,12 @@ pub async fn mark_plan_ready(
     let controller = state.0.read();
     controller.mark_plan_ready(&session_id)
 }
+
+#[tauri::command]
+pub async fn resume_session(
+    state: State<'_, SessionControllerState>,
+    session_id: String,
+) -> Result<Session, String> {
+    let controller = state.0.read();
+    controller.resume_session(&session_id)
+}

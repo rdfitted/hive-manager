@@ -252,6 +252,26 @@ function createSessionsStore() {
         throw err;
       }
     },
+
+    async resumeSession(sessionId: string) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('resume_session', { sessionId });
+        update((state) => {
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
   };
 }
 

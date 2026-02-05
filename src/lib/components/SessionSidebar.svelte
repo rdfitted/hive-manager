@@ -1,11 +1,20 @@
 <script lang="ts">
-  import { sessions, activeSession, type Session, type AgentInfo, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
+  import { invoke } from '@tauri-apps/api/core';
+  import { onMount } from 'svelte';
   import LaunchDialog from './LaunchDialog.svelte';
 
   interface Props {
     onLaunch: (projectPath: string, workerCount: number, command: string, prompt?: string) => Promise<void>;
     onLaunchHiveV2?: (config: HiveLaunchConfig) => Promise<void>;
     onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
+  }
+
+  interface SessionSummary {
+    id: string;
+    session_type: string;
+    project_path: string;
+    created_at: string;
   }
 
   let { onLaunch, onLaunchHiveV2, onLaunchSwarm }: Props = $props();
@@ -15,44 +24,65 @@
   let sidebarCollapsed = $state(true);
   let activeCollapsed = $state(false);
   let recentCollapsed = $state(true);
+  let persistedSessions = $state<SessionSummary[]>([]);
+  let loadingPersisted = $state(false);
+  let currentDirectory = $state<string | null>(null);
 
-  function getStatusIcon(status: AgentInfo['status']): string {
-    if (status === 'Running') return '█';
-    if (typeof status === 'object' && 'WaitingForInput' in status) return '⏳';
-    if (status === 'Completed') return '✓';
-    if (status === 'Starting') return '○';
-    if (typeof status === 'object' && 'Error' in status) return '✗';
-    return '?';
-  }
-
-  function getStatusColor(status: AgentInfo['status']): string {
-    if (status === 'Running') return 'var(--color-running)';
-    if (typeof status === 'object' && 'WaitingForInput' in status) return 'var(--color-warning)';
-    if (status === 'Completed') return 'var(--color-success)';
-    if (status === 'Starting') return 'var(--color-text-muted)';
-    if (typeof status === 'object' && 'Error' in status) return 'var(--color-error)';
-    return 'var(--color-text)';
-  }
-
-  function getRoleName(role: AgentInfo['role']): string {
-    if (role === 'Queen') return 'Queen';
-    if (typeof role === 'object') {
-      if ('Planner' in role) return `Planner ${role.Planner.index}`;
-      if ('Worker' in role) return `Worker ${role.Worker.index}`;
-      if ('Fusion' in role) return `Fusion: ${role.Fusion.variant}`;
+  onMount(async () => {
+    // Get current working directory first
+    try {
+      currentDirectory = await invoke<string>('get_current_directory');
+    } catch (err) {
+      console.error('Failed to get current directory:', err);
     }
-    return 'Agent';
+    await loadPersistedSessions();
+  });
+
+  async function loadPersistedSessions() {
+    loadingPersisted = true;
+    try {
+      // Filter by current directory if available
+      persistedSessions = await invoke<SessionSummary[]>('list_stored_sessions', {
+        projectPath: currentDirectory
+      });
+    } catch (err) {
+      console.error('Failed to load persisted sessions:', err);
+    } finally {
+      loadingPersisted = false;
+    }
   }
 
-  function getSessionTypeName(session: Session): string {
-    if ('Hive' in session.session_type) return 'Hive';
-    if ('Swarm' in session.session_type) return 'Swarm';
-    if ('Fusion' in session.session_type) return 'Fusion';
-    return 'Session';
+  function formatTimestamp(dateStr: string): string {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
+  }
+
+  function isActiveState(state: Session['state']): boolean {
+    return state === 'Running' || state === 'Starting' || state === 'Planning' || state === 'PlanReady';
   }
 
   function selectSession(sessionId: string) {
     sessions.setActiveSession(sessionId);
+  }
+
+  async function handleResumeSession(sessionId: string) {
+    try {
+      await sessions.resumeSession(sessionId);
+      // Remove from persisted list after successful resume
+      persistedSessions = persistedSessions.filter(s => s.id !== sessionId);
+    } catch (err) {
+      console.error('Failed to resume session:', err);
+    }
   }
 
   async function handleLaunchHive(e: CustomEvent<HiveLaunchConfig>) {
@@ -110,31 +140,16 @@
         <h3>Active</h3>
       </button>
       {#if !activeCollapsed}
-        {#if $sessions.sessions.filter(s => s.state === 'Running' || s.state === 'Starting').length === 0}
+        {#if $sessions.sessions.filter(s => isActiveState(s.state)).length === 0}
           <p class="empty-state">No active sessions</p>
         {:else}
           <ul class="session-list">
-            {#each $sessions.sessions.filter(s => s.state === 'Running' || s.state === 'Starting') as session}
+            {#each $sessions.sessions.filter(s => isActiveState(s.state)) as session}
               <li class="session-item" class:active={$activeSession?.id === session.id}>
                 <button class="session-button" onclick={() => selectSession(session.id)}>
-                  <span class="session-type">{getSessionTypeName(session)}</span>
                   <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                  <span class="session-meta">{formatTimestamp(session.created_at)}</span>
                 </button>
-                <ul class="agent-list">
-                  {#each session.agents.slice(0, 4) as agent}
-                    <li class="agent-item">
-                      <span class="agent-status" style="color: {getStatusColor(agent.status)}">
-                        {getStatusIcon(agent.status)}
-                      </span>
-                      <span class="agent-name">{agent.config?.label || getRoleName(agent.role)}</span>
-                    </li>
-                  {/each}
-                  {#if session.agents.length > 4}
-                    <li class="agent-item more">
-                      <span class="agent-name">+{session.agents.length - 4} more</span>
-                    </li>
-                  {/if}
-                </ul>
               </li>
             {/each}
           </ul>
@@ -148,15 +163,20 @@
         <h3>Recent</h3>
       </button>
       {#if !recentCollapsed}
-        {#if $sessions.sessions.filter(s => s.state === 'Completed').length === 0}
+        {#if loadingPersisted}
+          <p class="empty-state">Loading...</p>
+        {:else if persistedSessions.length === 0}
           <p class="empty-state">No recent sessions</p>
         {:else}
           <ul class="session-list">
-            {#each $sessions.sessions.filter(s => s.state === 'Completed').slice(0, 5) as session}
-              <li class="session-item completed">
-                <button class="session-button" onclick={() => selectSession(session.id)}>
-                  <span class="session-type">{getSessionTypeName(session)}</span>
+            {#each persistedSessions.slice(0, 5) as session}
+              <li class="session-item recent">
+                <div class="session-info">
                   <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                  <span class="session-meta">{formatTimestamp(session.created_at)}</span>
+                </div>
+                <button class="load-button" onclick={() => handleResumeSession(session.id)} title="Load Session">
+                  ▶
                 </button>
               </li>
             {/each}
@@ -304,10 +324,6 @@
     border-color: var(--color-accent);
   }
 
-  .session-item.completed {
-    opacity: 0.6;
-  }
-
   .session-button {
     width: 100%;
     display: flex;
@@ -325,45 +341,15 @@
     background: var(--color-surface-hover);
   }
 
-  .session-type {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-accent);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
   .session-path {
     font-size: 13px;
     color: var(--color-text);
+  }
+
+  .session-meta {
+    font-size: 11px;
+    color: var(--color-text-muted);
     margin-top: 2px;
-  }
-
-  .agent-list {
-    list-style: none;
-    margin: 4px 0 0 12px;
-    padding: 0;
-  }
-
-  .agent-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 2px 0;
-    font-size: 12px;
-  }
-
-  .agent-item.more {
-    color: var(--color-text-muted);
-    font-style: italic;
-  }
-
-  .agent-status {
-    font-size: 10px;
-  }
-
-  .agent-name {
-    color: var(--color-text-muted);
   }
 
   .sidebar-footer {
@@ -402,5 +388,43 @@
     font-size: 16px;
     font-weight: 400;
     flex-shrink: 0;
+  }
+
+  .session-item.recent {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+  }
+
+  .session-item.recent:hover {
+    background: var(--color-surface-hover);
+  }
+
+  .session-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .load-button {
+    padding: 4px 8px;
+    border: 1px solid var(--color-accent);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-accent);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .load-button:hover {
+    background: var(--color-accent);
+    color: var(--color-bg);
   }
 </style>

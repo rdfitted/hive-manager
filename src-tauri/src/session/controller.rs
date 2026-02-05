@@ -1450,6 +1450,112 @@ Last updated: {timestamp}
         }
     }
 
+    /// Resume a persisted session from storage
+    pub fn resume_session(&self, session_id: &str) -> Result<Session, String> {
+        // Validate session ID format to prevent path traversal
+        if session_id.contains("..") || session_id.contains("/") || session_id.contains("\\") {
+            return Err("Invalid session ID format".to_string());
+        }
+
+        // Check if session is already loaded in memory
+        {
+            let sessions = self.sessions.read();
+            if sessions.contains_key(session_id) {
+                return Err("Session is already loaded".to_string());
+            }
+        }
+
+        // Load session from storage
+        let storage = SessionStorage::new()
+            .map_err(|e| format!("Failed to initialize storage: {}", e))?;
+        let persisted = storage.load_session(session_id)
+            .map_err(|e| format!("Failed to load session from storage: {}", e))?;
+
+        // Convert persisted session to active session
+        let session_type = match persisted.session_type {
+            crate::storage::SessionTypeInfo::Hive { worker_count } => SessionType::Hive { worker_count },
+            crate::storage::SessionTypeInfo::Swarm { planner_count } => SessionType::Swarm { planner_count },
+            crate::storage::SessionTypeInfo::Fusion { variants } => SessionType::Fusion { variants },
+        };
+
+        // Convert persisted agents to active agents
+        let agents: Vec<AgentInfo> = persisted.agents.iter().filter_map(|pa| {
+            // Parse the role string (e.g., "Queen", "Planner(0)", "Worker(1)")
+            let role = if pa.role == "Queen" {
+                AgentRole::Queen
+            } else if pa.role.starts_with("Planner(") {
+                let index_str = pa.role.trim_start_matches("Planner(").trim_end_matches(")");
+                let index = index_str.parse::<u8>().ok()?;
+                AgentRole::Planner { index }
+            } else if pa.role.starts_with("Worker(") {
+                let parts: Vec<&str> = pa.role.trim_start_matches("Worker(").trim_end_matches(")").split(',').collect();
+                let index = parts.get(0)?.parse::<u8>().ok()?;
+                let parent = parts.get(1).and_then(|s: &&str| {
+                    let trimmed = s.trim();
+                    if trimmed == "None" {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                });
+                AgentRole::Worker { index, parent }
+            } else if pa.role.starts_with("Fusion(") {
+                let variant = pa.role.trim_start_matches("Fusion(").trim_end_matches(")").to_string();
+                AgentRole::Fusion { variant }
+            } else {
+                return None;  // Skip unparseable roles
+            };
+
+            // Convert PersistedAgentConfig to AgentConfig
+            let config = AgentConfig {
+                cli: pa.config.cli.clone(),
+                model: pa.config.model.clone(),
+                flags: pa.config.flags.clone(),
+                label: pa.config.label.clone(),
+                role: pa.config.role_type.as_ref().map(|rt: &String| WorkerRole {
+                    role_type: rt.clone(),
+                    label: pa.config.label.clone().unwrap_or_default(),
+                    default_cli: pa.config.cli.clone(),
+                    prompt_template: pa.config.initial_prompt.clone(),
+                }),
+                initial_prompt: pa.config.initial_prompt.clone(),
+            };
+
+            Some(AgentInfo {
+                id: pa.id.clone(),
+                role,
+                status: AgentStatus::Completed,  // All persisted sessions are completed
+                config,
+                parent_id: pa.parent_id.clone(),
+            })
+        }).collect();
+
+        // Create session object
+        let session = Session {
+            id: persisted.id.clone(),
+            session_type,
+            project_path: PathBuf::from(persisted.project_path),
+            state: SessionState::Completed,  // Persisted sessions are completed
+            created_at: persisted.created_at,
+            agents,
+        };
+
+        // Add to in-memory sessions
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session.id.clone(), session.clone());
+        }
+
+        // Emit session-update event to frontend
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: session.clone(),
+            });
+        }
+
+        Ok(session)
+    }
+
     /// Continue a Swarm session after planning phase
     fn continue_swarm_after_planning(&self, session_id: &str, session: &Session) -> Result<Session, String> {
         let cwd = session.project_path.to_str().unwrap_or(".");
@@ -1895,12 +2001,72 @@ Last updated: {timestamp}
     }
 
     /// Initialize session storage for a new session
+    /// Convert a Session to PersistedSession for storage
+    fn session_to_persisted(&self, session: &Session) -> crate::storage::PersistedSession {
+        use crate::storage::{PersistedSession, SessionTypeInfo, PersistedAgentInfo, PersistedAgentConfig};
+
+        let session_type = match &session.session_type {
+            SessionType::Hive { worker_count } => SessionTypeInfo::Hive { worker_count: *worker_count },
+            SessionType::Swarm { planner_count } => SessionTypeInfo::Swarm { planner_count: *planner_count },
+            SessionType::Fusion { variants } => SessionTypeInfo::Fusion { variants: variants.clone() },
+        };
+
+        let agents: Vec<PersistedAgentInfo> = session.agents.iter().map(|a| {
+            let role_str = match &a.role {
+                AgentRole::MasterPlanner => "MasterPlanner".to_string(),
+                AgentRole::Queen => "Queen".to_string(),
+                AgentRole::Planner { index } => format!("Planner({})", index),
+                AgentRole::Worker { index, parent } => format!("Worker({},{})", index, parent.as_deref().unwrap_or("None")),
+                AgentRole::Fusion { variant } => format!("Fusion({})", variant),
+            };
+
+            PersistedAgentInfo {
+                id: a.id.clone(),
+                role: role_str,
+                config: PersistedAgentConfig {
+                    cli: a.config.cli.clone(),
+                    model: a.config.model.clone(),
+                    flags: a.config.flags.clone(),
+                    label: a.config.label.clone(),
+                    role_type: a.config.role.as_ref().map(|r| r.role_type.clone()),
+                    initial_prompt: a.config.initial_prompt.clone(),
+                },
+                parent_id: a.parent_id.clone(),
+            }
+        }).collect();
+
+        let state_str = match &session.state {
+            SessionState::Planning => "Planning",
+            SessionState::PlanReady => "PlanReady",
+            SessionState::Starting => "Starting",
+            SessionState::Running => "Running",
+            SessionState::Paused => "Paused",
+            SessionState::Completed => "Completed",
+            SessionState::Failed(_) => "Failed",
+        }.to_string();
+
+        PersistedSession {
+            id: session.id.clone(),
+            session_type,
+            project_path: session.project_path.to_string_lossy().to_string(),
+            created_at: session.created_at,
+            agents,
+            state: state_str,
+        }
+    }
+
     fn init_session_storage(&self, session: &Session) {
         if let Some(ref storage) = self.storage {
             // Create session directory
             if let Err(e) = storage.create_session_dir(&session.id) {
                 tracing::warn!("Failed to create session directory: {}", e);
                 return;
+            }
+
+            // Save session metadata to session.json
+            let persisted = self.session_to_persisted(session);
+            if let Err(e) = storage.save_session(&persisted) {
+                tracing::warn!("Failed to save session metadata: {}", e);
             }
 
             // Build hierarchy nodes
@@ -1955,6 +2121,12 @@ Last updated: {timestamp}
         if let Some(ref storage) = self.storage {
             let sessions = self.sessions.read();
             if let Some(session) = sessions.get(session_id) {
+                // Update session.json with latest state
+                let persisted = self.session_to_persisted(session);
+                if let Err(e) = storage.save_session(&persisted) {
+                    tracing::warn!("Failed to update session metadata: {}", e);
+                }
+
                 // Build hierarchy nodes
                 let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
                     let role_str = match &agent.role {
