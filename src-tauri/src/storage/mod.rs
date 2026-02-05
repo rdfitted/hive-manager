@@ -277,7 +277,7 @@ impl SessionStorage {
             command: "opencode".to_string(),
             auto_approve_flag: None,
             model_flag: Some("-m".to_string()),
-            default_model: "glm-4.7".to_string(),
+            default_model: "bigpickle".to_string(),
             env: Some({
                 let mut env = HashMap::new();
                 env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
@@ -305,7 +305,7 @@ impl SessionStorage {
             command: "droid".to_string(),
             auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
             model_flag: Some("-m".to_string()),
-            default_model: "claude-opus-4-5-20251101".to_string(),
+            default_model: "glm-4.7".to_string(),
             env: None,
         });
 
@@ -327,7 +327,7 @@ impl SessionStorage {
             model: "gemini-2.5-pro".to_string(),
         });
         default_roles.insert("coherence".to_string(), RoleDefaults {
-            cli: "opencode".to_string(),
+            cli: "droid".to_string(),
             model: "glm-4.7".to_string(),
         });
         default_roles.insert("simplify".to_string(), RoleDefaults {

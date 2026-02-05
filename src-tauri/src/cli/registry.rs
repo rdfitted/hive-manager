@@ -159,7 +159,7 @@ mod tests {
             command: "droid".to_string(),
             auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
             model_flag: Some("-m".to_string()),
-            default_model: "claude-opus-4-5-20251101".to_string(),
+            default_model: "glm-4.7".to_string(),
             env: None,
         });
         clis.insert("qwen".to_string(), CliConfig {
