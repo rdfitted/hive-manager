@@ -2,7 +2,7 @@
 
 A desktop application for orchestrating multi-agent AI coding sessions. Launch coordinated teams of AI coding assistants (Claude, Codex, Gemini, etc.) that work together on complex software tasks.
 
-![Hive Manager](https://img.shields.io/badge/version-0.12.2-blue)
+![Hive Manager](https://img.shields.io/badge/version-0.13.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -71,12 +71,21 @@ Launch multiple agents working on the same task in parallel. Compare approaches 
 
 ## Supported CLIs
 
-- [Claude Code](https://claude.ai/claude-code) (Anthropic)
-- [Codex](https://github.com/openai/codex) (OpenAI)
-- [OpenCode](https://github.com/opencode-ai/opencode)
-- [Gemini CLI](https://github.com/google/gemini-cli)
-- [Aider](https://github.com/paul-gauthier/aider)
-- Any CLI that accepts prompts via stdin
+| CLI | Behavior | Notes |
+|-----|----------|-------|
+| [Claude Code](https://claude.ai/claude-code) | Action-Prone | Anthropic's official CLI. Needs role hardening for worker agents. |
+| [Gemini CLI](https://github.com/google/gemini-cli) | Action-Prone | Google's CLI. Similar behavior to Claude. |
+| [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Uses bash loops for coordination. |
+| [OpenCode](https://github.com/opencode-ai/opencode) | Explicit-Polling | Open-source alternative. |
+| [Qwen](https://github.com/QwenLM/qwen-agent) | Instruction-Following | Follows instructions literally, respects role boundaries naturally. |
+| [Droid](https://github.com/anthropics/droid) | Interactive | TUI mode with `/model` command for model selection. |
+| [Cursor](https://cursor.sh) | Interactive | Runs via WSL. Uses global model setting. |
+
+**Behavior profiles** determine how Hive Manager prompts each agent:
+- **Action-Prone**: Proactive agents that need strong constraints to stay in their lane
+- **Instruction-Following**: Literal interpreters that respect role boundaries naturally
+- **Explicit-Polling**: Agents that need bash loops for coordination
+- **Interactive**: TUI-based agents with different prompt injection
 
 ## Configuration
 
