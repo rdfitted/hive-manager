@@ -2,9 +2,11 @@
 
 A desktop application for orchestrating multi-agent AI coding sessions. Launch coordinated teams of AI coding assistants (Claude, Codex, Gemini, etc.) that work together on complex software tasks.
 
-![Hive Manager](https://img.shields.io/badge/version-0.12.0-blue)
+![Hive Manager](https://img.shields.io/badge/version-0.12.1-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
+
+![Hive Manager Screenshot](docs/images/hive-session.png)
 
 ## Features
 
