@@ -95,6 +95,7 @@ pub struct OperatorInjectRequest {
 }
 
 /// Request for worker status notification
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStatusRequest {
     pub session_id: String,
@@ -120,6 +121,7 @@ pub async fn operator_inject(
 }
 
 /// Report worker status change to Queen
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn report_worker_status(
     state: State<'_, CoordinationState>,

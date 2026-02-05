@@ -4,6 +4,9 @@
   import AgentTree from './AgentTree.svelte';
 
   let collapsed = $state(true);
+  let agentsCollapsed = $state(false);
+  let alertsCollapsed = $state(false);
+  let infoCollapsed = $state(true);
 
   function handleAlertClick(agentId: string) {
     ui.setFocusedAgent(agentId);
@@ -53,53 +56,70 @@
     {:else}
       <div class="panel-content">
         <section class="section">
-          <h3>Agents</h3>
-          <AgentTree agents={$activeAgents} selectedId={null} />
+          <button class="section-header" onclick={() => agentsCollapsed = !agentsCollapsed}>
+            <span class="chevron" class:collapsed={agentsCollapsed}>▼</span>
+            <h3>Agents ({$activeAgents.length})</h3>
+          </button>
+          {#if !agentsCollapsed}
+            <div class="section-content">
+              <AgentTree agents={$activeAgents} selectedId={null} />
+            </div>
+          {/if}
         </section>
 
         <section class="section">
-          <h3>Alerts</h3>
-          <div class="alerts">
-            {#each $activeAgents.filter(a => typeof a.status === 'object' && 'WaitingForInput' in a.status) as agent}
-              {@const lastLine = typeof agent.status === 'object' && 'WaitingForInput' in agent.status ? agent.status.WaitingForInput : ''}
-              <button class="alert warning clickable" onclick={() => handleAlertClick(agent.id)}>
-                <div class="alert-header">
-                  <span class="alert-icon">⚠</span>
-                  <span class="alert-title">{getAgentLabel(agent)} needs input</span>
-                </div>
-                {#if lastLine}
-                  <div class="alert-body">
-                    <p class="last-line">{lastLine}</p>
+          <button class="section-header" onclick={() => alertsCollapsed = !alertsCollapsed}>
+            <span class="chevron" class:collapsed={alertsCollapsed}>▼</span>
+            <h3>Alerts</h3>
+          </button>
+          {#if !alertsCollapsed}
+            <div class="alerts">
+              {#each $activeAgents.filter(a => typeof a.status === 'object' && 'WaitingForInput' in a.status) as agent}
+                {@const lastLine = typeof agent.status === 'object' && 'WaitingForInput' in agent.status ? agent.status.WaitingForInput : ''}
+                <button class="alert warning clickable" onclick={() => handleAlertClick(agent.id)}>
+                  <div class="alert-header">
+                    <span class="alert-icon">⚠</span>
+                    <span class="alert-title">{getAgentLabel(agent)} needs input</span>
                   </div>
-                {/if}
-              </button>
-            {:else}
-              <p class="no-alerts">No alerts</p>
-            {/each}
-          </div>
+                  {#if lastLine}
+                    <div class="alert-body">
+                      <p class="last-line">{lastLine}</p>
+                    </div>
+                  {/if}
+                </button>
+              {:else}
+                <p class="no-alerts">No alerts</p>
+              {/each}
+            </div>
+          {/if}
         </section>
 
         <section class="section">
-          <h3>Session Info</h3>
-          <div class="info-grid">
-            <div class="info-item">
-              <span class="info-label">Type</span>
-              <span class="info-value">
-                {'Hive' in $activeSession.session_type ? 'Hive' :
-                 'Swarm' in $activeSession.session_type ? 'Swarm' : 'Fusion'}
-              </span>
+          <button class="section-header" onclick={() => infoCollapsed = !infoCollapsed}>
+            <span class="chevron" class:collapsed={infoCollapsed}>▼</span>
+            <h3>Session Info</h3>
+          </button>
+          {#if !infoCollapsed}
+            <div class="info-grid">
+              <div class="info-item">
+                <span class="info-label">Type</span>
+                <span class="info-value">
+                  {'Hive' in $activeSession.session_type ? 'Hive' :
+                   'Swarm' in $activeSession.session_type ? 'Swarm' : 'Fusion'}
+                </span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Agents</span>
+                <span class="info-value">{$activeAgents.length}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">State</span>
+                <span class="info-value state-{getSessionStateClass($activeSession.state)}">
+                  {getSessionStateText($activeSession.state)}
+                </span>
+              </div>
             </div>
-            <div class="info-item">
-              <span class="info-label">Agents</span>
-              <span class="info-value">{$activeAgents.length}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">State</span>
-              <span class="info-value state-{getSessionStateClass($activeSession.state)}">
-                {getSessionStateText($activeSession.state)}
-              </span>
-            </div>
-          </div>
+          {/if}
         </section>
       </div>
     {/if}
@@ -186,16 +206,48 @@
   }
 
   .section {
-    padding: 12px 16px;
+    padding: 8px 16px;
   }
 
-  .section h3 {
-    margin: 0 0 12px 0;
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 4px 0;
+    margin-bottom: 8px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .section-header:hover h3 {
+    color: var(--color-text);
+  }
+
+  .section-header h3 {
+    margin: 0;
     font-size: 11px;
     font-weight: 600;
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+  }
+
+  .chevron {
+    font-size: 8px;
+    color: var(--color-text-muted);
+    transition: transform 0.2s ease;
+  }
+
+  .chevron.collapsed {
+    transform: rotate(-90deg);
+  }
+
+  .section-content {
+    max-height: 300px;
+    overflow-y: auto;
   }
 
   .alerts {

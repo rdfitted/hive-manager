@@ -487,7 +487,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             class="smoke-test-button"
             on:click={handleSmokeTest}
             disabled={launching || !projectPath.trim()}
-            title="Quick test to validate the entire flow without real investigation"
+            title="Quick test to validate the entire flow: planning phase, task check-off, and agent spawning"
           >
             Smoke Test
           </button>

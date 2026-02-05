@@ -26,6 +26,7 @@ pub struct SessionListResponse {
 
 #[derive(Deserialize)]
 pub struct LaunchHiveRequest {
+    #[allow(dead_code)]
     pub issue_url: Option<String>,
     pub task_description: Option<String>,
     pub worker_count: Option<u8>,
@@ -35,6 +36,7 @@ pub struct LaunchHiveRequest {
 
 #[derive(Deserialize)]
 pub struct LaunchSwarmRequest {
+    #[allow(dead_code)]
     pub issue_url: Option<String>,
     pub task_description: Option<String>,
     pub planner_count: Option<u8>,

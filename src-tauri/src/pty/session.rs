@@ -224,6 +224,35 @@ impl PtySession {
         Ok(())
     }
 
+    /// Check if the process is still running
+    #[allow(dead_code)]
+    pub fn is_alive(&self) -> bool {
+        let mut child = self.child.lock();
+        if let Some(ref mut c) = *child {
+            // Try to check if the process is still running
+            c.try_wait().ok().flatten().is_none()
+        } else {
+            false
+        }
+    }
+
+    /// Gracefully terminate the process by sending Ctrl+C, waiting, then killing if needed
+    #[allow(dead_code)]
+    pub async fn graceful_terminate(&self) -> Result<(), PtyError> {
+        // Send Ctrl+C for CLI tools
+        self.write(b"\x03")?;
+
+        // Wait up to 5 seconds for graceful exit
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Force kill if still running
+        if self.is_alive() {
+            self.kill()?;
+        }
+
+        Ok(())
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         let master = self.master.lock();
         master.resize(cols, rows)
