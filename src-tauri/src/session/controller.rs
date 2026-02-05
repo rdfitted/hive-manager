@@ -54,6 +54,8 @@ pub enum SessionState {
     Starting,
     SpawningWorker(u8),      // Which worker is being spawned (sequential mode)
     WaitingForWorker(u8),    // Which worker we're waiting on (sequential mode)
+    SpawningPlanner(u8),     // Which planner is being spawned (Swarm sequential mode)
+    WaitingForPlanner(u8),   // Which planner we're waiting on (Swarm sequential mode)
     Running,
     Paused,
     Completed,
@@ -1143,14 +1145,140 @@ Awaiting task assignment from the Queen."#,
         )
     }
 
-    /// Build the Queen's master prompt for Swarm mode with planner information
+    /// Build a planner's prompt with HTTP API for spawning workers sequentially
+    fn build_planner_prompt_with_http(cli: &str, index: u8, config: &PlannerConfig, queen_id: &str, session_id: &str) -> String {
+        let worker_count = config.workers.len();
+
+        // Build worker info section
+        let mut worker_info = String::new();
+        for (i, worker_config) in config.workers.iter().enumerate() {
+            let worker_index = i + 1;
+            let role_label = worker_config.role.as_ref()
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| format!("Worker {}", worker_index));
+            let cli_name = &worker_config.cli;
+            worker_info.push_str(&format!("| {} | {} | {} |\n", worker_index, role_label, cli_name));
+        }
+
+        let hardening = if CliRegistry::needs_role_hardening(cli) {
+            r#"
+WARNING: CRITICAL ROLE CONSTRAINTS
+
+You are a PLANNER - you coordinate Workers in your domain. You do NOT implement.
+
+### You ARE allowed to:
+- Read any file in your domain for context
+- Spawn workers via HTTP API (use curl)
+- Write/Edit ONLY: Worker task files in your domain
+- Read worker task files to monitor COMPLETED/BLOCKED status
+- Report domain completion to Queen
+
+### You are PROHIBITED from:
+- Editing application source code directly
+- Running implementation commands
+- Completing worker tasks yourself
+- "Helping" by doing a worker's job
+- Using Task tool to spawn subagents (use HTTP API instead for visible windows)
+
+If a worker is blocked, reassign or escalate to Queen. Do NOT fix it yourself.
+"#
+        } else {
+            ""
+        };
+
+        format!(
+            r#"# Planner {index} - {domain} Domain
+
+You are a **Planner** in a multi-agent Swarm session, managing the {domain} domain.
+{hardening}
+## Session Info
+
+- **Session ID**: {session_id}
+- **Queen**: {queen_id}
+- **Your ID**: {session_id}-planner-{index}
+- **Tools Directory**: `.hive-manager/{session_id}/tools/`
+
+## Your Domain
+
+{domain}
+
+## Workers to Spawn
+
+You will spawn {worker_count} workers SEQUENTIALLY. Each worker runs in its own visible terminal window.
+
+| # | Role | CLI |
+|---|------|-----|
+{worker_info}
+
+## HTTP API for Spawning Workers
+
+Read `.hive-manager/{session_id}/tools/spawn-worker.md` for detailed documentation.
+
+**Quick Reference:**
+```bash
+# Spawn a worker
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"role_type": "ROLE", "cli": "CLI", "initial_task": "TASK", "parent_id": "{session_id}-planner-{index}"}}'
+```
+
+## SEQUENTIAL SPAWNING PROTOCOL (CRITICAL)
+
+You MUST spawn workers ONE AT A TIME and wait for completion:
+
+1. **Spawn Worker 1** via HTTP API with initial task
+2. **Wait for Worker 1** to signal `[COMPLETED]` in their task file
+3. **Spawn Worker 2** via HTTP API with initial task
+4. **Wait for Worker 2** to signal `[COMPLETED]` in their task file
+5. Continue until all {worker_count} workers are done
+6. Signal `[DOMAIN_COMPLETE]` to Queen
+
+### Monitoring Worker Completion
+
+Check worker task files for status:
+```bash
+# Read worker task file to check status
+cat .hive-manager/{session_id}/tasks/worker-N-task.md | grep "Status:"
+```
+
+Look for:
+- `Status: COMPLETED` - Worker finished successfully
+- `Status: BLOCKED` - Worker needs help (escalate to you or Queen)
+
+## Protocol Summary
+
+1. Receive domain task from Queen
+2. Break down into worker subtasks
+3. Spawn Worker 1 with task → wait for completion
+4. Spawn Worker 2 with task → wait for completion
+5. ... repeat for all workers
+6. Verify integration works
+7. Report `[DOMAIN_COMPLETE]` to Queen
+
+## Your Current Task
+
+Awaiting task assignment from the Queen."#,
+            index = index,
+            domain = config.domain,
+            session_id = session_id,
+            hardening = hardening,
+            worker_info = worker_info,
+            worker_count = worker_count,
+            queen_id = queen_id
+        )
+    }
+
+    /// Build the Queen's master prompt for Swarm mode with sequential planner spawning
     fn build_swarm_queen_prompt(cli: &str, session_id: &str, planners: &[PlannerConfig], user_prompt: Option<&str>) -> String {
-        let mut planner_list = String::new();
+        let planner_count = planners.len();
+
+        // Build planner info section (what Queen will spawn)
+        let mut planner_info = String::new();
         for (i, planner_config) in planners.iter().enumerate() {
             let index = i + 1;
-            let planner_id = format!("{}-planner-{}", session_id, index);
-            planner_list.push_str(&format!("| {} | {} | {} | {} workers |\n",
-                planner_id, index, planner_config.domain, planner_config.workers.len()));
+            let worker_count = planner_config.workers.len();
+            planner_info.push_str(&format!("| {} | {} | {} workers |\n",
+                index, planner_config.domain, worker_count));
         }
 
         let hardening = if CliRegistry::needs_role_hardening(cli) {
@@ -1161,7 +1289,7 @@ You are the QUEEN - the top-level coordinator. You do NOT implement.
 
 ### You ARE allowed to:
 - Read plan.md, coordination.log, planner status files
-- Write/Edit ONLY: Planner task files, coordination.log
+- Spawn planners via HTTP API (use curl)
 - Run git commands: commit, push, branch, PR creation
 - Coordinate cross-domain integration
 
@@ -1169,7 +1297,8 @@ You are the QUEEN - the top-level coordinator. You do NOT implement.
 - Editing application source code (*.rs, *.ts, *.svelte, etc.)
 - Running implementation commands (cargo build, npm run, tests)
 - Fixing bugs or implementing features directly
-- Bypassing Planners to assign tasks directly to Workers
+- Spawning workers directly (Planners spawn workers)
+- Using Task tool to spawn subagents (use HTTP API for visible terminal windows)
 
 If you find yourself about to edit code, STOP. Assign work to a Planner instead.
 "#
@@ -1180,66 +1309,108 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
         format!(
 r#"# Queen Agent - Swarm Session
 
-You are the **Queen** orchestrating a multi-agent Swarm session. You coordinate Planners who each manage their own domain.
+You are the **Queen** orchestrating a multi-agent Swarm session. You spawn and coordinate Planners who each manage their own domain.
 {hardening}
 
 ## Session Info
 
 - **Session ID**: {session_id}
-- **Mode**: Swarm (hierarchical)
+- **Mode**: Swarm (hierarchical with sequential spawning)
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
 
-## Your Planners
+## Planners to Spawn
 
-| ID | # | Domain | Workers |
-|----|---|--------|---------|
-{planner_list}
+You will spawn {planner_count} planners SEQUENTIALLY. Each planner spawns their own workers.
+
+| # | Domain | Workers |
+|---|--------|---------|
+{planner_info}
+
+## HTTP API for Spawning Planners
+
+Read `.hive-manager/{session_id}/tools/spawn-planner.md` for detailed documentation.
+
+**Quick Reference:**
+```bash
+# Spawn a planner
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
+  -H "Content-Type: application/json" \
+  -d '{{"domain": "DOMAIN", "cli": "claude", "worker_count": N}}'
+```
+
 ## Your Tools
 
 ### Claude Code Tools (Native)
 You have full access to all Claude Code tools:
 - **Read/Write/Edit** - File operations
-- **Bash** - Run shell commands, git operations
+- **Bash** - Run shell commands, git operations, curl for HTTP API
 - **Glob/Grep** - Search files and content
-- **Task** - Spawn subagents for complex investigation (NOT for spawning workers)
+- **Task** - Spawn subagents for complex investigation (NOT for spawning planners/workers)
 - **WebFetch/WebSearch** - Access web resources
 
-### Claude Code Commands
-You can use any /commands in `~/.claude/commands/`
-
-### Hive-Specific Tools
+### Swarm-Specific Tools (HTTP API)
 
 Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files for detailed usage:
 
 | Tool | File | Purpose |
 |------|------|---------|
-| Spawn Worker | `spawn-worker.md` | Spawn new workers via HTTP API (visible terminal windows) |
+| Spawn Planner | `spawn-planner.md` | Spawn planners via HTTP API (visible terminal windows) |
+| List Planners | `list-planners.md` | Get list of all planners and their status |
+| Spawn Worker | `spawn-worker.md` | Reference only - Planners use this to spawn workers |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
 
-### Swarm Coordination
-Assign domain-level tasks to Planners. Each Planner will break down the task and coordinate their workers.
+## SEQUENTIAL SPAWNING PROTOCOL WITH COMMITS (CRITICAL)
 
-**Task Assignment:**
-Write domain tasks to planner prompt files or tell the operator:
+You MUST spawn planners ONE AT A TIME and COMMIT between each:
+
+### Protocol:
+
+1. **Spawn Planner 1** via HTTP API with domain task
+2. **Wait for Planner 1** to signal `[DOMAIN_COMPLETE]`
+3. **COMMIT** changes with message: "feat(DOMAIN): [description of domain work]"
+4. **Spawn Planner 2** via HTTP API with domain task
+5. **Wait for Planner 2** to signal `[DOMAIN_COMPLETE]`
+6. **COMMIT** changes with message: "feat(DOMAIN): [description of domain work]"
+7. Continue for all {planner_count} planners
+8. **Final integration commit** and push
+
+### Monitoring Planner Completion
+
+Check planner status via HTTP API or look for signals:
+```bash
+# List planners
+curl "http://localhost:18800/api/sessions/{session_id}/planners"
+
+# Check coordination log for [DOMAIN_COMPLETE] signals
+cat .hive-manager/{session_id}/coordination/coordination.log | grep "DOMAIN_COMPLETE"
 ```
-@Operator: Tell Planner 1 to handle the backend API implementation
+
+### Git Commit Pattern
+
+After each planner completes:
+```bash
+git add -A
+git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 ```
 
-## Swarm Protocol
+## Protocol Summary
 
-1. **Analyze task** - Identify which domains are involved
-2. **Assign to Planners** - Give each Planner their domain scope
-3. **Monitor progress** - Watch for [DOMAIN_COMPLETE] from Planners
-4. **Integration** - Coordinate cross-domain integration
-5. **Commit & push** - You handle final commits (only you push)
+1. Analyze task → identify domains
+2. For each planner (sequentially):
+   a. Spawn planner with domain task
+   b. Wait for `[DOMAIN_COMPLETE]` signal
+   c. **COMMIT** domain changes
+3. Run integration tests
+4. Final commit and push
 
 ## Your Task
 
 {task}"#,
             hardening = hardening,
             session_id = session_id,
-            planner_list = planner_list,
+            planner_info = planner_info,
+            planner_count = planner_count,
             task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
         )
     }
@@ -1381,6 +1552,140 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
 "#, session_id = session_id);
 
         Self::write_tool_file(project_path, session_id, "list-workers.md", &list_workers_tool)?;
+
+        Ok(())
+    }
+
+    /// Write tool documentation files for Swarm mode (includes planner tools)
+    fn write_swarm_tool_files(project_path: &PathBuf, session_id: &str, planner_count: u8) -> Result<(), String> {
+        // First write standard worker tools
+        Self::write_tool_files(project_path, session_id)?;
+
+        // Spawn Planner tool
+        let spawn_planner_tool = format!(r#"# Spawn Planner Tool
+
+Spawn a new planner agent in a visible terminal window. Planners manage a domain and spawn workers.
+
+## HTTP API
+
+**Endpoint:** `POST http://localhost:18800/api/sessions/{session_id}/planners`
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{{
+  "domain": "backend",
+  "cli": "claude",
+  "worker_count": 2
+}}
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
+| cli | string | No | CLI to use: claude (default), gemini, cursor, droid, qwen |
+| model | string | No | Model to use (e.g., "opus" for claude) |
+| label | string | No | Custom label for the planner |
+| worker_count | number | No | Number of workers this planner will manage (default: 1) |
+| workers | array | No | Pre-defined worker configurations |
+
+## Example Usage
+
+```bash
+# Spawn a backend planner with 2 workers
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
+  -H "Content-Type: application/json" \
+  -d '{{"domain": "backend", "cli": "claude", "worker_count": 2}}'
+
+# Spawn a frontend planner with specific workers
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "domain": "frontend",
+    "cli": "claude",
+    "workers": [
+      {{"role_type": "ui", "label": "UI Developer"}},
+      {{"role_type": "styling", "label": "CSS Specialist"}}
+    ]
+  }}'
+```
+
+## Response
+
+```json
+{{
+  "planner_id": "{session_id}-planner-N",
+  "planner_index": N,
+  "domain": "backend",
+  "cli": "claude",
+  "status": "Running",
+  "worker_count": 2,
+  "prompt_file": ".hive-manager/{session_id}/prompts/planner-N-prompt.md",
+  "tools_dir": ".hive-manager/{session_id}/tools/"
+}}
+```
+
+## Sequential Spawning Protocol
+
+1. Spawn Planner 1 → Wait for completion signal
+2. **COMMIT changes** with message describing Planner 1's domain work
+3. Spawn Planner 2 → Wait for completion signal
+4. **COMMIT changes** with message describing Planner 2's domain work
+5. Continue for all {planner_count} planners
+6. Final integration commit and push
+
+## Notes
+
+- Planners spawn in a new Windows Terminal tab (visible window)
+- Each planner knows how to spawn its own workers sequentially
+- Wait for `[DOMAIN_COMPLETE]` signal from planner before committing and spawning next
+- Commit between each planner to create clean git history
+"#, session_id = session_id, planner_count = planner_count);
+
+        Self::write_tool_file(project_path, session_id, "spawn-planner.md", &spawn_planner_tool)?;
+
+        // List Planners tool
+        let list_planners_tool = format!(r#"# List Planners Tool
+
+Get a list of all planners in the current Swarm session.
+
+## HTTP API
+
+**Endpoint:** `GET http://localhost:18800/api/sessions/{session_id}/planners`
+
+## Example Usage
+
+```bash
+curl "http://localhost:18800/api/sessions/{session_id}/planners"
+```
+
+## Response
+
+```json
+{{
+  "session_id": "{session_id}",
+  "planners": [
+    {{
+      "id": "{session_id}-planner-1",
+      "index": 1,
+      "cli": "claude",
+      "label": "Backend Planner",
+      "status": "Running",
+      "prompt_file": ".hive-manager/{session_id}/prompts/planner-1-prompt.md"
+    }}
+  ],
+  "count": 1
+}}
+```
+"#, session_id = session_id);
+
+        Self::write_tool_file(project_path, session_id, "list-planners.md", &list_planners_tool)?;
 
         Ok(())
     }
@@ -2400,7 +2705,7 @@ Last updated: {timestamp}
         {
             let pty_manager = self.pty_manager.read();
 
-            // Create Queen agent
+            // Create Queen agent ONLY - planners will be spawned sequentially by Queen via HTTP API
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
@@ -2410,10 +2715,10 @@ Last updated: {timestamp}
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-            // Write tool documentation files
-            Self::write_tool_files(&project_path, &session_id)?;
+            // Write Swarm tool documentation files (includes spawn-planner.md)
+            Self::write_swarm_tool_files(&project_path, &session_id, planners.len() as u8)?;
 
-            tracing::info!("Launching Queen agent (swarm): {} {:?} in {:?}", cmd, args, cwd);
+            tracing::info!("Launching Queen agent (swarm - sequential planner spawning): {} {:?} in {:?}", cmd, args, cwd);
 
             pty_manager
                 .create_session(
@@ -2435,91 +2740,24 @@ Last updated: {timestamp}
                 parent_id: None,
             });
 
-            // Create Planner agents and their Workers
-            for (planner_idx, planner_config) in planners.iter().enumerate() {
-                let planner_index = (planner_idx + 1) as u8;
-                let planner_id = format!("{}-planner-{}", session_id, planner_index);
-                let (cmd, mut args) = Self::build_command(&planner_config.config);
-
-                // Write planner prompt to file and pass to CLI
-                let planner_prompt = Self::build_planner_prompt(planner_config.config.cli.as_str(), planner_index, planner_config, &queen_id);
-                let filename = format!("planner-{}-prompt.md", planner_index);
-                let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &planner_prompt)?;
-                let prompt_path = prompt_file.to_string_lossy().to_string();
-                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-                tracing::info!("Launching Planner {} ({}) agent: {} {:?} in {:?}",
-                    planner_index, planner_config.domain, cmd, args, cwd);
-
-                pty_manager
-                    .create_session(
-                        planner_id.clone(),
-                        AgentRole::Planner { index: planner_index },
-                        &cmd,
-                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        Some(cwd),
-                        120,
-                        30,
-                    )
-                    .map_err(|e| format!("Failed to spawn Planner {}: {}", planner_index, e))?;
-
-                agents.push(AgentInfo {
-                    id: planner_id.clone(),
-                    role: AgentRole::Planner { index: planner_index },
-                    status: AgentStatus::Running,
-                    config: planner_config.config.clone(),
-                    parent_id: Some(queen_id.clone()),
-                });
-
-                // Create Workers for this Planner
-                for (worker_idx, worker_config) in planner_config.workers.iter().enumerate() {
-                    let worker_index = (worker_idx + 1) as u8;
-                    // For swarm, use combined index for unique task file naming
-                    let combined_index = planner_index * 10 + worker_index;
-                    let worker_id = format!("{}-planner-{}-worker-{}", session_id, planner_index, worker_index);
-                    let (cmd, mut args) = Self::build_command(worker_config);
-
-                    // Write task file for this worker (STANDBY or with initial task)
-                    Self::write_task_file(&project_path, &session_id, combined_index, worker_config.initial_prompt.as_deref())?;
-
-                    // Write worker prompt to file and pass to CLI (use combined_index for task file reference)
-                    let worker_prompt = Self::build_worker_prompt(combined_index, worker_config, &planner_id, &session_id);
-                    let filename = format!("planner-{}-worker-{}-prompt.md", planner_index, worker_index);
-                    let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
-                    let prompt_path = prompt_file.to_string_lossy().to_string();
-                    Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-                    tracing::info!("Launching Worker {}.{} agent: {} {:?} in {:?}",
-                        planner_index, worker_index, cmd, args, cwd);
-
-                    pty_manager
-                        .create_session(
-                            worker_id.clone(),
-                            AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
-                            &cmd,
-                            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                            Some(cwd),
-                            120,
-                            30,
-                        )
-                        .map_err(|e| format!("Failed to spawn Worker {}.{}: {}", planner_index, worker_index, e))?;
-
-                    agents.push(AgentInfo {
-                        id: worker_id,
-                        role: AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
-                        status: AgentStatus::Running,
-                        config: worker_config.clone(),
-                        parent_id: Some(planner_id.clone()),
-                    });
-                }
-            }
+            // NOTE: Planners and Workers are NOT spawned here anymore
+            // Queen will spawn them sequentially via HTTP API and commit between each planner
         }
+
+        // Store planner config for Queen to reference when spawning
+        let swarm_config_path = project_path.join(".hive-manager").join(&session_id).join("swarm-planners.json");
+        std::fs::create_dir_all(swarm_config_path.parent().unwrap())
+            .map_err(|e| format!("Failed to create session directory: {}", e))?;
+        let planners_json = serde_json::to_string_pretty(&planners)
+            .map_err(|e| format!("Failed to serialize planner config: {}", e))?;
+        std::fs::write(&swarm_config_path, planners_json)
+            .map_err(|e| format!("Failed to write planner config: {}", e))?;
 
         let session = Session {
             id: session_id.clone(),
             session_type: SessionType::Swarm { planner_count: planners.len() as u8 },
             project_path,
-            state: SessionState::Running,
+            state: SessionState::Running,  // Queen will spawn planners sequentially
             created_at: Utc::now(),
             agents,
         };
@@ -2659,6 +2897,139 @@ Last updated: {timestamp}
         Ok(agent_info)
     }
 
+    /// Add a planner to a Swarm session (called by Queen via HTTP API)
+    pub fn add_planner(
+        &self,
+        session_id: &str,
+        config: AgentConfig,
+        domain: String,
+        workers: Vec<AgentConfig>,
+    ) -> Result<AgentInfo, String> {
+        // Get session and validate
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }.ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        // Allow adding planners when Running or WaitingForPlanner
+        let can_add_planner = matches!(
+            session.state,
+            SessionState::Running | SessionState::WaitingForPlanner(_)
+        );
+        if !can_add_planner {
+            return Err(format!("Cannot add planner to session in state {:?}", session.state));
+        }
+
+        // Determine planner index
+        let existing_planners = session.agents.iter()
+            .filter(|a| matches!(a.role, AgentRole::Planner { .. }))
+            .count();
+        let planner_index = (existing_planners + 1) as u8;
+
+        // Get queen ID as parent
+        let queen_id = format!("{}-queen", session_id);
+
+        // Generate planner ID
+        let planner_id = format!("{}-planner-{}", session_id, planner_index);
+
+        // Build command
+        let (cmd, mut args) = Self::build_command(&config);
+
+        // Get project path
+        let cwd = session.project_path.to_str().unwrap_or(".");
+
+        // Build PlannerConfig for prompt generation
+        let planner_config = PlannerConfig {
+            config: config.clone(),
+            domain: domain.clone(),
+            workers: workers.clone(),
+        };
+
+        // Write planner prompt to file and add to args
+        let planner_prompt = Self::build_planner_prompt_with_http(&config.cli, planner_index, &planner_config, &queen_id, session_id);
+        let filename = format!("planner-{}-prompt.md", planner_index);
+        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &planner_prompt)?;
+        let prompt_path = prompt_file.to_string_lossy().to_string();
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+        // Write tool files for the planner (spawn-worker.md)
+        Self::write_tool_files(&session.project_path, session_id)?;
+
+        tracing::info!(
+            "Adding Planner {} ({}) to session {}: {} {:?}",
+            planner_index,
+            domain,
+            session_id,
+            cmd,
+            args
+        );
+
+        // Spawn PTY
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    planner_id.clone(),
+                    AgentRole::Planner { index: planner_index },
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Planner {}: {}", planner_index, e))?;
+        }
+
+        // Create agent info
+        let mut agent_config = config;
+        agent_config.label = Some(format!("{} Planner", domain));
+
+        let agent_info = AgentInfo {
+            id: planner_id.clone(),
+            role: AgentRole::Planner { index: planner_index },
+            status: AgentStatus::Running,
+            config: agent_config,
+            parent_id: Some(queen_id),
+        };
+
+        // Update session state to WaitingForPlanner
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.agents.push(agent_info.clone());
+                session.state = SessionState::WaitingForPlanner(planner_index);
+            }
+        }
+
+        // Emit session update
+        if let Some(ref app_handle) = self.app_handle {
+            let sessions = self.sessions.read();
+            if let Some(session) = sessions.get(session_id) {
+                let _ = app_handle.emit("session-update", SessionUpdate {
+                    session: session.clone(),
+                });
+            }
+        }
+
+        // Update session storage
+        self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &session.project_path);
+
+        // Store planner's worker config for sequential spawning
+        let planner_workers_path = session.project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join(format!("planner-{}-workers.json", planner_index));
+        if !workers.is_empty() {
+            let workers_json = serde_json::to_string_pretty(&workers)
+                .map_err(|e| format!("Failed to serialize worker config: {}", e))?;
+            std::fs::write(&planner_workers_path, workers_json)
+                .map_err(|e| format!("Failed to write planner workers config: {}", e))?;
+        }
+
+        Ok(agent_info)
+    }
+
     /// Initialize session storage for a new session
     /// Convert a Session to PersistedSession for storage
     fn session_to_persisted(&self, session: &Session) -> crate::storage::PersistedSession {
@@ -2700,6 +3071,8 @@ Last updated: {timestamp}
             SessionState::Starting => "Starting",
             SessionState::SpawningWorker(_) => "SpawningWorker",
             SessionState::WaitingForWorker(_) => "WaitingForWorker",
+            SessionState::SpawningPlanner(_) => "SpawningPlanner",
+            SessionState::WaitingForPlanner(_) => "WaitingForPlanner",
             SessionState::Running => "Running",
             SessionState::Paused => "Paused",
             SessionState::Completed => "Completed",

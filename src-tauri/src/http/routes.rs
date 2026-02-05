@@ -5,7 +5,7 @@ use axum::{
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
-use crate::http::handlers::{health, sessions, inject, workers};
+use crate::http::handlers::{health, sessions, inject, workers, planners};
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -23,6 +23,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))
         .route("/api/sessions/{id}/workers", post(workers::add_worker))
+        // Planner routes (Swarm mode)
+        .route("/api/sessions/{id}/planners", get(planners::list_planners))
+        .route("/api/sessions/{id}/planners", post(planners::add_planner))
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
         .route("/api/sessions/{id}/inject/queen", post(inject::queen_inject))
