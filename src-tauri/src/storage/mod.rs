@@ -277,7 +277,7 @@ impl SessionStorage {
             command: "opencode".to_string(),
             auto_approve_flag: None,
             model_flag: Some("-m".to_string()),
-            default_model: "grok".to_string(),
+            default_model: "glm-4.7".to_string(),
             env: Some({
                 let mut env = HashMap::new();
                 env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
@@ -328,7 +328,7 @@ impl SessionStorage {
         });
         default_roles.insert("coherence".to_string(), RoleDefaults {
             cli: "opencode".to_string(),
-            model: "grok".to_string(),
+            model: "glm-4.7".to_string(),
         });
         default_roles.insert("simplify".to_string(), RoleDefaults {
             cli: "codex".to_string(),
