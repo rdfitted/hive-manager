@@ -148,6 +148,27 @@ mod tests {
             default_model: "gemini-2.5-pro".to_string(),
             env: None,
         });
+        clis.insert("cursor".to_string(), CliConfig {
+            command: "wsl".to_string(),
+            auto_approve_flag: Some("--force".to_string()),
+            model_flag: None,  // Cursor uses global model setting
+            default_model: "composer-1".to_string(),
+            env: None,
+        });
+        clis.insert("droid".to_string(), CliConfig {
+            command: "droid".to_string(),
+            auto_approve_flag: None,  // Interactive mode - no auto-approve flag
+            model_flag: None,  // Model selected via /model command in TUI
+            default_model: "glm-4.7".to_string(),
+            env: None,
+        });
+        clis.insert("qwen".to_string(), CliConfig {
+            command: "qwen".to_string(),
+            auto_approve_flag: Some("-y".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "qwen3-coder".to_string(),
+            env: None,
+        });
 
         AppConfig {
             clis,
@@ -189,5 +210,60 @@ mod tests {
         let built = registry.build_command_with_prompt(&config, Some("Test prompt")).unwrap();
         assert!(built.args.contains(&"-p".to_string()));
         assert!(built.args.contains(&"Test prompt".to_string()));
+    }
+
+    #[test]
+    fn test_build_cursor_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "cursor".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "wsl");
+        assert!(built.args.contains(&"--force".to_string()));
+    }
+
+    #[test]
+    fn test_build_droid_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "droid".to_string(),
+            model: Some("glm-4.7".to_string()),
+            flags: vec![],
+            label: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "droid");
+        // Droid interactive mode - no auto-approve or model flags
+        // Model is selected via /model command in TUI
+        assert!(built.args.is_empty() || built.args == config.flags);
+    }
+
+    #[test]
+    fn test_build_qwen_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "qwen".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "qwen");
+        assert!(built.args.contains(&"-y".to_string()));
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"qwen3-coder".to_string()));
     }
 }

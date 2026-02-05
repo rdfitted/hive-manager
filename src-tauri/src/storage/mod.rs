@@ -277,7 +277,7 @@ impl SessionStorage {
             command: "opencode".to_string(),
             auto_approve_flag: None,
             model_flag: Some("-m".to_string()),
-            default_model: "grok".to_string(),
+            default_model: "opencode/big-pickle".to_string(),
             env: Some({
                 let mut env = HashMap::new();
                 env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
@@ -293,6 +293,30 @@ impl SessionStorage {
             env: None,
         });
 
+        clis.insert("cursor".to_string(), CliConfig {
+            command: "wsl".to_string(),
+            auto_approve_flag: Some("--force".to_string()),
+            model_flag: None,  // Cursor uses global model setting
+            default_model: "composer-1".to_string(),
+            env: None,
+        });
+
+        clis.insert("droid".to_string(), CliConfig {
+            command: "droid".to_string(),
+            auto_approve_flag: None,  // Interactive mode - no auto-approve flag
+            model_flag: None,  // Model selected via /model command in TUI
+            default_model: "glm-4.7".to_string(),
+            env: None,
+        });
+
+        clis.insert("qwen".to_string(), CliConfig {
+            command: "qwen".to_string(),
+            auto_approve_flag: Some("-y".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "qwen3-coder".to_string(),
+            env: None,
+        });
+
         let mut default_roles = HashMap::new();
         default_roles.insert("backend".to_string(), RoleDefaults {
             cli: "claude".to_string(),
@@ -303,8 +327,8 @@ impl SessionStorage {
             model: "gemini-2.5-pro".to_string(),
         });
         default_roles.insert("coherence".to_string(), RoleDefaults {
-            cli: "opencode".to_string(),
-            model: "grok".to_string(),
+            cli: "droid".to_string(),
+            model: "glm-4.7".to_string(),
         });
         default_roles.insert("simplify".to_string(), RoleDefaults {
             cli: "codex".to_string(),

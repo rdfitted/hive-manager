@@ -351,6 +351,27 @@ impl SessionController {
                     args.push(model.clone());
                 }
             }
+            "cursor" => {
+                // Cursor Agent via WSL - interactive TUI mode
+                args.push("-d".to_string());
+                args.push("Ubuntu".to_string());
+                args.push("/root/.local/bin/agent".to_string());
+                args.push("--force".to_string());  // Auto-approve commands
+                // Cursor uses global model setting, no --model flag
+            }
+            "droid" => {
+                // Droid CLI - interactive TUI mode
+                // Model selected via /model command or config
+                // No auto-approve flag available in interactive mode
+            }
+            "qwen" => {
+                // Qwen Code CLI - interactive mode with auto-approve
+                args.push("-y".to_string());  // YOLO mode for auto-approve
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
             _ => {
                 // For other CLIs, just add model flag if specified
                 if let Some(ref model) = config.model {
@@ -363,7 +384,13 @@ impl SessionController {
         // Add any extra flags from config
         args.extend(config.flags.clone());
 
-        (config.cli.clone(), args)
+        // Determine the actual command to run
+        let command = match config.cli.as_str() {
+            "cursor" => "wsl".to_string(),  // Cursor runs via WSL
+            _ => config.cli.clone(),         // Others use CLI name as command
+        };
+
+        (command, args)
     }
 
     /// Add prompt argument to args based on CLI type
@@ -371,8 +398,13 @@ impl SessionController {
     fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
         let prompt_arg = format!("Read {} and execute.", prompt_path);
         match cli {
-            "claude" | "codex" => {
-                // Claude and Codex accept prompt as positional argument
+            "claude" | "codex" | "cursor" | "droid" => {
+                // Claude, Codex, Cursor, Droid accept prompt as positional argument
+                args.push(prompt_arg);
+            }
+            "qwen" => {
+                // Qwen uses -i for interactive mode with initial prompt
+                args.push("-i".to_string());
                 args.push(prompt_arg);
             }
             "gemini" => {
@@ -481,9 +513,9 @@ You MUST spawn Task agents that call external CLI tools via Bash. This provides 
 
 Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
 
-### Scout 2 - OpenCode GLM 4.7 (Pattern Recognition)
+### Scout 2 - Droid GLM 4.7 (Pattern Recognition)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/glm-4.7-free 'Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.' Return file paths with observations.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-4.7 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
 
 ### Scout 3 - OpenCode Grok Code (Quick Search)
 
@@ -2181,3 +2213,5 @@ impl Default for SessionController {
         Self::new(Arc::new(RwLock::new(PtyManager::new())))
     }
 }
+
+
