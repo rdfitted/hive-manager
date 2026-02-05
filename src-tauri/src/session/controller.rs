@@ -156,9 +156,9 @@ done
             format!(
                 r#"
 ## WAIT FOR ACTIVATION (CRITICAL)
-⚠️ You MUST wait for your task file Status to become ACTIVE.
-⚠️ Do NOT start working just because you received this prompt.
-⚠️ Read {} - if Status is STANDBY, WAIT.
+WARNING: You MUST wait for your task file Status to become ACTIVE.
+WARNING: Do NOT start working just because you received this prompt.
+WARNING: Read {} - if Status is STANDBY, WAIT.
 
 Check the file, then wait. Do not proceed until ACTIVE.
 "#,
@@ -762,7 +762,7 @@ Follow the plan's task breakdown when assigning work to workers."#,
 
         let hardening = if CliRegistry::needs_role_hardening(cli) {
             r#"
-âš ï¸ CRITICAL ROLE CONSTRAINTS âš ï¸
+WARNING: CRITICAL ROLE CONSTRAINTS
 
 You are the QUEEN - the top-level coordinator. You do NOT implement.
 
@@ -784,15 +784,41 @@ If you find yourself about to edit code, STOP. Write a task file for a Planner i
             ""
         };
 
+        let branch_protocol = r#"
+## Branch Protocol (MANDATORY)
+
+⚠️ BEFORE assigning ANY tasks to workers:
+
+1. **Check if this is a smoke test** - If yes, skip branch creation
+2. **If NOT a smoke test**:
+   - FIRST create a new feature branch: `git checkout -b feat/<descriptive-name>`
+   - Push the branch: `git push -u origin <branch-name>`
+   - THEN assign tasks to workers
+
+### Why This Matters
+- Workers will commit to this branch
+- Prevents accidental commits to main
+- Ensures clean PR workflow
+
+### Example
+```bash
+# Queen does this FIRST
+git checkout -b feat/add-authentication
+git push -u origin feat/add-authentication
+
+# THEN assigns tasks to workers
+```
+
+Do NOT assign worker tasks until the branch exists!
+"#;
+
         format!(
-r#"# Queen Agent - Hive Manager Session
+            r#"# Queen Agent - Hive Manager Session
 
 You are the **Queen** orchestrating a multi-agent Hive session. You have full Claude Code capabilities plus coordination tools.
 {hardening}
+{branch_protocol}
 ## Session Info
-"#,
-            hardening = hardening,
-
 - **Session ID**: {session_id}
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tasks Directory**: `.hive-manager/{session_id}/tasks/`
@@ -804,6 +830,7 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 | ID | Role | CLI |
 |----|------|-----|
 {worker_list}
+
 ## Your Tools
 
 ### Claude Code Tools (Native)
@@ -840,6 +867,8 @@ Workers are polling their task files and will start working when they see ACTIVE
 ## Your Task
 
 {task}"#,
+            hardening = hardening,
+            branch_protocol = branch_protocol,
             session_id = session_id,
             plan_section = plan_section,
             worker_list = worker_list,
@@ -942,7 +971,7 @@ If the status is STANDBY, wait for the Queen to assign you a task by updating th
 
         let hardening = if CliRegistry::needs_role_hardening(cli) {
             r#"
-âš ï¸ CRITICAL ROLE CONSTRAINTS âš ï¸
+WARNING: CRITICAL ROLE CONSTRAINTS
 
 You are a PLANNER - you coordinate Workers in your domain. You do NOT implement.
 
@@ -972,15 +1001,11 @@ If a worker is blocked, reassign or escalate to Queen. Do NOT fix it yourself.
         };
 
         format!(
-r#"# Planner {index} - {domain} Domain
+            r#"# Planner {index} - {domain} Domain
 
 You are a **Planner** in a multi-agent Swarm session, managing the {domain} domain.
 {hardening}
 ## Your Domain
-"#,
-            index = index,
-            domain = config.domain,
-            hardening = hardening,
 
 {domain}
 
@@ -989,6 +1014,7 @@ You are a **Planner** in a multi-agent Swarm session, managing the {domain} doma
 | ID | Role | CLI |
 |----|------|-----|
 {worker_list}
+
 ## Your Tools
 
 You have full access to Claude Code tools:
@@ -1018,6 +1044,7 @@ You have full access to Claude Code tools:
 Awaiting task assignment from the Queen."#,
             index = index,
             domain = config.domain,
+            hardening = hardening,
             worker_list = worker_list,
             queen_id = queen_id
         )
@@ -1033,10 +1060,35 @@ Awaiting task assignment from the Queen."#,
                 planner_id, index, planner_config.domain, planner_config.workers.len()));
         }
 
+        let hardening = if CliRegistry::needs_role_hardening(cli) {
+            r#"
+WARNING: CRITICAL ROLE CONSTRAINTS
+
+You are the QUEEN - the top-level coordinator. You do NOT implement.
+
+### You ARE allowed to:
+- Read plan.md, coordination.log, planner status files
+- Write/Edit ONLY: Planner task files, coordination.log
+- Run git commands: commit, push, branch, PR creation
+- Coordinate cross-domain integration
+
+### You are PROHIBITED from:
+- Editing application source code (*.rs, *.ts, *.svelte, etc.)
+- Running implementation commands (cargo build, npm run, tests)
+- Fixing bugs or implementing features directly
+- Bypassing Planners to assign tasks directly to Workers
+
+If you find yourself about to edit code, STOP. Assign work to a Planner instead.
+"#
+        } else {
+            ""
+        };
+
         format!(
 r#"# Queen Agent - Swarm Session
 
 You are the **Queen** orchestrating a multi-agent Swarm session. You coordinate Planners who each manage their own domain.
+{hardening}
 
 ## Session Info
 
@@ -1082,6 +1134,7 @@ Write domain tasks to planner prompt files or tell the operator:
 ## Your Task
 
 {task}"#,
+            hardening = hardening,
             session_id = session_id,
             planner_list = planner_list,
             task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
@@ -1231,7 +1284,7 @@ Last updated: {timestamp}
             let has_plan = plan_path.exists();
 
             // Write Queen prompt to file and pass to CLI
-            let master_prompt = Self::build_queen_master_prompt(&session_id, &config.workers, config.prompt.as_deref(), has_plan);
+            let master_prompt = Self::build_queen_master_prompt(&config.queen_config.cli, &session_id, &config.workers, config.prompt.as_deref(), has_plan);
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -1676,7 +1729,7 @@ Last updated: {timestamp}
             let has_plan = session.project_path.join(".hive-manager").join(session_id).join("plan.md").exists();
 
             // Write Queen prompt with plan reference
-            let master_prompt = Self::build_queen_master_prompt(session_id, &config.workers, config.prompt.as_deref(), has_plan);
+            let master_prompt = Self::build_queen_master_prompt(&config.queen_config.cli, session_id, &config.workers, config.prompt.as_deref(), has_plan);
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -1940,7 +1993,7 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Write Queen prompt with plan reference
-            let master_prompt = Self::build_swarm_queen_prompt(session_id, &planners, config.prompt.as_deref());
+            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, session_id, &planners, config.prompt.as_deref());
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -1975,6 +2028,7 @@ Last updated: {timestamp}
 
                 // Build planner prompt
                 let planner_prompt = Self::build_planner_prompt(
+                    planner_config.config.cli.as_str(),
                     planner_index,
                     planner_config,
                     &queen_id,
@@ -2106,7 +2160,7 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Write Queen prompt to file and pass to CLI
-            let master_prompt = Self::build_swarm_queen_prompt(&session_id, &planners, config.prompt.as_deref());
+            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, &session_id, &planners, config.prompt.as_deref());
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -2140,7 +2194,7 @@ Last updated: {timestamp}
                 let (cmd, mut args) = Self::build_command(&planner_config.config);
 
                 // Write planner prompt to file and pass to CLI
-                let planner_prompt = Self::build_planner_prompt(planner_index, planner_config, &queen_id);
+                let planner_prompt = Self::build_planner_prompt(planner_config.config.cli.as_str(), planner_index, planner_config, &queen_id);
                 let filename = format!("planner-{}-prompt.md", planner_index);
                 let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &planner_prompt)?;
                 let prompt_path = prompt_file.to_string_lossy().to_string();
@@ -2578,6 +2632,13 @@ mod tests {
         let _paused = SessionState::Paused;
         let _completed = SessionState::Completed;
         let _failed = SessionState::Failed("error".to_string());
+    }
+
+    #[test]
+    fn session_state_serialization() {
+        let state = SessionState::SpawningWorker(3);
+        let json = serde_json::to_string(&state).expect("serialize SessionState");
+        assert!(json.contains("SpawningWorker"));
     }
 }
 

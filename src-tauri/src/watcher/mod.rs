@@ -107,3 +107,20 @@ impl TaskFileWatcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TaskFileWatcher;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_extract_worker_id() {
+        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-1-task.md")), Some(1));
+        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-5-task.md")), Some(5));
+        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-12-task.md")), Some(12));
+
+        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-task.md")), None);
+        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("planner-1-task.md")), None);
+        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-1.md")), None);
+    }
+}

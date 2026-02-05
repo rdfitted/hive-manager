@@ -311,4 +311,13 @@ mod tests {
         assert_eq!(CliRegistry::get_behavior("cursor"), CliBehavior::Interactive);
         assert_eq!(CliRegistry::get_behavior("unknown-cli"), CliBehavior::ActionProne);
     }
+
+    #[test]
+    fn test_needs_role_hardening() {
+        assert!(CliRegistry::needs_role_hardening("claude"));
+        assert!(CliRegistry::needs_role_hardening("gemini"));
+        assert!(!CliRegistry::needs_role_hardening("qwen"));
+        assert!(!CliRegistry::needs_role_hardening("codex"));
+        assert!(!CliRegistry::needs_role_hardening("droid"));
+    }
 }

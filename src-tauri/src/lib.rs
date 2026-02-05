@@ -126,11 +126,11 @@ pub fn run() {
                     // Spawn async task to handle worker completion
                     let controller = session_controller_clone.clone();
                     let session_id_clone = session_id.to_string();
-                    tauri::async_runtime::spawn(async move {
-                        let result = controller
-                            .read()
-                            .on_worker_completed(&session_id_clone, worker_id)
-                            .await;
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let result = tauri::async_runtime::block_on(async {
+                            let controller_read = controller.read();
+                            controller_read.on_worker_completed(&session_id_clone, worker_id).await
+                        });
 
                         if let Err(e) = result {
                             tracing::error!("Failed to handle worker completion: {}", e);
