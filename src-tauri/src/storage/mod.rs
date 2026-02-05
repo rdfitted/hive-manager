@@ -455,7 +455,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            enabled: false,  // Disabled by default for security
+            enabled: true,   // Enabled by default for Queen to spawn workers
             port: 18800,
         }
     }

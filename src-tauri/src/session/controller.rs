@@ -856,7 +856,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 
 **Quick Reference - Spawn Worker:**
 ```bash
-curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
   -d '{{"role_type": "backend", "cli": "claude"}}'
 ```
@@ -1204,7 +1204,7 @@ Spawn a new worker agent in a visible terminal window.
 
 ## HTTP API
 
-**Endpoint:** `POST http://localhost:8377/api/sessions/{session_id}/workers`
+**Endpoint:** `POST http://localhost:18800/api/sessions/{session_id}/workers`
 
 **Headers:**
 ```
@@ -1234,17 +1234,17 @@ Content-Type: application/json
 
 ```bash
 # Spawn a backend worker with claude
-curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
   -d '{{"role_type": "backend", "cli": "claude"}}'
 
 # Spawn a frontend worker with an initial task
-curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
   -d '{{"role_type": "frontend", "cli": "claude", "initial_task": "Implement the login form UI"}}'
 
 # Spawn a reviewer worker
-curl -X POST "http://localhost:8377/api/sessions/{session_id}/workers" \
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
   -d '{{"role_type": "reviewer", "cli": "claude"}}'
 ```
@@ -1278,12 +1278,12 @@ Get a list of all workers in the current session.
 
 ## HTTP API
 
-**Endpoint:** `GET http://localhost:8377/api/sessions/{session_id}/workers`
+**Endpoint:** `GET http://localhost:18800/api/sessions/{session_id}/workers`
 
 ## Example Usage
 
 ```bash
-curl "http://localhost:8377/api/sessions/{session_id}/workers"
+curl "http://localhost:18800/api/sessions/{session_id}/workers"
 ```
 
 ## Response
@@ -1791,8 +1791,13 @@ Last updated: {timestamp}
             return Ok(());
         }
 
-        // Load config
+        // Load config - if it doesn't exist, workers may have been spawned via HTTP API
         let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-config.json");
+        if !pending_config_path.exists() {
+            tracing::info!("No pending config found for session {} - workers may have been spawned via HTTP API", session_id);
+            return Ok(());
+        }
+
         let config_json = std::fs::read_to_string(&pending_config_path)
             .map_err(|e| SessionError::ConfigError(format!("Failed to read pending config: {}", e)))?;
         let config: HiveLaunchConfig = serde_json::from_str(&config_json)
