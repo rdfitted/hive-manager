@@ -1295,6 +1295,50 @@ Add task instructions
 
 Workers poll their task files and will start when they see ACTIVE status.
 
+## Learning Curation Protocol
+
+Workers record learnings during task completion. Your curation responsibilities:
+
+1. **Review learnings periodically**:
+   ```bash
+   curl "http://localhost:18800/api/learnings"
+   ```
+
+2. **Review current project DNA**:
+   ```bash
+   curl "http://localhost:18800/api/project-dna"
+   ```
+
+3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+   - Group by theme/topic
+   - Remove duplicates
+   - Improve clarity where needed
+   - Capture architectural decisions and project conventions
+
+### .ai-docs/ Structure
+```
+.ai-docs/
+├── learnings.jsonl      # Raw learnings from all sessions (append-only)
+├── project-dna.md       # Curated patterns, conventions, insights
+├── curation-state.json  # Tracks what's been curated
+└── archive/             # Retired learnings (after 50+ entries)
+    └── learnings-{{timestamp}}.jsonl
+```
+
+### Curation Process
+1. Review raw learnings via `GET /api/learnings`
+2. Synthesize insights into `.ai-docs/project-dna.md` sections:
+   - **Patterns That Work** - Successful approaches
+   - **Patterns That Failed** - What to avoid
+   - **Code Conventions** - Project-specific standards
+   - **Architecture Notes** - Key design decisions
+3. After 50+ learnings accumulate, archive to `.ai-docs/archive/` and clear the main file
+
+### When to Curate
+- After each major task phase completes
+- Before creating a PR
+- When learnings count exceeds 10
+
 ## Coordination Protocol
 
 1. **Read the plan** - Check `.hive-manager/{session_id}/plan.md` if it exists
@@ -1339,7 +1383,6 @@ Workers poll their task files and will start when they see ACTIVE status.
             .unwrap_or("General development tasks as assigned.");
 
         let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index);
-
         let polling_instructions = get_polling_instructions(&config.cli, &task_file);
 
         format!(
@@ -1385,15 +1428,37 @@ Your task assignments are in: `{task_file}`
 
 - **Queen**: {queen_id}
 
-## Initial Action
+## Learnings Protocol (MANDATORY)
 
-Read your task file now: `{task_file}`
+Before marking your task COMPLETED, submit what you learned:
 
-If the status is STANDBY, wait for the Queen to assign you a task by updating that file.{polling_instructions}"#,
+```bash
+curl -X POST "http://localhost:18800/api/learnings" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "session": "{session_id}",
+    "task": "Brief task description",
+    "outcome": "success|partial|failed",
+    "keywords": ["keyword1", "keyword2"],
+    "insight": "What you learned - be specific and actionable",
+    "files_touched": ["path/to/file.rs"]
+  }}'
+```
+
+Even if you learned nothing notable, submit with insight "No significant learnings for this task."
+
+## Project Context
+
+Review `.ai-docs/project-dna.md` for patterns and conventions learned from previous sessions.
+
+## Task Coordination
+Read {task_file}. Begin work only when Status is ACTIVE.
+Use the interactive interface to monitor your task file.{polling_instructions}"#,
             index = index,
             role_name = role_name,
             role_description = role_description,
             queen_id = queen_id,
+            session_id = session_id,
             task_file = task_file,
             polling_instructions = polling_instructions
         )
@@ -2558,59 +2623,17 @@ Last updated: {timestamp}
                 parent_id: None,
             });
 
-            // Create ONLY the first Worker agent (sequential spawning mode)
-            // Subsequent workers will be spawned as each worker completes its task
-            if !config.workers.is_empty() {
-                let worker_config = &config.workers[0];
-                let index = 1u8; // First worker has index 1
-                let worker_id = format!("{}-worker-{}", session_id, index);
-                let (cmd, mut args) = Self::build_command(worker_config);
-
-                // Write task file for this worker (ACTIVE status for sequential spawning)
-                Self::write_task_file_with_status(&session.project_path, session_id, index, worker_config.initial_prompt.as_deref(), "ACTIVE")?;
-
-                // Write worker prompt
-                let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id, session_id);
-                let filename = format!("worker-{}-prompt.md", index);
-                let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
-                let prompt_path = prompt_file.to_string_lossy().to_string();
-                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-                tracing::info!("Launching Worker 1 (first of {} workers, sequential mode): {} {:?} in {:?}", config.workers.len(), cmd, args, cwd);
-
-                pty_manager
-                    .create_session(
-                        worker_id.clone(),
-                        AgentRole::Worker { index, parent: Some(queen_id.clone()) },
-                        &cmd,
-                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        Some(cwd),
-                        120,
-                        30,
-                    )
-                    .map_err(|e| format!("Failed to spawn Worker {}: {}", index, e))?;
-
-                new_agents.push(AgentInfo {
-                    id: worker_id,
-                    role: AgentRole::Worker { index, parent: Some(queen_id.clone()) },
-                    status: AgentStatus::Running,
-                    config: worker_config.clone(),
-                    parent_id: Some(queen_id.clone()),
-                });
-            }
+            // Queen will spawn workers via HTTP API after reading the plan
+            // No auto-spawning of workers - Queen controls the flow
         }
 
-        // Update session with new agents and WaitingForWorker state (sequential spawning)
+        // Update session with new agents - Queen will spawn workers
         let updated_session = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 s.agents.extend(new_agents);
-                // Set state to WaitingForWorker(1) if we spawned a worker, otherwise Running
-                s.state = if !config.workers.is_empty() {
-                    SessionState::WaitingForWorker(1)
-                } else {
-                    SessionState::Running
-                };
+                // Set state to Running - Queen will spawn workers via HTTP API
+                s.state = SessionState::Running;
                 s.clone()
             } else {
                 return Err("Session disappeared".to_string());

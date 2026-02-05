@@ -1,12 +1,23 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::coordination::CoordinationMessage;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Learning {
+    pub date: String,
+    pub session: String,
+    pub task: String,
+    pub outcome: String,
+    pub keywords: Vec<String>,
+    pub insight: String,
+    pub files_touched: Vec<String>,
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -138,7 +149,6 @@ impl SessionStorage {
         fs::create_dir_all(session_dir.join("coordination"))?;
         fs::create_dir_all(session_dir.join("prompts"))?;
         fs::create_dir_all(session_dir.join("logs"))?;
-
         // Initialize empty state files
         fs::write(session_dir.join("state").join("workers.md"), "# Available Workers\n\nNo workers yet.\n")?;
         fs::write(session_dir.join("state").join("hierarchy.json"), "[]")?;
@@ -427,6 +437,79 @@ impl SessionStorage {
             content: caps[4].to_string(),
             message_type: crate::coordination::MessageType::Task,
         })
+    }
+
+    fn ai_docs_dir(project_path: &Path) -> PathBuf {
+        project_path.join(".ai-docs")
+    }
+
+    /// Append a learning to the .ai-docs/learnings.jsonl file
+    pub fn append_learning(&self, project_path: &Path, learning: &Learning) -> Result<(), StorageError> {
+        let ai_docs_dir = Self::ai_docs_dir(project_path);
+        fs::create_dir_all(&ai_docs_dir)?;
+        // Also ensure archive folder exists for /curate-learnings skill
+        fs::create_dir_all(ai_docs_dir.join("archive"))?;
+        let learnings_file = ai_docs_dir.join("learnings.jsonl");
+
+        let mut json = serde_json::to_string(learning)?;
+        json.push('\n');
+
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(learnings_file)?;
+
+        file.write_all(json.as_bytes())?;
+
+        Ok(())
+    }
+
+    /// Read all learnings from .ai-docs/learnings.jsonl
+    pub fn read_learnings(&self, project_path: &Path) -> Result<Vec<Learning>, StorageError> {
+        let learnings_file = Self::ai_docs_dir(project_path).join("learnings.jsonl");
+
+        if !learnings_file.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(learnings_file)?;
+        let mut learnings = Vec::new();
+
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Learning>(line) {
+                Ok(learning) => learnings.push(learning),
+                Err(e) => {
+                    tracing::warn!("Failed to parse learning line: {}. Error: {}", line, e);
+                }
+            }
+        }
+
+        Ok(learnings)
+    }
+
+    /// Read .ai-docs/project-dna.md content
+    pub fn read_project_dna(&self, project_path: &Path) -> Result<String, StorageError> {
+        let project_dna_file = Self::ai_docs_dir(project_path).join("project-dna.md");
+        if !project_dna_file.exists() {
+            return Ok(String::new());
+        }
+        Ok(fs::read_to_string(project_dna_file)?)
+    }
+
+    /// Save curated project DNA to .ai-docs/project-dna.md
+    #[allow(dead_code)]
+    pub fn save_project_dna(&self, project_path: &Path, content: &str) -> Result<(), StorageError> {
+        let ai_docs_dir = Self::ai_docs_dir(project_path);
+        fs::create_dir_all(&ai_docs_dir)?;
+        let project_dna_file = ai_docs_dir.join("project-dna.md");
+        fs::write(project_dna_file, content)?;
+        Ok(())
     }
 }
 

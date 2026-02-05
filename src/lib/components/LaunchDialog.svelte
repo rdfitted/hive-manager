@@ -119,7 +119,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let mode: SessionMode = 'hive';
   let projectPath = '';
   let prompt = '';
-  let withPlanning = true; // Enable planning phase by default
   let launching = false;
   let error = '';
 
@@ -241,7 +240,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           queen_config: queenConfig,
           workers: workersWithRoles,
           prompt: prompt || undefined,
-          with_planning: smokeTest ? true : withPlanning, // Smoke test requires planning
+          with_planning: true, // Planning is always enabled
           smoke_test: smokeTest,
         };
         dispatch('launchHive', config);
@@ -261,7 +260,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           planner_config: plannerConfig,
           workers_per_planner: workersWithRoles,
           prompt: prompt || undefined,
-          with_planning: smokeTest ? true : withPlanning, // Smoke test requires planning
+          with_planning: true, // Planning is always enabled
           smoke_test: smokeTest,
         };
         dispatch('launchSwarm', config);
@@ -457,21 +456,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             placeholder="Enter a task for the session..."
             rows="3"
           ></textarea>
-        </div>
-
-        <div class="form-group checkbox-group">
-          <label class="checkbox-label">
-            <input
-              type="checkbox"
-              bind:checked={withPlanning}
-            />
-            <span class="checkbox-text">
-              <span class="checkbox-title">Enable Planning Phase</span>
-              <span class="checkbox-description">
-                A Master Planner agent will analyze the task and create a detailed plan before spawning {mode === 'hive' ? 'workers' : 'planners'}.
-              </span>
-            </span>
-          </label>
         </div>
 
         {#if error}
