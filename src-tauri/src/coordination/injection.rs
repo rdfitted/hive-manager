@@ -211,6 +211,7 @@ impl InjectionManager {
     }
 
     /// Notify Queen of worker status change
+    #[allow(dead_code)]
     pub fn notify_queen_worker_status(
         &self,
         session_id: &str,
@@ -312,6 +313,13 @@ fn format_agent_display(agent_id: &str) -> String {
     // Extract the role part
     if agent_id.ends_with("-queen") {
         "QUEEN".to_string()
+    } else if agent_id.contains("-worker-") {
+        // Extract worker number
+        if let Some(idx) = agent_id.rfind("-worker-") {
+            format!("WORKER-{}", &agent_id[idx + 8..])
+        } else {
+            "WORKER".to_string()
+        }
     } else if agent_id.contains("-planner-") {
         // Extract planner number
         if let Some(idx) = agent_id.rfind("-planner-") {
@@ -323,13 +331,6 @@ fn format_agent_display(agent_id: &str) -> String {
             }
         } else {
             "PLANNER".to_string()
-        }
-    } else if agent_id.contains("-worker-") {
-        // Extract worker number
-        if let Some(idx) = agent_id.rfind("-worker-") {
-            format!("WORKER-{}", &agent_id[idx + 8..])
-        } else {
-            "WORKER".to_string()
         }
     } else {
         agent_id.to_string()
