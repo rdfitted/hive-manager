@@ -46,6 +46,7 @@ pub struct TaskAssignment {
     pub task: String,
     pub assigned_at: DateTime<Utc>,
     pub status: AssignmentStatus,
+    pub plan_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -186,7 +187,12 @@ impl StateManager {
     }
 
     /// Record a task assignment
-    pub fn record_assignment(&self, worker_id: &str, task: &str) -> Result<(), StateError> {
+    pub fn record_assignment(
+        &self,
+        worker_id: &str,
+        task: &str,
+        plan_task_id: Option<String>,
+    ) -> Result<(), StateError> {
         self.ensure_state_dir()?;
 
         let assignments_path = self.state_dir().join("assignments.json");
@@ -202,6 +208,7 @@ impl StateManager {
             task: task.to_string(),
             assigned_at: Utc::now(),
             status: AssignmentStatus::Pending,
+            plan_task_id,
         });
 
         let json = serde_json::to_string_pretty(&assignments)?;

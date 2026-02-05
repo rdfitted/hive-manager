@@ -164,14 +164,21 @@ function createCoordinationStore() {
       sessionId: string,
       queenId: string,
       workerId: string,
-      task: string
+      task: string,
+      planTaskId?: string | null
     ) {
       try {
-        await invoke('assign_task', {
+        const payload: Record<string, unknown> = {
           sessionId,
           queenId,
           workerId,
           task,
+        };
+        if (planTaskId) {
+          payload.planTaskId = planTaskId;
+        }
+        await invoke('assign_task', {
+          ...payload,
         });
       } catch (err) {
         update((state) => ({ ...state, error: String(err) }));

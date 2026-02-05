@@ -94,6 +94,15 @@ pub struct OperatorInjectRequest {
     pub message: String,
 }
 
+/// Request for worker status notification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerStatusRequest {
+    pub session_id: String,
+    pub queen_id: String,
+    pub worker_id: String,
+    pub status: String,
+}
+
 /// Operator injects a message to any agent (including Queen)
 #[tauri::command]
 pub async fn operator_inject(
@@ -106,6 +115,23 @@ pub async fn operator_inject(
             &request.session_id,
             &request.target_agent_id,
             &request.message,
+        )
+        .map_err(|e: crate::coordination::InjectionError| e.to_string())
+}
+
+/// Report worker status change to Queen
+#[tauri::command]
+pub async fn report_worker_status(
+    state: State<'_, CoordinationState>,
+    request: WorkerStatusRequest,
+) -> Result<(), String> {
+    let manager = state.0.read();
+    manager
+        .notify_queen_worker_status(
+            &request.session_id,
+            &request.queen_id,
+            &request.worker_id,
+            &request.status,
         )
         .map_err(|e: crate::coordination::InjectionError| e.to_string())
 }
@@ -225,6 +251,7 @@ pub async fn assign_task(
     queen_id: String,
     worker_id: String,
     task: String,
+    plan_task_id: Option<String>,
 ) -> Result<(), String> {
     // Log the injection
     let coord_manager = coord_state.0.read();
@@ -236,7 +263,7 @@ pub async fn assign_task(
     let session_path = storage_state.0.session_dir(&session_id);
     let state_manager = StateManager::new(session_path);
     state_manager
-        .record_assignment(&worker_id, &task)
+        .record_assignment(&worker_id, &task, plan_task_id)
         .map_err(|e: crate::coordination::StateError| e.to_string())
 }
 

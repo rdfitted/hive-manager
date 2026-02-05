@@ -338,6 +338,10 @@ impl SessionStorage {
         AppConfig {
             clis,
             default_roles,
+            api: ApiConfig {
+                enabled: true,
+                port: 18800,
+            },
         }
     }
 
@@ -437,6 +441,24 @@ impl Default for SessionStorage {
 pub struct AppConfig {
     pub clis: HashMap<String, CliConfig>,
     pub default_roles: HashMap<String, RoleDefaults>,
+    /// HTTP API configuration
+    #[serde(default)]
+    pub api: ApiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiConfig {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,  // Disabled by default for security
+            port: 18800,
+        }
+    }
 }
 
 /// CLI configuration for a specific agent CLI

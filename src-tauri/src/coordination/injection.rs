@@ -211,7 +211,6 @@ impl InjectionManager {
     }
 
     /// Notify Queen of worker status change
-    #[allow(dead_code)]
     pub fn notify_queen_worker_status(
         &self,
         session_id: &str,

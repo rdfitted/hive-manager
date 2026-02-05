@@ -173,6 +173,10 @@ mod tests {
         AppConfig {
             clis,
             default_roles: HashMap::new(),
+            api: crate::storage::ApiConfig {
+                enabled: true,
+                port: 18800,
+            },
         }
     }
 

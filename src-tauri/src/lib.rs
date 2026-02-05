@@ -5,10 +5,13 @@ mod storage;
 mod coordination;
 mod templates;
 mod cli;
+mod http;
+mod watcher;
 
 use std::sync::Arc;
 use parking_lot::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use crate::http::state::AppState;
 
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, resize_pty, write_to_pty, inject_to_pty,
@@ -35,6 +38,8 @@ pub fn run() {
 
     // Initialize session storage
     let storage = Arc::new(SessionStorage::new().expect("Failed to initialize session storage"));
+    let config = storage.load_config().expect("Failed to load config");
+    let shared_config = Arc::new(tokio::sync::RwLock::new(config));
 
     // Create shared state
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
@@ -71,6 +76,30 @@ pub fn run() {
                 let mut injection = injection_manager.write();
                 injection.set_app_handle(app.handle().clone());
             }
+
+            // Start HTTP server if enabled
+            let http_config = shared_config.clone();
+            tauri::async_runtime::spawn(async move {
+                let (enabled, port) = {
+                    let cfg = http_config.read().await;
+                    (cfg.api.enabled, cfg.api.port)
+                };
+
+                if enabled {
+                    tracing::info!("Starting HTTP API on port {}", port);
+                    let state = Arc::new(AppState::new(
+                        http_config,
+                        pty_manager.clone(),
+                        session_controller.clone(),
+                        injection_manager.clone(),
+                        storage.clone(),
+                    ));
+                    if let Err(e) = http::serve(state, port).await {
+                        tracing::error!("HTTP server error: {}", e);
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

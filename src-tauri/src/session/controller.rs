@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::SessionStorage;
-use crate::coordination::{StateManager, HierarchyNode, WorkerStateInfo};
+use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
+use crate::watcher::TaskFileWatcher;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
@@ -95,6 +96,7 @@ pub struct SessionController {
     pty_manager: Arc<RwLock<PtyManager>>,
     app_handle: Option<AppHandle>,
     storage: Option<Arc<SessionStorage>>,
+    task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
 }
 
 // Explicitly implement Send + Sync
@@ -108,6 +110,7 @@ impl SessionController {
             pty_manager,
             app_handle: None,
             storage: None,
+            task_watchers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1137,6 +1140,7 @@ Last updated: {timestamp}
 
         // Initialize session storage
         self.init_session_storage(&session);
+        self.ensure_task_watcher(&session.id, &session.project_path);
 
         Ok(session)
     }
@@ -1222,6 +1226,7 @@ Last updated: {timestamp}
         }
 
         self.init_session_storage(&session);
+        self.ensure_task_watcher(&session.id, &session.project_path);
 
         Ok(session)
     }
@@ -1307,6 +1312,7 @@ Last updated: {timestamp}
         }
 
         self.init_session_storage(&session);
+        self.ensure_task_watcher(&session.id, &session.project_path);
 
         Ok(session)
     }
@@ -1454,6 +1460,8 @@ Last updated: {timestamp}
 
         // Update storage
         self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &updated_session.project_path);
+        self.ensure_task_watcher(session_id, &updated_session.project_path);
 
         // Clean up pending config file
         let _ = std::fs::remove_file(&pending_config_path);
@@ -1917,6 +1925,7 @@ Last updated: {timestamp}
 
         // Initialize session storage if available
         self.init_session_storage(&session);
+        self.ensure_task_watcher(&session.id, &session.project_path);
 
         Ok(session)
     }
@@ -2028,6 +2037,7 @@ Last updated: {timestamp}
 
         // Update session storage
         self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &session.project_path);
 
         Ok(agent_info)
     }
@@ -2144,6 +2154,33 @@ Last updated: {timestamp}
             }
             if let Err(e) = state_manager.update_workers_file(&workers) {
                 tracing::warn!("Failed to update workers file: {}", e);
+            }
+        }
+    }
+
+    fn ensure_task_watcher(&self, session_id: &str, project_path: &PathBuf) {
+        let app_handle = match self.app_handle.clone() {
+            Some(handle) => handle,
+            None => return,
+        };
+
+        let mut watchers = self.task_watchers.lock();
+        if watchers.contains_key(session_id) {
+            return;
+        }
+
+        let session_path = project_path.join(".hive-manager").join(session_id);
+        let tasks_path = session_path.join("tasks");
+        if !tasks_path.exists() {
+            return;
+        }
+
+        match TaskFileWatcher::new(&session_path, session_id, app_handle) {
+            Ok(watcher) => {
+                watchers.insert(session_id.to_string(), watcher);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start task watcher for {}: {}", session_id, e);
             }
         }
     }

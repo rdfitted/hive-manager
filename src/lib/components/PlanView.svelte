@@ -2,6 +2,7 @@
   import { activeSession, sessions } from '$lib/stores/sessions';
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
 
   interface PlanTask {
     id: string;
@@ -93,14 +94,26 @@
     }
   }
 
-  // Start polling for plan when in Planning state
+  // Start polling for plan
   function startPolling() {
-    if (pollInterval) return;
+    const state = $activeSession?.state;
+    const interval = state === 'Running' ? 5000 : 2000;
+    
+    // If interval already exists, check if it's the right frequency
+    // For simplicity, we'll just restart it if the state changed significantly
+    if (pollInterval) {
+      // We don't want to restart on every effect pulse, 
+      // so we only restart if we're switching modes
+      // But since stopPolling is called in the effect when switching away from Planning/Ready/Running,
+      // we only need to worry about transitions between these three.
+      return; 
+    }
+    
     pollInterval = setInterval(() => {
       if ($activeSession?.id) {
         loadPlan($activeSession.id);
       }
-    }, 2000); // Poll every 2 seconds
+    }, interval);
   }
 
   function stopPolling() {
@@ -109,6 +122,19 @@
       pollInterval = null;
     }
   }
+
+  onMount(() => {
+    const unlisten = listen('plan-update', (event) => {
+      console.log('Plan update event received:', event);
+      if ($activeSession?.id) {
+        loadPlan($activeSession.id);
+      }
+    });
+
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  });
 
   onDestroy(() => {
     stopPolling();
@@ -129,7 +155,7 @@
     }
 
     // Start/stop polling based on state
-    if (state === 'Planning' || state === 'PlanReady') {
+    if (state === 'Planning' || state === 'PlanReady' || state === 'Running') {
       startPolling();
     } else {
       stopPolling();
