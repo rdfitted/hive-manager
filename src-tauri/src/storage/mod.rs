@@ -277,7 +277,7 @@ impl SessionStorage {
             command: "opencode".to_string(),
             auto_approve_flag: None,
             model_flag: Some("-m".to_string()),
-            default_model: "bigpickle".to_string(),
+            default_model: "opencode/big-pickle".to_string(),
             env: Some({
                 let mut env = HashMap::new();
                 env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
@@ -303,8 +303,8 @@ impl SessionStorage {
 
         clis.insert("droid".to_string(), CliConfig {
             command: "droid".to_string(),
-            auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
-            model_flag: Some("-m".to_string()),
+            auto_approve_flag: None,  // Interactive mode uses OAuth, no auto-approve flag
+            model_flag: None,  // Model selected via /model command or config
             default_model: "glm-4.7".to_string(),
             env: None,
         });

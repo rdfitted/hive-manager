@@ -360,13 +360,8 @@ impl SessionController {
                 // Cursor uses global model setting, no model flag
             }
             "droid" => {
-                // Droid CLI uses exec subcommand
-                args.push("exec".to_string());
-                args.push("--skip-permissions-unsafe".to_string());
-                if let Some(ref model) = config.model {
-                    args.push("-m".to_string());
-                    args.push(model.clone());
-                }
+                // Droid CLI in interactive mode - uses OAuth, model selected via /model or config
+                // No flags needed - just the prompt as positional argument
             }
             "qwen" => {
                 // Qwen Code CLI

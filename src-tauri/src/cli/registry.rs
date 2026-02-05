@@ -157,8 +157,8 @@ mod tests {
         });
         clis.insert("droid".to_string(), CliConfig {
             command: "droid".to_string(),
-            auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
-            model_flag: Some("-m".to_string()),
+            auto_approve_flag: None,  // Interactive mode uses OAuth
+            model_flag: None,  // Model selected via /model command or config
             default_model: "glm-4.7".to_string(),
             env: None,
         });
@@ -234,7 +234,7 @@ mod tests {
         let registry = CliRegistry::new(test_config());
         let config = AgentConfig {
             cli: "droid".to_string(),
-            model: Some("gpt-5.1-codex".to_string()),
+            model: Some("glm-4.7".to_string()),
             flags: vec![],
             label: None,
             role: None,
@@ -243,9 +243,8 @@ mod tests {
 
         let built = registry.build_command(&config).unwrap();
         assert_eq!(built.command, "droid");
-        assert!(built.args.contains(&"--skip-permissions-unsafe".to_string()));
-        assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"gpt-5.1-codex".to_string()));
+        // Droid interactive mode uses OAuth - no auto-approve flag needed
+        // Model is selected via /model command or ~/.factory/config.json
     }
 
     #[test]
