@@ -180,7 +180,8 @@ impl InjectionManager {
         Ok(())
     }
 
-    /// Notify Queen of new worker availability
+    /// Notify Queen of new worker availability (logs only, no PTY injection)
+    /// Queen spawns workers via HTTP API, so she already knows - no need to inject back
     pub fn notify_queen_worker_added(
         &self,
         session_id: &str,
@@ -192,15 +193,16 @@ impl InjectionManager {
             worker.id, worker.role.label, worker.cli
         );
 
-        // Log to coordination.log
+        // Log to coordination.log (for audit purposes)
         let coord_message = CoordinationMessage::system(&format_agent_display(queen_id), &message);
 
         self.storage
             .append_coordination_log(session_id, &coord_message)
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
-        // Write to Queen's PTY
-        self.write_to_agent(queen_id, &message)?;
+        // NOTE: We intentionally do NOT write to Queen's PTY here.
+        // Queen spawns workers via HTTP API, so she already knows about them.
+        // Injecting back would cause confusing "self-injection" in her terminal.
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
