@@ -512,7 +512,23 @@ impl SessionController {
     }
 
     /// Build the Master Planner's prompt for initial planning phase
-    fn build_master_planner_prompt(session_id: &str, user_prompt: &str) -> String {
+    fn build_master_planner_prompt(session_id: &str, user_prompt: &str, workers: &[AgentConfig]) -> String {
+        // Build worker info section
+        let mut worker_table = String::new();
+        for (i, worker_config) in workers.iter().enumerate() {
+            let index = i + 1;
+            let role_label = worker_config.role.as_ref()
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| format!("Worker {}", index));
+            let cli = &worker_config.cli;
+            worker_table.push_str(&format!(
+                "| Worker {} | {} | {} |\n",
+                index, role_label, cli
+            ));
+        }
+
+        let worker_count = workers.len();
+
         // Determine phase 0 based on whether a task was provided
         let phase0 = if user_prompt.trim().is_empty() {
             String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
@@ -580,12 +596,22 @@ You are the **Master Planner** orchestrating a multi-agent investigation to crea
 - **Session ID**: {session_id}
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
 
+## Configured Workers
+
+The user has configured **{worker_count} workers** for this session:
+
+| Worker | Role | CLI |
+|--------|------|-----|
+{worker_table}
+
+**IMPORTANT**: Your plan MUST create tasks for ALL {worker_count} configured workers!
+
 ## Your Mission
 
 1. **Gather Task**: Understand what the user wants (GitHub issue or custom task)
 2. **Spawn Scout Agents**: Launch parallel investigation agents using external CLIs
 3. **Synthesize Findings**: Merge and deduplicate file discoveries
-4. **Create Plan**: Write comprehensive plan.md with clear tasks
+4. **Create Plan**: Write comprehensive plan.md with **{worker_count} tasks** (one per worker)
 5. **Wait for Approval**: User will review and may request refinements
 
 ---
@@ -640,8 +666,10 @@ Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
 - Consensus Level: HIGH/MEDIUM/LOW
 
 ## Tasks
-- [ ] [HIGH] Task 1 -> Worker 1
-- [ ] [MEDIUM] Task 2 -> Worker 2
+(Create exactly {worker_count} tasks - one for each configured worker!)
+- [ ] [HIGH] Task 1: [description] -> Worker 1
+- [ ] [MEDIUM] Task 2: [description] -> Worker 2
+... continue for all {worker_count} workers ...
 (use checkboxes, priority tags, and worker assignments)
 
 ## Files to Modify
@@ -672,21 +700,65 @@ The user may approve or request refinements. Stay ready to update the plan.
 4. Write plan to `.hive-manager/{session_id}/plan.md`
 5. Say "PLAN READY FOR REVIEW""#,
             session_id = session_id,
-            phase0 = phase0
+            phase0 = phase0,
+            worker_count = worker_count,
+            worker_table = worker_table.trim_end()
         )
     }
 
     /// Build a minimal smoke test prompt that creates a simple plan without real investigation
-    fn build_smoke_test_prompt(session_id: &str) -> String {
+    fn build_smoke_test_prompt(session_id: &str, workers: &[AgentConfig]) -> String {
+        // Build worker table and task list based on configured workers
+        let mut worker_table = String::new();
+        let mut task_list = String::new();
+        let mut dependencies = String::new();
+
+        for (i, worker_config) in workers.iter().enumerate() {
+            let index = i + 1;
+            let role_label = worker_config.role.as_ref()
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| format!("Worker {}", index));
+            let cli = &worker_config.cli;
+
+            worker_table.push_str(&format!(
+                "| Worker {} | {} | {} |\n",
+                index, role_label, cli
+            ));
+
+            let priority = if index == 1 { "HIGH" } else if index == 2 { "MEDIUM" } else { "LOW" };
+            task_list.push_str(&format!(
+                "- [ ] [{}] Smoke test task {}: Verify {} worker functionality -> Worker {}\n",
+                priority, index, role_label, index
+            ));
+
+            if index > 1 {
+                dependencies.push_str(&format!("- Task {} depends on Task {} completing.\n", index, index - 1));
+            }
+        }
+
+        if dependencies.is_empty() {
+            dependencies = "None - single worker smoke test.".to_string();
+        }
+
         format!(
 r#"# Smoke Test - Quick Flow Validation
 
 You are running a **SMOKE TEST** to validate the Hive Manager flow.
 
+## Configured Workers
+
+The user has configured **{worker_count} workers** for this session:
+
+| Worker | Role | CLI |
+|--------|------|-----|
+{worker_table}
+
 ## Your Task
 
 Create a minimal test plan immediately. Do NOT spawn any investigation agents.
 Do NOT analyze the codebase. Just create a simple plan to test the flow.
+
+**IMPORTANT**: Create exactly **{worker_count} tasks** - one for each configured worker!
 
 ## Write This Plan Now
 
@@ -697,6 +769,7 @@ Write the following to `.hive-manager/{session_id}/plan.md`:
 
 ## Summary
 This is a smoke test to validate the planning flow works correctly.
+Testing {worker_count} workers as configured by the user.
 
 ## Investigation Results
 - Scouts Used: 0 (smoke test - skipped)
@@ -704,22 +777,20 @@ This is a smoke test to validate the planning flow works correctly.
 - Consensus Level: N/A
 
 ## Tasks
-- [ ] [HIGH] Smoke test task 1: Verify worker spawning -> Worker 1
-- [ ] [MEDIUM] Smoke test task 2: Verify Queen coordination -> Worker 2
-
+{task_list}
 ## Files to Modify
 | File | Priority | Changes Needed |
 |------|----------|----------------|
 | (smoke test - no real files) | N/A | N/A |
 
 ## Dependencies
-Task 2 depends on Task 1 completing.
-
+{dependencies}
 ## Risks
 None - this is a smoke test.
 
 ## Notes
 Smoke test completed successfully. The planning phase flow is working.
+Testing all {worker_count} configured workers.
 ```
 
 After writing the plan, say: **"PLAN READY FOR REVIEW"**
@@ -727,8 +798,12 @@ After writing the plan, say: **"PLAN READY FOR REVIEW"**
 This tests that:
 1. Master Planner can write to the plan file
 2. User can see and approve the plan
-3. Flow continues to spawn Queen and Workers"#,
-            session_id = session_id
+3. Flow continues to spawn Queen and all {worker_count} Workers"#,
+            session_id = session_id,
+            worker_count = workers.len(),
+            worker_table = worker_table.trim_end(),
+            task_list = task_list.trim_end(),
+            dependencies = dependencies.trim_end()
         )
     }
 
@@ -1546,11 +1621,11 @@ Last updated: {timestamp}
         // Build the appropriate prompt based on mode
         let planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
-            Self::build_smoke_test_prompt(&session_id)
+            Self::build_smoke_test_prompt(&session_id, &config.workers)
         } else {
-            // Empty string means Master Planner will ask user what task they want
+            // Pass workers info to Master Planner so it knows how many tasks to create
             let prompt = config.prompt.as_deref().unwrap_or("");
-            Self::build_master_planner_prompt(&session_id, prompt)
+            Self::build_master_planner_prompt(&session_id, prompt, &config.workers)
         };
 
         {
@@ -1632,11 +1707,11 @@ Last updated: {timestamp}
         // Build the appropriate prompt based on mode
         let planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode (swarm) - skipping real investigation");
-            Self::build_smoke_test_prompt(&session_id)
+            Self::build_smoke_test_prompt(&session_id, &config.workers_per_planner)
         } else {
-            // Empty string means Master Planner will ask user what task they want
+            // Pass workers info to Master Planner so it knows how many tasks to create
             let prompt = config.prompt.as_deref().unwrap_or("");
-            Self::build_master_planner_prompt(&session_id, prompt)
+            Self::build_master_planner_prompt(&session_id, prompt, &config.workers_per_planner)
         };
 
         {
