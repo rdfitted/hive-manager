@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
+use crate::cli::{CliRegistry, CliBehavior};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::SessionStorage;
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
@@ -19,11 +20,40 @@ pub enum SessionType {
     Fusion { variants: Vec<String> },
 }
 
+#[derive(Debug)]
+pub enum SessionError {
+    NotFound(String),
+    ConfigError(String),
+    SpawnError(String),
+    TerminationError(String),
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionError::NotFound(s) => write!(f, "Session not found: {}", s),
+            SessionError::ConfigError(s) => write!(f, "Config error: {}", s),
+            SessionError::SpawnError(s) => write!(f, "Spawn error: {}", s),
+            SessionError::TerminationError(s) => write!(f, "Termination error: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+impl From<String> for SessionError {
+    fn from(s: String) -> Self {
+        SessionError::ConfigError(s)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
     Planning,      // Master Planner is running
     PlanReady,     // Plan generated, waiting for user to continue
     Starting,
+    SpawningWorker(u8),      // Which worker is being spawned (sequential mode)
+    WaitingForWorker(u8),    // Which worker we're waiting on (sequential mode)
     Running,
     Paused,
     Completed,
@@ -102,6 +132,60 @@ pub struct SessionController {
 // Explicitly implement Send + Sync
 unsafe impl Send for SessionController {}
 unsafe impl Sync for SessionController {}
+
+/// Generate CLI-specific polling instructions based on the CLI's behavioral profile
+fn get_polling_instructions(cli: &str, task_file: &str) -> String {
+    match CliRegistry::get_behavior(cli) {
+        CliBehavior::ExplicitPolling => {
+            format!(
+                r#"
+## Polling Protocol (MANDATORY)
+Run this bash loop to wait for task activation:
+```bash
+while true; do
+  STATUS=$(grep "^## Status:" "{}" | head -1)
+  if [[ "$STATUS" == *"ACTIVE"* ]]; then break; fi
+  sleep 30
+done
+```
+"#,
+                task_file
+            )
+        }
+        CliBehavior::ActionProne => {
+            format!(
+                r#"
+## WAIT FOR ACTIVATION (CRITICAL)
+⚠️ You MUST wait for your task file Status to become ACTIVE.
+⚠️ Do NOT start working just because you received this prompt.
+⚠️ Read {} - if Status is STANDBY, WAIT.
+
+Check the file, then wait. Do not proceed until ACTIVE.
+"#,
+                task_file
+            )
+        }
+        CliBehavior::InstructionFollowing => {
+            format!(
+                r#"
+## Task Coordination
+Read {}. Begin work only when Status is ACTIVE.
+"#,
+                task_file
+            )
+        }
+        CliBehavior::Interactive => {
+            format!(
+                r#"
+## Task Coordination
+Read {}. Begin work only when Status is ACTIVE.
+Use the interactive interface to monitor your task file.
+"#,
+                task_file
+            )
+        }
+    }
+}
 
 impl SessionController {
     pub fn new(pty_manager: Arc<RwLock<PtyManager>>) -> Self {
@@ -649,7 +733,7 @@ This tests that:
     }
 
     /// Build the Queen's master prompt with worker information
-    fn build_queen_master_prompt(session_id: &str, workers: &[AgentConfig], user_prompt: Option<&str>, has_plan: bool) -> String {
+    fn build_queen_master_prompt(cli: &str, session_id: &str, workers: &[AgentConfig], user_prompt: Option<&str>, has_plan: bool) -> String {
         let mut worker_list = String::new();
         for (i, worker_config) in workers.iter().enumerate() {
             let index = i + 1;
@@ -676,12 +760,38 @@ Follow the plan's task breakdown when assigning work to workers."#,
             String::new()
         };
 
+        let hardening = if CliRegistry::needs_role_hardening(cli) {
+            r#"
+âš ï¸ CRITICAL ROLE CONSTRAINTS âš ï¸
+
+You are the QUEEN - the top-level coordinator. You do NOT implement.
+
+### You ARE allowed to:
+- Read plan.md, coordination.log, worker status files
+- Write/Edit ONLY: Planner task files, coordination.log
+- Run git commands: commit, push, branch, PR creation
+- Spawn investigation agents for planning (not implementation)
+
+### You are PROHIBITED from:
+- Editing application source code (*.rs, *.ts, *.svelte, etc.)
+- Running implementation commands (cargo build, npm run, tests)
+- Fixing bugs or implementing features directly
+- Bypassing Planners to assign tasks directly to Workers
+
+If you find yourself about to edit code, STOP. Write a task file for a Planner instead.
+"#
+        } else {
+            ""
+        };
+
         format!(
 r#"# Queen Agent - Hive Manager Session
 
 You are the **Queen** orchestrating a multi-agent Hive session. You have full Claude Code capabilities plus coordination tools.
-
+{hardening}
 ## Session Info
+"#,
+            hardening = hardening,
 
 - **Session ID**: {session_id}
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
@@ -760,41 +870,16 @@ Workers are polling their task files and will start working when they see ACTIVE
 
         let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index);
 
-        // Issue #3: Codex and OpenCode CLIs do not automatically poll for task file
-        // changes like Claude and Gemini do. We must include explicit bash polling
-        // instructions in their worker prompts to ensure they detect ACTIVE status.
-        let polling_instructions = match config.cli.as_str() {
-            "codex" | "opencode" => format!(r#"
-
-## Polling Protocol (CRITICAL - You MUST follow this)
-
-Your CLI requires explicit polling. Run this bash loop to wait for activation:
-
-```bash
-while true; do
-  STATUS=$(grep "^## Status:" "{task_file}" | head -1)
-  echo "[Worker {index}] Checking status: $STATUS"
-  if [[ "$STATUS" == *"ACTIVE"* ]]; then
-    echo "[Worker {index}] Task is ACTIVE - beginning work"
-    break
-  fi
-  if [[ "$STATUS" == *"COMPLETED"* ]] || [[ "$STATUS" == *"BLOCKED"* ]]; then
-    echo "[Worker {index}] Task already finished"
-    break
-  fi
-  sleep 30
-done
-```
-
-Do NOT simply "wait" conceptually. You MUST run the actual bash loop above."#,
-                task_file = task_file, index = index),
-            _ => String::new() // Claude and Gemini handle polling implicitly
-        };
+        let polling_instructions = get_polling_instructions(&config.cli, &task_file);
 
         format!(
 r#"# Worker {index} ({role_name}) - Hive Session
 
 You are a **Worker** in a multi-agent Hive session, coordinated by the Queen.
+
+## Your Role: EXECUTOR
+
+You have full implementation authority within your specialization.
 
 ## Your Specialization
 
@@ -845,7 +930,7 @@ If the status is STANDBY, wait for the Queen to assign you a task by updating th
     }
 
     /// Build a planner's role prompt
-    fn build_planner_prompt(index: u8, config: &PlannerConfig, queen_id: &str) -> String {
+    fn build_planner_prompt(cli: &str, index: u8, config: &PlannerConfig, queen_id: &str) -> String {
         let mut worker_list = String::new();
         for (i, worker_config) in config.workers.iter().enumerate() {
             let worker_index = i + 1;
@@ -855,12 +940,47 @@ If the status is STANDBY, wait for the Queen to assign you a task by updating th
             worker_list.push_str(&format!("| Worker {} | {} | {} |\n", worker_index, role_label, worker_config.cli));
         }
 
+        let hardening = if CliRegistry::needs_role_hardening(cli) {
+            r#"
+âš ï¸ CRITICAL ROLE CONSTRAINTS âš ï¸
+
+You are a PLANNER - you coordinate Workers in your domain. You do NOT implement.
+
+### You ARE allowed to:
+- Read any file in your domain for context
+- Write/Edit ONLY: Worker task files in your domain
+- Read worker task files to monitor COMPLETED/BLOCKED status
+- Report domain completion to Queen
+
+### You are PROHIBITED from:
+- Editing application source code directly
+- Running implementation commands
+- Completing worker tasks yourself
+- "Helping" by doing a worker's job
+
+### Batch Task Assignment (MANDATORY)
+You MUST write ALL worker task files BEFORE monitoring:
+1. Analyze your domain task
+2. Break into worker subtasks
+3. Write ALL task files (STANDBY -> ACTIVE) in ONE pass
+4. THEN poll for completion - do NOT interleave assignment and execution
+
+If a worker is blocked, reassign or escalate to Queen. Do NOT fix it yourself.
+"#
+        } else {
+            ""
+        };
+
         format!(
 r#"# Planner {index} - {domain} Domain
 
 You are a **Planner** in a multi-agent Swarm session, managing the {domain} domain.
-
+{hardening}
 ## Your Domain
+"#,
+            index = index,
+            domain = config.domain,
+            hardening = hardening,
 
 {domain}
 
@@ -904,7 +1024,7 @@ Awaiting task assignment from the Queen."#,
     }
 
     /// Build the Queen's master prompt for Swarm mode with planner information
-    fn build_swarm_queen_prompt(session_id: &str, planners: &[PlannerConfig], user_prompt: Option<&str>) -> String {
+    fn build_swarm_queen_prompt(cli: &str, session_id: &str, planners: &[PlannerConfig], user_prompt: Option<&str>) -> String {
         let mut planner_list = String::new();
         for (i, planner_config) in planners.iter().enumerate() {
             let index = i + 1;
@@ -1001,6 +1121,66 @@ Write domain tasks to planner prompt files or tell the operator:
 "# Task Assignment - Worker {worker_index}
 
 ## Status: {status}
+
+## Role Constraints
+
+- **EXECUTOR**: You have full authority to implement and fix issues.
+- **SCOPE**: Stay within your assigned domain/specialization.
+- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
+
+## Instructions
+
+{task_content}
+
+## Completion Protocol
+
+When task is complete, update this file:
+1. Change Status to: COMPLETED
+2. Add a summary under a new Result section
+
+If blocked, change Status to: BLOCKED and describe the issue.
+
+---
+Last updated: {timestamp}
+",
+            worker_index = worker_index,
+            status = status,
+            task_content = task_content,
+            timestamp = timestamp
+        );
+
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write task file: {}", e))?;
+
+        Ok(file_path)
+    }
+
+    /// Write a task file with a specific status (used for sequential spawning)
+    fn write_task_file_with_status(project_path: &PathBuf, session_id: &str, worker_index: u8, initial_task: Option<&str>, status: &str) -> Result<PathBuf, String> {
+        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+        std::fs::create_dir_all(&tasks_dir)
+            .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
+
+        let filename = format!("worker-{}-task.md", worker_index);
+        let file_path = tasks_dir.join(&filename);
+
+        let task_content = if let Some(task) = initial_task {
+            task.to_string()
+        } else {
+            "Awaiting task assignment. Monitor this file for updates.".to_string()
+        };
+
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let content = format!(
+"# Task Assignment - Worker {worker_index}
+
+## Status: {status}
+
+## Role Constraints
+
+- **EXECUTOR**: You have full authority to implement and fix issues.
+- **SCOPE**: Stay within your assigned domain/specialization.
+- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
 
 ## Instructions
 
@@ -1317,6 +1497,129 @@ Last updated: {timestamp}
         Ok(session)
     }
 
+    /// Spawn the next worker sequentially
+    async fn spawn_next_worker(&self, session_id: &str, worker_index: usize, config: &HiveLaunchConfig, queen_id: &str) -> Result<(), SessionError> {
+        let session = self.get_session(session_id)
+            .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
+
+        if worker_index >= config.workers.len() {
+            // All workers spawned - session complete
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.state = SessionState::Running;
+            }
+            return Ok(());
+        }
+
+        let worker_config = &config.workers[worker_index];
+        let index = (worker_index + 1) as u8;
+        let cwd = session.project_path.to_str().unwrap_or(".");
+
+        // Update state to spawning this worker
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.state = SessionState::SpawningWorker(index);
+            }
+        }
+
+        let pty_manager = self.pty_manager.read();
+        let worker_id = format!("{}-worker-{}", session_id, index);
+
+        // 1. Write task file FIRST (Status: ACTIVE since it's their turn)
+        Self::write_task_file_with_status(&session.project_path, session_id, index, worker_config.initial_prompt.as_deref(), "ACTIVE")?;
+
+        // 2. Write worker prompt to file
+        let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
+        let filename = format!("worker-{}-prompt.md", index);
+        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+        let prompt_path = prompt_file.to_string_lossy().to_string();
+
+        // 3. Build command with prompt
+        let (cmd, mut args) = Self::build_command(worker_config);
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+        // 4. Spawn the worker
+        pty_manager
+            .create_session(
+                worker_id.clone(),
+                AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
+                &cmd,
+                &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                Some(cwd),
+                120,
+                30,
+            )
+            .map_err(|e| SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e)))?;
+
+        // 5. Add worker to session
+        let mut sessions = self.sessions.write();
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.agents.push(AgentInfo {
+                id: worker_id,
+                role: AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
+                status: AgentStatus::Running,
+                config: worker_config.clone(),
+                parent_id: Some(queen_id.to_string()),
+            });
+            s.state = SessionState::WaitingForWorker(index);
+        }
+
+        Ok(())
+    }
+
+    /// Called when worker-completed event received
+    pub async fn on_worker_completed(&self, session_id: &str, worker_id: u8) -> Result<(), SessionError> {
+        let session = self.get_session(session_id)
+            .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
+
+        // Verify we're in sequential mode and this is the expected worker
+        if session.state != SessionState::WaitingForWorker(worker_id) {
+            tracing::warn!("Worker {} completed but session in state {:?}", worker_id, session.state);
+            return Ok(());
+        }
+
+        // Load config
+        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-config.json");
+        let config_json = std::fs::read_to_string(&pending_config_path)
+            .map_err(|e| SessionError::ConfigError(format!("Failed to read pending config: {}", e)))?;
+        let config: HiveLaunchConfig = serde_json::from_str(&config_json)
+            .map_err(|e| SessionError::ConfigError(format!("Failed to parse pending config: {}", e)))?;
+
+        // Get queen_id
+        let queen_id = format!("{}-queen", session_id);
+
+        // 1. Terminate the completed worker's PTY
+        self.terminate_worker(session_id, worker_id)?;
+
+        // 2. Spawn next worker
+        let next_worker_index = worker_id as usize;
+        self.spawn_next_worker(session_id, next_worker_index, &config, &queen_id).await?;
+
+        Ok(())
+    }
+
+    /// Terminate a worker
+    fn terminate_worker(&self, session_id: &str, worker_id: u8) -> Result<(), SessionError> {
+        let worker_agent_id = format!("{}-worker-{}", session_id, worker_id);
+
+        let pty_manager = self.pty_manager.read();
+
+        // Kill the PTY
+        pty_manager.kill(&worker_agent_id)
+            .map_err(|e| SessionError::TerminationError(format!("Failed to kill worker {}: {}", worker_id, e)))?;
+
+        // Update agent status
+        let mut sessions = self.sessions.write();
+        if let Some(session) = sessions.get_mut(session_id) {
+            if let Some(agent) = session.agents.iter_mut().find(|a| a.id == worker_agent_id) {
+                agent.status = AgentStatus::Completed;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Continue a session after planning phase - spawns Queen + Workers/Planners
     pub fn continue_after_planning(&self, session_id: &str) -> Result<Session, String> {
         // Get the session
@@ -1400,14 +1703,16 @@ Last updated: {timestamp}
                 parent_id: None,
             });
 
-            // Create Worker agents
-            for (i, worker_config) in config.workers.iter().enumerate() {
-                let index = (i + 1) as u8;
+            // Create ONLY the first Worker agent (sequential spawning mode)
+            // Subsequent workers will be spawned as each worker completes its task
+            if !config.workers.is_empty() {
+                let worker_config = &config.workers[0];
+                let index = 1u8; // First worker has index 1
                 let worker_id = format!("{}-worker-{}", session_id, index);
                 let (cmd, mut args) = Self::build_command(worker_config);
 
-                // Write task file for this worker
-                Self::write_task_file(&session.project_path, session_id, index, worker_config.initial_prompt.as_deref())?;
+                // Write task file for this worker (ACTIVE status for sequential spawning)
+                Self::write_task_file_with_status(&session.project_path, session_id, index, worker_config.initial_prompt.as_deref(), "ACTIVE")?;
 
                 // Write worker prompt
                 let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id, session_id);
@@ -1416,7 +1721,7 @@ Last updated: {timestamp}
                 let prompt_path = prompt_file.to_string_lossy().to_string();
                 Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-                tracing::info!("Launching Worker {} (after planning): {} {:?} in {:?}", index, cmd, args, cwd);
+                tracing::info!("Launching Worker 1 (first of {} workers, sequential mode): {} {:?} in {:?}", config.workers.len(), cmd, args, cwd);
 
                 pty_manager
                     .create_session(
@@ -1440,12 +1745,17 @@ Last updated: {timestamp}
             }
         }
 
-        // Update session with new agents and Running state
+        // Update session with new agents and WaitingForWorker state (sequential spawning)
         let updated_session = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 s.agents.extend(new_agents);
-                s.state = SessionState::Running;
+                // Set state to WaitingForWorker(1) if we spawned a worker, otherwise Running
+                s.state = if !config.workers.is_empty() {
+                    SessionState::WaitingForWorker(1)
+                } else {
+                    SessionState::Running
+                };
                 s.clone()
             } else {
                 return Err("Session disappeared".to_string());
@@ -2081,6 +2391,8 @@ Last updated: {timestamp}
             SessionState::Planning => "Planning",
             SessionState::PlanReady => "PlanReady",
             SessionState::Starting => "Starting",
+            SessionState::SpawningWorker(_) => "SpawningWorker",
+            SessionState::WaitingForWorker(_) => "WaitingForWorker",
             SessionState::Running => "Running",
             SessionState::Paused => "Paused",
             SessionState::Completed => "Completed",
@@ -2248,6 +2560,24 @@ Last updated: {timestamp}
 impl Default for SessionController {
     fn default() -> Self {
         Self::new(Arc::new(RwLock::new(PtyManager::new())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionState;
+
+    #[test]
+    fn session_state_variants_exist() {
+        let _planning = SessionState::Planning;
+        let _plan_ready = SessionState::PlanReady;
+        let _starting = SessionState::Starting;
+        let _spawning = SessionState::SpawningWorker(1);
+        let _waiting = SessionState::WaitingForWorker(1);
+        let _running = SessionState::Running;
+        let _paused = SessionState::Paused;
+        let _completed = SessionState::Completed;
+        let _failed = SessionState::Failed("error".to_string());
     }
 }
 

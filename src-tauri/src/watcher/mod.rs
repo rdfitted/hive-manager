@@ -1,11 +1,21 @@
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Serialize;
 use std::path::Path;
 use std::sync::{mpsc::channel, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+#[derive(Clone, Serialize)]
+struct WorkerCompletedPayload {
+    session_id: String,
+    worker_id: u8,
+    task_file: String,
+}
+
 pub struct TaskFileWatcher {
+    #[allow(dead_code)] // Must keep watcher alive to maintain file watching
     watcher: RecommendedWatcher,
+    #[allow(dead_code)]
     session_id: String,
 }
 
@@ -51,6 +61,17 @@ impl TaskFileWatcher {
         false
     }
 
+    fn extract_worker_id(path: &Path) -> Option<u8> {
+        let filename = path.file_name()?.to_str()?;
+        // Match "worker-N-task.md" pattern
+        if filename.starts_with("worker-") && filename.ends_with("-task.md") {
+            let num_str = filename.strip_prefix("worker-")?.strip_suffix("-task.md")?;
+            num_str.parse().ok()
+        } else {
+            None
+        }
+    }
+
     fn handle_event(
         event: &Event,
         session_id: &str,
@@ -63,6 +84,17 @@ impl TaskFileWatcher {
                 if filename.starts_with("worker-") && filename.ends_with("-task.md") {
                     if let Ok(content) = std::fs::read_to_string(path) {
                         if content.contains("Status: COMPLETED") || content.contains("**Status**: COMPLETED") {
+                            // Extract worker ID from filename
+                            if let Some(worker_id) = Self::extract_worker_id(path) {
+                                // Emit worker-specific completion event
+                                let payload = WorkerCompletedPayload {
+                                    session_id: session_id.to_string(),
+                                    worker_id,
+                                    task_file: path.to_string_lossy().to_string(),
+                                };
+                                let _ = app_handle.emit("worker-completed", payload);
+                            }
+
                             if Self::is_debounced(last_emit, debounce) {
                                 return;
                             }

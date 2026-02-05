@@ -3,6 +3,19 @@ use std::collections::HashMap;
 use crate::pty::AgentConfig;
 use crate::storage::{AppConfig, CliConfig};
 
+/// CLI behavioral profiles for characterizing how different CLI tools behave
+#[derive(Debug, Clone, PartialEq)]
+pub enum CliBehavior {
+    /// Highly proactive - will "help" by taking action. Needs strong constraints.
+    ActionProne,
+    /// Follows instructions literally. Respects role boundaries naturally.
+    InstructionFollowing,
+    /// Needs explicit bash loops to enforce waiting.
+    ExplicitPolling,
+    /// Interactive TUI mode - different prompt injection.
+    Interactive,
+}
+
 /// CLI Registry for building commands from agent configurations
 pub struct CliRegistry {
     config: AppConfig,
@@ -99,6 +112,22 @@ impl CliRegistry {
     /// Update the config
     pub fn update_config(&mut self, config: AppConfig) {
         self.config = config;
+    }
+
+    /// Get the behavioral profile for a CLI
+    pub fn get_behavior(cli: &str) -> CliBehavior {
+        match cli {
+            "claude" | "gemini" => CliBehavior::ActionProne,
+            "qwen" => CliBehavior::InstructionFollowing,
+            "codex" | "opencode" => CliBehavior::ExplicitPolling,
+            "droid" | "cursor" => CliBehavior::Interactive,
+            _ => CliBehavior::ActionProne, // Default to most constrained
+        }
+    }
+
+    /// Check if a CLI needs role hardening (stronger constraints in prompts)
+    pub fn needs_role_hardening(cli: &str) -> bool {
+        matches!(Self::get_behavior(cli), CliBehavior::ActionProne)
     }
 }
 
@@ -269,5 +298,17 @@ mod tests {
         assert!(built.args.contains(&"-y".to_string()));
         assert!(built.args.contains(&"-m".to_string()));
         assert!(built.args.contains(&"qwen3-coder".to_string()));
+    }
+
+    #[test]
+    fn test_cli_behavior_profiles() {
+        assert_eq!(CliRegistry::get_behavior("claude"), CliBehavior::ActionProne);
+        assert_eq!(CliRegistry::get_behavior("gemini"), CliBehavior::ActionProne);
+        assert_eq!(CliRegistry::get_behavior("qwen"), CliBehavior::InstructionFollowing);
+        assert_eq!(CliRegistry::get_behavior("codex"), CliBehavior::ExplicitPolling);
+        assert_eq!(CliRegistry::get_behavior("opencode"), CliBehavior::ExplicitPolling);
+        assert_eq!(CliRegistry::get_behavior("droid"), CliBehavior::Interactive);
+        assert_eq!(CliRegistry::get_behavior("cursor"), CliBehavior::Interactive);
+        assert_eq!(CliRegistry::get_behavior("unknown-cli"), CliBehavior::ActionProne);
     }
 }

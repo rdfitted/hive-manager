@@ -4,7 +4,7 @@ mod session;
 mod storage;
 mod coordination;
 mod templates;
-mod cli;
+pub mod cli;
 mod http;
 mod watcher;
 
@@ -79,6 +79,7 @@ pub fn run() {
 
             // Start HTTP server if enabled
             let http_config = shared_config.clone();
+            let http_session_controller = session_controller.clone();
             tauri::async_runtime::spawn(async move {
                 let (enabled, port) = {
                     let cfg = http_config.read().await;
@@ -90,13 +91,53 @@ pub fn run() {
                     let state = Arc::new(AppState::new(
                         http_config,
                         pty_manager.clone(),
-                        session_controller.clone(),
+                        http_session_controller.clone(),
                         injection_manager.clone(),
                         storage.clone(),
                     ));
                     if let Err(e) = http::serve(state, port).await {
                         tracing::error!("HTTP server error: {}", e);
                     }
+                }
+            });
+
+            // Set up worker-completed event listener for sequential spawning
+            let session_controller_clone = session_controller.clone();
+            use tauri::Listener;
+            app.listen("worker-completed", move |event: tauri::Event| {
+                let payload = event.payload();
+
+                // Parse the payload (session_id, worker_id, task_file)
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let session_id = json.get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let worker_id = json.get("worker_id")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u8;
+
+                    if session_id.is_empty() || worker_id == 0 {
+                        tracing::warn!("Invalid worker-completed payload: {}", payload);
+                        return;
+                    }
+
+                    tracing::info!("Worker {} completed, spawning next worker", worker_id);
+
+                    // Spawn async task to handle worker completion
+                    let controller = session_controller_clone.clone();
+                    let session_id_clone = session_id.to_string();
+                    tauri::async_runtime::spawn(async move {
+                        let result = controller
+                            .read()
+                            .on_worker_completed(&session_id_clone, worker_id)
+                            .await;
+
+                        if let Err(e) = result {
+                            tracing::error!("Failed to handle worker completion: {}", e);
+                        }
+                    });
+                } else {
+                    tracing::warn!("Failed to parse worker-committed payload: {}", payload);
                 }
             });
 
