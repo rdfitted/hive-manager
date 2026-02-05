@@ -2530,25 +2530,37 @@ Last updated: {timestamp}
                 .collect()
         };
 
+        // Clean up Master Planner PTY before spawning Queen
+        let planner_id = format!("{}-master-planner", session_id);
+        if let Err(e) = self.stop_agent(session_id, &planner_id) {
+            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
+        } else {
+            tracing::info!("Stopped Master Planner {} before spawning Queen", planner_id);
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.retain(|a| a.id != planner_id);
+            }
+        }
+
         let mut new_agents = Vec::new();
 
         {
             let pty_manager = self.pty_manager.read();
 
-            // Create Queen agent
+            // Create Queen agent ONLY - planners will be spawned sequentially by Queen via HTTP API
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
-            // Write Queen prompt with plan reference
+            // Write Queen prompt with sequential planner spawning protocol
             let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, session_id, &planners, config.prompt.as_deref());
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-            // Write tool documentation files
-            Self::write_tool_files(&session.project_path, session_id)?;
+            // Write Swarm tool documentation files (includes spawn-planner.md)
+            Self::write_swarm_tool_files(&session.project_path, session_id, planners.len() as u8)?;
 
-            tracing::info!("Launching Queen agent (swarm, after planning): {} {:?} in {:?}", cmd, args, cwd);
+            tracing::info!("Launching Queen agent (swarm - sequential planner spawning, after planning): {} {:?} in {:?}", cmd, args, cwd);
 
             pty_manager
                 .create_session(
@@ -2570,92 +2582,23 @@ Last updated: {timestamp}
                 parent_id: None,
             });
 
-            // Create Planner agents with their Workers
-            for (pi, planner_config) in planners.iter().enumerate() {
-                let planner_index = (pi + 1) as u8;
-                let planner_id = format!("{}-planner-{}", session_id, planner_index);
-                let (cmd, mut args) = Self::build_command(&planner_config.config);
-
-                // Build planner prompt
-                let planner_prompt = Self::build_planner_prompt(
-                    planner_config.config.cli.as_str(),
-                    planner_index,
-                    planner_config,
-                    &queen_id,
-                );
-                let filename = format!("planner-{}-prompt.md", planner_index);
-                let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &planner_prompt)?;
-                let prompt_path = prompt_file.to_string_lossy().to_string();
-                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-                tracing::info!("Launching Planner {} (swarm, after planning): {} {:?}", planner_index, cmd, args);
-
-                pty_manager
-                    .create_session(
-                        planner_id.clone(),
-                        AgentRole::Planner { index: planner_index },
-                        &cmd,
-                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        Some(cwd),
-                        120,
-                        30,
-                    )
-                    .map_err(|e| format!("Failed to spawn Planner {}: {}", planner_index, e))?;
-
-                new_agents.push(AgentInfo {
-                    id: planner_id.clone(),
-                    role: AgentRole::Planner { index: planner_index },
-                    status: AgentStatus::Running,
-                    config: planner_config.config.clone(),
-                    parent_id: Some(queen_id.clone()),
-                });
-
-                // Create Workers for this Planner
-                for (wi, worker_config) in planner_config.workers.iter().enumerate() {
-                    let worker_index = (wi + 1) as u8;
-                    let worker_id = format!("{}-planner-{}-worker-{}", session_id, planner_index, worker_index);
-                    let (cmd, mut args) = Self::build_command(worker_config);
-
-                    let worker_prompt = Self::build_worker_prompt(
-                        worker_index,
-                        worker_config,
-                        &planner_id,
-                        session_id,
-                    );
-                    let filename = format!("planner-{}-worker-{}-prompt.md", planner_index, worker_index);
-                    let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
-                    let prompt_path = prompt_file.to_string_lossy().to_string();
-                    Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-                    pty_manager
-                        .create_session(
-                            worker_id.clone(),
-                            AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
-                            &cmd,
-                            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                            Some(cwd),
-                            120,
-                            30,
-                        )
-                        .map_err(|e| format!("Failed to spawn Worker {}: {}", worker_index, e))?;
-
-                    new_agents.push(AgentInfo {
-                        id: worker_id,
-                        role: AgentRole::Worker { index: worker_index, parent: Some(planner_id.clone()) },
-                        status: AgentStatus::Running,
-                        config: worker_config.clone(),
-                        parent_id: Some(planner_id.clone()),
-                    });
-                }
-            }
+            // NOTE: Planners and Workers are NOT spawned here anymore
+            // Queen will spawn them sequentially via HTTP API and commit between each planner
         }
+
+        // Store planner config for Queen to reference when spawning via HTTP API
+        let swarm_config_path = session.project_path.join(".hive-manager").join(session_id).join("swarm-planners.json");
+        let planners_json = serde_json::to_string_pretty(&planners)
+            .map_err(|e| format!("Failed to serialize planner config: {}", e))?;
+        std::fs::write(&swarm_config_path, planners_json)
+            .map_err(|e| format!("Failed to write planner config: {}", e))?;
 
         // Update session with new agents and Running state
         let updated_session = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.extend(new_agents);
-                session.state = SessionState::Running;
+                session.state = SessionState::Running;  // Queen will spawn planners sequentially
                 session.clone()
             } else {
                 return Err("Session disappeared".to_string());
@@ -2670,8 +2613,9 @@ Last updated: {timestamp}
 
         // Update storage
         self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &updated_session.project_path);
 
-        // Clean up pending config file
+        // Clean up pending config file (keep swarm-planners.json for Queen reference)
         let _ = std::fs::remove_file(&pending_config_path);
 
         Ok(updated_session)
