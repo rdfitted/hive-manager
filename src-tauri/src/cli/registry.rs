@@ -151,14 +151,14 @@ mod tests {
         clis.insert("cursor".to_string(), CliConfig {
             command: "wsl".to_string(),
             auto_approve_flag: Some("--force".to_string()),
-            model_flag: Some("--model".to_string()),
-            default_model: "sonnet-4".to_string(),
+            model_flag: None,  // Cursor uses global model setting
+            default_model: "composer-1".to_string(),
             env: None,
         });
         clis.insert("droid".to_string(), CliConfig {
             command: "droid".to_string(),
-            auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
-            model_flag: Some("-m".to_string()),
+            auto_approve_flag: None,  // Interactive mode - no auto-approve flag
+            model_flag: None,  // Model selected via /model command in TUI
             default_model: "glm-4.7".to_string(),
             env: None,
         });
@@ -243,9 +243,9 @@ mod tests {
 
         let built = registry.build_command(&config).unwrap();
         assert_eq!(built.command, "droid");
-        assert!(built.args.contains(&"--skip-permissions-unsafe".to_string()));
-        assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"glm-4.7".to_string()));
+        // Droid interactive mode - no auto-approve or model flags
+        // Model is selected via /model command in TUI
+        assert!(built.args.is_empty() || built.args == config.flags);
     }
 
     #[test]

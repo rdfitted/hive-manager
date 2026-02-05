@@ -357,23 +357,16 @@ impl SessionController {
                 args.push("Ubuntu".to_string());
                 args.push("/root/.local/bin/agent".to_string());
                 args.push("--force".to_string());  // Auto-approve commands
-                if let Some(ref model) = config.model {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
+                // Cursor uses global model setting, no --model flag
             }
             "droid" => {
-                // Droid CLI exec mode for non-interactive use
-                args.push("exec".to_string());
-                args.push("--skip-permissions-unsafe".to_string());
-                if let Some(ref model) = config.model {
-                    args.push("-m".to_string());
-                    args.push(model.clone());
-                }
+                // Droid CLI - interactive TUI mode
+                // Model selected via /model command or config
+                // No auto-approve flag available in interactive mode
             }
             "qwen" => {
-                // Qwen Code CLI
-                args.push("-y".to_string());
+                // Qwen Code CLI - interactive mode with auto-approve
+                args.push("-y".to_string());  // YOLO mode for auto-approve
                 if let Some(ref model) = config.model {
                     args.push("-m".to_string());
                     args.push(model.clone());
@@ -399,8 +392,13 @@ impl SessionController {
     fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
         let prompt_arg = format!("Read {} and execute.", prompt_path);
         match cli {
-            "claude" | "codex" | "cursor" | "droid" | "qwen" => {
-                // Claude, Codex, Cursor, Droid, Qwen accept prompt as positional argument
+            "claude" | "codex" | "cursor" | "droid" => {
+                // Claude, Codex, Cursor, Droid accept prompt as positional argument
+                args.push(prompt_arg);
+            }
+            "qwen" => {
+                // Qwen uses -i for interactive mode with initial prompt
+                args.push("-i".to_string());
                 args.push(prompt_arg);
             }
             "gemini" => {
