@@ -352,6 +352,13 @@ impl SessionController {
         sessions.values().cloned().collect()
     }
 
+    /// Insert a session directly (for testing purposes only)
+    #[cfg(test)]
+    pub fn insert_test_session(&self, session: Session) {
+        let mut sessions = self.sessions.write();
+        sessions.insert(session.id.clone(), session);
+    }
+
     pub fn stop_session(&self, id: &str) -> Result<(), String> {
         let session = {
             let sessions = self.sessions.read();
@@ -1301,12 +1308,12 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/learnings"
+   curl "http://localhost:18800/api/sessions/{session_id}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/project-dna"
+   curl "http://localhost:18800/api/sessions/{session_id}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -1326,7 +1333,7 @@ Workers record learnings during task completion. Your curation responsibilities:
 ```
 
 ### Curation Process
-1. Review raw learnings via `GET /api/learnings`
+1. Review raw learnings via `GET /api/sessions/{session_id}/learnings`
 2. Synthesize insights into `.ai-docs/project-dna.md` sections:
    - **Patterns That Work** - Successful approaches
    - **Patterns That Failed** - What to avoid
@@ -1433,7 +1440,7 @@ Your task assignments are in: `{task_file}`
 Before marking your task COMPLETED, submit what you learned:
 
 ```bash
-curl -X POST "http://localhost:18800/api/learnings" \
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
   -H "Content-Type: application/json" \
   -d '{{
     "session": "{session_id}",

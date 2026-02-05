@@ -186,12 +186,12 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/learnings"
+   curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/project-dna"
+   curl "http://localhost:18800/api/sessions/{{session_id}}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -210,7 +210,7 @@ Workers record learnings during task completion. Your curation responsibilities:
 ```
 
 ### Curation Process
-1. Review learnings via `GET /api/learnings`
+1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
 2. Synthesize insights into `.ai-docs/project-dna.md`
 3. After 50+ learnings, archive to `.ai-docs/archive/`
 
@@ -254,12 +254,12 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/learnings"
+   curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/project-dna"
+   curl "http://localhost:18800/api/sessions/{{session_id}}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -278,7 +278,7 @@ Workers record learnings during task completion. Your curation responsibilities:
 ```
 
 ### Curation Process
-1. Review learnings via `GET /api/learnings`
+1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
 2. Synthesize insights into `.ai-docs/project-dna.md`
 3. After 50+ learnings, archive to `.ai-docs/archive/`
 
@@ -377,6 +377,9 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
 
         // Also support planners_list for swarm
         rendered = rendered.replace("{{planners_list}}", &workers_list);
+
+        // Replace session_id placeholder
+        rendered = rendered.replace("{{session_id}}", &context.session_id);
 
         // Replace task placeholder
         if let Some(ref task) = context.task {
