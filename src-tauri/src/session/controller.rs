@@ -351,6 +351,31 @@ impl SessionController {
                     args.push(model.clone());
                 }
             }
+            "cursor" => {
+                // Cursor CLI via WSL - add WSL args first
+                args.push("-d".to_string());
+                args.push("Ubuntu".to_string());
+                args.push("/root/.local/bin/agent".to_string());
+                args.push("--force".to_string());
+                // Cursor uses global model setting, no model flag
+            }
+            "droid" => {
+                // Droid CLI uses exec subcommand
+                args.push("exec".to_string());
+                args.push("--skip-permissions-unsafe".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "qwen" => {
+                // Qwen Code CLI
+                args.push("-y".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
             _ => {
                 // For other CLIs, just add model flag if specified
                 if let Some(ref model) = config.model {
@@ -371,8 +396,8 @@ impl SessionController {
     fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
         let prompt_arg = format!("Read {} and execute.", prompt_path);
         match cli {
-            "claude" | "codex" => {
-                // Claude and Codex accept prompt as positional argument
+            "claude" | "codex" | "cursor" | "droid" | "qwen" => {
+                // Claude, Codex, Cursor, Droid, Qwen accept prompt as positional argument
                 args.push(prompt_arg);
             }
             "gemini" => {

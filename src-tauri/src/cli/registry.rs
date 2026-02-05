@@ -148,6 +148,27 @@ mod tests {
             default_model: "gemini-2.5-pro".to_string(),
             env: None,
         });
+        clis.insert("cursor".to_string(), CliConfig {
+            command: "wsl".to_string(),
+            auto_approve_flag: Some("--force".to_string()),
+            model_flag: None,
+            default_model: "opus-4.5".to_string(),
+            env: None,
+        });
+        clis.insert("droid".to_string(), CliConfig {
+            command: "droid".to_string(),
+            auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "claude-opus-4-5-20251101".to_string(),
+            env: None,
+        });
+        clis.insert("qwen".to_string(), CliConfig {
+            command: "qwen".to_string(),
+            auto_approve_flag: Some("-y".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "qwen3-coder".to_string(),
+            env: None,
+        });
 
         AppConfig {
             clis,
@@ -189,5 +210,60 @@ mod tests {
         let built = registry.build_command_with_prompt(&config, Some("Test prompt")).unwrap();
         assert!(built.args.contains(&"-p".to_string()));
         assert!(built.args.contains(&"Test prompt".to_string()));
+    }
+
+    #[test]
+    fn test_build_cursor_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "cursor".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "wsl");
+        assert!(built.args.contains(&"--force".to_string()));
+    }
+
+    #[test]
+    fn test_build_droid_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "droid".to_string(),
+            model: Some("gpt-5.1-codex".to_string()),
+            flags: vec![],
+            label: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "droid");
+        assert!(built.args.contains(&"--skip-permissions-unsafe".to_string()));
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"gpt-5.1-codex".to_string()));
+    }
+
+    #[test]
+    fn test_build_qwen_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "qwen".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "qwen");
+        assert!(built.args.contains(&"-y".to_string()));
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"qwen3-coder".to_string()));
     }
 }

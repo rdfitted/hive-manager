@@ -33,6 +33,9 @@
     { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
     { value: 'opencode', label: 'OpenCode', description: 'Grok, BigPickle, GLM' },
     { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.2' },
+    { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Opus 4.5)' },
+    { value: 'droid', label: 'Droid', description: 'Factory Droid CLI (multi-model)' },
+    { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)' },
   ];
 
   let selectedRoleType = 'backend';

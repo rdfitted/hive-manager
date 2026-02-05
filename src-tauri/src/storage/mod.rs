@@ -293,6 +293,30 @@ impl SessionStorage {
             env: None,
         });
 
+        clis.insert("cursor".to_string(), CliConfig {
+            command: "wsl".to_string(),
+            auto_approve_flag: Some("--force".to_string()),
+            model_flag: None,
+            default_model: "opus-4.5".to_string(),
+            env: None,
+        });
+
+        clis.insert("droid".to_string(), CliConfig {
+            command: "droid".to_string(),
+            auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "claude-opus-4-5-20251101".to_string(),
+            env: None,
+        });
+
+        clis.insert("qwen".to_string(), CliConfig {
+            command: "qwen".to_string(),
+            auto_approve_flag: Some("-y".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "qwen3-coder".to_string(),
+            env: None,
+        });
+
         let mut default_roles = HashMap::new();
         default_roles.insert("backend".to_string(), RoleDefaults {
             cli: "claude".to_string(),
