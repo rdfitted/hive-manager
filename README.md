@@ -1,7 +1,114 @@
-# Tauri + SvelteKit + TypeScript
+# Hive Manager
 
-This template should help get you started developing with Tauri, SvelteKit and TypeScript in Vite.
+A desktop application for orchestrating multi-agent AI coding sessions. Launch coordinated teams of AI coding assistants (Claude, Codex, Gemini, etc.) that work together on complex software tasks.
 
-## Recommended IDE Setup
+![Hive Manager](https://img.shields.io/badge/version-0.12.0-blue)
+![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+## Features
+
+- **Hive Mode**: Queen + Workers architecture for coordinated development
+- **Swarm Mode**: Hierarchical planners with domain-specific mini-hives
+- **Fusion Mode**: Parallel competing implementations with best-pick resolution
+- **Session Persistence**: Save and resume sessions across app restarts
+- **Multi-CLI Support**: Works with Claude Code, Codex, OpenCode, Gemini CLI, and more
+- **Real-time Monitoring**: Watch all agents work simultaneously with live terminal output
+- **Git Integration**: Automatic branch management and coordination
+
+## Installation
+
+### Windows
+
+Download the latest release from the [Releases page](https://github.com/rdfitted/hive-manager/releases):
+
+- **NSIS Installer**: `Hive Manager_x.x.x_x64-setup.exe` (recommended)
+- **MSI Installer**: `Hive Manager_x.x.x_x64_en-US.msi`
+
+### Build from Source
+
+Requirements:
+- Node.js 18+
+- Rust 1.70+
+- Windows 10/11
+
+```bash
+# Clone the repository
+git clone https://github.com/rdfitted/hive-manager.git
+cd hive-manager
+
+# Install dependencies
+npm install
+
+# Development mode
+npm run tauri dev
+
+# Production build
+npm run tauri build
+```
+
+## Quick Start
+
+1. Launch Hive Manager
+2. Click **New Session** in the sidebar
+3. Select your project directory
+4. Choose a session type (Hive, Swarm, or Fusion)
+5. Configure your agents (CLI, model, roles)
+6. Click **Launch**
+
+## Session Types
+
+### Hive
+Traditional Queen + Workers setup. The Queen coordinates and delegates tasks to specialized Workers.
+
+### Swarm
+Hierarchical architecture with Planners that each manage their own mini-hive of Workers. Great for large, multi-domain projects.
+
+### Fusion
+Launch multiple agents working on the same task in parallel. Compare approaches and pick the best solution.
+
+## Supported CLIs
+
+- [Claude Code](https://claude.ai/claude-code) (Anthropic)
+- [Codex](https://github.com/openai/codex) (OpenAI)
+- [OpenCode](https://github.com/opencode-ai/opencode)
+- [Gemini CLI](https://github.com/google/gemini-cli)
+- [Aider](https://github.com/paul-gauthier/aider)
+- Any CLI that accepts prompts via stdin
+
+## Configuration
+
+Sessions are stored in `%APPDATA%/hive-manager/sessions/`.
+
+App configuration is in `%APPDATA%/hive-manager/config.json`.
+
+## Development
+
+```bash
+# Run in development mode with hot reload
+npm run tauri dev
+
+# Type checking
+npm run check
+
+# Build for production
+npm run tauri build
+```
+
+## Tech Stack
+
+- **Frontend**: SvelteKit 5, TypeScript
+- **Backend**: Rust, Tauri 2
+- **Terminal**: xterm.js with PTY support
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Acknowledgments
+
+Built with [Tauri](https://tauri.app/), [SvelteKit](https://kit.svelte.dev/), and [xterm.js](https://xtermjs.org/).
