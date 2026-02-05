@@ -296,15 +296,15 @@ impl SessionStorage {
         clis.insert("cursor".to_string(), CliConfig {
             command: "wsl".to_string(),
             auto_approve_flag: Some("--force".to_string()),
-            model_flag: None,
-            default_model: "opus-4.5".to_string(),
+            model_flag: Some("--model".to_string()),
+            default_model: "sonnet-4".to_string(),
             env: None,
         });
 
         clis.insert("droid".to_string(), CliConfig {
             command: "droid".to_string(),
-            auto_approve_flag: None,  // Interactive mode uses OAuth, no auto-approve flag
-            model_flag: None,  // Model selected via /model command or config
+            auto_approve_flag: Some("--skip-permissions-unsafe".to_string()),
+            model_flag: Some("-m".to_string()),
             default_model: "glm-4.7".to_string(),
             env: None,
         });

@@ -352,16 +352,24 @@ impl SessionController {
                 }
             }
             "cursor" => {
-                // Cursor CLI via WSL - add WSL args first
+                // Cursor Agent via WSL - interactive TUI mode
                 args.push("-d".to_string());
                 args.push("Ubuntu".to_string());
                 args.push("/root/.local/bin/agent".to_string());
-                args.push("--force".to_string());
-                // Cursor uses global model setting, no model flag
+                args.push("--force".to_string());  // Auto-approve commands
+                if let Some(ref model) = config.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
             }
             "droid" => {
-                // Droid CLI in interactive mode - uses OAuth, model selected via /model or config
-                // No flags needed - just the prompt as positional argument
+                // Droid CLI exec mode for non-interactive use
+                args.push("exec".to_string());
+                args.push("--skip-permissions-unsafe".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
             }
             "qwen" => {
                 // Qwen Code CLI
@@ -501,9 +509,9 @@ You MUST spawn Task agents that call external CLI tools via Bash. This provides 
 
 Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
 
-### Scout 2 - OpenCode GLM 4.7 (Pattern Recognition)
+### Scout 2 - Droid GLM 4.7 (Pattern Recognition)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/glm-4.7-free 'Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.' Return file paths with observations.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-4.7 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
 
 ### Scout 3 - OpenCode Grok Code (Quick Search)
 
@@ -2201,3 +2209,5 @@ impl Default for SessionController {
         Self::new(Arc::new(RwLock::new(PtyManager::new())))
     }
 }
+
+
