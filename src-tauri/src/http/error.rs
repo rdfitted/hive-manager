@@ -22,6 +22,7 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, message)
     }
 
+    #[allow(dead_code)]
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }

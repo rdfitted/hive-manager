@@ -6,6 +6,7 @@ use crate::pty::PtyManager;
 use crate::session::SessionController;
 use crate::coordination::InjectionManager;
 
+#[allow(dead_code)]
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub pty_manager: Arc<PLRwLock<PtyManager>>,
