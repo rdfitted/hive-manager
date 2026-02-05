@@ -26,10 +26,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Planner routes (Swarm mode)
         .route("/api/sessions/{id}/planners", get(planners::list_planners))
         .route("/api/sessions/{id}/planners", post(planners::add_planner))
-        // Learning routes
+        // Learning routes (legacy - work when single project active)
         .route("/api/learnings", get(learnings::list_learnings))
         .route("/api/learnings", post(learnings::submit_learning))
         .route("/api/project-dna", get(learnings::get_project_dna))
+        // Session-scoped learning routes (preferred - work with multiple projects)
+        .route("/api/sessions/{id}/learnings", get(learnings::list_learnings_for_session))
+        .route("/api/sessions/{id}/learnings", post(learnings::submit_learning_for_session))
+        .route("/api/sessions/{id}/project-dna", get(learnings::get_project_dna_for_session))
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
         .route("/api/sessions/{id}/inject/queen", post(inject::queen_inject))
