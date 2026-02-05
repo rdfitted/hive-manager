@@ -3085,10 +3085,13 @@ Last updated: {timestamp}
             sessions.get(session_id).cloned()
         }.ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-        // Allow adding workers when Running or WaitingForWorker (Queen spawning via HTTP API)
+        // Allow adding workers when:
+        // - Running: Normal operation
+        // - WaitingForWorker: Queen spawning workers sequentially (Hive mode)
+        // - WaitingForPlanner: Planner spawning workers (Swarm mode)
         let can_add_worker = matches!(
             session.state,
-            SessionState::Running | SessionState::WaitingForWorker(_)
+            SessionState::Running | SessionState::WaitingForWorker(_) | SessionState::WaitingForPlanner(_)
         );
         if !can_add_worker {
             return Err(format!("Cannot add worker to session in state {:?}", session.state));
