@@ -2481,8 +2481,13 @@ Last updated: {timestamp}
             sessions.get(session_id).cloned()
         }.ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-        if session.state != SessionState::Running {
-            return Err("Cannot add worker to non-running session".to_string());
+        // Allow adding workers when Running or WaitingForWorker (Queen spawning via HTTP API)
+        let can_add_worker = matches!(
+            session.state,
+            SessionState::Running | SessionState::WaitingForWorker(_)
+        );
+        if !can_add_worker {
+            return Err(format!("Cannot add worker to session in state {:?}", session.state));
         }
 
         // Determine worker index
