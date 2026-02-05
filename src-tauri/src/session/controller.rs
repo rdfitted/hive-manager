@@ -2623,59 +2623,17 @@ Last updated: {timestamp}
                 parent_id: None,
             });
 
-            // Create ONLY the first Worker agent (sequential spawning mode)
-            // Subsequent workers will be spawned as each worker completes its task
-            if !config.workers.is_empty() {
-                let worker_config = &config.workers[0];
-                let index = 1u8; // First worker has index 1
-                let worker_id = format!("{}-worker-{}", session_id, index);
-                let (cmd, mut args) = Self::build_command(worker_config);
-
-                // Write task file for this worker (ACTIVE status for sequential spawning)
-                Self::write_task_file_with_status(&session.project_path, session_id, index, worker_config.initial_prompt.as_deref(), "ACTIVE")?;
-
-                // Write worker prompt
-                let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id, session_id);
-                let filename = format!("worker-{}-prompt.md", index);
-                let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
-                let prompt_path = prompt_file.to_string_lossy().to_string();
-                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-                tracing::info!("Launching Worker 1 (first of {} workers, sequential mode): {} {:?} in {:?}", config.workers.len(), cmd, args, cwd);
-
-                pty_manager
-                    .create_session(
-                        worker_id.clone(),
-                        AgentRole::Worker { index, parent: Some(queen_id.clone()) },
-                        &cmd,
-                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        Some(cwd),
-                        120,
-                        30,
-                    )
-                    .map_err(|e| format!("Failed to spawn Worker {}: {}", index, e))?;
-
-                new_agents.push(AgentInfo {
-                    id: worker_id,
-                    role: AgentRole::Worker { index, parent: Some(queen_id.clone()) },
-                    status: AgentStatus::Running,
-                    config: worker_config.clone(),
-                    parent_id: Some(queen_id.clone()),
-                });
-            }
+            // Queen will spawn workers via HTTP API after reading the plan
+            // No auto-spawning of workers - Queen controls the flow
         }
 
-        // Update session with new agents and WaitingForWorker state (sequential spawning)
+        // Update session with new agents - Queen will spawn workers
         let updated_session = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 s.agents.extend(new_agents);
-                // Set state to WaitingForWorker(1) if we spawned a worker, otherwise Running
-                s.state = if !config.workers.is_empty() {
-                    SessionState::WaitingForWorker(1)
-                } else {
-                    SessionState::Running
-                };
+                // Set state to Running - Queen will spawn workers via HTTP API
+                s.state = SessionState::Running;
                 s.clone()
             } else {
                 return Err("Session disappeared".to_string());
