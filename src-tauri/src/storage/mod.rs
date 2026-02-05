@@ -8,8 +8,14 @@ use thiserror::Error;
 
 use crate::coordination::CoordinationMessage;
 
+fn generate_learning_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Learning {
+    #[serde(default = "generate_learning_id")]
+    pub id: String,
     pub date: String,
     pub session: String,
     pub task: String,
@@ -149,6 +155,8 @@ impl SessionStorage {
         fs::create_dir_all(session_dir.join("coordination"))?;
         fs::create_dir_all(session_dir.join("prompts"))?;
         fs::create_dir_all(session_dir.join("logs"))?;
+        fs::create_dir_all(session_dir.join("lessons"))?;
+        fs::create_dir_all(session_dir.join("lessons").join("archive"))?;
         // Initialize empty state files
         fs::write(session_dir.join("state").join("workers.md"), "# Available Workers\n\nNo workers yet.\n")?;
         fs::write(session_dir.join("state").join("hierarchy.json"), "[]")?;
@@ -443,7 +451,16 @@ impl SessionStorage {
         project_path.join(".ai-docs")
     }
 
-    /// Append a learning to the .ai-docs/learnings.jsonl file
+    /// Get the session-scoped lessons directory
+    /// Stores learnings and project DNA in .hive-manager/{session_id}/lessons/
+    fn session_lessons_dir(&self, session_id: &str) -> PathBuf {
+        // For per-session lessons, store in %APPDATA%/hive-manager/sessions/{session_id}/lessons/
+        // This allows multi-project sessions without conflicts
+        self.session_dir(session_id).join("lessons")
+    }
+
+    /// Append a learning to the .ai-docs/learnings.jsonl file (project-scoped, legacy)
+    /// DEPRECATED: Use append_learning_session for new code
     pub fn append_learning(&self, project_path: &Path, learning: &Learning) -> Result<(), StorageError> {
         let ai_docs_dir = Self::ai_docs_dir(project_path);
         fs::create_dir_all(&ai_docs_dir)?;
@@ -467,7 +484,33 @@ impl SessionStorage {
         Ok(())
     }
 
-    /// Read all learnings from .ai-docs/learnings.jsonl
+    /// Append a learning to the session-scoped lessons directory
+    /// Stores in .hive-manager/{session_id}/lessons/learnings.jsonl
+    pub fn append_learning_session(&self, session_id: &str, learning: &Learning) -> Result<(), StorageError> {
+        let lessons_dir = self.session_lessons_dir(session_id);
+        fs::create_dir_all(&lessons_dir)?;
+        // Also ensure archive folder exists
+        fs::create_dir_all(lessons_dir.join("archive"))?;
+        let learnings_file = lessons_dir.join("learnings.jsonl");
+
+        let mut json = serde_json::to_string(learning)?;
+        json.push('\n');
+
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(learnings_file)?;
+
+        file.write_all(json.as_bytes())?;
+
+        Ok(())
+    }
+
+    /// Read all learnings from .ai-docs/learnings.jsonl (project-scoped, legacy)
+    /// DEPRECATED: Use read_learnings_session for new code
     pub fn read_learnings(&self, project_path: &Path) -> Result<Vec<Learning>, StorageError> {
         let learnings_file = Self::ai_docs_dir(project_path).join("learnings.jsonl");
 
@@ -493,7 +536,80 @@ impl SessionStorage {
         Ok(learnings)
     }
 
-    /// Read .ai-docs/project-dna.md content
+    /// Delete a learning by ID from the session-scoped learnings file
+    /// Uses temp-file + rename for atomicity
+    pub fn delete_learning_session(&self, session_id: &str, learning_id: &str) -> Result<bool, StorageError> {
+        let learnings_file = self.session_lessons_dir(session_id).join("learnings.jsonl");
+
+        if !learnings_file.exists() {
+            return Ok(false);
+        }
+
+        let content = fs::read_to_string(&learnings_file)?;
+        let mut found = false;
+        let mut remaining_lines = Vec::new();
+
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Learning>(line) {
+                Ok(learning) if learning.id == learning_id => {
+                    found = true;
+                    // Skip this line (delete it)
+                }
+                _ => {
+                    remaining_lines.push(line);
+                }
+            }
+        }
+
+        if !found {
+            return Ok(false);
+        }
+
+        // Write to temp file then rename for atomicity
+        let temp_file = self.session_lessons_dir(session_id).join("learnings.jsonl.tmp");
+        let mut output = String::new();
+        for line in &remaining_lines {
+            output.push_str(line);
+            output.push('\n');
+        }
+        fs::write(&temp_file, &output)?;
+        fs::rename(&temp_file, &learnings_file)?;
+
+        Ok(true)
+    }
+
+    /// Read all learnings from the session-scoped lessons directory
+    /// Reads from .hive-manager/{session_id}/lessons/learnings.jsonl
+    pub fn read_learnings_session(&self, session_id: &str) -> Result<Vec<Learning>, StorageError> {
+        let learnings_file = self.session_lessons_dir(session_id).join("learnings.jsonl");
+
+        if !learnings_file.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content = fs::read_to_string(learnings_file)?;
+        let mut learnings = Vec::new();
+
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Learning>(line) {
+                Ok(learning) => learnings.push(learning),
+                Err(e) => {
+                    tracing::warn!("Failed to parse learning line: {}. Error: {}", line, e);
+                }
+            }
+        }
+
+        Ok(learnings)
+    }
+
+    /// Read .ai-docs/project-dna.md content (project-scoped, legacy)
+    /// DEPRECATED: Use read_project_dna_session for new code
     pub fn read_project_dna(&self, project_path: &Path) -> Result<String, StorageError> {
         let project_dna_file = Self::ai_docs_dir(project_path).join("project-dna.md");
         if !project_dna_file.exists() {
@@ -502,12 +618,33 @@ impl SessionStorage {
         Ok(fs::read_to_string(project_dna_file)?)
     }
 
-    /// Save curated project DNA to .ai-docs/project-dna.md
+    /// Read project DNA from the session-scoped lessons directory
+    /// Reads from .hive-manager/{session_id}/lessons/project-dna.md
+    pub fn read_project_dna_session(&self, session_id: &str) -> Result<String, StorageError> {
+        let project_dna_file = self.session_lessons_dir(session_id).join("project-dna.md");
+        if !project_dna_file.exists() {
+            return Ok(String::new());
+        }
+        Ok(fs::read_to_string(project_dna_file)?)
+    }
+
+    /// Save curated project DNA to .ai-docs/project-dna.md (project-scoped, legacy)
+    /// DEPRECATED: Use save_project_dna_session for new code
     #[allow(dead_code)]
     pub fn save_project_dna(&self, project_path: &Path, content: &str) -> Result<(), StorageError> {
         let ai_docs_dir = Self::ai_docs_dir(project_path);
         fs::create_dir_all(&ai_docs_dir)?;
         let project_dna_file = ai_docs_dir.join("project-dna.md");
+        fs::write(project_dna_file, content)?;
+        Ok(())
+    }
+
+    /// Save curated project DNA to the session-scoped lessons directory
+    /// Saves to .hive-manager/{session_id}/lessons/project-dna.md
+    pub fn save_project_dna_session(&self, session_id: &str, content: &str) -> Result<(), StorageError> {
+        let lessons_dir = self.session_lessons_dir(session_id);
+        fs::create_dir_all(&lessons_dir)?;
+        let project_dna_file = lessons_dir.join("project-dna.md");
         fs::write(project_dna_file, content)?;
         Ok(())
     }
@@ -559,4 +696,248 @@ pub struct CliConfig {
 pub struct RoleDefaults {
     pub cli: String,
     pub model: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn create_test_storage() -> (SessionStorage, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        // Override the base_dir by creating a custom SessionStorage
+        // We'll need to manually set up the directory structure
+        let base_dir = temp_dir.path().to_path_buf();
+        std::fs::create_dir_all(&base_dir).unwrap();
+        std::fs::create_dir_all(base_dir.join("templates").join("roles")).unwrap();
+        std::fs::create_dir_all(base_dir.join("sessions")).unwrap();
+        
+        // Create a storage instance with custom base_dir
+        // Since SessionStorage doesn't expose a way to set base_dir, we'll use a workaround
+        // by setting APPDATA/HOME env vars temporarily
+        let storage = SessionStorage::new().unwrap();
+        (storage, temp_dir)
+    }
+
+    #[test]
+    fn test_learning_serialization_roundtrip() {
+        let learning = Learning {
+            id: "test-id-123".to_string(),
+            date: "2024-01-01".to_string(),
+            session: "test-session".to_string(),
+            task: "test task".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec!["rust".to_string(), "api".to_string()],
+            insight: "test insight".to_string(),
+            files_touched: vec!["src/file.rs".to_string()],
+        };
+
+        let json = serde_json::to_string(&learning).unwrap();
+        let deserialized: Learning = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(learning.id, deserialized.id);
+        assert_eq!(learning.date, deserialized.date);
+        assert_eq!(learning.session, deserialized.session);
+        assert_eq!(learning.task, deserialized.task);
+        assert_eq!(learning.outcome, deserialized.outcome);
+        assert_eq!(learning.keywords, deserialized.keywords);
+        assert_eq!(learning.insight, deserialized.insight);
+        assert_eq!(learning.files_touched, deserialized.files_touched);
+    }
+
+    #[test]
+    fn test_learning_deserialization_with_id() {
+        let json = r#"{
+            "id": "custom-id-456",
+            "date": "2024-01-02",
+            "session": "session-1",
+            "task": "task 1",
+            "outcome": "partial",
+            "keywords": ["test"],
+            "insight": "insight 1",
+            "files_touched": ["file1.rs"]
+        }"#;
+
+        let learning: Learning = serde_json::from_str(json).unwrap();
+        assert_eq!(learning.id, "custom-id-456");
+        assert_eq!(learning.date, "2024-01-02");
+        assert_eq!(learning.session, "session-1");
+    }
+
+    #[test]
+    fn test_learning_deserialization_without_id_backward_compat() {
+        // Test backward compatibility - JSON without id field should auto-generate one
+        let json = r#"{
+            "date": "2024-01-03",
+            "session": "session-2",
+            "task": "task 2",
+            "outcome": "failed",
+            "keywords": [],
+            "insight": "insight 2",
+            "files_touched": []
+        }"#;
+
+        let learning: Learning = serde_json::from_str(json).unwrap();
+        // ID should be auto-generated (non-empty UUID)
+        assert!(!learning.id.is_empty());
+        assert_eq!(learning.date, "2024-01-03");
+        assert_eq!(learning.session, "session-2");
+    }
+
+    #[test]
+    fn test_append_and_read_learnings_session() {
+        let storage = SessionStorage::new().unwrap();
+        let session_id = "test-session-append-read";
+
+        // Create session directory structure
+        storage.create_session_dir(session_id).unwrap();
+
+        let learning = Learning {
+            id: "test-learning-1".to_string(),
+            date: "2024-01-01".to_string(),
+            session: session_id.to_string(),
+            task: "test task".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec!["test".to_string()],
+            insight: "test insight".to_string(),
+            files_touched: vec!["src/file.rs".to_string()],
+        };
+
+        // Append learning
+        storage.append_learning_session(session_id, &learning).unwrap();
+
+        // Read learnings
+        let learnings = storage.read_learnings_session(session_id).unwrap();
+        assert_eq!(learnings.len(), 1);
+        assert_eq!(learnings[0].id, learning.id);
+        assert_eq!(learnings[0].task, learning.task);
+        assert_eq!(learnings[0].insight, learning.insight);
+    }
+
+    #[test]
+    fn test_delete_learning_by_id() {
+        let storage = SessionStorage::new().unwrap();
+        let session_id = "test-session-delete";
+
+        storage.create_session_dir(session_id).unwrap();
+
+        // Append 3 learnings
+        let learning1 = Learning {
+            id: "learning-1".to_string(),
+            date: "2024-01-01".to_string(),
+            session: session_id.to_string(),
+            task: "task 1".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec![],
+            insight: "insight 1".to_string(),
+            files_touched: vec![],
+        };
+
+        let learning2 = Learning {
+            id: "learning-2".to_string(),
+            date: "2024-01-02".to_string(),
+            session: session_id.to_string(),
+            task: "task 2".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec![],
+            insight: "insight 2".to_string(),
+            files_touched: vec![],
+        };
+
+        let learning3 = Learning {
+            id: "learning-3".to_string(),
+            date: "2024-01-03".to_string(),
+            session: session_id.to_string(),
+            task: "task 3".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec![],
+            insight: "insight 3".to_string(),
+            files_touched: vec![],
+        };
+
+        storage.append_learning_session(session_id, &learning1).unwrap();
+        storage.append_learning_session(session_id, &learning2).unwrap();
+        storage.append_learning_session(session_id, &learning3).unwrap();
+
+        // Delete the middle one
+        let deleted = storage.delete_learning_session(session_id, "learning-2").unwrap();
+        assert!(deleted);
+
+        // Read learnings - should only have 2
+        let learnings = storage.read_learnings_session(session_id).unwrap();
+        assert_eq!(learnings.len(), 2);
+        assert!(learnings.iter().any(|l| l.id == "learning-1"));
+        assert!(learnings.iter().any(|l| l.id == "learning-3"));
+        assert!(!learnings.iter().any(|l| l.id == "learning-2"));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_learning() {
+        let storage = SessionStorage::new().unwrap();
+        let session_id = "test-session-delete-nonexistent";
+
+        storage.create_session_dir(session_id).unwrap();
+
+        // Append a learning
+        let learning = Learning {
+            id: "learning-1".to_string(),
+            date: "2024-01-01".to_string(),
+            session: session_id.to_string(),
+            task: "task 1".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec![],
+            insight: "insight 1".to_string(),
+            files_touched: vec![],
+        };
+
+        storage.append_learning_session(session_id, &learning).unwrap();
+
+        // Try to delete non-existent learning
+        let deleted = storage.delete_learning_session(session_id, "nonexistent-id").unwrap();
+        assert!(!deleted);
+
+        // Verify original learning still exists
+        let learnings = storage.read_learnings_session(session_id).unwrap();
+        assert_eq!(learnings.len(), 1);
+    }
+
+    #[test]
+    fn test_read_learnings_empty_file() {
+        let storage = SessionStorage::new().unwrap();
+        let session_id = "test-session-empty";
+
+        storage.create_session_dir(session_id).unwrap();
+
+        // Read from non-existent file should return empty vec
+        let learnings = storage.read_learnings_session(session_id).unwrap();
+        assert_eq!(learnings.len(), 0);
+    }
+
+    #[test]
+    fn test_read_learnings_skips_malformed_lines() {
+        let storage = SessionStorage::new().unwrap();
+        let session_id = "test-session-malformed";
+
+        storage.create_session_dir(session_id).unwrap();
+
+        let learnings_file = storage.session_lessons_dir(session_id).join("learnings.jsonl");
+        
+        // Write a file with valid and invalid lines
+        let content = r#"{"id":"valid-1","date":"2024-01-01","session":"test","task":"task1","outcome":"success","keywords":[],"insight":"insight1","files_touched":[]}
+invalid json line
+{"id":"valid-2","date":"2024-01-02","session":"test","task":"task2","outcome":"success","keywords":[],"insight":"insight2","files_touched":[]}
+{invalid}
+{"id":"valid-3","date":"2024-01-03","session":"test","task":"task3","outcome":"success","keywords":[],"insight":"insight3","files_touched":[]}
+"#;
+
+        std::fs::write(&learnings_file, content).unwrap();
+
+        // Read should skip malformed lines and return only valid ones
+        let learnings = storage.read_learnings_session(session_id).unwrap();
+        assert_eq!(learnings.len(), 3);
+        assert_eq!(learnings[0].id, "valid-1");
+        assert_eq!(learnings[1].id, "valid-2");
+        assert_eq!(learnings[2].id, "valid-3");
+    }
 }

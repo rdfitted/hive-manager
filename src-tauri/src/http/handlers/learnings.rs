@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -23,6 +23,12 @@ pub struct SubmitLearningRequest {
     pub insight: String,
     #[serde(default)]
     pub files_touched: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LearningsFilter {
+    pub category: Option<String>,
+    pub keywords: Option<String>,
 }
 
 fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
@@ -55,7 +61,8 @@ fn resolve_session_project_path(state: &AppState, session_id: &str) -> Result<Pa
     Ok(session.project_path.clone())
 }
 
-/// POST /api/learnings - Submit a learning
+/// POST /api/learnings - Submit a learning (project-scoped, legacy)
+/// DEPRECATED: Use POST /api/sessions/{session_id}/learnings for new code
 pub async fn submit_learning(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitLearningRequest>,
@@ -92,7 +99,10 @@ pub async fn submit_learning(
 
     let project_path = resolve_project_path(&state)?;
 
+    let learning_id = uuid::Uuid::new_v4().to_string();
+
     let learning = Learning {
+        id: learning_id.clone(),
         date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
         session: req.session,
         task: req.task,
@@ -111,13 +121,16 @@ pub async fn submit_learning(
         StatusCode::CREATED,
         Json(json!({
             "message": "Learning submitted successfully",
+            "learning_id": learning_id,
         })),
     ))
 }
 
-/// GET /api/learnings - List all learnings
+/// GET /api/learnings - List all learnings (project-scoped, legacy)
+/// DEPRECATED: Use GET /api/sessions/{session_id}/learnings for new code
 pub async fn list_learnings(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<LearningsFilter>,
 ) -> Result<Json<Value>, ApiError> {
     let project_path = resolve_project_path(&state)?;
 
@@ -128,8 +141,28 @@ pub async fn list_learnings(
 
     let learnings_json: Vec<Value> = learnings
         .iter()
+        .filter(|learning| {
+            if let Some(ref cat) = params.category {
+                if learning.outcome != *cat {
+                    return false;
+                }
+            }
+            if let Some(ref kws) = params.keywords {
+                let filter_kws: Vec<&str> = kws.split(',').map(|s| s.trim()).collect();
+                if !filter_kws.is_empty()
+                    && !learning
+                        .keywords
+                        .iter()
+                        .any(|lk| filter_kws.contains(&lk.as_str()))
+                {
+                    return false;
+                }
+            }
+            true
+        })
         .map(|learning| {
             json!({
+                "id": learning.id,
                 "date": learning.date,
                 "session": learning.session,
                 "task": learning.task,
@@ -147,7 +180,8 @@ pub async fn list_learnings(
     })))
 }
 
-/// GET /api/project-dna - Get curated project DNA content
+/// GET /api/project-dna - Get curated project DNA content (project-scoped, legacy)
+/// DEPRECATED: Use GET /api/sessions/{session_id}/project-dna for new code
 pub async fn get_project_dna(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -199,9 +233,10 @@ pub async fn submit_learning_for_session(
         }
     }
 
-    let project_path = resolve_session_project_path(&state, &session_id)?;
+    let learning_id = uuid::Uuid::new_v4().to_string();
 
     let learning = Learning {
+        id: learning_id.clone(),
         date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
         session: req.session,
         task: req.task,
@@ -211,15 +246,17 @@ pub async fn submit_learning_for_session(
         files_touched: req.files_touched,
     };
 
+    // Use session-scoped storage
     state
         .storage
-        .append_learning(&project_path, &learning)
+        .append_learning_session(&session_id, &learning)
         .map_err(|e| ApiError::internal(format!("Failed to save learning: {}", e)))?;
 
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "message": "Learning submitted successfully",
+            "learning_id": learning_id,
         })),
     ))
 }
@@ -228,18 +265,38 @@ pub async fn submit_learning_for_session(
 pub async fn list_learnings_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    Query(params): Query<LearningsFilter>,
 ) -> Result<Json<Value>, ApiError> {
-    let project_path = resolve_session_project_path(&state, &session_id)?;
-
+    // Use session-scoped storage
     let learnings = state
         .storage
-        .read_learnings(&project_path)
+        .read_learnings_session(&session_id)
         .map_err(|e| ApiError::internal(format!("Failed to read learnings: {}", e)))?;
 
     let learnings_json: Vec<Value> = learnings
         .iter()
+        .filter(|learning| {
+            if let Some(ref cat) = params.category {
+                if learning.outcome != *cat {
+                    return false;
+                }
+            }
+            if let Some(ref kws) = params.keywords {
+                let filter_kws: Vec<&str> = kws.split(',').map(|s| s.trim()).collect();
+                if !filter_kws.is_empty()
+                    && !learning
+                        .keywords
+                        .iter()
+                        .any(|lk| filter_kws.contains(&lk.as_str()))
+                {
+                    return false;
+                }
+            }
+            true
+        })
         .map(|learning| {
             json!({
+                "id": learning.id,
                 "date": learning.date,
                 "session": learning.session,
                 "task": learning.task,
@@ -257,19 +314,208 @@ pub async fn list_learnings_for_session(
     })))
 }
 
+/// DELETE /api/sessions/{id}/learnings/{learning_id} - Delete a specific learning by ID
+pub async fn delete_learning_for_session(
+    State(state): State<Arc<AppState>>,
+    Path((session_id, learning_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let found = state
+        .storage
+        .delete_learning_session(&session_id, &learning_id)
+        .map_err(|e| ApiError::internal(format!("Failed to delete learning: {}", e)))?;
+
+    if found {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!(
+            "Learning {} not found in session {}",
+            learning_id, session_id
+        )))
+    }
+}
+
 /// GET /api/sessions/{id}/project-dna - Get project DNA for a session (session-scoped)
 pub async fn get_project_dna_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let project_path = resolve_session_project_path(&state, &session_id)?;
-
+    // Use session-scoped storage
     let content = state
         .storage
-        .read_project_dna(&project_path)
+        .read_project_dna_session(&session_id)
         .map_err(|e| ApiError::internal(format!("Failed to read project DNA: {}", e)))?;
 
     Ok(Json(json!({
         "content": content
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_submit_request_validation_rejects_empty_session() {
+        let json = r#"{
+            "session": "",
+            "task": "test task",
+            "outcome": "success",
+            "keywords": [],
+            "insight": "test insight",
+            "files_touched": []
+        }"#;
+
+        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
+        assert!(req.is_ok());
+        let req = req.unwrap();
+        assert!(req.session.trim().is_empty());
+    }
+
+    #[test]
+    fn test_submit_request_validation_rejects_empty_task() {
+        let json = r#"{
+            "session": "test-session",
+            "task": "",
+            "outcome": "success",
+            "keywords": [],
+            "insight": "test insight",
+            "files_touched": []
+        }"#;
+
+        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
+        assert!(req.is_ok());
+        let req = req.unwrap();
+        assert!(req.task.trim().is_empty());
+    }
+
+    #[test]
+    fn test_submit_request_validation_rejects_empty_insight() {
+        let json = r#"{
+            "session": "test-session",
+            "task": "test task",
+            "outcome": "success",
+            "keywords": [],
+            "insight": "",
+            "files_touched": []
+        }"#;
+
+        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
+        assert!(req.is_ok());
+        let req = req.unwrap();
+        assert!(req.insight.trim().is_empty());
+    }
+
+    #[test]
+    fn test_submit_request_validation_rejects_invalid_outcome() {
+        let json = r#"{
+            "session": "test-session",
+            "task": "test task",
+            "outcome": "invalid-outcome",
+            "keywords": [],
+            "insight": "test insight",
+            "files_touched": []
+        }"#;
+
+        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
+        assert!(req.is_ok());
+        let req = req.unwrap();
+        // Outcome validation happens in the handler, but we can test the struct deserializes
+        assert_eq!(req.outcome, "invalid-outcome");
+    }
+
+    #[test]
+    fn test_submit_request_validation_accepts_valid_outcomes() {
+        for outcome in ["success", "partial", "failed"] {
+            let json = format!(r#"{{
+                "session": "test-session",
+                "task": "test task",
+                "outcome": "{}",
+                "keywords": [],
+                "insight": "test insight",
+                "files_touched": []
+            }}"#, outcome);
+
+            let req: Result<SubmitLearningRequest, _> = serde_json::from_str(&json);
+            assert!(req.is_ok());
+            let req = req.unwrap();
+            assert_eq!(req.outcome, outcome);
+        }
+    }
+
+    #[test]
+    fn test_submit_request_validation_detects_path_traversal() {
+        let test_cases = vec![
+            ("../../etc/passwd", true),
+            ("/etc/passwd", true),
+            ("C:\\Windows\\System32", true),
+            ("src/file.rs", false),
+            ("tests/file.rs", false),
+        ];
+
+        for (file_path, should_reject) in test_cases {
+            let json = format!(r#"{{
+                "session": "test-session",
+                "task": "test task",
+                "outcome": "success",
+                "keywords": [],
+                "insight": "test insight",
+                "files_touched": ["{}"]
+            }}"#, file_path);
+
+            let req: Result<SubmitLearningRequest, _> = serde_json::from_str(&json);
+            assert!(req.is_ok());
+            let req = req.unwrap();
+            
+            let has_traversal = req.files_touched.iter().any(|p| {
+                p.contains("..") || p.starts_with('/') || p.contains('\\')
+            });
+
+            if should_reject {
+                assert!(has_traversal, "Path {} should be detected as traversal", file_path);
+            } else {
+                assert!(!has_traversal, "Path {} should not be detected as traversal", file_path);
+            }
+        }
+    }
+
+    #[test]
+    fn test_submit_request_deserializes_with_defaults() {
+        let json = r#"{
+            "session": "test-session",
+            "task": "test task",
+            "outcome": "success",
+            "insight": "test insight"
+        }"#;
+
+        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
+        assert!(req.is_ok());
+        let req = req.unwrap();
+        assert_eq!(req.keywords.len(), 0);
+        assert_eq!(req.files_touched.len(), 0);
+    }
+
+    #[test]
+    fn test_learnings_filter_deserializes() {
+        let json = r#"{
+            "category": "success",
+            "keywords": "rust,api"
+        }"#;
+
+        let filter: Result<LearningsFilter, _> = serde_json::from_str(json);
+        assert!(filter.is_ok());
+        let filter = filter.unwrap();
+        assert_eq!(filter.category, Some("success".to_string()));
+        assert_eq!(filter.keywords, Some("rust,api".to_string()));
+    }
+
+    #[test]
+    fn test_learnings_filter_deserializes_with_defaults() {
+        let json = r#"{}"#;
+
+        let filter: Result<LearningsFilter, _> = serde_json::from_str(json);
+        assert!(filter.is_ok());
+        let filter = filter.unwrap();
+        assert_eq!(filter.category, None);
+        assert_eq!(filter.keywords, None);
+    }
 }

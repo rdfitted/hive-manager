@@ -1283,6 +1283,9 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 |------|------|---------|
 | Spawn Worker | `spawn-worker.md` | Spawn new workers via HTTP API (visible terminal windows) |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
+| Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
+| List Learnings | `list-learnings.md` | Get all learnings for this session |
+| Delete Learning | `delete-learning.md` | Remove a learning by ID |
 
 **Quick Reference - Spawn Worker:**
 ```bash
@@ -1685,6 +1688,53 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 | List Planners | `list-planners.md` | Get list of all planners and their status |
 | Spawn Worker | `spawn-worker.md` | Reference only - Planners use this to spawn workers |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
+| Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
+| List Learnings | `list-learnings.md` | Get all learnings for this session |
+| Delete Learning | `delete-learning.md` | Remove a learning by ID |
+
+## Learning Curation Protocol
+
+Workers and planners record learnings during task completion. Your curation responsibilities:
+
+1. **Review learnings periodically**:
+   ```bash
+   curl "http://localhost:18800/api/sessions/{session_id}/learnings"
+   ```
+
+2. **Review current project DNA**:
+   ```bash
+   curl "http://localhost:18800/api/sessions/{session_id}/project-dna"
+   ```
+
+3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+   - Group by theme/topic
+   - Remove duplicates
+   - Improve clarity where needed
+   - Capture architectural decisions and project conventions
+
+### .ai-docs/ Structure
+```
+.ai-docs/
+├── learnings.jsonl      # Raw learnings from all sessions (append-only)
+├── project-dna.md       # Curated patterns, conventions, insights
+├── curation-state.json  # Tracks what's been curated
+└── archive/             # Retired learnings (after 50+ entries)
+    └── learnings-{{timestamp}}.jsonl
+```
+
+### Curation Process
+1. Review raw learnings via `GET /api/sessions/{session_id}/learnings`
+2. Synthesize insights into `.ai-docs/project-dna.md` sections:
+   - **Patterns That Work** - Successful approaches
+   - **Patterns That Failed** - What to avoid
+   - **Code Conventions** - Project-specific standards
+   - **Architecture Notes** - Key design decisions
+3. After 50+ learnings accumulate, archive to `.ai-docs/archive/` and clear the main file
+
+### When to Curate
+- After each planner completes its domain
+- Before creating a PR
+- When learnings count exceeds 10
 
 ## SEQUENTIAL SPAWNING PROTOCOL WITH COMMITS (CRITICAL)
 
@@ -1878,6 +1928,115 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
 "#, session_id = session_id);
 
         Self::write_tool_file(project_path, session_id, "list-workers.md", &list_workers_tool)?;
+
+        // Submit Learning tool
+        let submit_learning_tool = r#"# Submit Learning Tool
+
+Submit a learning from your work session.
+
+## HTTP API
+
+**Endpoint:** `POST http://localhost:18800/api/sessions/{{session_id}}/learnings`
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "session": "{{session_id}}",
+  "task": "Description of the task you completed",
+  "insight": "What you learned or discovered",
+  "outcome": "discovery|pattern|convention|architecture|failure",
+  "keywords": ["keyword1", "keyword2"],
+  "files_touched": ["path/to/file.rs"]
+}
+```
+
+## Required Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| session | string | Current session ID |
+| task | string | What task was being performed |
+| insight | string | The learning or discovery |
+| outcome | string | Category: discovery, pattern, convention, architecture, failure |
+| keywords | string[] | Relevant keywords for filtering |
+| files_touched | string[] | Files involved in this learning |
+
+## Example
+
+```bash
+curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/learnings" \
+  -H "Content-Type: application/json" \
+  -d '{"session": "{{session_id}}", "task": "Implemented DELETE endpoint", "insight": "JSONL files need atomic rewrite via temp-file+rename", "outcome": "pattern", "keywords": ["jsonl", "atomic-write"], "files_touched": ["src/storage/mod.rs"]}'
+```
+"#;
+
+        Self::write_tool_file(project_path, session_id, "submit-learning.md", submit_learning_tool)?;
+
+        // List Learnings tool
+        let list_learnings_tool = r#"# List Learnings Tool
+
+List all learnings recorded for this session.
+
+## HTTP API
+
+**Endpoint:** `GET http://localhost:18800/api/sessions/{{session_id}}/learnings`
+
+## Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| category | string | Filter by outcome category (e.g., "discovery", "pattern") |
+| keywords | string | Comma-separated keyword filter (e.g., "api,rust") |
+
+## Example
+
+```bash
+# List all learnings
+curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
+
+# Filter by category
+curl "http://localhost:18800/api/sessions/{{session_id}}/learnings?category=pattern"
+
+# Filter by keywords
+curl "http://localhost:18800/api/sessions/{{session_id}}/learnings?keywords=api,rust"
+```
+"#;
+
+        Self::write_tool_file(project_path, session_id, "list-learnings.md", list_learnings_tool)?;
+
+        // Delete Learning tool
+        let delete_learning_tool = r#"# Delete Learning Tool
+
+Delete a specific learning by ID.
+
+## HTTP API
+
+**Endpoint:** `DELETE http://localhost:18800/api/sessions/{{session_id}}/learnings/{learning_id}`
+
+## Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| learning_id | string | UUID of the learning to delete |
+
+## Example
+
+```bash
+curl -X DELETE "http://localhost:18800/api/sessions/{{session_id}}/learnings/abc-123-def"
+```
+
+## Response
+
+- **204 No Content** - Learning deleted successfully
+- **404 Not Found** - Learning ID not found
+"#;
+
+        Self::write_tool_file(project_path, session_id, "delete-learning.md", delete_learning_tool)?;
 
         Ok(())
     }

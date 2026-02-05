@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -33,6 +33,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Session-scoped learning routes (preferred - work with multiple projects)
         .route("/api/sessions/{id}/learnings", get(learnings::list_learnings_for_session))
         .route("/api/sessions/{id}/learnings", post(learnings::submit_learning_for_session))
+        .route("/api/sessions/{id}/learnings/{learning_id}", delete(learnings::delete_learning_for_session))
         .route("/api/sessions/{id}/project-dna", get(learnings::get_project_dna_for_session))
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
