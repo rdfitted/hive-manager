@@ -708,6 +708,220 @@ The user may approve or request refinements. Stay ready to update the plan.
         )
     }
 
+    /// Build the Master Planner's prompt for Swarm mode with planner and worker information
+    fn build_swarm_master_planner_prompt(session_id: &str, user_prompt: &str, planner_count: u8, workers_per_planner: &[AgentConfig]) -> String {
+        let workers_per = workers_per_planner.len();
+        let total_workers = planner_count as usize * workers_per;
+
+        // Build planner table
+        let mut planner_table = String::new();
+        let domains = ["backend", "frontend", "testing", "infrastructure", "documentation", "security", "performance", "integration"];
+
+        for i in 0..planner_count {
+            let index = i + 1;
+            let domain = domains.get(i as usize).unwrap_or(&"general");
+            planner_table.push_str(&format!(
+                "| Planner {} | {} | {} workers |\n",
+                index, domain, workers_per
+            ));
+        }
+
+        // Build worker info
+        let mut worker_info = String::new();
+        for (i, worker_config) in workers_per_planner.iter().enumerate() {
+            let index = i + 1;
+            let role_label = worker_config.role.as_ref()
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| format!("Worker {}", index));
+            worker_info.push_str(&format!(
+                "| {} | {} | {} |\n",
+                index, role_label, worker_config.cli
+            ));
+        }
+
+        // Determine phase 0 based on whether a task was provided
+        let phase0 = if user_prompt.trim().is_empty() {
+            String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
+
+**No task was provided.** You must first ask the user what they want to work on.
+
+Ask the user: "What would you like me to help you with today? You can:
+- Provide a GitHub issue number (e.g., #42 or just 42)
+- Describe a feature you want to implement
+- Describe a bug you want to fix
+- Describe code you want to refactor"
+
+**If user provides a GitHub Issue number:**
+1. Fetch issue details using: gh issue view <number> --json number,title,body,labels,state
+2. Extract requirements and acceptance criteria from the issue body
+
+**Once you have the task, proceed to PHASE 1.**
+
+---
+
+"#)
+        } else if user_prompt.trim().starts_with('#') || user_prompt.trim().parse::<u32>().is_ok() {
+            let issue_num = user_prompt.trim().trim_start_matches('#');
+            format!(r#"## PHASE 0: Fetch GitHub Issue
+
+The user wants to work on GitHub issue: **#{}**
+
+**Fetch the issue details now:**
+```bash
+gh issue view {} --json number,title,body,labels,state
+```
+
+Extract from the response:
+- Issue title and full description
+- Acceptance criteria (look for checkboxes in the body)
+- Labels (bug, feature, enhancement, etc.)
+
+**Once you have the full context, proceed to PHASE 1.**
+
+---
+
+"#, issue_num, issue_num)
+        } else {
+            format!(r#"## PHASE 0: Task Provided
+
+The user wants to work on:
+
+**{}**
+
+**Proceed directly to PHASE 1.**
+
+---
+
+"#, user_prompt)
+        };
+
+        format!(
+r#"# Master Planner - Swarm Multi-Agent Investigation
+
+You are the **Master Planner** orchestrating a Swarm investigation to create a detailed implementation plan.
+
+## Session Info
+
+- **Session ID**: {session_id}
+- **Mode**: Swarm (hierarchical)
+- **Plan Output**: `.hive-manager/{session_id}/plan.md`
+
+## Swarm Configuration
+
+- **Planners**: {planner_count}
+- **Workers per Planner**: {workers_per}
+- **Total Workers**: {total_workers}
+
+### Planners (Domains)
+
+| Planner | Domain | Workers |
+|---------|--------|---------|
+{planner_table}
+
+### Worker Roles (per Planner)
+
+| # | Role | CLI |
+|---|------|-----|
+{worker_info}
+
+**IMPORTANT**: Your plan MUST create **{planner_count} domain-level tasks** - one for each Planner!
+Each Planner will break their domain task into {workers_per} worker subtasks.
+
+## Your Mission
+
+1. **Gather Task**: Understand what the user wants (GitHub issue or custom task)
+2. **Spawn Scout Agents**: Launch parallel investigation agents using external CLIs
+3. **Synthesize Findings**: Merge and deduplicate file discoveries
+4. **Create Plan**: Write comprehensive plan.md with **{planner_count} domain tasks** (one per Planner)
+5. **Wait for Approval**: User will review and may request refinements
+
+---
+
+{phase0}## PHASE 1: Parallel Investigation
+
+Spawn 3 scout agents to investigate the codebase in parallel:
+
+```bash
+# Scout 1 - Code Structure (Gemini)
+gemini -y -i "Analyze the codebase structure for: [TASK]. List relevant files by priority."
+
+# Scout 2 - Implementation Patterns (Claude Subagent via Task tool)
+# Use Claude's Task tool with Explore agent
+
+# Scout 3 - Related Code (Codex if available, or another Gemini)
+codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.2 "Find code related to: [TASK]"
+```
+
+---
+
+## PHASE 2: Synthesize & Partition
+
+Merge findings from all scouts:
+1. Deduplicate file lists
+2. **Partition into {planner_count} domains** - one per Planner
+3. Prioritize by impact (HIGH/MEDIUM/LOW)
+
+---
+
+## PHASE 3: Write Plan
+
+Write to `.hive-manager/{session_id}/plan.md`:
+
+```markdown
+# Implementation Plan
+
+## Summary
+[Brief description of the task and approach]
+
+## Investigation Results
+- Scouts Used: 3
+- Files Identified: [count]
+- Consensus Level: [HIGH/MEDIUM/LOW]
+
+## Domain Tasks (for Planners)
+
+### Domain 1: [Domain Name]
+- [ ] [PRIORITY] Task description -> Planner 1
+- Files: [list of files in this domain]
+- Workers: {workers_per} available
+
+### Domain 2: [Domain Name]
+- [ ] [PRIORITY] Task description -> Planner 2
+- Files: [list of files in this domain]
+- Workers: {workers_per} available
+
+[... repeat for all {planner_count} planners ...]
+
+## Files to Modify
+| File | Domain | Priority | Changes Needed |
+|------|--------|----------|----------------|
+
+## Cross-Domain Dependencies
+[Note any dependencies between domains]
+
+## Risks
+[List potential risks and mitigation strategies]
+```
+
+---
+
+## Quick Reference
+
+1. Gather task (ask user or fetch GitHub issue)
+2. Launch ALL 3 scout agents in PARALLEL
+3. Synthesize findings and partition into {planner_count} domains
+4. Write plan to `.hive-manager/{session_id}/plan.md`
+5. Say "PLAN READY FOR REVIEW""#,
+            session_id = session_id,
+            phase0 = phase0,
+            planner_count = planner_count,
+            workers_per = workers_per,
+            total_workers = total_workers,
+            planner_table = planner_table.trim_end(),
+            worker_info = worker_info.trim_end()
+        )
+    }
+
     /// Build a minimal smoke test prompt that creates a simple plan without real investigation
     fn build_smoke_test_prompt(session_id: &str, workers: &[AgentConfig]) -> String {
         // Build worker table and task list based on configured workers
@@ -806,6 +1020,138 @@ This tests that:
             worker_table = worker_table.trim_end(),
             task_list = task_list.trim_end(),
             dependencies = dependencies.trim_end()
+        )
+    }
+
+    /// Build a smoke test prompt for Swarm mode that accounts for planners AND workers
+    fn build_swarm_smoke_test_prompt(session_id: &str, planner_count: u8, workers_per_planner: &[AgentConfig]) -> String {
+        let workers_per = workers_per_planner.len();
+        let total_workers = planner_count as usize * workers_per;
+
+        // Build planner table
+        let mut planner_table = String::new();
+        let mut domain_tasks = String::new();
+
+        let domains = ["backend", "frontend", "testing", "infrastructure", "documentation", "security", "performance", "integration"];
+
+        for i in 0..planner_count {
+            let index = i + 1;
+            let domain = domains.get(i as usize).unwrap_or(&"general");
+            planner_table.push_str(&format!(
+                "| Planner {} | {} | {} workers |\n",
+                index, domain, workers_per
+            ));
+
+            let priority = if index == 1 { "HIGH" } else if index == 2 { "MEDIUM" } else { "LOW" };
+            domain_tasks.push_str(&format!(
+                "- [ ] [{}] Domain {}: {} smoke test tasks (will be broken into {} worker tasks)\n",
+                priority, index, domain, workers_per
+            ));
+        }
+
+        // Build worker breakdown per planner
+        let mut worker_breakdown = String::new();
+        for pi in 0..planner_count {
+            let planner_index = pi + 1;
+            let domain = domains.get(pi as usize).unwrap_or(&"general");
+            worker_breakdown.push_str(&format!("\n### Planner {} - {} Domain\n\n", planner_index, domain));
+
+            for (wi, worker_config) in workers_per_planner.iter().enumerate() {
+                let worker_index = wi + 1;
+                let role_label = worker_config.role.as_ref()
+                    .map(|r| r.label.clone())
+                    .unwrap_or_else(|| format!("Worker {}", worker_index));
+                worker_breakdown.push_str(&format!(
+                    "- Worker {}.{}: {} ({})\n",
+                    planner_index, worker_index, role_label, worker_config.cli
+                ));
+            }
+        }
+
+        format!(
+r#"# Swarm Smoke Test - Quick Flow Validation
+
+You are running a **SMOKE TEST** to validate the Swarm Manager flow.
+
+## Swarm Configuration
+
+- **Planners**: {planner_count}
+- **Workers per Planner**: {workers_per}
+- **Total Workers**: {total_workers}
+
+### Planners
+
+| Planner | Domain | Workers |
+|---------|--------|---------|
+{planner_table}
+
+### Worker Breakdown
+{worker_breakdown}
+
+## Your Task
+
+Create a minimal test plan immediately. Do NOT spawn any investigation agents.
+Do NOT analyze the codebase. Just create a simple plan to test the Swarm flow.
+
+**IMPORTANT**: Create exactly **{planner_count} domain tasks** - one for each configured planner!
+Each planner will then break their domain task into {workers_per} worker tasks.
+
+## Write This Plan Now
+
+Write the following to `.hive-manager/{session_id}/plan.md`:
+
+```markdown
+# Swarm Smoke Test Plan
+
+## Summary
+This is a smoke test to validate the Swarm planning flow works correctly.
+Testing {planner_count} planners, each with {workers_per} workers ({total_workers} total workers).
+
+## Investigation Results
+- Scouts Used: 0 (smoke test - skipped)
+- Files Identified: 0
+- Consensus Level: N/A
+
+## Domain Tasks (for Planners)
+{domain_tasks}
+## Planner → Worker Breakdown
+
+Each Planner spawns their workers sequentially and assigns subtasks:
+{worker_breakdown}
+
+## Files to Modify
+| File | Priority | Changes Needed |
+|------|----------|----------------|
+| (smoke test - no real files) | N/A | N/A |
+
+## Dependencies
+- Planners work sequentially (Planner 1 completes, commit, then Planner 2)
+- Workers within each Planner work sequentially
+- Queen commits between each Planner completion
+
+## Risks
+None - this is a smoke test.
+
+## Notes
+Swarm smoke test completed successfully. The planning phase flow is working.
+Testing {planner_count} planners with {workers_per} workers each = {total_workers} total workers.
+```
+
+After writing the plan, say: **"PLAN READY FOR REVIEW"**
+
+This tests that:
+1. Master Planner can write to the plan file
+2. User can see and approve the plan
+3. Flow continues to spawn Queen who spawns {planner_count} Planners sequentially
+4. Each Planner spawns {workers_per} Workers sequentially
+5. Queen commits between each Planner completion"#,
+            session_id = session_id,
+            planner_count = planner_count,
+            workers_per = workers_per,
+            total_workers = total_workers,
+            planner_table = planner_table.trim_end(),
+            domain_tasks = domain_tasks.trim_end(),
+            worker_breakdown = worker_breakdown.trim_end()
         )
     }
 
@@ -2010,13 +2356,14 @@ Last updated: {timestamp}
         let mut agents = Vec::new();
 
         // Build the appropriate prompt based on mode
+        let planner_count = if config.planners.is_empty() { config.planner_count } else { config.planners.len() as u8 };
         let planner_prompt = if config.smoke_test {
-            tracing::info!("Running in SMOKE TEST mode (swarm) - skipping real investigation");
-            Self::build_smoke_test_prompt(&session_id, &config.workers_per_planner)
+            tracing::info!("Running in SMOKE TEST mode (swarm) - {} planners, {} workers each", planner_count, config.workers_per_planner.len());
+            Self::build_swarm_smoke_test_prompt(&session_id, planner_count, &config.workers_per_planner)
         } else {
-            // Pass workers info to Master Planner so it knows how many tasks to create
+            // Pass planners and workers info to Master Planner so it knows the full scope
             let prompt = config.prompt.as_deref().unwrap_or("");
-            Self::build_master_planner_prompt(&session_id, prompt, &config.workers_per_planner)
+            Self::build_swarm_master_planner_prompt(&session_id, prompt, planner_count, &config.workers_per_planner)
         };
 
         {
