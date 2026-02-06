@@ -81,6 +81,14 @@ pub struct PersistedSession {
     pub created_at: DateTime<Utc>,
     pub agents: Vec<PersistedAgentInfo>,
     pub state: String,
+    #[serde(default = "default_cli")]
+    pub default_cli: String,
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
+
+fn default_cli() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -689,6 +697,7 @@ impl SessionStorage {
 
     /// Save curated project DNA to the session-scoped lessons directory
     /// Saves to .hive-manager/{session_id}/lessons/project-dna.md
+    #[allow(dead_code)]
     pub fn save_project_dna_session(&self, session_id: &str, content: &str) -> Result<(), StorageError> {
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
@@ -749,7 +758,6 @@ pub struct RoleDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_storage() -> (SessionStorage, TempDir) {

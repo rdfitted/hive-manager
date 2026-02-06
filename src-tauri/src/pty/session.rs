@@ -62,7 +62,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             cli: "claude".to_string(),
-            model: Some("opus".to_string()),
+            model: None,
             flags: vec![],
             label: None,
             role: None,

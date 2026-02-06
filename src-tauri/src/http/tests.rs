@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
-use crate::storage::SessionStorage;
+use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
 use crate::session::{Session, SessionController, SessionState, SessionType};
 use crate::coordination::InjectionManager;
@@ -64,6 +64,8 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         state: SessionState::Running,
         created_at: chrono::Utc::now(),
         agents: vec![],
+        default_cli: "claude".to_string(),
+        default_model: Some("opus".to_string()),
     }
 }
 
@@ -1615,4 +1617,162 @@ async fn test_legacy_list_learnings_returns_error_with_no_sessions() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- Worker/Planner CLI validation and session_id validation tests ---
+
+#[tokio::test]
+async fn test_add_worker_rejects_invalid_cli() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-invalid-cli");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session("session-cli-test", temp_dir.to_str().unwrap())
+    );
+
+    let body = serde_json::json!({
+        "role_type": "backend",
+        "cli": "invalid-command"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-cli-test/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let error_msg = response_json.get("error").unwrap().as_str().unwrap();
+    assert!(error_msg.contains("Invalid CLI"), "Error should mention invalid CLI: {}", error_msg);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_add_worker_rejects_path_traversal_session_id() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "role_type": "backend"
+    });
+
+    // Use "..evil" which contains ".." and triggers validate_session_id rejection
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/..evil/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let error_msg = response_json.get("error").unwrap().as_str().unwrap();
+    assert!(error_msg.contains("Invalid session ID"), "Error should mention invalid session ID: {}", error_msg);
+}
+
+#[tokio::test]
+async fn test_add_worker_explicit_cli_overrides_session_default() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-cli-override");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    // Create a session with default_cli = "gemini" (not "claude")
+    let mut session = make_test_session("session-override", temp_dir.to_str().unwrap());
+    session.default_cli = "gemini".to_string();
+    controller.read().insert_test_session(session);
+
+    // POST with explicit cli: "droid" - should pass CLI validation (not 400)
+    // The handler may fail downstream at PTY spawn (500), but should NOT reject
+    // the CLI itself since "droid" is in the allowlist.
+    let body = serde_json::json!({
+        "role_type": "backend",
+        "cli": "droid"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-override/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should NOT be 400 - "droid" is a valid CLI that overrides session default "gemini"
+    assert_ne!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Explicit CLI 'droid' should override session default 'gemini' and pass validation"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+// --- PersistedSession serde tests ---
+
+#[test]
+fn test_persisted_session_serializes_default_cli() {
+    let session = PersistedSession {
+        id: "test-session".to_string(),
+        session_type: SessionTypeInfo::Hive { worker_count: 2 },
+        project_path: "/tmp/test".to_string(),
+        created_at: chrono::Utc::now(),
+        agents: vec![],
+        state: "Running".to_string(),
+        default_cli: "gemini".to_string(),
+        default_model: Some("gemini-2.5-pro".to_string()),
+    };
+
+    let json = serde_json::to_string(&session).unwrap();
+    let deserialized: PersistedSession = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(deserialized.default_cli, "gemini");
+    assert_eq!(deserialized.default_model, Some("gemini-2.5-pro".to_string()));
+}
+
+#[test]
+fn test_persisted_session_legacy_json_defaults_to_claude() {
+    // Legacy JSON without default_cli or default_model fields
+    // should deserialize with serde(default) fallbacks
+    let json = r#"{
+        "id": "legacy-session",
+        "session_type": {"Hive": {"worker_count": 3}},
+        "project_path": "/tmp/legacy",
+        "created_at": "2024-01-01T00:00:00Z",
+        "agents": [],
+        "state": "Completed"
+    }"#;
+
+    let session: PersistedSession = serde_json::from_str(json).unwrap();
+
+    assert_eq!(
+        session.default_cli, "claude",
+        "Legacy sessions without default_cli should fallback to 'claude'"
+    );
+    assert_eq!(
+        session.default_model, None,
+        "Legacy sessions without default_model should fallback to None"
+    );
 }

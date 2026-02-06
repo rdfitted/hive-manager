@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole};
+use super::{validate_session_id, validate_cli};
 
 /// Request to add a planner to a Swarm session (spawned sequentially by Queen)
 #[derive(Debug, Clone, Deserialize)]
@@ -60,8 +61,16 @@ pub async fn add_planner(
     Path(session_id): Path<String>,
     Json(req): Json<AddPlannerRequest>,
 ) -> Result<(StatusCode, Json<AddPlannerResponse>), ApiError> {
-    let cli = req.cli.unwrap_or_else(|| "claude".to_string());
-    let model = req.model.or_else(|| if cli == "claude" { Some("opus".to_string()) } else { None });
+    validate_session_id(&session_id)?;
+
+    let session_default_cli = {
+        let controller = state.session_controller.read();
+        controller.get_session_default_cli(&session_id)
+            .unwrap_or_else(|| "claude".to_string())
+    };
+    let cli = req.cli.unwrap_or(session_default_cli);
+    validate_cli(&cli)?;
+    let model = req.model;
 
     // Build planner config
     let config = AgentConfig {
@@ -74,17 +83,18 @@ pub async fn add_planner(
     };
 
     // Convert worker configs (or create default based on worker_count)
+    // Reuse session_default_cli already fetched above (avoid redundant lock acquisitions)
     let workers: Vec<AgentConfig> = if let Some(worker_configs) = req.workers {
         worker_configs.iter().map(|w| {
             AgentConfig {
-                cli: w.cli.clone().unwrap_or_else(|| "claude".to_string()),
+                cli: w.cli.clone().unwrap_or(cli.clone()),
                 model: None,
                 flags: vec![],
                 label: w.label.clone(),
                 role: Some(crate::pty::WorkerRole {
                     role_type: w.role_type.clone(),
                     label: w.label.clone().unwrap_or_else(|| w.role_type.clone()),
-                    default_cli: w.cli.clone().unwrap_or_else(|| "claude".to_string()),
+                    default_cli: w.cli.clone().unwrap_or(cli.clone()),
                     prompt_template: None,
                 }),
                 initial_prompt: None,
@@ -95,14 +105,14 @@ pub async fn add_planner(
         let count = req.worker_count.unwrap_or(1) as usize;
         (0..count).map(|i| {
             AgentConfig {
-                cli: "claude".to_string(),
-                model: Some("opus".to_string()),
+                cli: cli.clone(),
+                model: None,
                 flags: vec![],
                 label: Some(format!("Worker {}", i + 1)),
                 role: Some(crate::pty::WorkerRole {
                     role_type: "general".to_string(),
                     label: format!("Worker {}", i + 1),
-                    default_cli: "claude".to_string(),
+                    default_cli: cli.clone(),
                     prompt_template: None,
                 }),
                 initial_prompt: None,
@@ -153,6 +163,8 @@ pub async fn list_planners(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
     let controller = state.session_controller.read();
 
     let session = controller
