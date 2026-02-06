@@ -576,11 +576,19 @@ impl SessionStorage {
                 continue;
             }
             match serde_json::from_str::<Learning>(line) {
-                Ok(learning) if learning.id == learning_id => {
-                    found = true;
-                    // Skip this line (delete it)
+                Ok(mut learning) => {
+                    // Apply same fixup as read path for entries without persisted ID
+                    if learning.id.is_empty() {
+                        learning.id = stable_learning_id(&learning);
+                    }
+                    if learning.id == learning_id {
+                        found = true;
+                        // Skip this line (delete it)
+                    } else {
+                        remaining_lines.push(line);
+                    }
                 }
-                _ => {
+                Err(_) => {
                     remaining_lines.push(line);
                 }
             }
@@ -795,7 +803,8 @@ mod tests {
 
     #[test]
     fn test_learning_deserialization_without_id_backward_compat() {
-        // Test backward compatibility - JSON without id field should auto-generate one
+        // Test backward compatibility - JSON without id field deserializes to empty string
+        // (fixup happens in read paths via stable_learning_id)
         let json = r#"{
             "date": "2024-01-03",
             "session": "session-2",
@@ -806,11 +815,21 @@ mod tests {
             "files_touched": []
         }"#;
 
-        let learning: Learning = serde_json::from_str(json).unwrap();
-        // ID should be auto-generated (non-empty UUID)
-        assert!(!learning.id.is_empty());
+        let mut learning: Learning = serde_json::from_str(json).unwrap();
+        // Raw deserialization yields empty ID
+        assert!(learning.id.is_empty());
         assert_eq!(learning.date, "2024-01-03");
         assert_eq!(learning.session, "session-2");
+
+        // Fixup: apply stable content-based hash
+        learning.id = stable_learning_id(&learning);
+        assert!(!learning.id.is_empty());
+        assert_eq!(learning.id.len(), 36); // UUID format
+
+        // Deserializing the same content again should produce the same ID
+        let learning2: Learning = serde_json::from_str(json).unwrap();
+        let id2 = stable_learning_id(&learning2);
+        assert_eq!(learning.id, id2); // Deterministic
     }
 
     #[test]
