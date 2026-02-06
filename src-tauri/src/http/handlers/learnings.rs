@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,6 +24,12 @@ pub struct SubmitLearningRequest {
     pub insight: String,
     #[serde(default)]
     pub files_touched: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LearningsFilter {
+    pub category: Option<String>,
+    pub keywords: Option<String>,
 }
 
 fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
@@ -46,16 +53,65 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
     Ok(first_path)
 }
 
-/// Resolve project_path from a session ID (O(1) HashMap lookup)
-fn resolve_session_project_path(state: &AppState, session_id: &str) -> Result<PathBuf, ApiError> {
-    let controller = state.session_controller.read();
-    let session = controller
-        .get_session(session_id)
-        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
-    Ok(session.project_path.clone())
+/// Validate session_id for path traversal attacks
+fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
+    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
+        return Err(ApiError::bad_request(
+            "Invalid session ID: must not contain '..', '/', or '\\'",
+        ));
+    }
+    Ok(())
 }
 
-/// POST /api/learnings - Submit a learning
+/// Apply case-insensitive filtering on learnings by category and keywords
+fn filter_learnings(learnings: Vec<Learning>, params: &LearningsFilter) -> Vec<Value> {
+    let cat_lower = params.category.as_deref().map(|c| c.to_lowercase());
+    let filter_kws: HashSet<String> = params
+        .keywords
+        .as_deref()
+        .map(|k| {
+            k.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    learnings
+        .into_iter()
+        .filter(|learning| {
+            if let Some(ref cat) = cat_lower {
+                if learning.outcome.to_lowercase() != *cat {
+                    return false;
+                }
+            }
+            if !filter_kws.is_empty()
+                && !learning
+                    .keywords
+                    .iter()
+                    .any(|lk| filter_kws.contains(&lk.to_lowercase()))
+            {
+                return false;
+            }
+            true
+        })
+        .map(|learning| {
+            json!({
+                "id": learning.id,
+                "date": learning.date,
+                "session": learning.session,
+                "task": learning.task,
+                "outcome": learning.outcome,
+                "keywords": learning.keywords,
+                "insight": learning.insight,
+                "files_touched": learning.files_touched,
+            })
+        })
+        .collect()
+}
+
+/// POST /api/learnings - Submit a learning (project-scoped, legacy)
+/// DEPRECATED: Use POST /api/sessions/{session_id}/learnings for new code
 pub async fn submit_learning(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitLearningRequest>,
@@ -92,7 +148,10 @@ pub async fn submit_learning(
 
     let project_path = resolve_project_path(&state)?;
 
+    let learning_id = uuid::Uuid::new_v4().to_string();
+
     let learning = Learning {
+        id: learning_id.clone(),
         date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
         session: req.session,
         task: req.task,
@@ -111,13 +170,16 @@ pub async fn submit_learning(
         StatusCode::CREATED,
         Json(json!({
             "message": "Learning submitted successfully",
+            "learning_id": learning_id,
         })),
     ))
 }
 
-/// GET /api/learnings - List all learnings
+/// GET /api/learnings - List all learnings (project-scoped, legacy)
+/// DEPRECATED: Use GET /api/sessions/{session_id}/learnings for new code
 pub async fn list_learnings(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<LearningsFilter>,
 ) -> Result<Json<Value>, ApiError> {
     let project_path = resolve_project_path(&state)?;
 
@@ -126,20 +188,7 @@ pub async fn list_learnings(
         .read_learnings(&project_path)
         .map_err(|e| ApiError::internal(format!("Failed to read learnings: {}", e)))?;
 
-    let learnings_json: Vec<Value> = learnings
-        .iter()
-        .map(|learning| {
-            json!({
-                "date": learning.date,
-                "session": learning.session,
-                "task": learning.task,
-                "outcome": learning.outcome,
-                "keywords": learning.keywords,
-                "insight": learning.insight,
-                "files_touched": learning.files_touched,
-            })
-        })
-        .collect();
+    let learnings_json = filter_learnings(learnings, &params);
 
     Ok(Json(json!({
         "learnings": learnings_json,
@@ -147,7 +196,8 @@ pub async fn list_learnings(
     })))
 }
 
-/// GET /api/project-dna - Get curated project DNA content
+/// GET /api/project-dna - Get curated project DNA content (project-scoped, legacy)
+/// DEPRECATED: Use GET /api/sessions/{session_id}/project-dna for new code
 pub async fn get_project_dna(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -169,6 +219,8 @@ pub async fn submit_learning_for_session(
     Path(session_id): Path<String>,
     Json(req): Json<SubmitLearningRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    validate_session_id(&session_id)?;
+
     if req.session.trim().is_empty() {
         return Err(ApiError::bad_request("Session cannot be empty"));
     }
@@ -199,9 +251,10 @@ pub async fn submit_learning_for_session(
         }
     }
 
-    let project_path = resolve_session_project_path(&state, &session_id)?;
+    let learning_id = uuid::Uuid::new_v4().to_string();
 
     let learning = Learning {
+        id: learning_id.clone(),
         date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
         session: req.session,
         task: req.task,
@@ -211,15 +264,17 @@ pub async fn submit_learning_for_session(
         files_touched: req.files_touched,
     };
 
+    // Use session-scoped storage
     state
         .storage
-        .append_learning(&project_path, &learning)
+        .append_learning_session(&session_id, &learning)
         .map_err(|e| ApiError::internal(format!("Failed to save learning: {}", e)))?;
 
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "message": "Learning submitted successfully",
+            "learning_id": learning_id,
         })),
     ))
 }
@@ -228,28 +283,17 @@ pub async fn submit_learning_for_session(
 pub async fn list_learnings_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    Query(params): Query<LearningsFilter>,
 ) -> Result<Json<Value>, ApiError> {
-    let project_path = resolve_session_project_path(&state, &session_id)?;
+    validate_session_id(&session_id)?;
 
+    // Use session-scoped storage
     let learnings = state
         .storage
-        .read_learnings(&project_path)
+        .read_learnings_session(&session_id)
         .map_err(|e| ApiError::internal(format!("Failed to read learnings: {}", e)))?;
 
-    let learnings_json: Vec<Value> = learnings
-        .iter()
-        .map(|learning| {
-            json!({
-                "date": learning.date,
-                "session": learning.session,
-                "task": learning.task,
-                "outcome": learning.outcome,
-                "keywords": learning.keywords,
-                "insight": learning.insight,
-                "files_touched": learning.files_touched,
-            })
-        })
-        .collect();
+    let learnings_json = filter_learnings(learnings, &params);
 
     Ok(Json(json!({
         "learnings": learnings_json,
@@ -257,16 +301,39 @@ pub async fn list_learnings_for_session(
     })))
 }
 
+/// DELETE /api/sessions/{id}/learnings/{learning_id} - Delete a specific learning by ID
+pub async fn delete_learning_for_session(
+    State(state): State<Arc<AppState>>,
+    Path((session_id, learning_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    validate_session_id(&session_id)?;
+
+    let found = state
+        .storage
+        .delete_learning_session(&session_id, &learning_id)
+        .map_err(|e| ApiError::internal(format!("Failed to delete learning: {}", e)))?;
+
+    if found {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!(
+            "Learning {} not found in session {}",
+            learning_id, session_id
+        )))
+    }
+}
+
 /// GET /api/sessions/{id}/project-dna - Get project DNA for a session (session-scoped)
 pub async fn get_project_dna_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let project_path = resolve_session_project_path(&state, &session_id)?;
+    validate_session_id(&session_id)?;
 
+    // Use session-scoped storage
     let content = state
         .storage
-        .read_project_dna(&project_path)
+        .read_project_dna_session(&session_id)
         .map_err(|e| ApiError::internal(format!("Failed to read project DNA: {}", e)))?;
 
     Ok(Json(json!({
