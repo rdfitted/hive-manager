@@ -22,9 +22,16 @@ fn generate_learning_id() -> String {
 fn stable_learning_id(learning: &Learning) -> String {
     use uuid::Uuid;
     // Use the DNS namespace as a stable base (arbitrary but deterministic)
+    // Include all fields to avoid collisions between entries that share date/session/task/insight
     let content = format!(
-        "{}:{}:{}:{}",
-        learning.date, learning.session, learning.task, learning.insight
+        "{}:{}:{}:{}:{}:{}:{}",
+        learning.date,
+        learning.session,
+        learning.task,
+        learning.outcome,
+        learning.keywords.join(","),
+        learning.insight,
+        learning.files_touched.join(","),
     );
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, content.as_bytes()).to_string()
 }
