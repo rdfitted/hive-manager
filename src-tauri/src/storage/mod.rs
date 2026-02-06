@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -8,8 +9,24 @@ use thiserror::Error;
 
 use crate::coordination::CoordinationMessage;
 
+/// Generate a deterministic ID for legacy learnings that lack one.
+/// Uses UUID v5 (SHA-1 namespace hash) from concatenated fields so the same
+/// entry always produces the same ID across reads.
 fn generate_learning_id() -> String {
-    uuid::Uuid::new_v4().to_string()
+    // This default is only used when deserializing entries that lack an `id` field.
+    // A post-deserialization fixup in the read paths replaces it with a content-based hash.
+    String::new()
+}
+
+/// Produce a stable, content-based ID for a learning entry.
+fn stable_learning_id(learning: &Learning) -> String {
+    use uuid::Uuid;
+    // Use the DNS namespace as a stable base (arbitrary but deterministic)
+    let content = format!(
+        "{}:{}:{}:{}",
+        learning.date, learning.session, learning.task, learning.insight
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, content.as_bytes()).to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -526,7 +543,12 @@ impl SessionStorage {
                 continue;
             }
             match serde_json::from_str::<Learning>(line) {
-                Ok(learning) => learnings.push(learning),
+                Ok(mut learning) => {
+                    if learning.id.is_empty() {
+                        learning.id = stable_learning_id(&learning);
+                    }
+                    learnings.push(learning);
+                }
                 Err(e) => {
                     tracing::warn!("Failed to parse learning line: {}. Error: {}", line, e);
                 }
@@ -568,15 +590,16 @@ impl SessionStorage {
             return Ok(false);
         }
 
-        // Write to temp file then rename for atomicity
-        let temp_file = self.session_lessons_dir(session_id).join("learnings.jsonl.tmp");
-        let mut output = String::new();
+        // Write to temp file then rename for atomicity using tempfile crate
+        let lessons_dir = self.session_lessons_dir(session_id);
+        let mut temp = tempfile::NamedTempFile::new_in(&lessons_dir)
+            .map_err(|e| StorageError::Io(e))?;
         for line in &remaining_lines {
-            output.push_str(line);
-            output.push('\n');
+            writeln!(temp, "{}", line)
+                .map_err(|e| StorageError::Io(e))?;
         }
-        fs::write(&temp_file, &output)?;
-        fs::rename(&temp_file, &learnings_file)?;
+        temp.persist(&learnings_file)
+            .map_err(|e| StorageError::Io(e.error))?;
 
         Ok(true)
     }
@@ -598,7 +621,12 @@ impl SessionStorage {
                 continue;
             }
             match serde_json::from_str::<Learning>(line) {
-                Ok(learning) => learnings.push(learning),
+                Ok(mut learning) => {
+                    if learning.id.is_empty() {
+                        learning.id = stable_learning_id(&learning);
+                    }
+                    learnings.push(learning);
+                }
                 Err(e) => {
                     tracing::warn!("Failed to parse learning line: {}. Error: {}", line, e);
                 }

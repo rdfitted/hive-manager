@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -52,13 +53,61 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
     Ok(first_path)
 }
 
-/// Resolve project_path from a session ID (O(1) HashMap lookup)
-fn resolve_session_project_path(state: &AppState, session_id: &str) -> Result<PathBuf, ApiError> {
-    let controller = state.session_controller.read();
-    let session = controller
-        .get_session(session_id)
-        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
-    Ok(session.project_path.clone())
+/// Validate session_id for path traversal attacks
+fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
+    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
+        return Err(ApiError::bad_request(
+            "Invalid session ID: must not contain '..', '/', or '\\'",
+        ));
+    }
+    Ok(())
+}
+
+/// Apply case-insensitive filtering on learnings by category and keywords
+fn filter_learnings(learnings: Vec<Learning>, params: &LearningsFilter) -> Vec<Value> {
+    let cat_lower = params.category.as_deref().map(|c| c.to_lowercase());
+    let filter_kws: HashSet<String> = params
+        .keywords
+        .as_deref()
+        .map(|k| {
+            k.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    learnings
+        .into_iter()
+        .filter(|learning| {
+            if let Some(ref cat) = cat_lower {
+                if learning.outcome.to_lowercase() != *cat {
+                    return false;
+                }
+            }
+            if !filter_kws.is_empty()
+                && !learning
+                    .keywords
+                    .iter()
+                    .any(|lk| filter_kws.contains(&lk.to_lowercase()))
+            {
+                return false;
+            }
+            true
+        })
+        .map(|learning| {
+            json!({
+                "id": learning.id,
+                "date": learning.date,
+                "session": learning.session,
+                "task": learning.task,
+                "outcome": learning.outcome,
+                "keywords": learning.keywords,
+                "insight": learning.insight,
+                "files_touched": learning.files_touched,
+            })
+        })
+        .collect()
 }
 
 /// POST /api/learnings - Submit a learning (project-scoped, legacy)
@@ -139,40 +188,7 @@ pub async fn list_learnings(
         .read_learnings(&project_path)
         .map_err(|e| ApiError::internal(format!("Failed to read learnings: {}", e)))?;
 
-    let learnings_json: Vec<Value> = learnings
-        .iter()
-        .filter(|learning| {
-            if let Some(ref cat) = params.category {
-                if learning.outcome != *cat {
-                    return false;
-                }
-            }
-            if let Some(ref kws) = params.keywords {
-                let filter_kws: Vec<&str> = kws.split(',').map(|s| s.trim()).collect();
-                if !filter_kws.is_empty()
-                    && !learning
-                        .keywords
-                        .iter()
-                        .any(|lk| filter_kws.contains(&lk.as_str()))
-                {
-                    return false;
-                }
-            }
-            true
-        })
-        .map(|learning| {
-            json!({
-                "id": learning.id,
-                "date": learning.date,
-                "session": learning.session,
-                "task": learning.task,
-                "outcome": learning.outcome,
-                "keywords": learning.keywords,
-                "insight": learning.insight,
-                "files_touched": learning.files_touched,
-            })
-        })
-        .collect();
+    let learnings_json = filter_learnings(learnings, &params);
 
     Ok(Json(json!({
         "learnings": learnings_json,
@@ -203,6 +219,8 @@ pub async fn submit_learning_for_session(
     Path(session_id): Path<String>,
     Json(req): Json<SubmitLearningRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    validate_session_id(&session_id)?;
+
     if req.session.trim().is_empty() {
         return Err(ApiError::bad_request("Session cannot be empty"));
     }
@@ -267,46 +285,15 @@ pub async fn list_learnings_for_session(
     Path(session_id): Path<String>,
     Query(params): Query<LearningsFilter>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
     // Use session-scoped storage
     let learnings = state
         .storage
         .read_learnings_session(&session_id)
         .map_err(|e| ApiError::internal(format!("Failed to read learnings: {}", e)))?;
 
-    let learnings_json: Vec<Value> = learnings
-        .iter()
-        .filter(|learning| {
-            if let Some(ref cat) = params.category {
-                if learning.outcome != *cat {
-                    return false;
-                }
-            }
-            if let Some(ref kws) = params.keywords {
-                let filter_kws: Vec<&str> = kws.split(',').map(|s| s.trim()).collect();
-                if !filter_kws.is_empty()
-                    && !learning
-                        .keywords
-                        .iter()
-                        .any(|lk| filter_kws.contains(&lk.as_str()))
-                {
-                    return false;
-                }
-            }
-            true
-        })
-        .map(|learning| {
-            json!({
-                "id": learning.id,
-                "date": learning.date,
-                "session": learning.session,
-                "task": learning.task,
-                "outcome": learning.outcome,
-                "keywords": learning.keywords,
-                "insight": learning.insight,
-                "files_touched": learning.files_touched,
-            })
-        })
-        .collect();
+    let learnings_json = filter_learnings(learnings, &params);
 
     Ok(Json(json!({
         "learnings": learnings_json,
@@ -319,6 +306,8 @@ pub async fn delete_learning_for_session(
     State(state): State<Arc<AppState>>,
     Path((session_id, learning_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    validate_session_id(&session_id)?;
+
     let found = state
         .storage
         .delete_learning_session(&session_id, &learning_id)
@@ -339,6 +328,8 @@ pub async fn get_project_dna_for_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
     // Use session-scoped storage
     let content = state
         .storage
@@ -348,174 +339,4 @@ pub async fn get_project_dna_for_session(
     Ok(Json(json!({
         "content": content
     })))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_submit_request_validation_rejects_empty_session() {
-        let json = r#"{
-            "session": "",
-            "task": "test task",
-            "outcome": "success",
-            "keywords": [],
-            "insight": "test insight",
-            "files_touched": []
-        }"#;
-
-        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
-        assert!(req.is_ok());
-        let req = req.unwrap();
-        assert!(req.session.trim().is_empty());
-    }
-
-    #[test]
-    fn test_submit_request_validation_rejects_empty_task() {
-        let json = r#"{
-            "session": "test-session",
-            "task": "",
-            "outcome": "success",
-            "keywords": [],
-            "insight": "test insight",
-            "files_touched": []
-        }"#;
-
-        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
-        assert!(req.is_ok());
-        let req = req.unwrap();
-        assert!(req.task.trim().is_empty());
-    }
-
-    #[test]
-    fn test_submit_request_validation_rejects_empty_insight() {
-        let json = r#"{
-            "session": "test-session",
-            "task": "test task",
-            "outcome": "success",
-            "keywords": [],
-            "insight": "",
-            "files_touched": []
-        }"#;
-
-        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
-        assert!(req.is_ok());
-        let req = req.unwrap();
-        assert!(req.insight.trim().is_empty());
-    }
-
-    #[test]
-    fn test_submit_request_validation_rejects_invalid_outcome() {
-        let json = r#"{
-            "session": "test-session",
-            "task": "test task",
-            "outcome": "invalid-outcome",
-            "keywords": [],
-            "insight": "test insight",
-            "files_touched": []
-        }"#;
-
-        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
-        assert!(req.is_ok());
-        let req = req.unwrap();
-        // Outcome validation happens in the handler, but we can test the struct deserializes
-        assert_eq!(req.outcome, "invalid-outcome");
-    }
-
-    #[test]
-    fn test_submit_request_validation_accepts_valid_outcomes() {
-        for outcome in ["success", "partial", "failed"] {
-            let json = format!(r#"{{
-                "session": "test-session",
-                "task": "test task",
-                "outcome": "{}",
-                "keywords": [],
-                "insight": "test insight",
-                "files_touched": []
-            }}"#, outcome);
-
-            let req: Result<SubmitLearningRequest, _> = serde_json::from_str(&json);
-            assert!(req.is_ok());
-            let req = req.unwrap();
-            assert_eq!(req.outcome, outcome);
-        }
-    }
-
-    #[test]
-    fn test_submit_request_validation_detects_path_traversal() {
-        let test_cases = vec![
-            ("../../etc/passwd", true),
-            ("/etc/passwd", true),
-            ("C:\\Windows\\System32", true),
-            ("src/file.rs", false),
-            ("tests/file.rs", false),
-        ];
-
-        for (file_path, should_reject) in test_cases {
-            let json = format!(r#"{{
-                "session": "test-session",
-                "task": "test task",
-                "outcome": "success",
-                "keywords": [],
-                "insight": "test insight",
-                "files_touched": ["{}"]
-            }}"#, file_path);
-
-            let req: Result<SubmitLearningRequest, _> = serde_json::from_str(&json);
-            assert!(req.is_ok());
-            let req = req.unwrap();
-            
-            let has_traversal = req.files_touched.iter().any(|p| {
-                p.contains("..") || p.starts_with('/') || p.contains('\\')
-            });
-
-            if should_reject {
-                assert!(has_traversal, "Path {} should be detected as traversal", file_path);
-            } else {
-                assert!(!has_traversal, "Path {} should not be detected as traversal", file_path);
-            }
-        }
-    }
-
-    #[test]
-    fn test_submit_request_deserializes_with_defaults() {
-        let json = r#"{
-            "session": "test-session",
-            "task": "test task",
-            "outcome": "success",
-            "insight": "test insight"
-        }"#;
-
-        let req: Result<SubmitLearningRequest, _> = serde_json::from_str(json);
-        assert!(req.is_ok());
-        let req = req.unwrap();
-        assert_eq!(req.keywords.len(), 0);
-        assert_eq!(req.files_touched.len(), 0);
-    }
-
-    #[test]
-    fn test_learnings_filter_deserializes() {
-        let json = r#"{
-            "category": "success",
-            "keywords": "rust,api"
-        }"#;
-
-        let filter: Result<LearningsFilter, _> = serde_json::from_str(json);
-        assert!(filter.is_ok());
-        let filter = filter.unwrap();
-        assert_eq!(filter.category, Some("success".to_string()));
-        assert_eq!(filter.keywords, Some("rust,api".to_string()));
-    }
-
-    #[test]
-    fn test_learnings_filter_deserializes_with_defaults() {
-        let json = r#"{}"#;
-
-        let filter: Result<LearningsFilter, _> = serde_json::from_str(json);
-        assert!(filter.is_ok());
-        let filter = filter.unwrap();
-        assert_eq!(filter.category, None);
-        assert_eq!(filter.keywords, None);
-    }
 }

@@ -1319,30 +1319,28 @@ Workers record learnings during task completion. Your curation responsibilities:
    curl "http://localhost:18800/api/sessions/{session_id}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** into the session-scoped `project-dna.md` via the API:
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
+### Session-Scoped Lessons Structure
 ```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions (append-only)
-├── project-dna.md       # Curated patterns, conventions, insights
-├── curation-state.json  # Tracks what's been curated
-└── archive/             # Retired learnings (after 50+ entries)
-    └── learnings-{{timestamp}}.jsonl
+.hive-manager/{session_id}/lessons/
+├── learnings.jsonl      # Raw learnings for this session (append-only)
+└── project-dna.md       # Curated patterns, conventions, insights
 ```
 
 ### Curation Process
 1. Review raw learnings via `GET /api/sessions/{session_id}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md` sections:
+2. Review current project DNA via `GET /api/sessions/{session_id}/project-dna`
+3. Synthesize insights into `project-dna.md` sections:
    - **Patterns That Work** - Successful approaches
    - **Patterns That Failed** - What to avoid
    - **Code Conventions** - Project-specific standards
    - **Architecture Notes** - Key design decisions
-3. After 50+ learnings accumulate, archive to `.ai-docs/archive/` and clear the main file
+4. Delete outdated or duplicate learnings via `DELETE /api/sessions/{{session_id}}/learnings/{{learning_id}}`
 
 ### When to Curate
 - After each major task phase completes
@@ -1706,30 +1704,28 @@ Workers and planners record learnings during task completion. Your curation resp
    curl "http://localhost:18800/api/sessions/{session_id}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** into the session-scoped `project-dna.md` via the API:
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
+### Session-Scoped Lessons Structure
 ```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions (append-only)
-├── project-dna.md       # Curated patterns, conventions, insights
-├── curation-state.json  # Tracks what's been curated
-└── archive/             # Retired learnings (after 50+ entries)
-    └── learnings-{{timestamp}}.jsonl
+.hive-manager/{session_id}/lessons/
+├── learnings.jsonl      # Raw learnings for this session (append-only)
+└── project-dna.md       # Curated patterns, conventions, insights
 ```
 
 ### Curation Process
 1. Review raw learnings via `GET /api/sessions/{session_id}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md` sections:
+2. Review current project DNA via `GET /api/sessions/{session_id}/project-dna`
+3. Synthesize insights into `project-dna.md` sections:
    - **Patterns That Work** - Successful approaches
    - **Patterns That Failed** - What to avoid
    - **Code Conventions** - Project-specific standards
    - **Architecture Notes** - Key design decisions
-3. After 50+ learnings accumulate, archive to `.ai-docs/archive/` and clear the main file
+4. Delete outdated or duplicate learnings via `DELETE /api/sessions/{{session_id}}/learnings/{{learning_id}}`
 
 ### When to Curate
 - After each planner completes its domain
@@ -1949,7 +1945,7 @@ Content-Type: application/json
   "session": "{{session_id}}",
   "task": "Description of the task you completed",
   "insight": "What you learned or discovered",
-  "outcome": "discovery|pattern|convention|architecture|failure",
+  "outcome": "success|partial|failed",
   "keywords": ["keyword1", "keyword2"],
   "files_touched": ["path/to/file.rs"]
 }
@@ -1962,7 +1958,7 @@ Content-Type: application/json
 | session | string | Current session ID |
 | task | string | What task was being performed |
 | insight | string | The learning or discovery |
-| outcome | string | Category: discovery, pattern, convention, architecture, failure |
+| outcome | string | Category: success, partial, failed |
 | keywords | string[] | Relevant keywords for filtering |
 | files_touched | string[] | Files involved in this learning |
 
@@ -1971,7 +1967,7 @@ Content-Type: application/json
 ```bash
 curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/learnings" \
   -H "Content-Type: application/json" \
-  -d '{"session": "{{session_id}}", "task": "Implemented DELETE endpoint", "insight": "JSONL files need atomic rewrite via temp-file+rename", "outcome": "pattern", "keywords": ["jsonl", "atomic-write"], "files_touched": ["src/storage/mod.rs"]}'
+  -d '{"session": "{{session_id}}", "task": "Implemented DELETE endpoint", "insight": "JSONL files need atomic rewrite via temp-file+rename", "outcome": "success", "keywords": ["jsonl", "atomic-write"], "files_touched": ["src/storage/mod.rs"]}'
 ```
 "#;
 
@@ -1990,7 +1986,7 @@ List all learnings recorded for this session.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| category | string | Filter by outcome category (e.g., "discovery", "pattern") |
+| category | string | Filter by outcome category (e.g., "success", "partial") |
 | keywords | string | Comma-separated keyword filter (e.g., "api,rust") |
 
 ## Example
@@ -2000,7 +1996,7 @@ List all learnings recorded for this session.
 curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
 
 # Filter by category
-curl "http://localhost:18800/api/sessions/{{session_id}}/learnings?category=pattern"
+curl "http://localhost:18800/api/sessions/{{session_id}}/learnings?category=success"
 
 # Filter by keywords
 curl "http://localhost:18800/api/sessions/{{session_id}}/learnings?keywords=api,rust"
