@@ -110,6 +110,11 @@ impl SessionStorage {
     /// Create a new SessionStorage, initializing the base directory if needed
     pub fn new() -> Result<Self, StorageError> {
         let base_dir = Self::get_app_data_dir()?;
+        Self::new_with_base(base_dir)
+    }
+
+    /// Create a SessionStorage with a custom base directory (for testing)
+    pub fn new_with_base(base_dir: PathBuf) -> Result<Self, StorageError> {
         fs::create_dir_all(&base_dir)?;
         fs::create_dir_all(base_dir.join("templates").join("roles"))?;
         fs::create_dir_all(base_dir.join("sessions"))?;
@@ -742,17 +747,7 @@ mod tests {
 
     fn create_test_storage() -> (SessionStorage, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        // Override the base_dir by creating a custom SessionStorage
-        // We'll need to manually set up the directory structure
-        let base_dir = temp_dir.path().to_path_buf();
-        std::fs::create_dir_all(&base_dir).unwrap();
-        std::fs::create_dir_all(base_dir.join("templates").join("roles")).unwrap();
-        std::fs::create_dir_all(base_dir.join("sessions")).unwrap();
-        
-        // Create a storage instance with custom base_dir
-        // Since SessionStorage doesn't expose a way to set base_dir, we'll use a workaround
-        // by setting APPDATA/HOME env vars temporarily
-        let storage = SessionStorage::new().unwrap();
+        let storage = SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap();
         (storage, temp_dir)
     }
 
@@ -834,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_append_and_read_learnings_session() {
-        let storage = SessionStorage::new().unwrap();
+        let (storage, _temp_dir) = create_test_storage();
         let session_id = "test-session-append-read";
 
         // Create session directory structure
@@ -864,7 +859,7 @@ mod tests {
 
     #[test]
     fn test_delete_learning_by_id() {
-        let storage = SessionStorage::new().unwrap();
+        let (storage, _temp_dir) = create_test_storage();
         let session_id = "test-session-delete";
 
         storage.create_session_dir(session_id).unwrap();
@@ -921,7 +916,7 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_learning() {
-        let storage = SessionStorage::new().unwrap();
+        let (storage, _temp_dir) = create_test_storage();
         let session_id = "test-session-delete-nonexistent";
 
         storage.create_session_dir(session_id).unwrap();
@@ -951,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_read_learnings_empty_file() {
-        let storage = SessionStorage::new().unwrap();
+        let (storage, _temp_dir) = create_test_storage();
         let session_id = "test-session-empty";
 
         storage.create_session_dir(session_id).unwrap();
@@ -963,7 +958,7 @@ mod tests {
 
     #[test]
     fn test_read_learnings_skips_malformed_lines() {
-        let storage = SessionStorage::new().unwrap();
+        let (storage, _temp_dir) = create_test_storage();
         let session_id = "test-session-malformed";
 
         storage.create_session_dir(session_id).unwrap();
