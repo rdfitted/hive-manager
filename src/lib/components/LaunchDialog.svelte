@@ -10,9 +10,10 @@
     close: void;
     launchHive: HiveLaunchConfig;
     launchSwarm: SwarmLaunchConfig;
+    launchFusion: FusionLaunchConfig;
   }>();
 
-  type SessionMode = 'hive' | 'swarm';
+  type SessionMode = 'hive' | 'swarm' | 'fusion';
 
   // Predefined roles with default CLIs, descriptions, and prompt templates
   const predefinedRoles = [
@@ -151,6 +152,18 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     { cli: 'claude', flags: [], label: undefined, selectedRole: 'resolver' },
   ];
 
+  // Fusion config
+  let variantCount = 2;
+  let fusionVariants: FusionVariantConfig[] = [
+    { name: 'Variant A', cli: 'claude' },
+    { name: 'Variant B', cli: 'claude' },
+    { name: 'Variant C', cli: 'claude' },
+    { name: 'Variant D', cli: 'claude' },
+  ];
+  let judgeConfig = { cli: 'claude', model: '' };
+
+  $: activeFusionVariants = fusionVariants.slice(0, variantCount);
+
   function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
     const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
     return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
@@ -244,7 +257,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           smoke_test: smokeTest,
         };
         dispatch('launchHive', config);
-      } else {
+      } else if (mode === 'swarm') {
         // Build workers config with roles
         const workersWithRoles: AgentConfig[] = workersPerPlanner.map((w) => ({
           cli: w.cli,
@@ -264,6 +277,15 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           smoke_test: smokeTest,
         };
         dispatch('launchSwarm', config);
+      } else {
+        const config: FusionLaunchConfig = {
+          project_path: projectPath,
+          variants: activeFusionVariants,
+          task_description: prompt,
+          judge_config: judgeConfig,
+          with_planning: true,
+        };
+        dispatch('launchFusion', config);
       }
     } catch (err) {
       error = String(err);
@@ -317,6 +339,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           type="button"
         >
           Swarm
+        </button>
+        <button
+          class="mode-tab"
+          class:active={mode === 'fusion'}
+          on:click={() => (mode = 'fusion')}
+          type="button"
+        >
+          Fusion
         </button>
       </div>
 
@@ -443,6 +473,61 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                     <AgentConfigEditor bind:config={worker} showLabel={true} />
                   </div>
                 {/each}
+              </div>
+            </div>
+          </div>
+        {:else if mode === 'fusion'}
+          <div class="form-section">
+            <h3>Fusion Configuration</h3>
+            <p class="section-description">Run multiple agent variants in parallel to compare their outputs. A judge will evaluate and recommend the best result.</p>
+
+            <div class="field">
+              <label for="variant-count">Number of Variants</label>
+              <select id="variant-count" bind:value={variantCount} class="role-select">
+                <option value={2}>2 Variants</option>
+                <option value={3}>3 Variants</option>
+                <option value={4}>4 Variants</option>
+              </select>
+            </div>
+
+            <div class="subsection">
+              <h4>Variant Configurations</h4>
+              <div class="workers-list">
+                {#each activeFusionVariants as variant, i (i)}
+                  <div class="worker-card">
+                    <div class="card-header">
+                      <span class="card-title">{variant.name}</span>
+                    </div>
+                    <div class="field">
+                      <label for="variant-cli-{i}">CLI</label>
+                      <select id="variant-cli-{i}" bind:value={variant.cli} class="role-select">
+                        <option value="claude">Claude</option>
+                        <option value="gemini">Gemini</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="variant-model-{i}">Model (optional)</label>
+                      <input id="variant-model-{i}" type="text" bind:value={variant.model} placeholder="Default model" />
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <div class="subsection">
+              <h4>Judge Configuration</h4>
+              <div class="worker-card">
+                <div class="field">
+                  <label for="judge-cli">Judge CLI</label>
+                  <select id="judge-cli" bind:value={judgeConfig.cli} class="role-select">
+                    <option value="claude">Claude</option>
+                    <option value="gemini">Gemini</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="judge-model">Judge Model (optional)</label>
+                  <input id="judge-model" type="text" bind:value={judgeConfig.model} placeholder="Default model" />
+                </div>
               </div>
             </div>
           </div>
