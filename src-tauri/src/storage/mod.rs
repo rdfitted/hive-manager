@@ -5,8 +5,61 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Pre-compiled regex for parsing coordination log lines (new format with message type)
+static COORDINATION_LOG_REGEX_NEW: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\[([^\]]+)\] (TASK|PROGRESS|COMPLETION|ERROR|SYSTEM) ([^ ]+) → ([^:]+): (.*)$")
+        .expect("Invalid coordination log regex (new format)")
+});
+
+/// Pre-compiled regex for parsing coordination log lines (legacy format without message type)
+static COORDINATION_LOG_REGEX_LEGACY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\[([^\]]+)\] ([^ ]+) → ([^:]+): (.*)$")
+        .expect("Invalid coordination log regex (legacy format)")
+});
+
+/// Regex for validating session IDs - only alphanumeric, dash, and underscore allowed
+static SESSION_ID_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-zA-Z0-9_-]+$").expect("Invalid session ID validation regex")
+});
+
+/// Validate a session ID to prevent path traversal attacks.
+/// Session IDs must contain only alphanumeric characters, dashes, and underscores.
+/// Returns an error if the session ID is invalid.
+pub fn validate_session_id(session_id: &str) -> Result<(), StorageError> {
+    // Check for empty session ID
+    if session_id.is_empty() {
+        return Err(StorageError::InvalidPath("Session ID cannot be empty".to_string()));
+    }
+    
+    // Check for null bytes
+    if session_id.contains('\0') {
+        return Err(StorageError::InvalidPath("Session ID cannot contain null bytes".to_string()));
+    }
+    
+    // Check for path traversal patterns
+    if session_id.contains("..") {
+        return Err(StorageError::InvalidPath("Session ID cannot contain '..'".to_string()));
+    }
+    
+    // Validate against allowlist pattern (alphanumeric, dash, underscore only)
+    if !SESSION_ID_REGEX.is_match(session_id) {
+        return Err(StorageError::InvalidPath(
+            "Session ID must contain only alphanumeric characters, dashes, and underscores".to_string()
+        ));
+    }
+    
+    // Check reasonable length (UUID is 36 chars, allow some buffer)
+    if session_id.len() > 128 {
+        return Err(StorageError::InvalidPath("Session ID is too long".to_string()));
+    }
+    
+    Ok(())
+}
 
 use crate::coordination::{CoordinationMessage, MessageType};
 
@@ -171,12 +224,27 @@ impl SessionStorage {
     }
 
     /// Get path to a specific session directory
+    /// Validates session_id to prevent path traversal attacks
     pub fn session_dir(&self, session_id: &str) -> PathBuf {
+        // Validate session_id - log warning if invalid but don't panic
+        // (callers should validate before calling this)
+        if let Err(e) = validate_session_id(session_id) {
+            tracing::warn!("Invalid session_id passed to session_dir: {}", e);
+        }
         self.sessions_dir().join(session_id)
+    }
+    
+    /// Get path to a specific session directory with validation
+    /// Returns an error if session_id is invalid
+    pub fn session_dir_validated(&self, session_id: &str) -> Result<PathBuf, StorageError> {
+        validate_session_id(session_id)?;
+        Ok(self.sessions_dir().join(session_id))
     }
 
     /// Create a new session directory structure
+    /// Validates session_id to prevent path traversal attacks
     pub fn create_session_dir(&self, session_id: &str) -> Result<PathBuf, StorageError> {
+        validate_session_id(session_id)?;
         let session_dir = self.session_dir(session_id);
 
         // Create all subdirectories
@@ -224,7 +292,9 @@ impl SessionStorage {
     }
 
     /// Load session metadata from disk
+    /// Validates session_id to prevent path traversal attacks
     pub fn load_session(&self, session_id: &str) -> Result<PersistedSession, StorageError> {
+        validate_session_id(session_id)?;
         let session_file = self.session_dir(session_id).join("session.json");
         if !session_file.exists() {
             return Err(StorageError::SessionNotFound(session_id.to_string()));
@@ -501,11 +571,13 @@ impl SessionStorage {
 
     /// Append a message to the coordination log
     /// Uses file locking for concurrent write safety
+    /// Validates session_id to prevent path traversal attacks
     pub fn append_coordination_log(
         &self,
         session_id: &str,
         message: &CoordinationMessage,
     ) -> Result<(), StorageError> {
+        validate_session_id(session_id)?;
         let log_path = self
             .session_dir(session_id)
             .join("coordination")
@@ -552,11 +624,13 @@ impl SessionStorage {
     }
 
     /// Read the coordination log
+    /// Validates session_id to prevent path traversal attacks
     pub fn read_coordination_log(
         &self,
         session_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<CoordinationMessage>, StorageError> {
+        validate_session_id(session_id)?;
         let log_path = self
             .session_dir(session_id)
             .join("coordination")
@@ -585,17 +659,13 @@ impl SessionStorage {
         Ok(messages)
     }
 
-    /// Parse a coordination log line
+    /// Parse a coordination log line using pre-compiled static regexes
     fn parse_coordination_line(line: &str) -> Option<CoordinationMessage> {
         // New format: [2024-02-03T18:52:34Z] TYPE FROM → TO: content
         // Legacy format: [2024-02-03T18:52:34Z] FROM → TO: content
 
-        // Try new format first (with message type)
-        let re_new = regex::Regex::new(
-            r"^\[([^\]]+)\] (TASK|PROGRESS|COMPLETION|ERROR|SYSTEM) ([^ ]+) → ([^:]+): (.*)$",
-        )
-        .ok()?;
-        if let Some(caps) = re_new.captures(line) {
+        // Try new format first (with message type) using pre-compiled regex
+        if let Some(caps) = COORDINATION_LOG_REGEX_NEW.captures(line) {
             let timestamp = DateTime::parse_from_rfc3339(&caps[1])
                 .ok()?
                 .with_timezone(&Utc);
@@ -611,8 +681,7 @@ impl SessionStorage {
         }
 
         // Fall back to legacy format (no message type - defaults to Task)
-        let re_legacy = regex::Regex::new(r"^\[([^\]]+)\] ([^ ]+) → ([^:]+): (.*)$").ok()?;
-        let caps = re_legacy.captures(line)?;
+        let caps = COORDINATION_LOG_REGEX_LEGACY.captures(line)?;
 
         let timestamp = DateTime::parse_from_rfc3339(&caps[1])
             .ok()?
@@ -634,10 +703,19 @@ impl SessionStorage {
 
     /// Get the session-scoped lessons directory
     /// Stores learnings and project DNA in .hive-manager/{session_id}/lessons/
+    /// Validates session_id to prevent path traversal attacks
     fn session_lessons_dir(&self, session_id: &str) -> PathBuf {
+        // Validation is performed by session_dir
         // For per-session lessons, store in %APPDATA%/hive-manager/sessions/{session_id}/lessons/
         // This allows multi-project sessions without conflicts
         self.session_dir(session_id).join("lessons")
+    }
+    
+    /// Get the session-scoped lessons directory with validation
+    /// Returns an error if session_id is invalid
+    fn session_lessons_dir_validated(&self, session_id: &str) -> Result<PathBuf, StorageError> {
+        validate_session_id(session_id)?;
+        Ok(self.session_dir(session_id).join("lessons"))
     }
 
     /// Append a learning to the .ai-docs/learnings.jsonl file (project-scoped, legacy)
@@ -671,11 +749,13 @@ impl SessionStorage {
 
     /// Append a learning to the session-scoped lessons directory
     /// Stores in .hive-manager/{session_id}/lessons/learnings.jsonl
+    /// Validates session_id to prevent path traversal attacks
     pub fn append_learning_session(
         &self,
         session_id: &str,
         learning: &Learning,
     ) -> Result<(), StorageError> {
+        validate_session_id(session_id)?;
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
         // Also ensure archive folder exists
@@ -732,11 +812,13 @@ impl SessionStorage {
 
     /// Delete a learning by ID from the session-scoped learnings file
     /// Uses temp-file + rename for atomicity
+    /// Validates session_id to prevent path traversal attacks
     pub fn delete_learning_session(
         &self,
         session_id: &str,
         learning_id: &str,
     ) -> Result<bool, StorageError> {
+        validate_session_id(session_id)?;
         let learnings_file = self.session_lessons_dir(session_id).join("learnings.jsonl");
 
         if !learnings_file.exists() {
@@ -789,7 +871,9 @@ impl SessionStorage {
 
     /// Read all learnings from the session-scoped lessons directory
     /// Reads from .hive-manager/{session_id}/lessons/learnings.jsonl
+    /// Validates session_id to prevent path traversal attacks
     pub fn read_learnings_session(&self, session_id: &str) -> Result<Vec<Learning>, StorageError> {
+        validate_session_id(session_id)?;
         let learnings_file = self.session_lessons_dir(session_id).join("learnings.jsonl");
 
         if !learnings_file.exists() {
@@ -831,7 +915,9 @@ impl SessionStorage {
 
     /// Read project DNA from the session-scoped lessons directory
     /// Reads from .hive-manager/{session_id}/lessons/project-dna.md
+    /// Validates session_id to prevent path traversal attacks
     pub fn read_project_dna_session(&self, session_id: &str) -> Result<String, StorageError> {
+        validate_session_id(session_id)?;
         let project_dna_file = self.session_lessons_dir(session_id).join("project-dna.md");
         if !project_dna_file.exists() {
             return Ok(String::new());
@@ -852,11 +938,13 @@ impl SessionStorage {
 
     /// Save curated project DNA to the session-scoped lessons directory
     /// Saves to .hive-manager/{session_id}/lessons/project-dna.md
+    /// Validates session_id to prevent path traversal attacks
     pub fn save_project_dna_session(
         &self,
         session_id: &str,
         content: &str,
     ) -> Result<(), StorageError> {
+        validate_session_id(session_id)?;
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
         let project_dna_file = lessons_dir.join("project-dna.md");
@@ -1171,5 +1259,84 @@ invalid json line
         assert_eq!(learnings[0].id, "valid-1");
         assert_eq!(learnings[1].id, "valid-2");
         assert_eq!(learnings[2].id, "valid-3");
+    }
+    
+    // ============ Session ID Validation Tests ============
+    
+    #[test]
+    fn test_validate_session_id_valid() {
+        // Valid session IDs
+        assert!(validate_session_id("abc123").is_ok());
+        assert!(validate_session_id("test-session-1").is_ok());
+        assert!(validate_session_id("my_session").is_ok());
+        assert!(validate_session_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890").is_ok());
+        assert!(validate_session_id("UPPERCASE").is_ok());
+        assert!(validate_session_id("MixedCase123").is_ok());
+    }
+    
+    #[test]
+    fn test_validate_session_id_path_traversal() {
+        // Path traversal attempts
+        assert!(validate_session_id("..").is_err());
+        assert!(validate_session_id("../etc/passwd").is_err());
+        assert!(validate_session_id("..\\windows\\system32").is_err());
+        assert!(validate_session_id("foo/../bar").is_err());
+        assert!(validate_session_id("valid..invalid").is_err());
+    }
+    
+    #[test]
+    fn test_validate_session_id_invalid_chars() {
+        // Invalid characters
+        assert!(validate_session_id("path/slash").is_err());
+        assert!(validate_session_id("path\\backslash").is_err());
+        assert!(validate_session_id("with space").is_err());
+        assert!(validate_session_id("special@char").is_err());
+        assert!(validate_session_id("emoji🎉").is_err());
+        assert!(validate_session_id("null\0byte").is_err());
+    }
+    
+    #[test]
+    fn test_validate_session_id_empty() {
+        assert!(validate_session_id("").is_err());
+    }
+    
+    #[test]
+    fn test_validate_session_id_too_long() {
+        let long_id = "a".repeat(200);
+        assert!(validate_session_id(&long_id).is_err());
+    }
+    
+    #[test]
+    fn test_create_session_dir_validates_id() {
+        let (storage, _temp_dir) = create_test_storage();
+        
+        // Valid session ID should work
+        assert!(storage.create_session_dir("valid-session-123").is_ok());
+        
+        // Path traversal should fail
+        assert!(storage.create_session_dir("../escape").is_err());
+        assert!(storage.create_session_dir("..\\escape").is_err());
+        assert!(storage.create_session_dir("a/b/c").is_err());
+    }
+    
+    #[test]
+    fn test_append_learning_session_validates_id() {
+        let (storage, _temp_dir) = create_test_storage();
+        
+        let learning = Learning {
+            id: "test-1".to_string(),
+            date: "2024-01-01".to_string(),
+            session: "test".to_string(),
+            task: "task".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec![],
+            insight: "insight".to_string(),
+            files_touched: vec![],
+        };
+        
+        // Path traversal should fail
+        assert!(storage.append_learning_session("../escape", &learning).is_err());
+        assert!(storage.append_learning_session("a/b", &learning).is_err());
+        assert!(storage.append_learning_session("null\0byte", &learning).is_err());
     }
 }

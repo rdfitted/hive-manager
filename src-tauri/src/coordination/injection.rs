@@ -47,6 +47,45 @@ impl InjectionManager {
         self.app_handle = Some(handle);
     }
 
+    /// Validate that the claimed agent ID matches the expected format for the session
+    /// and verify it exists in the PTY manager (is a registered agent)
+    fn validate_agent_role(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        expected_suffix: &str,
+    ) -> Result<(), InjectionError> {
+        // Build expected agent ID pattern: session_id-suffix
+        let expected_prefix = format!("{}-", session_id);
+        
+        // Verify agent ID belongs to this session
+        if !agent_id.starts_with(&expected_prefix) {
+            return Err(InjectionError::NotAuthorized(format!(
+                "Agent ID '{}' does not belong to session '{}'",
+                agent_id, session_id
+            )));
+        }
+        
+        // Verify agent ID has the expected role suffix
+        if !agent_id.ends_with(expected_suffix) && !agent_id.contains(expected_suffix) {
+            return Err(InjectionError::NotAuthorized(format!(
+                "Agent ID '{}' does not have expected role '{}'",
+                agent_id, expected_suffix
+            )));
+        }
+        
+        // Verify agent exists in PTY manager (is a registered, active agent)
+        let pty_manager = self.pty_manager.read();
+        if !pty_manager.session_exists(agent_id) {
+            return Err(InjectionError::NotAuthorized(format!(
+                "Agent '{}' is not a registered active agent",
+                agent_id
+            )));
+        }
+        
+        Ok(())
+    }
+    
     /// Queen injects a message to a worker
     pub fn queen_inject(
         &self,
@@ -55,12 +94,8 @@ impl InjectionManager {
         target_worker_id: &str,
         message: &str,
     ) -> Result<(), InjectionError> {
-        // Validate sender is Queen (ID should end with -queen)
-        if !queen_id.ends_with("-queen") {
-            return Err(InjectionError::NotAuthorized(
-                "Only Queen can inject messages to workers".to_string(),
-            ));
-        }
+        // Strong validation: verify queen_id belongs to session and is an active queen agent
+        self.validate_agent_role(session_id, queen_id, "-queen")?;
 
         // Log to coordination.log
         let coord_message = CoordinationMessage::task(
@@ -92,12 +127,8 @@ impl InjectionManager {
         worker_ids: &[String],
         branch: &str,
     ) -> Result<Vec<(String, Result<(), InjectionError>)>, InjectionError> {
-        // Validate sender is Queen (ID should end with -queen)
-        if !queen_id.ends_with("-queen") {
-            return Err(InjectionError::NotAuthorized(
-                "Only Queen can initiate branch switches".to_string(),
-            ));
-        }
+        // Strong validation: verify queen_id belongs to session and is an active queen agent
+        self.validate_agent_role(session_id, queen_id, "-queen")?;
 
         let message = format!(
             "[BRANCH SWITCH] Switching all workers to branch: {}",
@@ -131,6 +162,33 @@ impl InjectionManager {
         Ok(results)
     }
 
+    /// Sanitize a string for safe logging - prevents log injection attacks
+    /// Replaces control characters and limits length
+    fn sanitize_for_log(s: &str, max_len: usize) -> String {
+        let sanitized: String = s.chars()
+            .map(|c| {
+                if c.is_control() && c != ' ' {
+                    // Replace control characters with their escape representation
+                    match c {
+                        '\n' => "\\n".to_string(),
+                        '\r' => "\\r".to_string(),
+                        '\t' => "\\t".to_string(),
+                        '\0' => "\\0".to_string(),
+                        _ => format!("\\x{:02x}", c as u32),
+                    }
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect();
+        
+        if sanitized.len() > max_len {
+            format!("{}...[truncated]", &sanitized[..max_len])
+        } else {
+            sanitized
+        }
+    }
+    
     /// Write a message to an agent's PTY and press Enter to submit
     pub fn write_to_agent(&self, agent_id: &str, message: &str) -> Result<(), InjectionError> {
         let pty_manager = self.pty_manager.read();
@@ -138,19 +196,23 @@ impl InjectionManager {
         // Strip any existing line endings first
         let clean_message = message.trim_end_matches(&['\r', '\n'][..]);
 
+        // Sanitize user-controlled data before logging to prevent log injection
+        let safe_agent_id = Self::sanitize_for_log(agent_id, 128);
+        let safe_message = Self::sanitize_for_log(clean_message, 500);
+        
         tracing::info!("=== INJECTION START ===");
-        tracing::info!("Target agent: {}", agent_id);
-        tracing::info!("Message: {:?}", clean_message);
-        tracing::info!("Message bytes: {:?}", clean_message.as_bytes());
+        tracing::info!("Target agent: {}", safe_agent_id);
+        tracing::info!("Message length: {} chars", clean_message.len());
+        tracing::debug!("Message preview: {}", safe_message);
 
         // Write the message content with Enter appended
         // On Windows ConPTY, Enter is typically just \r, but some apps need \n
         // We'll send both \r\n to maximize compatibility
         let message_with_enter = format!("{}\r\n", clean_message);
 
-        tracing::info!(
-            "Full message with enter: {:?}",
-            message_with_enter.as_bytes()
+        tracing::debug!(
+            "Message bytes count: {}",
+            message_with_enter.as_bytes().len()
         );
 
         pty_manager
@@ -294,20 +356,15 @@ impl InjectionManager {
     }
 
     /// Worker logs a message to coordination log
-    /// Validates that the sender is a worker (ID contains "-worker-")
+    /// Validates that the sender is a registered active worker
     pub fn worker_inject(
         &self,
         session_id: &str,
         worker_id: &str,
         message: &str,
     ) -> Result<(), InjectionError> {
-        // Validate sender is a Worker (ID should contain -worker-)
-        if !worker_id.contains("-worker-") {
-            return Err(InjectionError::NotAuthorized(format!(
-                "Only Workers can use worker_inject. Got ID: {}",
-                worker_id
-            )));
-        }
+        // Strong validation: verify worker_id belongs to session and is an active worker agent
+        self.validate_agent_role(session_id, worker_id, "-worker-")?;
 
         // Log to coordination.log as a Progress message
         let coord_message =
@@ -326,20 +383,15 @@ impl InjectionManager {
     }
 
     /// Planner logs a message to coordination log
-    /// Validates that the sender is a planner (ID contains "-planner-")
+    /// Validates that the sender is a registered active planner
     pub fn planner_inject(
         &self,
         session_id: &str,
         planner_id: &str,
         message: &str,
     ) -> Result<(), InjectionError> {
-        // Validate sender is a Planner (ID should contain -planner-)
-        if !planner_id.contains("-planner-") {
-            return Err(InjectionError::NotAuthorized(format!(
-                "Only Planners can use planner_inject. Got ID: {}",
-                planner_id
-            )));
-        }
+        // Strong validation: verify planner_id belongs to session and is an active planner agent
+        self.validate_agent_role(session_id, planner_id, "-planner-")?;
 
         // Log to coordination.log as a Progress message
         let coord_message =
@@ -384,25 +436,74 @@ impl InjectionManager {
     }
 }
 
+/// Safely get a substring starting from a byte offset, handling UTF-8 boundaries
+/// Returns the substring from the given byte offset, or an empty string if invalid
+fn safe_slice_from(s: &str, byte_offset: usize) -> &str {
+    if byte_offset >= s.len() {
+        return "";
+    }
+    // Ensure we're at a valid UTF-8 char boundary
+    if s.is_char_boundary(byte_offset) {
+        &s[byte_offset..]
+    } else {
+        // Find the next valid char boundary
+        let mut offset = byte_offset;
+        while offset < s.len() && !s.is_char_boundary(offset) {
+            offset += 1;
+        }
+        if offset < s.len() {
+            &s[offset..]
+        } else {
+            ""
+        }
+    }
+}
+
+/// Safely get a substring up to a byte offset, handling UTF-8 boundaries
+/// Returns the substring up to the given byte offset, or the whole string if invalid
+fn safe_slice_to(s: &str, byte_offset: usize) -> &str {
+    if byte_offset >= s.len() {
+        return s;
+    }
+    // Ensure we're at a valid UTF-8 char boundary
+    if s.is_char_boundary(byte_offset) {
+        &s[..byte_offset]
+    } else {
+        // Find the previous valid char boundary
+        let mut offset = byte_offset;
+        while offset > 0 && !s.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        &s[..offset]
+    }
+}
+
 /// Format agent ID for display (extract role from full ID)
 fn format_agent_display(agent_id: &str) -> String {
     // IDs are like "session-id-queen" or "session-id-worker-1"
-    // Extract the role part
+    // Extract the role part using safe UTF-8 slicing
     if agent_id.ends_with("-queen") {
         "QUEEN".to_string()
     } else if agent_id.contains("-worker-") {
-        // Extract worker number
+        // Extract worker number using safe slicing
         if let Some(idx) = agent_id.rfind("-worker-") {
-            format!("WORKER-{}", &agent_id[idx + 8..])
+            let suffix = safe_slice_from(agent_id, idx + 8);
+            if suffix.is_empty() {
+                "WORKER".to_string()
+            } else {
+                format!("WORKER-{}", suffix)
+            }
         } else {
             "WORKER".to_string()
         }
     } else if agent_id.contains("-planner-") {
-        // Extract planner number
+        // Extract planner number using safe slicing
         if let Some(idx) = agent_id.rfind("-planner-") {
-            let suffix = &agent_id[idx + 9..];
-            if let Some(end_idx) = suffix.find('-') {
-                format!("PLANNER-{}", &suffix[..end_idx])
+            let suffix = safe_slice_from(agent_id, idx + 9);
+            if suffix.is_empty() {
+                "PLANNER".to_string()
+            } else if let Some(end_idx) = suffix.find('-') {
+                format!("PLANNER-{}", safe_slice_to(suffix, end_idx))
             } else {
                 format!("PLANNER-{}", suffix)
             }

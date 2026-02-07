@@ -163,6 +163,13 @@ impl PtyManager {
             .map(|(id, session)| (id.clone(), session.role.clone(), session.status.read().clone()))
             .collect()
     }
+    
+    /// Check if a session with the given ID exists and is registered
+    /// Used for authorization checks to verify agent identity
+    pub fn session_exists(&self, id: &str) -> bool {
+        let sessions = self.sessions.read();
+        sessions.contains_key(id)
+    }
 }
 
 impl Default for PtyManager {

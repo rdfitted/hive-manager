@@ -1648,6 +1648,7 @@ dependencies = [
  "fs2",
  "futures",
  "notify",
+ "once_cell",
  "parking_lot",
  "portable-pty",
  "regex",

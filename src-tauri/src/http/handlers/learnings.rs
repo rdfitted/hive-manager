@@ -12,7 +12,6 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::storage::Learning;
-use super::validate_session_id;
 
 /// Request to submit a learning
 #[derive(Debug, Deserialize)]
@@ -52,6 +51,12 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
     }
 
     Ok(first_path)
+}
+
+/// Validate session_id for path traversal attacks using centralized validation
+fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
+    crate::storage::validate_session_id(session_id)
+        .map_err(|e| ApiError::bad_request(format!("Invalid session ID: {}", e)))
 }
 
 /// Apply case-insensitive filtering on learnings by category and keywords
