@@ -11,6 +11,7 @@ use crate::coordination::{StateManager, WorkerStateInfo};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
+use super::{validate_session_id, validate_cli};
 
 /// Request to add a worker to a session
 #[derive(Debug, Clone, Deserialize)]
@@ -21,6 +22,8 @@ pub struct AddWorkerRequest {
     pub label: Option<String>,
     /// CLI to use: claude, gemini, cursor, droid, qwen, etc. Defaults to "claude"
     pub cli: Option<String>,
+    /// Model to use (optional)
+    pub model: Option<String>,
     /// Initial task/prompt for the worker
     pub initial_task: Option<String>,
     /// Parent agent ID (defaults to Queen)
@@ -43,7 +46,15 @@ pub async fn add_worker(
     Path(session_id): Path<String>,
     Json(req): Json<AddWorkerRequest>,
 ) -> Result<(StatusCode, Json<AddWorkerResponse>), ApiError> {
-    let cli = req.cli.unwrap_or_else(|| "claude".to_string());
+    validate_session_id(&session_id)?;
+
+    let session_default_cli = {
+        let controller = state.session_controller.read();
+        controller.get_session_default_cli(&session_id)
+            .unwrap_or_else(|| "claude".to_string())
+    };
+    let cli = req.cli.unwrap_or(session_default_cli);
+    validate_cli(&cli)?;
 
     // Build role
     let role_label = req.label.unwrap_or_else(|| {
@@ -65,7 +76,7 @@ pub async fn add_worker(
     // Build config
     let config = AgentConfig {
         cli: cli.clone(),
-        model: if cli == "claude" { Some("opus".to_string()) } else { None },
+        model: req.model,
         flags: vec![],
         label: Some(role_label.clone()),
         role: Some(role.clone()),
@@ -152,6 +163,8 @@ pub async fn list_workers(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
     let controller = state.session_controller.read();
 
     let session = controller

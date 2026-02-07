@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use serde::Deserialize;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use super::validate_session_id;
 
 #[derive(Deserialize)]
 pub struct OperatorInjectRequest {
@@ -26,6 +27,8 @@ pub async fn operator_inject(
     Path(id): Path<String>,
     Json(payload): Json<OperatorInjectRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&id)?;
+
     let manager = state.injection_manager.read();
     manager
         .operator_inject(
@@ -46,6 +49,8 @@ pub async fn queen_inject(
     Path(id): Path<String>,
     Json(payload): Json<QueenInjectRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&id)?;
+
     let manager = state.injection_manager.read();
     manager
         .queen_inject(

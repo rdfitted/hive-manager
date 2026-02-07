@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::storage::Learning;
+use super::validate_session_id;
 
 /// Request to submit a learning
 #[derive(Debug, Deserialize)]
@@ -51,16 +52,6 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
     }
 
     Ok(first_path)
-}
-
-/// Validate session_id for path traversal attacks
-fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
-    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
-        return Err(ApiError::bad_request(
-            "Invalid session ID: must not contain '..', '/', or '\\'",
-        ));
-    }
-    Ok(())
 }
 
 /// Apply case-insensitive filtering on learnings by category and keywords

@@ -81,6 +81,14 @@ pub struct PersistedSession {
     pub created_at: DateTime<Utc>,
     pub agents: Vec<PersistedAgentInfo>,
     pub state: String,
+    #[serde(default = "default_cli")]
+    pub default_cli: String,
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
+
+fn default_cli() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,7 +316,7 @@ impl SessionStorage {
             command: "claude".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
-            default_model: "opus".to_string(),
+            default_model: "opus-4-6".to_string(),
             env: None,
         });
 
@@ -336,7 +344,7 @@ impl SessionStorage {
             command: "codex".to_string(),
             auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
             model_flag: Some("-m".to_string()),
-            default_model: "gpt-5.2".to_string(),
+            default_model: "gpt-5.3-codex".to_string(),
             env: None,
         });
 
@@ -367,7 +375,7 @@ impl SessionStorage {
         let mut default_roles = HashMap::new();
         default_roles.insert("backend".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus".to_string(),
+            model: "opus-4-6".to_string(),
         });
         default_roles.insert("frontend".to_string(), RoleDefaults {
             cli: "gemini".to_string(),
@@ -379,7 +387,7 @@ impl SessionStorage {
         });
         default_roles.insert("simplify".to_string(), RoleDefaults {
             cli: "codex".to_string(),
-            model: "gpt-5.2".to_string(),
+            model: "gpt-5.3-codex".to_string(),
         });
 
         AppConfig {
@@ -689,6 +697,7 @@ impl SessionStorage {
 
     /// Save curated project DNA to the session-scoped lessons directory
     /// Saves to .hive-manager/{session_id}/lessons/project-dna.md
+    #[allow(dead_code)]
     pub fn save_project_dna_session(&self, session_id: &str, content: &str) -> Result<(), StorageError> {
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
@@ -749,7 +758,6 @@ pub struct RoleDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_storage() -> (SessionStorage, TempDir) {

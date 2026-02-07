@@ -116,6 +116,8 @@ pub struct Session {
     pub state: SessionState,
     pub created_at: DateTime<Utc>,
     pub agents: Vec<AgentInfo>,
+    pub default_cli: String,
+    pub default_model: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -262,7 +264,7 @@ impl SessionController {
 
             let queen_config = AgentConfig {
                 cli: cmd.to_string(),
-                model: if cmd == "claude" { Some("opus".to_string()) } else { None },
+                model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
                 role: None,
@@ -302,7 +304,7 @@ impl SessionController {
 
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
-                    model: if cmd == "claude" { Some("opus".to_string()) } else { None },
+                    model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     role: None,
@@ -326,6 +328,8 @@ impl SessionController {
             state: SessionState::Running,
             created_at: Utc::now(),
             agents,
+            default_cli: cmd.to_string(),
+            default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
         };
 
         {
@@ -345,6 +349,12 @@ impl SessionController {
     pub fn get_session(&self, id: &str) -> Option<Session> {
         let sessions = self.sessions.read();
         sessions.get(id).cloned()
+    }
+
+    /// Get the default CLI for a session
+    pub fn get_session_default_cli(&self, session_id: &str) -> Option<String> {
+        let sessions = self.sessions.read();
+        sessions.get(session_id).map(|s| s.default_cli.clone())
     }
 
     pub fn list_sessions(&self) -> Vec<Session> {
@@ -856,7 +866,7 @@ gemini -y -i "Analyze the codebase structure for: [TASK]. List relevant files by
 # Use Claude's Task tool with Explore agent
 
 # Scout 3 - Related Code (Codex if available, or another Gemini)
-codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.2 "Find code related to: [TASK]"
+codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex "Find code related to: [TASK]"
 ```
 
 ---
@@ -1291,7 +1301,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 ```bash
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "backend", "cli": "claude"}}'
+  -d '{{"role_type": "backend", "cli": "{cli}"}}'
 ```
 
 ### Task Assignment
@@ -1363,6 +1373,7 @@ Workers record learnings during task completion. Your curation responsibilities:
             hardening = hardening,
             branch_protocol = branch_protocol,
             session_id = session_id,
+            cli = cli,
             plan_section = plan_section,
             worker_list = worker_list,
             task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
@@ -1546,7 +1557,7 @@ Read `.hive-manager/{session_id}/tools/spawn-worker.md` for detailed documentati
 # Spawn a worker
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "ROLE", "cli": "CLI", "initial_task": "TASK", "parent_id": "{session_id}-planner-{index}"}}'
+  -d '{{"role_type": "ROLE", "cli": "{cli}", "initial_task": "TASK", "parent_id": "{session_id}-planner-{index}"}}'
 ```
 
 ## SEQUENTIAL SPAWNING PROTOCOL (CRITICAL)
@@ -1588,6 +1599,7 @@ Awaiting task assignment from the Queen."#,
             index = index,
             domain = config.domain,
             session_id = session_id,
+            cli = cli,
             hardening = hardening,
             worker_info = worker_info,
             worker_count = worker_count,
@@ -1663,7 +1675,7 @@ Read `.hive-manager/{session_id}/tools/spawn-planner.md` for detailed documentat
 # Spawn a planner
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
   -H "Content-Type: application/json" \
-  -d '{{"domain": "DOMAIN", "cli": "claude", "worker_count": N}}'
+  -d '{{"domain": "DOMAIN", "cli": "{cli}", "worker_count": N}}'
 ```
 
 ## Your Tools
@@ -1781,6 +1793,7 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 {task}"#,
             hardening = hardening,
             session_id = session_id,
+            cli = cli,
             planner_info = planner_info,
             planner_count = planner_count,
             task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
@@ -1814,7 +1827,7 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
     }
 
     /// Write all standard tool documentation files for a session
-    fn write_tool_files(project_path: &PathBuf, session_id: &str) -> Result<(), String> {
+    fn write_tool_files(project_path: &PathBuf, session_id: &str, default_cli: &str) -> Result<(), String> {
         // Spawn Worker tool
         let spawn_worker_tool = format!(r#"# Spawn Worker Tool
 
@@ -1833,7 +1846,7 @@ Content-Type: application/json
 ```json
 {{
   "role_type": "backend",
-  "cli": "claude",
+  "cli": "{default_cli}",
   "initial_task": "Optional task description"
 }}
 ```
@@ -1843,7 +1856,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality |
-| cli | string | No | CLI to use: claude (default), gemini, cursor, droid, qwen |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
 | label | string | No | Custom label for the worker |
 | initial_task | string | No | Initial task/prompt for the worker |
 | parent_id | string | No | Parent agent ID (defaults to Queen) |
@@ -1851,20 +1864,20 @@ Content-Type: application/json
 ## Example Usage
 
 ```bash
-# Spawn a backend worker with claude
+# Spawn a backend worker with {default_cli}
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "backend", "cli": "claude"}}'
+  -d '{{"role_type": "backend", "cli": "{default_cli}"}}'
 
 # Spawn a frontend worker with an initial task
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "frontend", "cli": "claude", "initial_task": "Implement the login form UI"}}'
+  -d '{{"role_type": "frontend", "cli": "{default_cli}", "initial_task": "Implement the login form UI"}}'
 
 # Spawn a reviewer worker
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "reviewer", "cli": "claude"}}'
+  -d '{{"role_type": "reviewer", "cli": "{default_cli}"}}'
 ```
 
 ## Response
@@ -1873,7 +1886,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 {{
   "worker_id": "{session_id}-worker-N",
   "role": "Backend",
-  "cli": "claude",
+  "cli": "{default_cli}",
   "status": "Running",
   "task_file": ".hive-manager/{session_id}/tasks/worker-N-task.md"
 }}
@@ -1885,7 +1898,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 - Each worker gets a task file you can update to assign work
 - Workers poll their task files for ACTIVE status
 - Use this to spawn workers sequentially as tasks complete
-"#, session_id = session_id);
+"#, session_id = session_id, default_cli = default_cli);
 
         Self::write_tool_file(project_path, session_id, "spawn-worker.md", &spawn_worker_tool)?;
 
@@ -1913,7 +1926,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
     {{
       "id": "{session_id}-worker-1",
       "role": "Backend",
-      "cli": "claude",
+      "cli": "{default_cli}",
       "status": "Running",
       "task_file": ".hive-manager/{session_id}/tasks/worker-1-task.md"
     }}
@@ -1921,7 +1934,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
   "count": 1
 }}
 ```
-"#, session_id = session_id);
+"#, session_id = session_id, default_cli = default_cli);
 
         Self::write_tool_file(project_path, session_id, "list-workers.md", &list_workers_tool)?;
 
@@ -2038,9 +2051,9 @@ curl -X DELETE "http://localhost:18800/api/sessions/{{session_id}}/learnings/abc
     }
 
     /// Write tool documentation files for Swarm mode (includes planner tools)
-    fn write_swarm_tool_files(project_path: &PathBuf, session_id: &str, planner_count: u8) -> Result<(), String> {
+    fn write_swarm_tool_files(project_path: &PathBuf, session_id: &str, planner_count: u8, default_cli: &str) -> Result<(), String> {
         // First write standard worker tools
-        Self::write_tool_files(project_path, session_id)?;
+        Self::write_tool_files(project_path, session_id, default_cli)?;
 
         // Spawn Planner tool
         let spawn_planner_tool = format!(r#"# Spawn Planner Tool
@@ -2060,7 +2073,7 @@ Content-Type: application/json
 ```json
 {{
   "domain": "backend",
-  "cli": "claude",
+  "cli": "{default_cli}",
   "worker_count": 2
 }}
 ```
@@ -2070,8 +2083,8 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
-| cli | string | No | CLI to use: claude (default), gemini, cursor, droid, qwen |
-| model | string | No | Model to use (e.g., "opus" for claude) |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
+| model | string | No | Model to use (e.g., "opus-4-6" for {default_cli}) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -2082,14 +2095,14 @@ Content-Type: application/json
 # Spawn a backend planner with 2 workers
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
   -H "Content-Type: application/json" \
-  -d '{{"domain": "backend", "cli": "claude", "worker_count": 2}}'
+  -d '{{"domain": "backend", "cli": "{default_cli}", "worker_count": 2}}'
 
 # Spawn a frontend planner with specific workers
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
   -H "Content-Type: application/json" \
   -d '{{
     "domain": "frontend",
-    "cli": "claude",
+    "cli": "{default_cli}",
     "workers": [
       {{"role_type": "ui", "label": "UI Developer"}},
       {{"role_type": "styling", "label": "CSS Specialist"}}
@@ -2104,7 +2117,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
   "planner_id": "{session_id}-planner-N",
   "planner_index": N,
   "domain": "backend",
-  "cli": "claude",
+  "cli": "{default_cli}",
   "status": "Running",
   "worker_count": 2,
   "prompt_file": ".hive-manager/{session_id}/prompts/planner-N-prompt.md",
@@ -2127,7 +2140,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
 - Each planner knows how to spawn its own workers sequentially
 - Wait for `[DOMAIN_COMPLETE]` signal from planner before committing and spawning next
 - Commit between each planner to create clean git history
-"#, session_id = session_id, planner_count = planner_count);
+"#, session_id = session_id, planner_count = planner_count, default_cli = default_cli);
 
         Self::write_tool_file(project_path, session_id, "spawn-planner.md", &spawn_planner_tool)?;
 
@@ -2155,7 +2168,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
     {{
       "id": "{session_id}-planner-1",
       "index": 1,
-      "cli": "claude",
+      "cli": "{default_cli}",
       "label": "Backend Planner",
       "status": "Running",
       "prompt_file": ".hive-manager/{session_id}/prompts/planner-1-prompt.md"
@@ -2164,7 +2177,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
   "count": 1
 }}
 ```
-"#, session_id = session_id);
+"#, session_id = session_id, default_cli = default_cli);
 
         Self::write_tool_file(project_path, session_id, "list-planners.md", &list_planners_tool)?;
 
@@ -2307,7 +2320,7 @@ Last updated: {timestamp}
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write tool documentation files
-            Self::write_tool_files(&project_path, &session_id)?;
+            Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli)?;
 
             tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -2378,6 +2391,8 @@ Last updated: {timestamp}
             state: SessionState::Running,
             created_at: Utc::now(),
             agents,
+            default_cli: config.queen_config.cli.clone(),
+            default_model: config.queen_config.model.clone(),
         };
 
         {
@@ -2465,6 +2480,8 @@ Last updated: {timestamp}
             state: SessionState::Planning,
             created_at: Utc::now(),
             agents,
+            default_cli: config.queen_config.cli.clone(),
+            default_model: config.queen_config.model.clone(),
         };
 
         {
@@ -2552,6 +2569,8 @@ Last updated: {timestamp}
             state: SessionState::Planning,
             created_at: Utc::now(),
             agents,
+            default_cli: config.queen_config.cli.clone(),
+            default_model: config.queen_config.model.clone(),
         };
 
         {
@@ -2761,7 +2780,7 @@ Last updated: {timestamp}
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write tool documentation files
-            Self::write_tool_files(&session.project_path, session_id)?;
+            Self::write_tool_files(&session.project_path, session_id, &config.queen_config.cli)?;
 
             tracing::info!("Launching Queen agent (after planning): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -2928,6 +2947,8 @@ Last updated: {timestamp}
             state: SessionState::Completed,  // Persisted sessions are completed
             created_at: persisted.created_at,
             agents,
+            default_cli: persisted.default_cli.clone(),
+            default_model: persisted.default_model.clone(),
         };
 
         // Add to in-memory sessions
@@ -2998,7 +3019,7 @@ Last updated: {timestamp}
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write Swarm tool documentation files (includes spawn-planner.md)
-            Self::write_swarm_tool_files(&session.project_path, session_id, planners.len() as u8)?;
+            Self::write_swarm_tool_files(&session.project_path, session_id, planners.len() as u8, &config.queen_config.cli)?;
 
             tracing::info!("Launching Queen agent (swarm - sequential planner spawning, after planning): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -3100,7 +3121,7 @@ Last updated: {timestamp}
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write Swarm tool documentation files (includes spawn-planner.md)
-            Self::write_swarm_tool_files(&project_path, &session_id, planners.len() as u8)?;
+            Self::write_swarm_tool_files(&project_path, &session_id, planners.len() as u8, &config.queen_config.cli)?;
 
             tracing::info!("Launching Queen agent (swarm - sequential planner spawning): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -3144,6 +3165,8 @@ Last updated: {timestamp}
             state: SessionState::Running,  // Queen will spawn planners sequentially
             created_at: Utc::now(),
             agents,
+            default_cli: config.queen_config.cli.clone(),
+            default_model: config.queen_config.model.clone(),
         };
 
         {
@@ -3322,6 +3345,8 @@ Last updated: {timestamp}
         // Build command
         let (cmd, mut args) = Self::build_command(&config);
 
+        let default_cli = session.default_cli.as_str();
+
         // Get project path
         let cwd = session.project_path.to_str().unwrap_or(".");
 
@@ -3340,7 +3365,7 @@ Last updated: {timestamp}
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         // Write tool files for the planner (spawn-worker.md)
-        Self::write_tool_files(&session.project_path, session_id)?;
+        Self::write_tool_files(&session.project_path, session_id, default_cli)?;
 
         tracing::info!(
             "Adding Planner {} ({}) to session {}: {} {:?}",
@@ -3473,6 +3498,8 @@ Last updated: {timestamp}
             created_at: session.created_at,
             agents,
             state: state_str,
+            default_cli: session.default_cli.clone(),
+            default_model: session.default_model.clone(),
         }
     }
 

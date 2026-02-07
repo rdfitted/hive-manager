@@ -9,6 +9,7 @@ use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
 use crate::storage::SessionTypeInfo;
+use super::{validate_session_id, validate_cli};
 
 #[derive(Serialize)]
 pub struct SessionInfo {
@@ -72,6 +73,8 @@ pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionInfo>, ApiError> {
+    validate_session_id(&id)?;
+
     let controller = state.session_controller.read();
     if let Some(session) = controller.get_session(&id) {
         return Ok(Json(SessionInfo {
@@ -111,9 +114,10 @@ pub async fn launch_hive(
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
     let controller = state.session_controller.write();
     let project_path = std::path::PathBuf::from(req.project_path);
-    
+
     let command = req.command.unwrap_or_else(|| "claude".to_string());
-    
+    validate_cli(&command)?;
+
     let session = controller.launch_hive(
         project_path,
         req.worker_count.unwrap_or(3),
@@ -136,10 +140,11 @@ pub async fn launch_swarm(
     Json(req): Json<LaunchSwarmRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
     let controller = state.session_controller.write();
-    
+
+    let default_cli = "claude".to_string();
     let default_config = AgentConfig {
-        cli: "claude".to_string(),
-        model: Some("opus".to_string()),
+        cli: default_cli.clone(),
+        model: None,
         flags: vec![],
         label: None,
         role: None,
@@ -157,7 +162,7 @@ pub async fn launch_swarm(
         smoke_test: false,
         planners: vec![],
     };
-    
+
     let session = controller.launch_swarm(config)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -175,6 +180,8 @@ pub async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_session_id(&id)?;
+
     let controller = state.session_controller.write();
     controller.stop_session(&id)
         .map_err(|e| ApiError::internal(e.to_string()))?;

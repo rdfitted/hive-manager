@@ -59,15 +59,15 @@ A single-window application that:
 | Worker 1X (Backend) | `agent` via WSL | Cursor/Opus | Backend implementation |
 | Worker 2X (Frontend) | `gemini` | Gemini 3 Pro | Frontend implementation |
 | Worker 3X (Coherence) | `opencode` | Grok Code | Cross-cutting coherence |
-| Worker 4X (Simplify) | `codex` | GPT-5.2 | Simplification pass |
+| Worker 4X (Simplify) | `codex` | GPT-5.3 | Simplification pass |
 
 ### Support Agents
 | Agent | CLI | Model | Role |
 |-------|-----|-------|------|
 | Reviewer | `opencode` | BigPickle | Code review |
-| Tester | `codex` | GPT-5.2 | Test execution |
+| Tester | `codex` | GPT-5.3 | Test execution |
 | Integration Reviewer | `opencode` | BigPickle | Cross-domain review |
-| Integration Tester | `codex` | GPT-5.2 | Integration tests |
+| Integration Tester | `codex` | GPT-5.3 | Integration tests |
 
 ### CLI Reference
 | CLI | Auto-Approve Flag | Model Flag | Platform |
@@ -76,7 +76,7 @@ A single-window application that:
 | `agent` | `--force` | (global) | WSL Ubuntu |
 | `gemini` | `-y` | `-m gemini-3-pro-preview` | Windows |
 | `opencode` | env `OPENCODE_YOLO=true` | `-m opencode/MODEL` | Windows |
-| `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m gpt-5.2` | Windows |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m gpt-5.3-codex` | Windows |
 
 ---
 
