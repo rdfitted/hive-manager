@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
+use crate::session::{FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus};
 use crate::storage::SessionTypeInfo;
 use super::{validate_session_id, validate_cli};
 
@@ -44,10 +45,49 @@ pub struct LaunchSwarmRequest {
     pub project_path: String,
 }
 
+#[derive(Deserialize)]
+pub struct LaunchFusionVariantRequest {
+    pub name: String,
+    pub cli: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LaunchFusionRequest {
+    pub project_path: String,
+    pub task_description: String,
+    pub variants: Vec<LaunchFusionVariantRequest>,
+    pub judge_cli: Option<String>,
+    pub judge_model: Option<String>,
+    pub with_planning: Option<bool>,
+    pub default_cli: Option<String>,
+    pub default_model: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SelectFusionWinnerRequest {
+    pub variant: String,
+}
+
 #[derive(Serialize)]
 pub struct LaunchResponse {
     pub session_id: String,
     pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct FusionStatusResponse {
+    pub session_id: String,
+    pub state: String,
+    pub variants: Vec<FusionVariantStatus>,
+}
+
+#[derive(Serialize)]
+pub struct FusionEvaluationResponse {
+    pub session_id: String,
+    pub state: String,
+    pub report_path: String,
+    pub report: Option<String>,
 }
 
 /// GET /api/sessions - List all sessions
@@ -173,6 +213,148 @@ pub async fn launch_swarm(
             message: "Swarm session launched".to_string(),
         }),
     ))
+}
+
+/// POST /api/sessions/fusion - Launch a new Fusion session
+pub async fn launch_fusion(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LaunchFusionRequest>,
+) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
+    if req.variants.is_empty() {
+        return Err(ApiError::bad_request("Fusion launch requires at least one variant"));
+    }
+    if req.task_description.trim().is_empty() {
+        return Err(ApiError::bad_request("task_description cannot be empty"));
+    }
+
+    let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
+    validate_cli(&default_cli)?;
+
+    let judge_cli = req.judge_cli.unwrap_or_else(|| default_cli.clone());
+    validate_cli(&judge_cli)?;
+
+    let variants = req
+        .variants
+        .into_iter()
+        .map(|v| {
+            let cli = v.cli.unwrap_or_else(|| default_cli.clone());
+            validate_cli(&cli)?;
+            Ok(FusionVariantConfig {
+                name: v.name,
+                cli,
+                model: v.model,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    let judge_config = AgentConfig {
+        cli: judge_cli,
+        model: req.judge_model.or(req.default_model.clone()),
+        flags: vec![],
+        label: Some("Fusion Judge".to_string()),
+        role: None,
+        initial_prompt: None,
+    };
+
+    let config = FusionLaunchConfig {
+        project_path: req.project_path,
+        variants,
+        task_description: req.task_description,
+        judge_config,
+        with_planning: req.with_planning.unwrap_or(false),
+        default_cli,
+        default_model: req.default_model,
+    };
+
+    let controller = state.session_controller.write();
+    let session = controller
+        .launch_fusion(config)
+        .map_err(ApiError::internal)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(LaunchResponse {
+            session_id: session.id,
+            message: "Fusion session launched".to_string(),
+        }),
+    ))
+}
+
+/// POST /api/sessions/{id}/fusion/select-winner - Select and squash-merge winner
+pub async fn select_fusion_winner(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SelectFusionWinnerRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_session_id(&id)?;
+    if req.variant.trim().is_empty() {
+        return Err(ApiError::bad_request("variant cannot be empty"));
+    }
+
+    let controller = state.session_controller.write();
+    controller
+        .select_fusion_winner(&id, &req.variant)
+        .map_err(ApiError::internal)?;
+
+    Ok(Json(serde_json::json!({
+        "session_id": id,
+        "message": format!("Selected '{}' as fusion winner", req.variant)
+    })))
+}
+
+/// GET /api/sessions/{id}/fusion/status - Get fusion variant statuses
+pub async fn get_fusion_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<FusionStatusResponse>, ApiError> {
+    validate_session_id(&id)?;
+
+    let controller = state.session_controller.read();
+    if controller.get_session(&id).is_none() {
+        return Err(ApiError::not_found(format!("Session {} not found", id)));
+    }
+
+    let variants = controller
+        .get_fusion_variant_statuses(&id)
+        .map_err(ApiError::internal)?;
+    let state_str = controller
+        .get_session(&id)
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    Ok(Json(FusionStatusResponse {
+        session_id: id,
+        state: state_str,
+        variants,
+    }))
+}
+
+/// GET /api/sessions/{id}/fusion/evaluation - Get judge report
+pub async fn get_fusion_evaluation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<FusionEvaluationResponse>, ApiError> {
+    validate_session_id(&id)?;
+
+    let controller = state.session_controller.read();
+    if controller.get_session(&id).is_none() {
+        return Err(ApiError::not_found(format!("Session {} not found", id)));
+    }
+
+    let (report_path, report) = controller
+        .get_fusion_evaluation(&id)
+        .map_err(ApiError::internal)?;
+    let state_str = controller
+        .get_session(&id)
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    Ok(Json(FusionEvaluationResponse {
+        session_id: id,
+        state: state_str,
+        report_path,
+        report,
+    }))
 }
 
 /// POST /api/sessions/{id}/stop - Stop a session
