@@ -332,9 +332,14 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         // Build the evaluation context message
+        // Sanitize evaluation_prompt: escape newlines to prevent command injection in PTY
+        let sanitized_prompt = evaluation_prompt
+            .replace('\r', "\\r")
+            .replace('\n', "\\n");
+        
         let mut eval_context = String::from("[FUSION EVALUATION CONTEXT]\n\n");
         eval_context.push_str("You have been assigned as the JUDGE for this Fusion mode session.\n\n");
-        eval_context.push_str(&format!("Evaluation Prompt: {}\n\n", evaluation_prompt));
+        eval_context.push_str(&format!("Evaluation Prompt: {}\n\n", sanitized_prompt));
         eval_context.push_str("Worktrees to evaluate:\n");
         for (i, path) in variant_paths.iter().enumerate() {
             eval_context.push_str(&format!("{}. {}\n", i + 1, path));

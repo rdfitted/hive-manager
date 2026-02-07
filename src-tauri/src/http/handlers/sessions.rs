@@ -10,7 +10,7 @@ use crate::http::state::AppState;
 use crate::pty::AgentConfig;
 use crate::session::{FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus};
 use crate::storage::SessionTypeInfo;
-use super::{validate_session_id, validate_cli};
+use super::{validate_session_id, validate_cli, validate_project_path};
 
 #[derive(Serialize)]
 pub struct SessionInfo {
@@ -226,6 +226,9 @@ pub async fn launch_fusion(
     if req.task_description.trim().is_empty() {
         return Err(ApiError::bad_request("task_description cannot be empty"));
     }
+
+    // Validate project path for security (prevent path traversal)
+    validate_project_path(&req.project_path)?;
 
     let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;

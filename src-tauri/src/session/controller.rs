@@ -3483,6 +3483,12 @@ Last updated: {timestamp}
 
         Self::run_git_in_dir(&session.project_path, &["merge", "--squash", &winner.branch])?;
 
+        // Commit the squash merge (--squash only stages changes, doesn't commit)
+        Self::run_git_in_dir(
+            &session.project_path,
+            &["commit", "-m", &format!("Merge fusion winner: {}", winner.variant_name)],
+        )?;
+
         let mut cleanup_errors = Vec::new();
         for variant in &metadata.variants {
             if let Err(err) = Self::run_git_in_dir(
