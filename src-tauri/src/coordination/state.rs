@@ -57,6 +57,25 @@ pub enum AssignmentStatus {
     Failed,
 }
 
+/// Status of a fusion variant
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum FusionVariantStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed(String),
+}
+
+/// State information for a fusion variant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FusionVariantState {
+    pub variant_name: String,
+    pub worktree_path: String,
+    pub branch: String,
+    pub status: FusionVariantStatus,
+    pub worker_id: String,
+}
+
 /// Manages state files for a session
 pub struct StateManager {
     session_path: PathBuf,
@@ -263,5 +282,50 @@ impl StateManager {
     pub fn get_worker_assignment(&self, worker_id: &str) -> Result<Option<TaskAssignment>, StateError> {
         let assignments = self.get_assignments()?;
         Ok(assignments.get(worker_id).cloned())
+    }
+
+    /// Get path to fusion variants state file
+    fn fusion_state_path(&self) -> PathBuf {
+        self.state_dir().join("fusion-variants.json")
+    }
+
+    /// Write fusion variant states to state file
+    pub fn write_fusion_state(
+        &self,
+        variants: &[FusionVariantState],
+    ) -> Result<(), StateError> {
+        self.ensure_state_dir()?;
+
+        let fusion_state_path = self.fusion_state_path();
+        let json = serde_json::to_string_pretty(variants)?;
+        fs::write(fusion_state_path, json)?;
+
+        Ok(())
+    }
+
+    /// Read fusion variant states from state file
+    pub fn read_fusion_state(&self) -> Result<Vec<FusionVariantState>, StateError> {
+        let fusion_state_path = self.fusion_state_path();
+        if !fusion_state_path.exists() {
+            return Ok(vec![]);
+        }
+
+        let json = fs::read_to_string(&fusion_state_path)?;
+        let variants: Vec<FusionVariantState> = serde_json::from_str(&json)?;
+
+        Ok(variants)
+    }
+
+    /// Check if all fusion variants have completed
+    pub fn all_variants_completed(&self) -> Result<bool, StateError> {
+        let variants = self.read_fusion_state()?;
+
+        if variants.is_empty() {
+            return Ok(false);
+        }
+
+        Ok(variants.iter().all(|v| {
+            matches!(v.status, FusionVariantStatus::Completed | FusionVariantStatus::Failed(_))
+        }))
     }
 }
