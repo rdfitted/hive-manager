@@ -56,6 +56,12 @@ pub enum SessionState {
     WaitingForWorker(u8),    // Which worker we're waiting on (sequential mode)
     SpawningPlanner(u8),     // Which planner is being spawned (Swarm sequential mode)
     WaitingForPlanner(u8),   // Which planner we're waiting on (Swarm sequential mode)
+    SpawningFusionVariant(u8),    // Which fusion variant is being spawned
+    WaitingForFusionVariants,     // All variants running, waiting for completion
+    SpawningJudge,                // Launching judge after all variants complete
+    Judging,                      // Judge evaluating implementations
+    AwaitingVerdictSelection,     // User choosing winner
+    MergingWinner,                // Merging winning variant
     Running,
     Paused,
     Completed,
@@ -2890,7 +2896,9 @@ Last updated: {timestamp}
         // Convert persisted agents to active agents
         let agents: Vec<AgentInfo> = persisted.agents.iter().filter_map(|pa| {
             // Parse the role string (e.g., "Queen", "Planner(0)", "Worker(1)")
-            let role = if pa.role == "Queen" {
+            let role = if pa.role == "MasterPlanner" {
+                AgentRole::MasterPlanner
+            } else if pa.role == "Queen" {
                 AgentRole::Queen
             } else if pa.role.starts_with("Planner(") {
                 let index_str = pa.role.trim_start_matches("Planner(").trim_end_matches(")");
@@ -2911,6 +2919,9 @@ Last updated: {timestamp}
             } else if pa.role.starts_with("Fusion(") {
                 let variant = pa.role.trim_start_matches("Fusion(").trim_end_matches(")").to_string();
                 AgentRole::Fusion { variant }
+            } else if pa.role.starts_with("Judge(") {
+                let parsed_session_id = pa.role.trim_start_matches("Judge(").trim_end_matches(")").to_string();
+                AgentRole::Judge { session_id: parsed_session_id }
             } else {
                 return None;  // Skip unparseable roles
             };
@@ -3460,6 +3471,7 @@ Last updated: {timestamp}
                 AgentRole::Planner { index } => format!("Planner({})", index),
                 AgentRole::Worker { index, parent } => format!("Worker({},{})", index, parent.as_deref().unwrap_or("None")),
                 AgentRole::Fusion { variant } => format!("Fusion({})", variant),
+                AgentRole::Judge { session_id } => format!("Judge({})", session_id),
             };
 
             PersistedAgentInfo {
@@ -3485,6 +3497,12 @@ Last updated: {timestamp}
             SessionState::WaitingForWorker(_) => "WaitingForWorker",
             SessionState::SpawningPlanner(_) => "SpawningPlanner",
             SessionState::WaitingForPlanner(_) => "WaitingForPlanner",
+            SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant",
+            SessionState::WaitingForFusionVariants => "WaitingForFusionVariants",
+            SessionState::SpawningJudge => "SpawningJudge",
+            SessionState::Judging => "Judging",
+            SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection",
+            SessionState::MergingWinner => "MergingWinner",
             SessionState::Running => "Running",
             SessionState::Paused => "Paused",
             SessionState::Completed => "Completed",
@@ -3525,6 +3543,7 @@ Last updated: {timestamp}
                     AgentRole::Planner { index } => format!("Planner-{}", index),
                     AgentRole::Worker { index, .. } => format!("Worker-{}", index),
                     AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
+                    AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
                 };
 
                 let children: Vec<String> = session.agents.iter()
@@ -3610,6 +3629,7 @@ Last updated: {timestamp}
                         AgentRole::Planner { index } => format!("Planner-{}", index),
                         AgentRole::Worker { index, .. } => format!("Worker-{}", index),
                         AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
+                        AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
                     };
 
                     let children: Vec<String> = session.agents.iter()
@@ -3668,6 +3688,12 @@ mod tests {
         let _starting = SessionState::Starting;
         let _spawning = SessionState::SpawningWorker(1);
         let _waiting = SessionState::WaitingForWorker(1);
+        let _spawning_fusion = SessionState::SpawningFusionVariant(1);
+        let _waiting_fusion = SessionState::WaitingForFusionVariants;
+        let _spawning_judge = SessionState::SpawningJudge;
+        let _judging = SessionState::Judging;
+        let _awaiting_verdict = SessionState::AwaitingVerdictSelection;
+        let _merging_winner = SessionState::MergingWinner;
         let _running = SessionState::Running;
         let _paused = SessionState::Paused;
         let _completed = SessionState::Completed;

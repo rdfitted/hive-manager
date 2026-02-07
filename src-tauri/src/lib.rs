@@ -21,6 +21,7 @@ use commands::{
     get_workers_state, assign_task, get_session_storage_path, list_stored_sessions, get_current_directory,
     get_app_config, update_app_config, get_session_plan,
     list_branches, get_current_branch, switch_branch, git_pull, git_push, git_fetch,
+    git_worktree_add, git_worktree_list, git_worktree_remove, git_worktree_prune,
     PtyManagerState, SessionControllerState, CoordinationState, StorageState,
 };
 use pty::PtyManager;
@@ -182,6 +183,10 @@ pub fn run() {
             git_pull,
             git_push,
             git_fetch,
+            git_worktree_add,
+            git_worktree_list,
+            git_worktree_remove,
+            git_worktree_prune,
             // Planning phase commands
             continue_after_planning,
             mark_plan_ready,
