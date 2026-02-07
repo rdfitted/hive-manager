@@ -99,7 +99,10 @@ impl InjectionManager {
             ));
         }
 
-        let message = format!("[BRANCH SWITCH] Switching all workers to branch: {}", branch);
+        let message = format!(
+            "[BRANCH SWITCH] Switching all workers to branch: {}",
+            branch
+        );
         self.log_system_message(session_id, "ALL", &message)?;
 
         // Ctrl+C first to interrupt any running command
@@ -109,7 +112,11 @@ impl InjectionManager {
         for worker_id in worker_ids {
             let result = self.write_to_agent(worker_id, &git_command);
 
-            let status = if result.is_ok() { "initiated" } else { "failed" };
+            let status = if result.is_ok() {
+                "initiated"
+            } else {
+                "failed"
+            };
             let log_msg = format!(
                 "[BRANCH SWITCH] Worker {} switch to '{}': {}",
                 format_agent_display(worker_id),
@@ -141,7 +148,10 @@ impl InjectionManager {
         // We'll send both \r\n to maximize compatibility
         let message_with_enter = format!("{}\r\n", clean_message);
 
-        tracing::info!("Full message with enter: {:?}", message_with_enter.as_bytes());
+        tracing::info!(
+            "Full message with enter: {:?}",
+            message_with_enter.as_bytes()
+        );
 
         pty_manager
             .write(agent_id, message_with_enter.as_bytes())
@@ -269,12 +279,77 @@ impl InjectionManager {
         from_agent: &str,
         message: &str,
     ) -> Result<(), InjectionError> {
-        let coord_message = CoordinationMessage::progress(&format_agent_display(from_agent), message);
+        let coord_message =
+            CoordinationMessage::progress(&format_agent_display(from_agent), message);
 
         self.storage
             .append_coordination_log(session_id, &coord_message)
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("coordination-message", &coord_message);
+        }
+
+        Ok(())
+    }
+
+    /// Worker logs a message to coordination log
+    /// Validates that the sender is a worker (ID contains "-worker-")
+    pub fn worker_inject(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        message: &str,
+    ) -> Result<(), InjectionError> {
+        // Validate sender is a Worker (ID should contain -worker-)
+        if !worker_id.contains("-worker-") {
+            return Err(InjectionError::NotAuthorized(format!(
+                "Only Workers can use worker_inject. Got ID: {}",
+                worker_id
+            )));
+        }
+
+        // Log to coordination.log as a Progress message
+        let coord_message =
+            CoordinationMessage::progress(&format_agent_display(worker_id), message);
+
+        self.storage
+            .append_coordination_log(session_id, &coord_message)
+            .map_err(|e| InjectionError::StorageError(e.to_string()))?;
+
+        // Emit event for UI
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("coordination-message", &coord_message);
+        }
+
+        Ok(())
+    }
+
+    /// Planner logs a message to coordination log
+    /// Validates that the sender is a planner (ID contains "-planner-")
+    pub fn planner_inject(
+        &self,
+        session_id: &str,
+        planner_id: &str,
+        message: &str,
+    ) -> Result<(), InjectionError> {
+        // Validate sender is a Planner (ID should contain -planner-)
+        if !planner_id.contains("-planner-") {
+            return Err(InjectionError::NotAuthorized(format!(
+                "Only Planners can use planner_inject. Got ID: {}",
+                planner_id
+            )));
+        }
+
+        // Log to coordination.log as a Progress message
+        let coord_message =
+            CoordinationMessage::progress(&format_agent_display(planner_id), message);
+
+        self.storage
+            .append_coordination_log(session_id, &coord_message)
+            .map_err(|e| InjectionError::StorageError(e.to_string()))?;
+
+        // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("coordination-message", &coord_message);
         }
@@ -349,6 +424,59 @@ mod tests {
         assert_eq!(format_agent_display("abc123-worker-1"), "WORKER-1");
         assert_eq!(format_agent_display("abc123-worker-12"), "WORKER-12");
         assert_eq!(format_agent_display("abc123-planner-1"), "PLANNER-1");
-        assert_eq!(format_agent_display("abc123-planner-1-worker-2"), "WORKER-2");
+        assert_eq!(
+            format_agent_display("abc123-planner-1-worker-2"),
+            "WORKER-2"
+        );
+    }
+
+    #[test]
+    fn test_worker_inject_validates_worker_id() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap();
+        let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+        let manager = InjectionManager::new(pty_manager, storage);
+
+        // Should fail for non-worker IDs
+        let result = manager.worker_inject("test-session", "abc123-queen", "test message");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            InjectionError::NotAuthorized(_)
+        ));
+
+        let result = manager.worker_inject("test-session", "abc123-planner-1", "test message");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            InjectionError::NotAuthorized(_)
+        ));
+    }
+
+    #[test]
+    fn test_planner_inject_validates_planner_id() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap();
+        let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+        let manager = InjectionManager::new(pty_manager, storage);
+
+        // Should fail for non-planner IDs
+        let result = manager.planner_inject("test-session", "abc123-queen", "test message");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            InjectionError::NotAuthorized(_)
+        ));
+
+        let result = manager.planner_inject("test-session", "abc123-worker-1", "test message");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            InjectionError::NotAuthorized(_)
+        ));
     }
 }
