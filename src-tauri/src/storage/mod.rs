@@ -4,10 +4,64 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::coordination::CoordinationMessage;
+/// Pre-compiled regex for parsing coordination log lines (new format with message type)
+static COORDINATION_LOG_REGEX_NEW: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\[([^\]]+)\] (TASK|PROGRESS|COMPLETION|ERROR|SYSTEM) ([^ ]+) → ([^:]+): (.*)$")
+        .expect("Invalid coordination log regex (new format)")
+});
+
+/// Pre-compiled regex for parsing coordination log lines (legacy format without message type)
+static COORDINATION_LOG_REGEX_LEGACY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\[([^\]]+)\] ([^ ]+) → ([^:]+): (.*)$")
+        .expect("Invalid coordination log regex (legacy format)")
+});
+
+/// Regex for validating session IDs - only alphanumeric, dash, and underscore allowed
+static SESSION_ID_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-zA-Z0-9_-]+$").expect("Invalid session ID validation regex")
+});
+
+/// Validate a session ID to prevent path traversal attacks.
+/// Session IDs must contain only alphanumeric characters, dashes, and underscores.
+/// Returns an error if the session ID is invalid.
+pub fn validate_session_id(session_id: &str) -> Result<(), StorageError> {
+    // Check for empty session ID
+    if session_id.is_empty() {
+        return Err(StorageError::InvalidPath("Session ID cannot be empty".to_string()));
+    }
+    
+    // Check for null bytes
+    if session_id.contains('\0') {
+        return Err(StorageError::InvalidPath("Session ID cannot contain null bytes".to_string()));
+    }
+    
+    // Check for path traversal patterns
+    if session_id.contains("..") {
+        return Err(StorageError::InvalidPath("Session ID cannot contain '..'".to_string()));
+    }
+    
+    // Validate against allowlist pattern (alphanumeric, dash, underscore only)
+    if !SESSION_ID_REGEX.is_match(session_id) {
+        return Err(StorageError::InvalidPath(
+            "Session ID must contain only alphanumeric characters, dashes, and underscores".to_string()
+        ));
+    }
+    
+    // Check reasonable length (UUID is 36 chars, allow some buffer)
+    if session_id.len() > 128 {
+        return Err(StorageError::InvalidPath("Session ID is too long".to_string()));
+    }
+    
+    Ok(())
+}
+
+use crate::coordination::{CoordinationMessage, MessageType};
 
 /// Generate a deterministic ID for legacy learnings that lack one.
 /// Uses UUID v5 (SHA-1 namespace hash) from concatenated fields so the same
@@ -81,14 +135,6 @@ pub struct PersistedSession {
     pub created_at: DateTime<Utc>,
     pub agents: Vec<PersistedAgentInfo>,
     pub state: String,
-    #[serde(default = "default_cli")]
-    pub default_cli: String,
-    #[serde(default)]
-    pub default_model: Option<String>,
-}
-
-fn default_cli() -> String {
-    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,12 +224,27 @@ impl SessionStorage {
     }
 
     /// Get path to a specific session directory
+    /// Validates session_id to prevent path traversal attacks
     pub fn session_dir(&self, session_id: &str) -> PathBuf {
+        // Validate session_id - log warning if invalid but don't panic
+        // (callers should validate before calling this)
+        if let Err(e) = validate_session_id(session_id) {
+            tracing::warn!("Invalid session_id passed to session_dir: {}", e);
+        }
         self.sessions_dir().join(session_id)
+    }
+    
+    /// Get path to a specific session directory with validation
+    /// Returns an error if session_id is invalid
+    pub fn session_dir_validated(&self, session_id: &str) -> Result<PathBuf, StorageError> {
+        validate_session_id(session_id)?;
+        Ok(self.sessions_dir().join(session_id))
     }
 
     /// Create a new session directory structure
+    /// Validates session_id to prevent path traversal attacks
     pub fn create_session_dir(&self, session_id: &str) -> Result<PathBuf, StorageError> {
+        validate_session_id(session_id)?;
         let session_dir = self.session_dir(session_id);
 
         // Create all subdirectories
@@ -195,13 +256,22 @@ impl SessionStorage {
         fs::create_dir_all(session_dir.join("lessons"))?;
         fs::create_dir_all(session_dir.join("lessons").join("archive"))?;
         // Initialize empty state files
-        fs::write(session_dir.join("state").join("workers.md"), "# Available Workers\n\nNo workers yet.\n")?;
+        fs::write(
+            session_dir.join("state").join("workers.md"),
+            "# Available Workers\n\nNo workers yet.\n",
+        )?;
         fs::write(session_dir.join("state").join("hierarchy.json"), "[]")?;
         fs::write(session_dir.join("state").join("assignments.json"), "{}")?;
 
         // Initialize coordination files
-        fs::write(session_dir.join("coordination").join("coordination.log"), "")?;
-        fs::write(session_dir.join("coordination").join("queen-inbox.md"), "# Queen Inbox\n\nNo messages yet.\n")?;
+        fs::write(
+            session_dir.join("coordination").join("coordination.log"),
+            "",
+        )?;
+        fs::write(
+            session_dir.join("coordination").join("queen-inbox.md"),
+            "# Queen Inbox\n\nNo messages yet.\n",
+        )?;
 
         Ok(session_dir)
     }
@@ -222,7 +292,9 @@ impl SessionStorage {
     }
 
     /// Load session metadata from disk
+    /// Validates session_id to prevent path traversal attacks
     pub fn load_session(&self, session_id: &str) -> Result<PersistedSession, StorageError> {
+        validate_session_id(session_id)?;
         let session_file = self.session_dir(session_id).join("session.json");
         if !session_file.exists() {
             return Err(StorageError::SessionNotFound(session_id.to_string()));
@@ -249,9 +321,15 @@ impl SessionStorage {
                 let session_id = entry.file_name().to_string_lossy().to_string();
                 if let Ok(session) = self.load_session(&session_id) {
                     let session_type = match &session.session_type {
-                        SessionTypeInfo::Hive { worker_count } => format!("Hive ({})", worker_count),
-                        SessionTypeInfo::Swarm { planner_count } => format!("Swarm ({})", planner_count),
-                        SessionTypeInfo::Fusion { variants } => format!("Fusion ({})", variants.len()),
+                        SessionTypeInfo::Hive { worker_count } => {
+                            format!("Hive ({})", worker_count)
+                        }
+                        SessionTypeInfo::Swarm { planner_count } => {
+                            format!("Swarm ({})", planner_count)
+                        }
+                        SessionTypeInfo::Fusion { variants } => {
+                            format!("Fusion ({})", variants.len())
+                        }
                     };
 
                     summaries.push(SessionSummary {
@@ -312,83 +390,116 @@ impl SessionStorage {
     fn default_config() -> AppConfig {
         let mut clis = HashMap::new();
 
-        clis.insert("claude".to_string(), CliConfig {
-            command: "claude".to_string(),
-            auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
-            model_flag: Some("--model".to_string()),
-            default_model: "opus-4-6".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "claude".to_string(),
+            CliConfig {
+                command: "claude".to_string(),
+                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
+                model_flag: Some("--model".to_string()),
+                default_model: "opus-4-6".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("gemini".to_string(), CliConfig {
-            command: "gemini".to_string(),
-            auto_approve_flag: Some("-y".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "gemini-2.5-pro".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "gemini".to_string(),
+            CliConfig {
+                command: "gemini".to_string(),
+                auto_approve_flag: Some("-y".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "gemini-2.5-pro".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("opencode".to_string(), CliConfig {
-            command: "opencode".to_string(),
-            auto_approve_flag: None,
-            model_flag: Some("-m".to_string()),
-            default_model: "opencode/big-pickle".to_string(),
-            env: Some({
-                let mut env = HashMap::new();
-                env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
-                env
-            }),
-        });
+        clis.insert(
+            "opencode".to_string(),
+            CliConfig {
+                command: "opencode".to_string(),
+                auto_approve_flag: None,
+                model_flag: Some("-m".to_string()),
+                default_model: "opencode/big-pickle".to_string(),
+                env: Some({
+                    let mut env = HashMap::new();
+                    env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
+                    env
+                }),
+            },
+        );
 
-        clis.insert("codex".to_string(), CliConfig {
-            command: "codex".to_string(),
-            auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "gpt-5.3-codex".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "codex".to_string(),
+            CliConfig {
+                command: "codex".to_string(),
+                auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "gpt-5.3-codex".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("cursor".to_string(), CliConfig {
-            command: "wsl".to_string(),
-            auto_approve_flag: Some("--force".to_string()),
-            model_flag: None,  // Cursor uses global model setting
-            default_model: "composer-1".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "cursor".to_string(),
+            CliConfig {
+                command: "wsl".to_string(),
+                auto_approve_flag: Some("--force".to_string()),
+                model_flag: None, // Cursor uses global model setting
+                default_model: "composer-1".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("droid".to_string(), CliConfig {
-            command: "droid".to_string(),
-            auto_approve_flag: None,  // Interactive mode - no auto-approve flag
-            model_flag: None,  // Model selected via /model command in TUI
-            default_model: "glm-4.7".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "droid".to_string(),
+            CliConfig {
+                command: "droid".to_string(),
+                auto_approve_flag: None, // Interactive mode - no auto-approve flag
+                model_flag: None,        // Model selected via /model command in TUI
+                default_model: "glm-4.7".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("qwen".to_string(), CliConfig {
-            command: "qwen".to_string(),
-            auto_approve_flag: Some("-y".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "qwen3-coder".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "qwen".to_string(),
+            CliConfig {
+                command: "qwen".to_string(),
+                auto_approve_flag: Some("-y".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "qwen3-coder".to_string(),
+                env: None,
+            },
+        );
 
         let mut default_roles = HashMap::new();
-        default_roles.insert("backend".to_string(), RoleDefaults {
-            cli: "claude".to_string(),
-            model: "opus-4-6".to_string(),
-        });
-        default_roles.insert("frontend".to_string(), RoleDefaults {
-            cli: "gemini".to_string(),
-            model: "gemini-2.5-pro".to_string(),
-        });
-        default_roles.insert("coherence".to_string(), RoleDefaults {
-            cli: "droid".to_string(),
-            model: "glm-4.7".to_string(),
-        });
-        default_roles.insert("simplify".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.3-codex".to_string(),
-        });
+        default_roles.insert(
+            "backend".to_string(),
+            RoleDefaults {
+                cli: "claude".to_string(),
+                model: "opus-4-6".to_string(),
+            },
+        );
+        default_roles.insert(
+            "frontend".to_string(),
+            RoleDefaults {
+                cli: "gemini".to_string(),
+                model: "gemini-2.5-pro".to_string(),
+            },
+        );
+        default_roles.insert(
+            "coherence".to_string(),
+            RoleDefaults {
+                cli: "droid".to_string(),
+                model: "glm-4.7".to_string(),
+            },
+        );
+        default_roles.insert(
+            "simplify".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+            },
+        );
 
         AppConfig {
             clis,
@@ -400,22 +511,90 @@ impl SessionStorage {
         }
     }
 
+    /// Maximum content length for coordination log entries (prevents log bloat)
+    const MAX_CONTENT_LENGTH: usize = 2000;
+
+    /// Sanitize content for coordination log: strip newlines and limit length
+    fn sanitize_content(content: &str) -> String {
+        // Replace newlines with spaces to prevent log injection
+        let sanitized = content
+            .replace('\n', " ")
+            .replace('\r', " ")
+            .replace('\t', " ");
+
+        // Collapse multiple spaces into single space
+        let mut result = String::with_capacity(sanitized.len());
+        let mut last_was_space = false;
+        for c in sanitized.chars() {
+            if c == ' ' {
+                if !last_was_space {
+                    result.push(c);
+                }
+                last_was_space = true;
+            } else {
+                result.push(c);
+                last_was_space = false;
+            }
+        }
+
+        // Trim and limit length
+        let trimmed = result.trim();
+        if trimmed.len() > Self::MAX_CONTENT_LENGTH {
+            format!("{}...", &trimmed[..Self::MAX_CONTENT_LENGTH - 3])
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    /// Convert MessageType to string for log format
+    fn message_type_to_str(message_type: &MessageType) -> &'static str {
+        match message_type {
+            MessageType::Task => "TASK",
+            MessageType::Progress => "PROGRESS",
+            MessageType::Completion => "COMPLETION",
+            MessageType::Error => "ERROR",
+            MessageType::System => "SYSTEM",
+        }
+    }
+
+    /// Parse MessageType from string
+    fn str_to_message_type(s: &str) -> MessageType {
+        match s.to_uppercase().as_str() {
+            "TASK" => MessageType::Task,
+            "PROGRESS" => MessageType::Progress,
+            "COMPLETION" => MessageType::Completion,
+            "ERROR" => MessageType::Error,
+            "SYSTEM" => MessageType::System,
+            _ => MessageType::Task, // Default fallback for legacy logs
+        }
+    }
+
     /// Append a message to the coordination log
+    /// Uses file locking for concurrent write safety
+    /// Validates session_id to prevent path traversal attacks
     pub fn append_coordination_log(
         &self,
         session_id: &str,
         message: &CoordinationMessage,
     ) -> Result<(), StorageError> {
-        let log_path = self.session_dir(session_id)
+        validate_session_id(session_id)?;
+        let log_path = self
+            .session_dir(session_id)
             .join("coordination")
             .join("coordination.log");
 
+        // Sanitize content to prevent log injection
+        let sanitized_content = Self::sanitize_content(&message.content);
+        let message_type_str = Self::message_type_to_str(&message.message_type);
+
+        // Format: [TIMESTAMP] TYPE FROM → TO: content
         let line = format!(
-            "[{}] {} → {}: {}\n",
+            "[{}] {} {} → {}: {}\n",
             message.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
+            message_type_str,
             message.from,
             message.to,
-            message.content
+            sanitized_content
         );
 
         use std::fs::OpenOptions;
@@ -424,20 +603,36 @@ impl SessionStorage {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(log_path)?;
+            .open(&log_path)?;
 
-        file.write_all(line.as_bytes())?;
+        // Acquire exclusive lock for write safety (blocks until lock acquired)
+        file.lock_exclusive().map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to acquire file lock: {}", e),
+            ))
+        })?;
 
+        // Write the line
+        let result = file.write_all(line.as_bytes());
+
+        // Unlock (happens automatically on drop, but explicit is clearer)
+        let _ = file.unlock();
+
+        result?;
         Ok(())
     }
 
     /// Read the coordination log
+    /// Validates session_id to prevent path traversal attacks
     pub fn read_coordination_log(
         &self,
         session_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<CoordinationMessage>, StorageError> {
-        let log_path = self.session_dir(session_id)
+        validate_session_id(session_id)?;
+        let log_path = self
+            .session_dir(session_id)
             .join("coordination")
             .join("coordination.log");
 
@@ -464,11 +659,29 @@ impl SessionStorage {
         Ok(messages)
     }
 
-    /// Parse a coordination log line
+    /// Parse a coordination log line using pre-compiled static regexes
     fn parse_coordination_line(line: &str) -> Option<CoordinationMessage> {
-        // Format: [2024-02-03T18:52:34Z] FROM → TO: content
-        let re = regex::Regex::new(r"^\[([^\]]+)\] ([^ ]+) → ([^:]+): (.*)$").ok()?;
-        let caps = re.captures(line)?;
+        // New format: [2024-02-03T18:52:34Z] TYPE FROM → TO: content
+        // Legacy format: [2024-02-03T18:52:34Z] FROM → TO: content
+
+        // Try new format first (with message type) using pre-compiled regex
+        if let Some(caps) = COORDINATION_LOG_REGEX_NEW.captures(line) {
+            let timestamp = DateTime::parse_from_rfc3339(&caps[1])
+                .ok()?
+                .with_timezone(&Utc);
+
+            return Some(CoordinationMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp,
+                from: caps[3].to_string(),
+                to: caps[4].to_string(),
+                content: caps[5].to_string(),
+                message_type: Self::str_to_message_type(&caps[2]),
+            });
+        }
+
+        // Fall back to legacy format (no message type - defaults to Task)
+        let caps = COORDINATION_LOG_REGEX_LEGACY.captures(line)?;
 
         let timestamp = DateTime::parse_from_rfc3339(&caps[1])
             .ok()?
@@ -480,7 +693,7 @@ impl SessionStorage {
             from: caps[2].to_string(),
             to: caps[3].to_string(),
             content: caps[4].to_string(),
-            message_type: crate::coordination::MessageType::Task,
+            message_type: MessageType::Task,
         })
     }
 
@@ -490,15 +703,28 @@ impl SessionStorage {
 
     /// Get the session-scoped lessons directory
     /// Stores learnings and project DNA in .hive-manager/{session_id}/lessons/
+    /// Validates session_id to prevent path traversal attacks
     fn session_lessons_dir(&self, session_id: &str) -> PathBuf {
+        // Validation is performed by session_dir
         // For per-session lessons, store in %APPDATA%/hive-manager/sessions/{session_id}/lessons/
         // This allows multi-project sessions without conflicts
         self.session_dir(session_id).join("lessons")
     }
+    
+    /// Get the session-scoped lessons directory with validation
+    /// Returns an error if session_id is invalid
+    fn session_lessons_dir_validated(&self, session_id: &str) -> Result<PathBuf, StorageError> {
+        validate_session_id(session_id)?;
+        Ok(self.session_dir(session_id).join("lessons"))
+    }
 
     /// Append a learning to the .ai-docs/learnings.jsonl file (project-scoped, legacy)
     /// DEPRECATED: Use append_learning_session for new code
-    pub fn append_learning(&self, project_path: &Path, learning: &Learning) -> Result<(), StorageError> {
+    pub fn append_learning(
+        &self,
+        project_path: &Path,
+        learning: &Learning,
+    ) -> Result<(), StorageError> {
         let ai_docs_dir = Self::ai_docs_dir(project_path);
         fs::create_dir_all(&ai_docs_dir)?;
         // Also ensure archive folder exists for /curate-learnings skill
@@ -523,7 +749,13 @@ impl SessionStorage {
 
     /// Append a learning to the session-scoped lessons directory
     /// Stores in .hive-manager/{session_id}/lessons/learnings.jsonl
-    pub fn append_learning_session(&self, session_id: &str, learning: &Learning) -> Result<(), StorageError> {
+    /// Validates session_id to prevent path traversal attacks
+    pub fn append_learning_session(
+        &self,
+        session_id: &str,
+        learning: &Learning,
+    ) -> Result<(), StorageError> {
+        validate_session_id(session_id)?;
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
         // Also ensure archive folder exists
@@ -580,7 +812,13 @@ impl SessionStorage {
 
     /// Delete a learning by ID from the session-scoped learnings file
     /// Uses temp-file + rename for atomicity
-    pub fn delete_learning_session(&self, session_id: &str, learning_id: &str) -> Result<bool, StorageError> {
+    /// Validates session_id to prevent path traversal attacks
+    pub fn delete_learning_session(
+        &self,
+        session_id: &str,
+        learning_id: &str,
+    ) -> Result<bool, StorageError> {
+        validate_session_id(session_id)?;
         let learnings_file = self.session_lessons_dir(session_id).join("learnings.jsonl");
 
         if !learnings_file.exists() {
@@ -620,11 +858,10 @@ impl SessionStorage {
 
         // Write to temp file then rename for atomicity using tempfile crate
         let lessons_dir = self.session_lessons_dir(session_id);
-        let mut temp = tempfile::NamedTempFile::new_in(&lessons_dir)
-            .map_err(|e| StorageError::Io(e))?;
+        let mut temp =
+            tempfile::NamedTempFile::new_in(&lessons_dir).map_err(|e| StorageError::Io(e))?;
         for line in &remaining_lines {
-            writeln!(temp, "{}", line)
-                .map_err(|e| StorageError::Io(e))?;
+            writeln!(temp, "{}", line).map_err(|e| StorageError::Io(e))?;
         }
         temp.persist(&learnings_file)
             .map_err(|e| StorageError::Io(e.error))?;
@@ -634,7 +871,9 @@ impl SessionStorage {
 
     /// Read all learnings from the session-scoped lessons directory
     /// Reads from .hive-manager/{session_id}/lessons/learnings.jsonl
+    /// Validates session_id to prevent path traversal attacks
     pub fn read_learnings_session(&self, session_id: &str) -> Result<Vec<Learning>, StorageError> {
+        validate_session_id(session_id)?;
         let learnings_file = self.session_lessons_dir(session_id).join("learnings.jsonl");
 
         if !learnings_file.exists() {
@@ -676,7 +915,9 @@ impl SessionStorage {
 
     /// Read project DNA from the session-scoped lessons directory
     /// Reads from .hive-manager/{session_id}/lessons/project-dna.md
+    /// Validates session_id to prevent path traversal attacks
     pub fn read_project_dna_session(&self, session_id: &str) -> Result<String, StorageError> {
+        validate_session_id(session_id)?;
         let project_dna_file = self.session_lessons_dir(session_id).join("project-dna.md");
         if !project_dna_file.exists() {
             return Ok(String::new());
@@ -697,8 +938,13 @@ impl SessionStorage {
 
     /// Save curated project DNA to the session-scoped lessons directory
     /// Saves to .hive-manager/{session_id}/lessons/project-dna.md
-    #[allow(dead_code)]
-    pub fn save_project_dna_session(&self, session_id: &str, content: &str) -> Result<(), StorageError> {
+    /// Validates session_id to prevent path traversal attacks
+    pub fn save_project_dna_session(
+        &self,
+        session_id: &str,
+        content: &str,
+    ) -> Result<(), StorageError> {
+        validate_session_id(session_id)?;
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
         let project_dna_file = lessons_dir.join("project-dna.md");
@@ -732,7 +978,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            enabled: true,   // Enabled by default for Queen to spawn workers
+            enabled: true, // Enabled by default for Queen to spawn workers
             port: 18800,
         }
     }
@@ -758,6 +1004,7 @@ pub struct RoleDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_storage() -> (SessionStorage, TempDir) {
@@ -862,7 +1109,9 @@ mod tests {
         };
 
         // Append learning
-        storage.append_learning_session(session_id, &learning).unwrap();
+        storage
+            .append_learning_session(session_id, &learning)
+            .unwrap();
 
         // Read learnings
         let learnings = storage.read_learnings_session(session_id).unwrap();
@@ -913,12 +1162,20 @@ mod tests {
             files_touched: vec![],
         };
 
-        storage.append_learning_session(session_id, &learning1).unwrap();
-        storage.append_learning_session(session_id, &learning2).unwrap();
-        storage.append_learning_session(session_id, &learning3).unwrap();
+        storage
+            .append_learning_session(session_id, &learning1)
+            .unwrap();
+        storage
+            .append_learning_session(session_id, &learning2)
+            .unwrap();
+        storage
+            .append_learning_session(session_id, &learning3)
+            .unwrap();
 
         // Delete the middle one
-        let deleted = storage.delete_learning_session(session_id, "learning-2").unwrap();
+        let deleted = storage
+            .delete_learning_session(session_id, "learning-2")
+            .unwrap();
         assert!(deleted);
 
         // Read learnings - should only have 2
@@ -948,10 +1205,14 @@ mod tests {
             files_touched: vec![],
         };
 
-        storage.append_learning_session(session_id, &learning).unwrap();
+        storage
+            .append_learning_session(session_id, &learning)
+            .unwrap();
 
         // Try to delete non-existent learning
-        let deleted = storage.delete_learning_session(session_id, "nonexistent-id").unwrap();
+        let deleted = storage
+            .delete_learning_session(session_id, "nonexistent-id")
+            .unwrap();
         assert!(!deleted);
 
         // Verify original learning still exists
@@ -978,8 +1239,10 @@ mod tests {
 
         storage.create_session_dir(session_id).unwrap();
 
-        let learnings_file = storage.session_lessons_dir(session_id).join("learnings.jsonl");
-        
+        let learnings_file = storage
+            .session_lessons_dir(session_id)
+            .join("learnings.jsonl");
+
         // Write a file with valid and invalid lines
         let content = r#"{"id":"valid-1","date":"2024-01-01","session":"test","task":"task1","outcome":"success","keywords":[],"insight":"insight1","files_touched":[]}
 invalid json line
@@ -996,5 +1259,84 @@ invalid json line
         assert_eq!(learnings[0].id, "valid-1");
         assert_eq!(learnings[1].id, "valid-2");
         assert_eq!(learnings[2].id, "valid-3");
+    }
+    
+    // ============ Session ID Validation Tests ============
+    
+    #[test]
+    fn test_validate_session_id_valid() {
+        // Valid session IDs
+        assert!(validate_session_id("abc123").is_ok());
+        assert!(validate_session_id("test-session-1").is_ok());
+        assert!(validate_session_id("my_session").is_ok());
+        assert!(validate_session_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890").is_ok());
+        assert!(validate_session_id("UPPERCASE").is_ok());
+        assert!(validate_session_id("MixedCase123").is_ok());
+    }
+    
+    #[test]
+    fn test_validate_session_id_path_traversal() {
+        // Path traversal attempts
+        assert!(validate_session_id("..").is_err());
+        assert!(validate_session_id("../etc/passwd").is_err());
+        assert!(validate_session_id("..\\windows\\system32").is_err());
+        assert!(validate_session_id("foo/../bar").is_err());
+        assert!(validate_session_id("valid..invalid").is_err());
+    }
+    
+    #[test]
+    fn test_validate_session_id_invalid_chars() {
+        // Invalid characters
+        assert!(validate_session_id("path/slash").is_err());
+        assert!(validate_session_id("path\\backslash").is_err());
+        assert!(validate_session_id("with space").is_err());
+        assert!(validate_session_id("special@char").is_err());
+        assert!(validate_session_id("emoji🎉").is_err());
+        assert!(validate_session_id("null\0byte").is_err());
+    }
+    
+    #[test]
+    fn test_validate_session_id_empty() {
+        assert!(validate_session_id("").is_err());
+    }
+    
+    #[test]
+    fn test_validate_session_id_too_long() {
+        let long_id = "a".repeat(200);
+        assert!(validate_session_id(&long_id).is_err());
+    }
+    
+    #[test]
+    fn test_create_session_dir_validates_id() {
+        let (storage, _temp_dir) = create_test_storage();
+        
+        // Valid session ID should work
+        assert!(storage.create_session_dir("valid-session-123").is_ok());
+        
+        // Path traversal should fail
+        assert!(storage.create_session_dir("../escape").is_err());
+        assert!(storage.create_session_dir("..\\escape").is_err());
+        assert!(storage.create_session_dir("a/b/c").is_err());
+    }
+    
+    #[test]
+    fn test_append_learning_session_validates_id() {
+        let (storage, _temp_dir) = create_test_storage();
+        
+        let learning = Learning {
+            id: "test-1".to_string(),
+            date: "2024-01-01".to_string(),
+            session: "test".to_string(),
+            task: "task".to_string(),
+            outcome: "success".to_string(),
+            keywords: vec![],
+            insight: "insight".to_string(),
+            files_touched: vec![],
+        };
+        
+        // Path traversal should fail
+        assert!(storage.append_learning_session("../escape", &learning).is_err());
+        assert!(storage.append_learning_session("a/b", &learning).is_err());
+        assert!(storage.append_learning_session("null\0byte", &learning).is_err());
     }
 }
