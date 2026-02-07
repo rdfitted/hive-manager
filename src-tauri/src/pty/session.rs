@@ -11,6 +11,7 @@ pub enum AgentRole {
     Planner { index: u8 },
     Worker { index: u8, parent: Option<String> },
     Fusion { variant: String },
+    Judge { session_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

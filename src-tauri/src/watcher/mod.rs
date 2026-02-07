@@ -12,6 +12,13 @@ struct WorkerCompletedPayload {
     task_file: String,
 }
 
+#[derive(Clone, Serialize)]
+struct FusionVariantCompletedPayload {
+    session_id: String,
+    variant_index: u8,
+    task_file: String,
+}
+
 pub struct TaskFileWatcher {
     #[allow(dead_code)] // Must keep watcher alive to maintain file watching
     watcher: RecommendedWatcher,
@@ -72,6 +79,17 @@ impl TaskFileWatcher {
         }
     }
 
+    fn extract_fusion_variant(path: &Path) -> Option<u8> {
+        let filename = path.file_name()?.to_str()?;
+        // Match "fusion-variant-N-task.md" pattern
+        if filename.starts_with("fusion-variant-") && filename.ends_with("-task.md") {
+            let suffix = filename.strip_prefix("fusion-variant-")?;
+            let num_end = suffix.strip_suffix("-task.md")?;
+            return num_end.parse::<u8>().ok();
+        }
+        None
+    }
+
     fn handle_event(
         event: &Event,
         session_id: &str,
@@ -80,28 +98,39 @@ impl TaskFileWatcher {
         debounce: Duration,
     ) {
         for path in &event.paths {
-            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                if filename.starts_with("worker-") && filename.ends_with("-task.md") {
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        if content.contains("Status: COMPLETED") || content.contains("**Status**: COMPLETED") {
-                            // Extract worker ID from filename
-                            if let Some(worker_id) = Self::extract_worker_id(path) {
-                                // Emit worker-specific completion event
-                                let payload = WorkerCompletedPayload {
-                                    session_id: session_id.to_string(),
-                                    worker_id,
-                                    task_file: path.to_string_lossy().to_string(),
-                                };
-                                let _ = app_handle.emit("worker-completed", payload);
-                            }
+            let worker_id = Self::extract_worker_id(path);
+            let fusion_variant_index = Self::extract_fusion_variant(path);
+            if worker_id.is_none() && fusion_variant_index.is_none() {
+                continue;
+            }
 
-                            if Self::is_debounced(last_emit, debounce) {
-                                return;
-                            }
-                            let _ = app_handle.emit("plan-update", session_id);
-                            return;
-                        }
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if content.contains("Status: COMPLETED") || content.contains("**Status**: COMPLETED") {
+                    let task_file = path.to_string_lossy().to_string();
+
+                    if let Some(worker_id) = worker_id {
+                        let payload = WorkerCompletedPayload {
+                            session_id: session_id.to_string(),
+                            worker_id,
+                            task_file: task_file.clone(),
+                        };
+                        let _ = app_handle.emit("worker-completed", payload);
                     }
+
+                    if let Some(variant_index) = fusion_variant_index {
+                        let payload = FusionVariantCompletedPayload {
+                            session_id: session_id.to_string(),
+                            variant_index,
+                            task_file,
+                        };
+                        let _ = app_handle.emit("fusion-variant-completed", payload);
+                    }
+
+                    if Self::is_debounced(last_emit, debounce) {
+                        return;
+                    }
+                    let _ = app_handle.emit("plan-update", session_id);
+                    return;
                 }
             }
         }
@@ -122,5 +151,17 @@ mod tests {
         assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-task.md")), None);
         assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("planner-1-task.md")), None);
         assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-1.md")), None);
+    }
+
+    #[test]
+    fn test_extract_fusion_variant() {
+        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-1-task.md")), Some(1));
+        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-5-task.md")), Some(5));
+        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-12-task.md")), Some(12));
+
+        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-")), None);
+        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-foo-task.md")), None);
+        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-task.md")), None);
+        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-1.md")), None);
     }
 }

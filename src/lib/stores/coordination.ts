@@ -2,7 +2,7 @@ import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-export type MessageType = 'Task' | 'Progress' | 'Completion' | 'Error' | 'System';
+export type MessageType = 'Task' | 'Progress' | 'Completion' | 'Error' | 'System' | 'Judge';
 
 export interface CoordinationMessage {
   id: string;
@@ -53,6 +53,11 @@ export interface AddWorkerRequest {
 interface CoordinationState {
   log: CoordinationMessage[];
   workers: WorkerStateInfo[];
+  fusionState: {
+    completedVariants: string[];
+    judgeReport: string | null;
+    evaluationReady: boolean;
+  };
   loading: boolean;
   error: string | null;
   sessionId: string | null;
@@ -62,6 +67,11 @@ function createCoordinationStore() {
   const { subscribe, set, update } = writable<CoordinationState>({
     log: [],
     workers: [],
+    fusionState: {
+      completedVariants: [],
+      judgeReport: null,
+      evaluationReady: false,
+    },
     loading: false,
     error: null,
     sessionId: null,
@@ -82,6 +92,29 @@ function createCoordinationStore() {
     });
   });
 
+  // Listen for fusion variant completion
+  listen<{ variant: string }>('fusion-variant-completed', (event) => {
+    update((state) => ({
+      ...state,
+      fusionState: {
+        ...state.fusionState,
+        completedVariants: [...state.fusionState.completedVariants, event.payload.variant],
+      },
+    }));
+  });
+
+  // Listen for judge evaluation ready
+  listen<{ report: string }>('judge-evaluation-ready', (event) => {
+    update((state) => ({
+      ...state,
+      fusionState: {
+        ...state.fusionState,
+        judgeReport: event.payload.report,
+        evaluationReady: true,
+      },
+    }));
+  });
+
   return {
     subscribe,
 
@@ -91,6 +124,11 @@ function createCoordinationStore() {
         sessionId,
         log: sessionId === state.sessionId ? state.log : [],
         workers: sessionId === state.sessionId ? state.workers : [],
+        fusionState: sessionId === state.sessionId ? state.fusionState : {
+          completedVariants: [],
+          judgeReport: null,
+          evaluationReady: false,
+        },
       }));
     },
 

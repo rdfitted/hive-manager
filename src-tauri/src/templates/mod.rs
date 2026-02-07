@@ -165,6 +165,41 @@ You are a Worker in a multi-agent coding session.
 {{task}}
 "#.to_string());
 
+        // Fusion worker prompt template
+        self.builtin_templates.insert("fusion-worker".to_string(), r#"You are a Fusion worker implementing variant "{{variant_name}}".
+Working directory: {{worktree_path}}
+Branch: {{branch}}
+
+## Your Task
+{{task}}
+
+## Rules
+- Work ONLY within your worktree directory
+- Commit all changes to your branch
+- Do NOT interact with other variants
+- When complete, update your task file status to COMPLETED
+"#.to_string());
+
+        // Fusion judge prompt template
+        self.builtin_templates.insert("fusion-judge".to_string(), r#"You are the Judge evaluating {{variant_count}} competing implementations.
+
+## Variants
+{{variant_list}}
+
+## Evaluation Process
+1. For each variant, run: git diff fusion/{{session_id}}/base..fusion/{{session_id}}/[variant]
+2. Review code quality, correctness, test coverage, pattern adherence
+3. Write comparison report to: {{decision_file}}
+
+## Report Format
+# Evaluation Report
+## Variant Comparison
+| Criterion | Variant A | Variant B | ... |
+## Recommendation
+Winner: [variant name]
+Rationale: [explanation]
+"#.to_string());
+
         // Queen prompt for Hive sessions
         self.builtin_templates.insert("queen-hive".to_string(), r#"# Queen - Hive Session Orchestrator
 
@@ -420,6 +455,59 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         } else {
             rendered = rendered.replace("{{task}}", "Awaiting task assignment from Queen");
         }
+
+        Ok(rendered)
+    }
+
+    pub fn render_fusion_worker_prompt(
+        &self,
+        context: &PromptContext,
+    ) -> Result<String, TemplateError> {
+        let template = self.get_template("fusion-worker")?;
+        let mut rendered = template.clone();
+
+        rendered = rendered.replace(
+            "{{variant_name}}",
+            context.variables.get("variant_name").map(String::as_str).unwrap_or("variant"),
+        );
+        rendered = rendered.replace(
+            "{{worktree_path}}",
+            context.variables.get("worktree_path").map(String::as_str).unwrap_or("."),
+        );
+        rendered = rendered.replace(
+            "{{branch}}",
+            context.variables.get("branch").map(String::as_str).unwrap_or(""),
+        );
+
+        if let Some(ref task) = context.task {
+            rendered = rendered.replace("{{task}}", task);
+        } else {
+            rendered = rendered.replace("{{task}}", "Awaiting instructions");
+        }
+
+        Ok(rendered)
+    }
+
+    pub fn render_fusion_judge_prompt(
+        &self,
+        context: &PromptContext,
+    ) -> Result<String, TemplateError> {
+        let template = self.get_template("fusion-judge")?;
+        let mut rendered = template.clone();
+
+        rendered = rendered.replace("{{session_id}}", &context.session_id);
+        rendered = rendered.replace(
+            "{{variant_count}}",
+            context.variables.get("variant_count").map(String::as_str).unwrap_or("0"),
+        );
+        rendered = rendered.replace(
+            "{{variant_list}}",
+            context.variables.get("variant_list").map(String::as_str).unwrap_or(""),
+        );
+        rendered = rendered.replace(
+            "{{decision_file}}",
+            context.variables.get("decision_file").map(String::as_str).unwrap_or(""),
+        );
 
         Ok(rendered)
     }

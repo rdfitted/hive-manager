@@ -30,3 +30,32 @@ pub fn validate_cli(cli: &str) -> Result<(), ApiError> {
     }
     Ok(())
 }
+
+/// Validate project path for path traversal and existence
+pub fn validate_project_path(path: &str) -> Result<(), ApiError> {
+    use std::path::Path;
+    
+    // Check for path traversal sequences
+    if path.contains("..") {
+        return Err(ApiError::bad_request(
+            "Invalid project path: must not contain '..' (path traversal)",
+        ));
+    }
+    
+    // Verify the path exists and is a directory
+    let project_path = Path::new(path);
+    if !project_path.exists() {
+        return Err(ApiError::bad_request(format!(
+            "Project path does not exist: {}",
+            path
+        )));
+    }
+    if !project_path.is_dir() {
+        return Err(ApiError::bad_request(format!(
+            "Project path is not a directory: {}",
+            path
+        )));
+    }
+    
+    Ok(())
+}

@@ -21,6 +21,7 @@ use commands::{
     get_workers_state, assign_task, get_session_storage_path, list_stored_sessions, get_current_directory,
     get_app_config, update_app_config, get_session_plan,
     list_branches, get_current_branch, switch_branch, git_pull, git_push, git_fetch,
+    git_worktree_add, git_worktree_list, git_worktree_remove, git_worktree_prune,
     PtyManagerState, SessionControllerState, CoordinationState, StorageState,
 };
 use pty::PtyManager;
@@ -141,6 +142,49 @@ pub fn run() {
                 }
             });
 
+            // Set up fusion-variant-completed event listener for judge spawning
+            let fusion_controller_clone = session_controller.clone();
+            app.listen("fusion-variant-completed", move |event: tauri::Event| {
+                let payload = event.payload();
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let session_id = json.get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let variant_index = json.get("variant_index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u8;
+
+                    if session_id.is_empty() || variant_index == 0 {
+                        tracing::warn!("Invalid fusion-variant-completed payload: {}", payload);
+                        return;
+                    }
+
+                    tracing::info!(
+                        "Fusion variant {} completed for session {}, checking judge trigger",
+                        variant_index,
+                        session_id
+                    );
+
+                    let controller = fusion_controller_clone.clone();
+                    let session_id_clone = session_id.to_string();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let result = tauri::async_runtime::block_on(async {
+                            let controller_read = controller.read();
+                            controller_read
+                                .on_fusion_variant_completed(&session_id_clone, variant_index)
+                                .await
+                        });
+
+                        if let Err(e) = result {
+                            tracing::error!("Failed to handle fusion variant completion: {}", e);
+                        }
+                    });
+                } else {
+                    tracing::warn!("Failed to parse fusion-variant-completed payload: {}", payload);
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -182,6 +226,10 @@ pub fn run() {
             git_pull,
             git_push,
             git_fetch,
+            git_worktree_add,
+            git_worktree_list,
+            git_worktree_remove,
+            git_worktree_prune,
             // Planning phase commands
             continue_after_planning,
             mark_plan_ready,

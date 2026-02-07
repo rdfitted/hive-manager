@@ -19,6 +19,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}", get(sessions::get_session))
         .route("/api/sessions/hive", post(sessions::launch_hive))
         .route("/api/sessions/swarm", post(sessions::launch_swarm))
+        .route("/api/sessions/fusion", post(sessions::launch_fusion))
+        .route("/api/sessions/{id}/fusion/select-winner", post(sessions::select_fusion_winner))
+        .route("/api/sessions/{id}/fusion/status", get(sessions::get_fusion_status))
+        .route("/api/sessions/{id}/fusion/evaluation", get(sessions::get_fusion_evaluation))
         .route("/api/sessions/{id}/stop", post(sessions::stop_session))
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))

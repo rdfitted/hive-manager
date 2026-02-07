@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import LaunchDialog from './LaunchDialog.svelte';
@@ -8,6 +8,7 @@
     onLaunch: (projectPath: string, workerCount: number, command: string, prompt?: string) => Promise<void>;
     onLaunchHiveV2?: (config: HiveLaunchConfig) => Promise<void>;
     onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
+    onLaunchFusion?: (config: FusionLaunchConfig) => Promise<void>;
   }
 
   interface SessionSummary {
@@ -17,7 +18,7 @@
     created_at: string;
   }
 
-  let { onLaunch, onLaunchHiveV2, onLaunchSwarm }: Props = $props();
+  let { onLaunch, onLaunchHiveV2, onLaunchSwarm, onLaunchFusion }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
@@ -122,6 +123,22 @@
       launching = false;
     }
   }
+
+  async function handleLaunchFusion(e: CustomEvent<FusionLaunchConfig>) {
+    launching = true;
+    try {
+      if (onLaunchFusion) {
+        await onLaunchFusion(e.detail);
+        showLaunchDialog = false;
+      } else {
+        console.error('Fusion launch not supported');
+      }
+    } catch (err) {
+      console.error('Launch failed:', err);
+    } finally {
+      launching = false;
+    }
+  }
 </script>
 
 <aside class="sidebar" class:collapsed={sidebarCollapsed}>
@@ -202,6 +219,7 @@
   on:close={() => showLaunchDialog = false}
   on:launchHive={handleLaunchHive}
   on:launchSwarm={handleLaunchSwarm}
+  on:launchFusion={handleLaunchFusion}
 />
 
 <style>

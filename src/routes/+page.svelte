@@ -9,7 +9,8 @@
   import QueenControls from '$lib/components/QueenControls.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
-  import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig } from '$lib/stores/sessions';
+  import FusionPanel from '$lib/components/FusionPanel.svelte';
+  import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
 
@@ -98,6 +99,10 @@
     await sessions.launchSwarm(config);
   }
 
+  async function handleLaunchFusion(config: FusionLaunchConfig): Promise<void> {
+    await sessions.launchFusion(config);
+  }
+
   function toggleStatusPanel() {
     showStatusPanel = !showStatusPanel;
   }
@@ -163,6 +168,7 @@
     onLaunch={handleLaunch}
     onLaunchHiveV2={handleLaunchHiveV2}
     onLaunchSwarm={handleLaunchSwarm}
+    onLaunchFusion={handleLaunchFusion}
   />
 
   {#if $activeSession}
@@ -221,6 +227,8 @@
           <div class="no-agents">
             <p>No agents in this session</p>
           </div>
+        {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type}
+          <FusionPanel />
         {:else if $ui.layoutMode === 'grid'}
           <TerminalGrid
             agents={$activeAgents}
