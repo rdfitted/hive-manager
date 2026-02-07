@@ -1856,7 +1856,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality |
-| cli | string | No | CLI to use: {default_cli} (default), gemini, cursor, droid, qwen |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
 | label | string | No | Custom label for the worker |
 | initial_task | string | No | Initial task/prompt for the worker |
 | parent_id | string | No | Parent agent ID (defaults to Queen) |
@@ -2083,7 +2083,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
-| cli | string | No | CLI to use: {default_cli} (default), gemini, cursor, droid, qwen |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
 | model | string | No | Model to use (e.g., "opus-4-6" for {default_cli}) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
