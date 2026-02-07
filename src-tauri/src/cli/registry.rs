@@ -167,7 +167,7 @@ mod tests {
             command: "claude".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
-            default_model: "opus".to_string(),
+            default_model: "opus-4-6".to_string(),
             env: None,
         });
         clis.insert("gemini".to_string(), CliConfig {

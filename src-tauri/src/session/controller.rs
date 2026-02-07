@@ -264,7 +264,7 @@ impl SessionController {
 
             let queen_config = AgentConfig {
                 cli: cmd.to_string(),
-                model: if cmd == "claude" { Some("opus".to_string()) } else { None },
+                model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
                 role: None,
@@ -304,7 +304,7 @@ impl SessionController {
 
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
-                    model: if cmd == "claude" { Some("opus".to_string()) } else { None },
+                    model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     role: None,
@@ -329,7 +329,7 @@ impl SessionController {
             created_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
-            default_model: if cmd == "claude" { Some("opus".to_string()) } else { None },
+            default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
         };
 
         {
@@ -866,7 +866,7 @@ gemini -y -i "Analyze the codebase structure for: [TASK]. List relevant files by
 # Use Claude's Task tool with Explore agent
 
 # Scout 3 - Related Code (Codex if available, or another Gemini)
-codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.2 "Find code related to: [TASK]"
+codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex "Find code related to: [TASK]"
 ```
 
 ---
@@ -2084,7 +2084,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, cursor, droid, qwen |
-| model | string | No | Model to use (e.g., "opus" for {default_cli}) |
+| model | string | No | Model to use (e.g., "opus-4-6" for {default_cli}) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |

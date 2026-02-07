@@ -76,7 +76,7 @@ A single-window application that:
 | `agent` | `--force` | (global) | WSL Ubuntu |
 | `gemini` | `-y` | `-m gemini-3-pro-preview` | Windows |
 | `opencode` | env `OPENCODE_YOLO=true` | `-m opencode/MODEL` | Windows |
-| `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m gpt-5.2` | Windows |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m gpt-5.3-codex` | Windows |
 
 ---
 

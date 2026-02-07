@@ -9,7 +9,7 @@ use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
 use crate::storage::SessionTypeInfo;
-use super::validate_session_id;
+use super::{validate_session_id, validate_cli};
 
 #[derive(Serialize)]
 pub struct SessionInfo {
@@ -115,12 +115,13 @@ pub async fn launch_hive(
     let controller = state.session_controller.write();
     let project_path = std::path::PathBuf::from(req.project_path);
 
-    let command = req.command;
+    let command = req.command.unwrap_or_else(|| "claude".to_string());
+    validate_cli(&command)?;
 
     let session = controller.launch_hive(
         project_path,
         req.worker_count.unwrap_or(3),
-        &command.unwrap_or_else(|| "claude".to_string()),
+        &command,
         req.task_description,
     ).map_err(|e| ApiError::internal(e.to_string()))?;
 

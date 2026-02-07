@@ -65,7 +65,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         created_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus".to_string()),
+        default_model: Some("opus-4-6".to_string()),
     }
 }
 
