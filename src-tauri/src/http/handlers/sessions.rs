@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
-use crate::session::{FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus};
+use crate::session::{FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus, HiveLaunchConfig};
 use crate::storage::SessionTypeInfo;
 use super::{validate_session_id, validate_cli, validate_project_path};
 
@@ -63,6 +63,15 @@ pub struct LaunchFusionRequest {
     pub with_planning: Option<bool>,
     pub default_cli: Option<String>,
     pub default_model: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LaunchSoloRequest {
+    pub project_path: String,
+    pub task_description: String,
+    pub cli: String,
+    pub model: Option<String>,
+    pub flags: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +133,7 @@ pub async fn get_session(
                 crate::session::SessionType::Hive { worker_count } => format!("Hive ({})", worker_count),
                 crate::session::SessionType::Swarm { planner_count } => format!("Swarm ({})", planner_count),
                 crate::session::SessionType::Fusion { variants } => format!("Fusion ({})", variants.len()),
+                crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
             },
             status: format!("{:?}", session.state),
             project_path: session.project_path.to_string_lossy().to_string(),
@@ -141,6 +151,7 @@ pub async fn get_session(
             SessionTypeInfo::Hive { worker_count } => format!("Hive ({})", worker_count),
             SessionTypeInfo::Swarm { planner_count } => format!("Swarm ({})", planner_count),
             SessionTypeInfo::Fusion { variants } => format!("Fusion ({})", variants.len()),
+            SessionTypeInfo::Solo { cli, .. } => format!("Solo ({})", cli),
         },
         status: persisted.state,
         project_path: persisted.project_path,
@@ -212,6 +223,50 @@ pub async fn launch_swarm(
         Json(LaunchResponse {
             session_id: session.id,
             message: "Swarm session launched".to_string(),
+        }),
+    ))
+}
+
+/// POST /api/sessions/solo - Launch a new solo session
+pub async fn launch_solo(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LaunchSoloRequest>,
+) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
+    if req.task_description.trim().is_empty() {
+        return Err(ApiError::bad_request("task_description cannot be empty"));
+    }
+
+    validate_project_path(&req.project_path)?;
+    validate_cli(&req.cli)?;
+
+    let agent_config = AgentConfig {
+        cli: req.cli,
+        model: req.model,
+        flags: req.flags.unwrap_or_default(),
+        label: None,
+        role: None,
+        initial_prompt: None,
+    };
+
+    let config = HiveLaunchConfig {
+        project_path: req.project_path,
+        queen_config: agent_config,
+        workers: vec![],
+        prompt: Some(req.task_description),
+        with_planning: false,
+        smoke_test: false,
+    };
+
+    let controller = state.session_controller.write();
+    let session = controller
+        .launch_solo(config)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(LaunchResponse {
+            session_id: session.id,
+            message: "Solo session launched".to_string(),
         }),
     ))
 }

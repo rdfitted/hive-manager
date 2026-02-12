@@ -634,18 +634,18 @@ impl SessionController {
         match config.cli.as_str() {
             "claude" => {
                 args.push("--dangerously-skip-permissions".to_string());
+                Self::add_inline_task_to_args("claude", &mut args, task);
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
-                Self::add_inline_task_to_args("claude", &mut args, task);
             }
             "gemini" => {
+                Self::add_inline_task_to_args("gemini", &mut args, task);
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
-                Self::add_inline_task_to_args("gemini", &mut args, task);
             }
             "droid" => {
                 Self::add_inline_task_to_args("droid", &mut args, task);
@@ -2988,8 +2988,7 @@ Last updated: {timestamp}
             role: None,
             initial_prompt: Some(task_description.clone()),
         };
-        let (cmd, mut args) = Self::build_command(&solo_config);
-        Self::add_inline_task_to_args(&cli, &mut args, &task_description);
+        let (cmd, args) = Self::build_solo_command(&solo_config, &task_description);
         let solo_id = format!("{}-worker-1", session_id);
 
         {

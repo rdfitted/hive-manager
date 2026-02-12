@@ -401,6 +401,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             SessionType::Hive { .. } => "queen-hive",
             SessionType::Swarm { .. } => "queen-swarm",
             SessionType::Fusion { .. } => "queen-hive", // Use hive template for fusion
+            SessionType::Solo { .. } => "queen-hive", // Solo has no queen, keep fallback template for compatibility
         };
 
         let template = self.get_template(template_name)?;
