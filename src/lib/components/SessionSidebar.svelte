@@ -9,6 +9,7 @@
     onLaunchHiveV2?: (config: HiveLaunchConfig) => Promise<void>;
     onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
     onLaunchFusion?: (config: FusionLaunchConfig) => Promise<void>;
+    onLaunchSolo?: (config: SoloLaunchConfig) => Promise<void>;
   }
 
   interface SessionSummary {
@@ -16,9 +17,11 @@
     session_type: string;
     project_path: string;
     created_at: string;
+    agent_count: number;
+    state: string;
   }
 
-  let { onLaunch, onLaunchHiveV2, onLaunchSwarm, onLaunchFusion }: Props = $props();
+  let { onLaunch, onLaunchHiveV2, onLaunchSwarm, onLaunchFusion, onLaunchSolo }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
@@ -139,6 +142,22 @@
       launching = false;
     }
   }
+
+  async function handleLaunchSolo(e: CustomEvent<SoloLaunchConfig>) {
+    launching = true;
+    try {
+      if (onLaunchSolo) {
+        await onLaunchSolo(e.detail);
+      } else {
+        await sessions.launchSolo(e.detail);
+      }
+      showLaunchDialog = false;
+    } catch (err) {
+      console.error('Launch failed:', err);
+    } finally {
+      launching = false;
+    }
+  }
 </script>
 
 <aside class="sidebar" class:collapsed={sidebarCollapsed}>
@@ -165,7 +184,12 @@
               <li class="session-item" class:active={$activeSession?.id === session.id}>
                 <button class="session-button" onclick={() => selectSession(session.id)}>
                   <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-                  <span class="session-meta">{formatTimestamp(session.created_at)}</span>
+                  <span class="session-meta">
+                    {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
+                      <span class="type-tag solo">Solo</span>
+                    {/if}
+                    {formatTimestamp(session.created_at)}
+                  </span>
                 </button>
               </li>
             {/each}
@@ -190,7 +214,12 @@
               <li class="session-item recent">
                 <div class="session-info">
                   <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-                  <span class="session-meta">{formatTimestamp(session.created_at)}</span>
+                  <span class="session-meta">
+                    {#if session.session_type.startsWith('Solo') || (session.session_type === 'Hive (1)' && session.agent_count === 1)}
+                      <span class="type-tag solo">Solo</span>
+                    {/if}
+                    {formatTimestamp(session.created_at)}
+                  </span>
                 </div>
                 <button class="load-button" onclick={() => handleResumeSession(session.id)} title="Load Session">
                   ▶
@@ -220,6 +249,7 @@
   on:launchHive={handleLaunchHive}
   on:launchSwarm={handleLaunchSwarm}
   on:launchFusion={handleLaunchFusion}
+  on:launchSolo={handleLaunchSolo}
 />
 
 <style>
@@ -368,6 +398,26 @@
     font-size: 11px;
     color: var(--color-text-muted);
     margin-top: 2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .type-tag {
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: var(--color-bg-secondary);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+  }
+
+  .type-tag.solo {
+    background: rgba(122, 162, 247, 0.1);
+    color: var(--color-accent);
+    border-color: rgba(122, 162, 247, 0.3);
   }
 
   .sidebar-footer {

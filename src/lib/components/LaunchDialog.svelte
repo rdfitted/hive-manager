@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, SoloLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
@@ -11,9 +11,10 @@
     launchHive: HiveLaunchConfig;
     launchSwarm: SwarmLaunchConfig;
     launchFusion: FusionLaunchConfig;
+    launchSolo: SoloLaunchConfig;
   }>();
 
-  type SessionMode = 'hive' | 'swarm' | 'fusion';
+  type SessionMode = 'hive' | 'swarm' | 'fusion' | 'solo';
 
   // Predefined roles with default CLIs, descriptions, and prompt templates
   const predefinedRoles = [
@@ -122,6 +123,22 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let prompt = '';
   let launching = false;
   let error = '';
+
+  // CLI options for solo mode
+  const cliOptions = [
+    { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.6)' },
+    { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
+    { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model' },
+    { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.3' },
+    { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Opus 4.6)' },
+    { value: 'droid', label: 'Droid', description: 'GLM 4.7 (Factory Droid CLI)' },
+    { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)' },
+  ];
+
+  // Solo config
+  let soloCli = 'claude';
+  let soloModel = '';
+  let soloTask = '';
 
   // Queen config (shared)
   let queenConfig: AgentConfig = {
@@ -299,6 +316,20 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           smoke_test: smokeTest,
         };
         dispatch('launchSwarm', config);
+      } else if (mode === 'solo') {
+        if (!soloTask.trim()) {
+          error = 'Task description is required for solo mode';
+          launching = false;
+          return;
+        }
+
+        const config: SoloLaunchConfig = {
+          projectPath,
+          taskDescription: soloTask,
+          cli: soloCli,
+          model: soloModel || undefined,
+        };
+        dispatch('launchSolo', config);
       } else {
         const config: FusionLaunchConfig = {
           project_path: projectPath,
@@ -371,6 +402,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         >
           Fusion
         </button>
+        <button
+          class="mode-tab"
+          class:active={mode === 'solo'}
+          on:click={() => (mode = 'solo')}
+          type="button"
+        >
+          Solo
+        </button>
       </div>
 
       <form on:submit|preventDefault={() => handleSubmit(false)}>
@@ -391,10 +430,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           </div>
         </div>
 
-        <div class="form-section">
-          <h3>Queen Configuration</h3>
-          <AgentConfigEditor bind:config={queenConfig} showLabel={true} />
-        </div>
+        {#if mode !== 'solo'}
+          <div class="form-section">
+            <h3>Queen Configuration</h3>
+            <AgentConfigEditor bind:config={queenConfig} showLabel={true} />
+          </div>
+        {/if}
 
         {#if mode === 'hive'}
           <div class="form-section">
@@ -548,17 +589,54 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
           </div>
+        {:else if mode === 'solo'}
+          <div class="form-section">
+            <h3>Solo Configuration</h3>
+            <p class="section-description">Run a single agent for a specific task without any orchestration overhead.</p>
+            
+            <div class="field">
+              <label for="solo-cli">CLI</label>
+              <select id="solo-cli" bind:value={soloCli} class="role-select">
+                {#each cliOptions as cli}
+                  <option value={cli.value} title={cli.description}>{cli.label}</option>
+                {/each}
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="solo-model">Model (optional)</label>
+              <input
+                id="solo-model"
+                type="text"
+                bind:value={soloModel}
+                placeholder="e.g. opus, gemini-2.0-flash-exp"
+              />
+            </div>
+
+            <div class="form-group">
+              <label for="solo-task">Task Description</label>
+              <textarea
+                id="solo-task"
+                bind:value={soloTask}
+                placeholder="What should the agent do? (Required)"
+                rows="5"
+                required
+              ></textarea>
+            </div>
+          </div>
         {/if}
 
-        <div class="form-group">
-          <label for="prompt">Initial Prompt (optional)</label>
-          <textarea
-            id="prompt"
-            bind:value={prompt}
-            placeholder="Enter a task for the session..."
-            rows="3"
-          ></textarea>
-        </div>
+        {#if mode !== 'solo'}
+          <div class="form-group">
+            <label for="prompt">Initial Prompt (optional)</label>
+            <textarea
+              id="prompt"
+              bind:value={prompt}
+              placeholder="Enter a task for the session..."
+              rows="3"
+            ></textarea>
+          </div>
+        {/if}
 
         {#if error}
           <div class="error-message">{error}</div>
