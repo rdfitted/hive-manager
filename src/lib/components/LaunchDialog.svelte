@@ -162,6 +162,26 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   ];
   let judgeConfig = { cli: 'claude', model: '' };
 
+  // AgentConfig wrappers for fusion variants (so AgentConfigEditor can be used)
+  let variantAgentConfigs: AgentConfig[] = fusionVariants.map(v => ({
+    cli: v.cli, model: v.model, flags: [], label: v.name,
+  }));
+  let judgeAgentConfig: AgentConfig = { cli: judgeConfig.cli, model: judgeConfig.model, flags: [], label: 'Fusion Judge' };
+
+  function handleVariantConfigChange(index: number, detail: AgentConfig) {
+    variantAgentConfigs[index] = detail;
+    fusionVariants[index] = {
+      ...fusionVariants[index],
+      cli: detail.cli,
+      model: detail.model,
+    };
+  }
+
+  function handleJudgeConfigChange(detail: AgentConfig) {
+    judgeAgentConfig = detail;
+    judgeConfig = { cli: detail.cli, model: detail.model };
+  }
+
   $: activeFusionVariants = fusionVariants.slice(0, variantCount);
 
   function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
@@ -498,17 +518,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                     <div class="card-header">
                       <span class="card-title">{variant.name}</span>
                     </div>
-                    <div class="field">
-                      <label for="variant-cli-{i}">CLI</label>
-                      <select id="variant-cli-{i}" bind:value={variant.cli} class="role-select">
-                        <option value="claude">Claude</option>
-                        <option value="gemini">Gemini</option>
-                      </select>
-                    </div>
-                    <div class="field">
-                      <label for="variant-model-{i}">Model (optional)</label>
-                      <input id="variant-model-{i}" type="text" bind:value={variant.model} placeholder="Default model" />
-                    </div>
+                    <AgentConfigEditor
+                      config={variantAgentConfigs[i]}
+                      showLabel={false}
+                      on:change={(e) => handleVariantConfigChange(i, e.detail)}
+                    />
                   </div>
                 {/each}
               </div>
@@ -517,17 +531,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <div class="subsection">
               <h4>Judge Configuration</h4>
               <div class="worker-card">
-                <div class="field">
-                  <label for="judge-cli">Judge CLI</label>
-                  <select id="judge-cli" bind:value={judgeConfig.cli} class="role-select">
-                    <option value="claude">Claude</option>
-                    <option value="gemini">Gemini</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label for="judge-model">Judge Model (optional)</label>
-                  <input id="judge-model" type="text" bind:value={judgeConfig.model} placeholder="Default model" />
-                </div>
+                <AgentConfigEditor
+                  config={judgeAgentConfig}
+                  showLabel={false}
+                  on:change={(e) => handleJudgeConfigChange(e.detail)}
+                />
               </div>
             </div>
           </div>
