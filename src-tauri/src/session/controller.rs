@@ -605,6 +605,77 @@ impl SessionController {
         }
     }
 
+    /// Add an inline task prompt to args based on CLI type (solo mode).
+    /// This bypasses prompt files and uses each CLI's native prompt flag/convention.
+    fn add_inline_task_to_args(cli: &str, args: &mut Vec<String>, task: &str) {
+        match cli {
+            "claude" | "gemini" => {
+                args.push("-p".to_string());
+                args.push(task.to_string());
+            }
+            "codex" => {
+                args.push("-q".to_string());
+                args.push(task.to_string());
+            }
+            "cursor" | "droid" => {
+                args.push(task.to_string());
+            }
+            _ => {
+                args.push(task.to_string());
+            }
+        }
+    }
+
+    /// Build command/args for solo launch with direct task passing and no orchestration overhead.
+    fn build_solo_command(config: &AgentConfig, task: &str) -> (String, Vec<String>) {
+        let mut args = Vec::new();
+
+        match config.cli.as_str() {
+            "claude" => {
+                args.push("--dangerously-skip-permissions".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+                Self::add_inline_task_to_args("claude", &mut args, task);
+            }
+            "gemini" => {
+                if let Some(ref model) = config.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+                Self::add_inline_task_to_args("gemini", &mut args, task);
+            }
+            "droid" => {
+                Self::add_inline_task_to_args("droid", &mut args, task);
+                if let Some(ref model) = config.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "codex" => {
+                Self::add_inline_task_to_args("codex", &mut args, task);
+                if let Some(ref model) = config.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "cursor" => {
+                Self::add_inline_task_to_args("cursor", &mut args, task);
+            }
+            _ => {
+                if let Some(ref model) = config.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+                Self::add_inline_task_to_args(&config.cli, &mut args, task);
+            }
+        }
+
+        args.extend(config.flags.clone());
+        (config.cli.clone(), args)
+    }
+
     fn run_git_in_dir(project_path: &PathBuf, args: &[&str]) -> Result<String, String> {
         if !project_path.exists() {
             return Err(format!("Project path does not exist: {}", project_path.display()));
@@ -2898,6 +2969,67 @@ Last updated: {timestamp}
 
         Ok(file_path)
     }
+    pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        let session_id = Uuid::new_v4().to_string();
+        let project_path = PathBuf::from(&config.project_path);
+        let cwd = config.project_path.as_str();
+
+        let task = config
+            .prompt
+            .clone()
+            .or_else(|| config.queen_config.initial_prompt.clone())
+            .unwrap_or_default();
+
+        let (cmd, args) = Self::build_solo_command(&config.queen_config, &task);
+        let solo_id = format!("{}-worker-1", session_id);
+
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    solo_id.clone(),
+                    AgentRole::Worker { index: 1, parent: None },
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn solo agent: {}", e))?;
+        }
+
+        let session = Session {
+            id: session_id.clone(),
+            session_type: SessionType::Hive { worker_count: 1 },
+            project_path,
+            state: SessionState::Running,
+            created_at: Utc::now(),
+            agents: vec![AgentInfo {
+                id: solo_id,
+                role: AgentRole::Worker { index: 1, parent: None },
+                status: AgentStatus::Running,
+                config: config.queen_config.clone(),
+                parent_id: None,
+            }],
+            default_cli: config.queen_config.cli.clone(),
+            default_model: config.queen_config.model.clone(),
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session.clone());
+        }
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: session.clone(),
+            });
+        }
+
+        self.init_session_storage(&session);
+        Ok(session)
+    }
+
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
@@ -2907,6 +3039,11 @@ Last updated: {timestamp}
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
             return self.launch_planning_phase(session_id, config);
+        }
+
+        // Solo mode: skip orchestration and launch one agent directly.
+        if config.workers.is_empty() {
+            return self.launch_solo(config);
         }
 
         {
