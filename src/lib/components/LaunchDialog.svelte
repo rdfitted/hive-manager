@@ -182,6 +182,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     judgeConfig = { cli: detail.cli, model: detail.model, flags: detail.flags, label: detail.label };
   }
 
+
   $: activeFusionVariants = fusionVariants.slice(0, variantCount);
 
   function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
@@ -303,6 +304,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           variants: activeFusionVariants,
           task_description: prompt,
           judge_config: judgeConfig,
+          queen_config: queenConfig,
           with_planning: true,
         };
         dispatch('launchFusion', config);
@@ -535,6 +537,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
             <div class="subsection">
               <h4>Judge Configuration</h4>
+              <p class="section-description">Evaluates variant outputs and recommends a winner.</p>
               <div class="worker-card">
                 <AgentConfigEditor
                   config={judgeAgentConfig}

@@ -5,6 +5,8 @@
   import { invoke } from '@tauri-apps/api/core';
 
   let fusionAgents = $derived($activeAgents.filter(a => typeof a.role === 'object' && 'Fusion' in a.role));
+  let queenAgent = $derived($activeAgents.find(a => a.role === 'Queen'));
+  let judgeAgent = $derived($activeAgents.find(a => typeof a.role === 'object' && 'Judge' in a.role));
   let completedVariants = $derived($coordination.fusionState.completedVariants);
   let judgeReport = $derived($coordination.fusionState.judgeReport);
   let evaluationReady = $derived($coordination.fusionState.evaluationReady);
@@ -47,6 +49,19 @@
 </script>
 
 <div class="fusion-panel">
+  {#if queenAgent}
+    <div class="orchestrator-section">
+      <div class="orchestrator-header">
+        <span class="icon">♕</span>
+        <h3>Fusion Queen</h3>
+        <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
+      </div>
+      <div class="orchestrator-terminal">
+        <Terminal agentId={queenAgent.id} isFocused={true} />
+      </div>
+    </div>
+  {/if}
+
   <div class="variants-grid" class:has-report={evaluationReady}>
     {#each fusionAgents as agent (agent.id)}
       {@const variantName = typeof agent.role === 'object' && 'Fusion' in agent.role ? agent.role.Fusion.variant : ''}
@@ -75,6 +90,19 @@
       </div>
     {/each}
   </div>
+
+  {#if judgeAgent}
+    <div class="orchestrator-section">
+      <div class="orchestrator-header">
+        <span class="icon">⚖️</span>
+        <h3>Judge</h3>
+        <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
+      </div>
+      <div class="orchestrator-terminal">
+        <Terminal agentId={judgeAgent.id} isFocused={true} />
+      </div>
+    </div>
+  {/if}
 
   {#if evaluationReady && judgeReport}
     <div class="judge-section">
@@ -114,6 +142,43 @@
     height: 100%;
     padding: 16px;
     overflow-y: auto;
+  }
+
+  .orchestrator-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .orchestrator-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .orchestrator-header h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    flex: 1;
+  }
+
+  .orchestrator-terminal {
+    height: 300px;
+    background: #000;
+  }
+
+  .cli-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--color-primary-muted);
+    color: var(--color-accent);
+    font-weight: 500;
   }
 
   .variants-grid {

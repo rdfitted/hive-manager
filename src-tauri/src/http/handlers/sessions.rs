@@ -264,6 +264,7 @@ pub async fn launch_fusion(
         variants,
         task_description: req.task_description,
         judge_config,
+        queen_config: None,
         with_planning: req.with_planning.unwrap_or(false),
         default_cli,
         default_model: req.default_model,

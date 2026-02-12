@@ -227,7 +227,7 @@
           <div class="no-agents">
             <p>No agents in this session</p>
           </div>
-        {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type}
+        {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && $activeSession.state !== 'Planning' && $activeSession.state !== 'PlanReady'}
           <FusionPanel />
         {:else if $ui.layoutMode === 'grid'}
           <TerminalGrid

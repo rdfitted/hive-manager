@@ -122,6 +122,8 @@ pub struct FusionLaunchConfig {
     pub task_description: String,
     pub judge_config: AgentConfig,
     #[serde(default)]
+    pub queen_config: Option<AgentConfig>,
+    #[serde(default)]
     pub with_planning: bool,
     #[serde(default = "default_fusion_cli")]
     pub default_cli: String,
@@ -896,6 +898,62 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
             variant_table.push_str(&format!("| {} | {} | {} |\n", index, name, v.cli));
         }
 
+        // Determine phase 0 based on whether a task was provided
+        let phase0 = if task_description.trim().is_empty() {
+            String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
+
+**No task was provided.** You must first ask the user what they want to work on.
+
+Ask the user: "What would you like the Fusion variants to compete on? You can:
+- Provide a GitHub issue number (e.g., #42 or just 42)
+- Describe a feature you want to implement
+- Describe a bug you want to fix
+- Describe code you want to refactor"
+
+**If user provides a GitHub Issue number:**
+1. Fetch issue details using: gh issue view <number> --json number,title,body,labels,state
+2. Extract requirements and acceptance criteria from the issue body
+
+**Once you have the task, proceed to PHASE 1.**
+
+---
+
+"#)
+        } else if task_description.trim().starts_with('#') || task_description.trim().parse::<u32>().is_ok() {
+            let issue_num = task_description.trim().trim_start_matches('#');
+            format!(r#"## PHASE 0: Fetch GitHub Issue
+
+The user wants to work on GitHub issue: **#{}**
+
+**Fetch the issue details now:**
+```bash
+gh issue view {} --json number,title,body,labels,state
+```
+
+Extract from the response:
+- Issue title and full description
+- Acceptance criteria (look for checkboxes in the body)
+- Labels (bug, feature, enhancement, etc.)
+
+**Once you have the full context, proceed to PHASE 1.**
+
+---
+
+"#, issue_num, issue_num)
+        } else {
+            format!(r#"## PHASE 0: Task Provided
+
+The user wants to work on:
+
+**{}**
+
+**Proceed directly to PHASE 1.**
+
+---
+
+"#, task_description)
+        };
+
         format!(
 r#"# Master Planner - Fusion Mode
 
@@ -915,11 +973,9 @@ You are the **Master Planner** for a Fusion session. Your job is to analyze the 
 |---|------|-----|
 {variant_table}
 
-## Task
+{phase0}
 
-{task_description}
-
-## Your Mission
+## PHASE 1: Your Mission
 
 1. **Analyze the task** — understand what needs to be done, identify key decisions
 2. **Document expected approaches** — for each variant, describe what strategies or patterns they might use. Since each variant works independently, they may naturally take different approaches.
@@ -958,7 +1014,7 @@ Write the plan in this structure:
             session_id = session_id,
             variant_count = variant_count,
             variant_table = variant_table,
-            task_description = task_description,
+            phase0 = phase0,
         )
     }
 
@@ -2963,6 +3019,9 @@ Last updated: {timestamp}
     }
 
     pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {
+        tracing::info!("launch_fusion called: with_planning={}, variants={}, task={}",
+            config.with_planning, config.variants.len(), &config.task_description);
+
         if config.variants.is_empty() {
             return Err("Fusion launch requires at least one variant".to_string());
         }
@@ -3288,7 +3347,8 @@ Last updated: {timestamp}
             let pty_manager = self.pty_manager.read();
 
             let planner_id = format!("{}-master-planner", session_id);
-            let (cmd, mut args) = Self::build_command(&config.judge_config); // Use judge config for planner
+            let queen_cfg = config.queen_config.as_ref().unwrap_or(&config.judge_config);
+            let (cmd, mut args) = Self::build_command(queen_cfg);
 
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
@@ -3312,7 +3372,7 @@ Last updated: {timestamp}
                 id: planner_id,
                 role: AgentRole::MasterPlanner,
                 status: AgentStatus::Running,
-                config: config.judge_config.clone(),
+                config: queen_cfg.clone(),
                 parent_id: None,
             });
         }
@@ -3429,14 +3489,15 @@ Last updated: {timestamp}
         let mut new_agents = Vec::new();
 
         // Spawn Queen agent
+        let queen_cfg = config.queen_config.as_ref().unwrap_or(&config.judge_config).clone();
         {
             let pty_manager = self.pty_manager.read();
 
             let queen_id = format!("{}-queen", session_id);
-            let (cmd, mut args) = Self::build_command(&config.judge_config);
+            let (cmd, mut args) = Self::build_command(&queen_cfg);
 
             let queen_prompt = Self::build_fusion_queen_prompt(
-                &config.judge_config.cli,
+                &queen_cfg.cli,
                 session_id,
                 &variants,
                 &config.task_description,
@@ -3446,7 +3507,7 @@ Last updated: {timestamp}
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write tool docs for Queen
-            Self::write_tool_files(&session.project_path, session_id, &config.judge_config.cli)?;
+            Self::write_tool_files(&session.project_path, session_id, &queen_cfg.cli)?;
 
             tracing::info!("Launching Fusion Queen: {} {:?} in {:?}", cmd, args, cwd);
 
@@ -3466,7 +3527,7 @@ Last updated: {timestamp}
                 id: queen_id,
                 role: AgentRole::Queen,
                 status: AgentStatus::Running,
-                config: config.judge_config.clone(),
+                config: queen_cfg,
                 parent_id: None,
             });
         }

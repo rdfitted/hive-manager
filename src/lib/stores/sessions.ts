@@ -60,6 +60,7 @@ export interface FusionLaunchConfig {
   variants: FusionVariantConfig[];
   task_description: string;
   judge_config: { cli: string; model?: string; flags?: string[]; label?: string };
+  queen_config?: { cli: string; model?: string; flags?: string[]; label?: string };
   with_planning: boolean;
 }
 
