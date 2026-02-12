@@ -96,6 +96,7 @@ pub enum SessionTypeInfo {
     Hive { worker_count: u8 },
     Swarm { planner_count: u8 },
     Fusion { variants: Vec<String> },
+    Solo { cli: String, model: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +253,7 @@ impl SessionStorage {
                         SessionTypeInfo::Hive { worker_count } => format!("Hive ({})", worker_count),
                         SessionTypeInfo::Swarm { planner_count } => format!("Swarm ({})", planner_count),
                         SessionTypeInfo::Fusion { variants } => format!("Fusion ({})", variants.len()),
+                        SessionTypeInfo::Solo { cli, .. } => format!("Solo ({})", cli),
                     };
 
                     summaries.push(SessionSummary {
