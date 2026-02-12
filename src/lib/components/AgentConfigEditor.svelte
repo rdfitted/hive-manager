@@ -131,8 +131,16 @@
 
       if (cli === 'claude' && flag === '--settings' && i + 1 < flags.length) {
         try {
-          const parsed = JSON.parse(flags[i + 1]) as { effortLevel?: string };
+          const parsed = JSON.parse(flags[i + 1]) as { effortLevel?: string; [key: string]: unknown };
           if (typeof parsed.effortLevel === 'string') {
+            // Strip effortLevel but preserve other keys
+            const { effortLevel: _, ...rest } = parsed;
+            if (Object.keys(rest).length > 0) {
+              // Other keys exist, keep --settings with remaining keys
+              cleaned.push(flag);
+              cleaned.push(JSON.stringify(rest));
+            }
+            // Skip the original --settings pair regardless
             i += 1;
             continue;
           }

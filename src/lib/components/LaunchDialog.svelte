@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
