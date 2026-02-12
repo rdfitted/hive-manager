@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -309,66 +308,6 @@ impl InjectionManager {
         Ok(())
     }
 
-    /// Judge injection - inject evaluation context for Fusion mode
-    pub fn judge_inject(
-        &self,
-        session_id: &str,
-        judge_agent_id: &str,
-        variant_paths: Vec<String>,
-        evaluation_prompt: &str,
-    ) -> Result<(), InjectionError> {
-        // Log the judge injection
-        let message = format!(
-            "[JUDGE INJECTION] Evaluating {} variants with evaluation report path: {}",
-            variant_paths.len(),
-            self.session_path(session_id).join("state").join("evaluation-report.md").display()
-        );
-
-        self.storage
-            .append_coordination_log(
-                session_id,
-                &CoordinationMessage::system(&format_agent_display(judge_agent_id), &message)
-            )
-            .map_err(|e| InjectionError::StorageError(e.to_string()))?;
-
-        // Build the evaluation context message
-        // Sanitize evaluation_prompt: escape newlines to prevent command injection in PTY
-        let sanitized_prompt = evaluation_prompt
-            .replace('\r', "\\r")
-            .replace('\n', "\\n");
-        
-        let mut eval_context = String::from("[FUSION EVALUATION CONTEXT]\n\n");
-        eval_context.push_str("You have been assigned as the JUDGE for this Fusion mode session.\n\n");
-        eval_context.push_str(&format!("Evaluation Prompt: {}\n\n", sanitized_prompt));
-        eval_context.push_str("Worktrees to evaluate:\n");
-        for (i, path) in variant_paths.iter().enumerate() {
-            eval_context.push_str(&format!("{}. {}\n", i + 1, path));
-        }
-        eval_context.push_str("\nEvaluation report will be written to: ");
-        eval_context.push_str(&self.session_path(session_id).join("state").join("evaluation-report.md").display().to_string());
-        eval_context.push_str("\n");
-
-        // Write to judge agent's PTY
-        self.write_to_agent(judge_agent_id, &eval_context)?;
-
-        // Emit event for UI
-        if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("judge-activated", serde_json::json!({
-                "session_id": session_id,
-                "judge_id": judge_agent_id,
-                "variant_count": variant_paths.len(),
-                "evaluation_report_path": self.session_path(session_id).join("state").join("evaluation-report.md").display().to_string()
-            }));
-        }
-
-        Ok(())
-    }
-
-    /// Get session path helper
-    fn session_path(&self, session_id: &str) -> PathBuf {
-        // Build path using session storage base
-        std::path::PathBuf::from(".hive-manager").join(session_id)
-    }
 }
 
 /// Format agent ID for display (extract role from full ID)
