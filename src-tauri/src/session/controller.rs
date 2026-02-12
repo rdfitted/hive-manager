@@ -139,6 +139,8 @@ pub struct FusionVariantConfig {
     pub name: String,
     pub cli: String,
     pub model: Option<String>,
+    #[serde(default)]
+    pub flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3142,7 +3144,7 @@ Last updated: {timestamp}
             let variant_agent_config = AgentConfig {
                 cli: cli.clone(),
                 model: source_variant.model.clone().or(config.default_model.clone()),
-                flags: vec![],
+                flags: source_variant.flags.clone(),
                 label: Some(format!("Fusion {}", variant.name)),
                 role: None,
                 initial_prompt: Some(config.task_description.clone()),
@@ -3567,7 +3569,7 @@ Last updated: {timestamp}
             let variant_agent_config = AgentConfig {
                 cli: cli.clone(),
                 model: source_variant.model.clone().or(config.default_model.clone()),
-                flags: vec![],
+                flags: source_variant.flags.clone(),
                 label: Some(format!("Fusion {}", variant.name)),
                 role: None,
                 initial_prompt: Some(config.task_description.clone()),
@@ -4110,7 +4112,7 @@ Last updated: {timestamp}
         // Commit the squash merge (--squash only stages changes, doesn't commit)
         Self::run_git_in_dir(
             &session.project_path,
-            &["commit", "-m", &format!("Merge fusion winner: {}", winner.variant_name)],
+            &["commit", "-m", &format!("Merge fusion winner: {}", winner.name)],
         )?;
 
         let mut cleanup_errors = Vec::new();

@@ -246,6 +246,7 @@ pub async fn launch_fusion(
                 name: v.name,
                 cli,
                 model: v.model,
+                flags: vec![],
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;

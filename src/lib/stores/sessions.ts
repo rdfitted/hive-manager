@@ -53,6 +53,7 @@ export interface FusionVariantConfig {
   name: string;
   cli: string;
   model?: string;
+  flags?: string[];
 }
 
 export interface FusionLaunchConfig {

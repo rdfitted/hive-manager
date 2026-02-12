@@ -155,10 +155,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   // Fusion config
   let variantCount = 2;
   let fusionVariants: FusionVariantConfig[] = [
-    { name: 'Variant A', cli: 'claude' },
-    { name: 'Variant B', cli: 'claude' },
-    { name: 'Variant C', cli: 'claude' },
-    { name: 'Variant D', cli: 'claude' },
+    { name: 'Variant A', cli: 'claude', flags: [] },
+    { name: 'Variant B', cli: 'claude', flags: [] },
+    { name: 'Variant C', cli: 'claude', flags: [] },
+    { name: 'Variant D', cli: 'claude', flags: [] },
   ];
   let judgeConfig = { cli: 'claude', model: '' };
 
@@ -174,6 +174,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
       ...fusionVariants[index],
       cli: detail.cli,
       model: detail.model,
+      flags: detail.flags,
     };
   }
 
