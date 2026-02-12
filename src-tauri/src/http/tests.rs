@@ -1776,3 +1776,268 @@ fn test_persisted_session_legacy_json_defaults_to_claude() {
         "Legacy sessions without default_model should fallback to None"
     );
 }
+
+// --- Fusion mode smoke tests ---
+
+#[tokio::test]
+async fn test_launch_fusion_success() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "project_path": std::env::temp_dir().to_str().unwrap(),
+        "task_description": "Implement feature X",
+        "variants": [
+            { "name": "variant-a" },
+            { "name": "variant-b" }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/fusion")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400
+    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_launch_fusion_empty_variants() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "project_path": "/tmp/test",
+        "task_description": "Implement feature X",
+        "variants": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/fusion")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_launch_fusion_empty_task() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "project_path": "/tmp/test",
+        "task_description": "   ",
+        "variants": [{ "name": "v1" }]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/fusion")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_launch_fusion_invalid_cli() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "project_path": "/tmp/test",
+        "task_description": "Implement feature",
+        "variants": [{ "name": "v1" }],
+        "default_cli": "evil-cli"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/fusion")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_launch_fusion_invalid_judge_cli() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "project_path": "/tmp/test",
+        "task_description": "Implement feature",
+        "variants": [{ "name": "v1" }],
+        "judge_cli": "malicious-judge"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/fusion")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_get_fusion_status_not_found() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/nonexistent/fusion/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_fusion_evaluation_not_found() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/nonexistent/fusion/evaluation")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_select_fusion_winner_not_found() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({ "variant": "variant-a" });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/nonexistent/fusion/select-winner")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should be 404 or 500 (session not found), not 200
+    assert_ne!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_select_fusion_winner_empty_variant() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({ "variant": "  " });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/nonexistent/fusion/select-winner")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_fusion_status_path_traversal() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/..evil/fusion/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_fusion_evaluation_path_traversal() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/..evil/fusion/evaluation")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_select_winner_path_traversal() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({ "variant": "v1" });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/..evil/fusion/select-winner")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
