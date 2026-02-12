@@ -516,7 +516,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 {#each activeFusionVariants as variant, i (i)}
                   <div class="worker-card">
                     <div class="card-header">
-                      <span class="card-title">{variant.name}</span>
+                      <input
+                        type="text"
+                        class="card-title-input"
+                        bind:value={fusionVariants[i].name}
+                        placeholder="Variant {String.fromCharCode(65 + i)}"
+                      />
                     </div>
                     <AgentConfigEditor
                       config={variantAgentConfigs[i]}
@@ -809,6 +814,22 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 12px;
     font-weight: 600;
     color: var(--color-text);
+  }
+
+  .card-title-input {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text);
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    width: 150px;
+  }
+
+  .card-title-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
   }
 
   .remove-button {
