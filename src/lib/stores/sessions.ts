@@ -49,6 +49,22 @@ export interface HiveLaunchConfig {
   smoke_test?: boolean;
 }
 
+export interface FusionVariantConfig {
+  name: string;
+  cli: string;
+  model?: string;
+  flags?: string[];
+}
+
+export interface FusionLaunchConfig {
+  project_path: string;
+  variants: FusionVariantConfig[];
+  task_description: string;
+  judge_config: { cli: string; model?: string; flags?: string[]; label?: string };
+  queen_config?: { cli: string; model?: string; flags?: string[]; label?: string };
+  with_planning: boolean;
+}
+
 export interface PlannerConfig {
   config: AgentConfig;
   domain: string;
@@ -207,6 +223,26 @@ function createSessionsStore() {
       }
     },
 
+    async launchFusion(config: FusionLaunchConfig) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('launch_fusion', { config });
+        update((state) => {
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
     setActiveSession(sessionId: string | null) {
       update((state) => ({ ...state, activeSessionId: sessionId }));
     },
@@ -269,6 +305,15 @@ function createSessionsStore() {
         return session;
       } catch (err) {
         update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async applyFusionWinner(sessionId: string, variantName: string) {
+      try {
+        await invoke('apply_fusion_winner', { sessionId, variantName });
+      } catch (err) {
+        update((state) => ({ ...state, error: String(err) }));
         throw err;
       }
     },

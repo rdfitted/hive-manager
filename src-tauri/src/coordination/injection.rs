@@ -307,6 +307,7 @@ impl InjectionManager {
         }
         Ok(())
     }
+
 }
 
 /// Format agent ID for display (extract role from full ID)

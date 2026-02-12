@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
@@ -10,9 +10,10 @@
     close: void;
     launchHive: HiveLaunchConfig;
     launchSwarm: SwarmLaunchConfig;
+    launchFusion: FusionLaunchConfig;
   }>();
 
-  type SessionMode = 'hive' | 'swarm';
+  type SessionMode = 'hive' | 'swarm' | 'fusion';
 
   // Predefined roles with default CLIs, descriptions, and prompt templates
   const predefinedRoles = [
@@ -151,6 +152,40 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     { cli: 'claude', flags: [], label: undefined, selectedRole: 'resolver' },
   ];
 
+  // Fusion config
+  let variantCount = 2;
+  let fusionVariants: FusionVariantConfig[] = [
+    { name: 'Variant A', cli: 'claude', flags: [] },
+    { name: 'Variant B', cli: 'claude', flags: [] },
+    { name: 'Variant C', cli: 'claude', flags: [] },
+    { name: 'Variant D', cli: 'claude', flags: [] },
+  ];
+  let judgeConfig = { cli: 'claude', model: undefined };
+
+  // AgentConfig wrappers for fusion variants (so AgentConfigEditor can be used)
+  let variantAgentConfigs: AgentConfig[] = fusionVariants.map(v => ({
+    cli: v.cli, model: v.model, flags: [], label: v.name,
+  }));
+  let judgeAgentConfig: AgentConfig = { cli: judgeConfig.cli, model: judgeConfig.model, flags: [], label: 'Fusion Judge' };
+
+  function handleVariantConfigChange(index: number, detail: AgentConfig) {
+    variantAgentConfigs[index] = detail;
+    fusionVariants[index] = {
+      ...fusionVariants[index],
+      cli: detail.cli,
+      model: detail.model || undefined,
+      flags: detail.flags,
+    };
+  }
+
+  function handleJudgeConfigChange(detail: AgentConfig) {
+    judgeAgentConfig = detail;
+    judgeConfig = { cli: detail.cli, model: detail.model || undefined, flags: detail.flags, label: detail.label };
+  }
+
+
+  $: activeFusionVariants = fusionVariants.slice(0, variantCount);
+
   function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
     const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
     return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
@@ -244,7 +279,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           smoke_test: smokeTest,
         };
         dispatch('launchHive', config);
-      } else {
+      } else if (mode === 'swarm') {
         // Build workers config with roles
         const workersWithRoles: AgentConfig[] = workersPerPlanner.map((w) => ({
           cli: w.cli,
@@ -264,6 +299,16 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           smoke_test: smokeTest,
         };
         dispatch('launchSwarm', config);
+      } else {
+        const config: FusionLaunchConfig = {
+          project_path: projectPath,
+          variants: activeFusionVariants,
+          task_description: prompt,
+          judge_config: judgeConfig,
+          queen_config: queenConfig,
+          with_planning: true,
+        };
+        dispatch('launchFusion', config);
       }
     } catch (err) {
       error = String(err);
@@ -317,6 +362,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           type="button"
         >
           Swarm
+        </button>
+        <button
+          class="mode-tab"
+          class:active={mode === 'fusion'}
+          on:click={() => (mode = 'fusion')}
+          type="button"
+        >
+          Fusion
         </button>
       </div>
 
@@ -443,6 +496,55 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                     <AgentConfigEditor bind:config={worker} showLabel={true} />
                   </div>
                 {/each}
+              </div>
+            </div>
+          </div>
+        {:else if mode === 'fusion'}
+          <div class="form-section">
+            <h3>Fusion Configuration</h3>
+            <p class="section-description">Run multiple agent variants in parallel to compare their outputs. A judge will evaluate and recommend the best result.</p>
+
+            <div class="field">
+              <label for="variant-count">Number of Variants</label>
+              <select id="variant-count" bind:value={variantCount} class="role-select">
+                <option value={2}>2 Variants</option>
+                <option value={3}>3 Variants</option>
+                <option value={4}>4 Variants</option>
+              </select>
+            </div>
+
+            <div class="subsection">
+              <h4>Variant Configurations</h4>
+              <div class="workers-list">
+                {#each activeFusionVariants as variant, i (i)}
+                  <div class="worker-card">
+                    <div class="card-header">
+                      <input
+                        type="text"
+                        class="card-title-input"
+                        bind:value={fusionVariants[i].name}
+                        placeholder="Variant {String.fromCharCode(65 + i)}"
+                      />
+                    </div>
+                    <AgentConfigEditor
+                      config={variantAgentConfigs[i]}
+                      showLabel={false}
+                      on:change={(e) => handleVariantConfigChange(i, e.detail)}
+                    />
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <div class="subsection">
+              <h4>Judge Configuration</h4>
+              <p class="section-description">Evaluates variant outputs and recommends a winner.</p>
+              <div class="worker-card">
+                <AgentConfigEditor
+                  config={judgeAgentConfig}
+                  showLabel={false}
+                  on:change={(e) => handleJudgeConfigChange(e.detail)}
+                />
               </div>
             </div>
           </div>
@@ -716,6 +818,22 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 12px;
     font-weight: 600;
     color: var(--color-text);
+  }
+
+  .card-title-input {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text);
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    width: 150px;
+  }
+
+  .card-title-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
   }
 
   .remove-button {

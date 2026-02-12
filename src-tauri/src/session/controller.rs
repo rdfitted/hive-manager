@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -56,6 +57,12 @@ pub enum SessionState {
     WaitingForWorker(u8),    // Which worker we're waiting on (sequential mode)
     SpawningPlanner(u8),     // Which planner is being spawned (Swarm sequential mode)
     WaitingForPlanner(u8),   // Which planner we're waiting on (Swarm sequential mode)
+    SpawningFusionVariant(u8),    // Which fusion variant is being spawned
+    WaitingForFusionVariants,     // All variants running, waiting for completion
+    SpawningJudge,                // Launching judge after all variants complete
+    Judging,                      // Judge evaluating implementations
+    AwaitingVerdictSelection,     // User choosing winner
+    MergingWinner,                // Merging winning variant
     Running,
     Paused,
     Completed,
@@ -106,6 +113,63 @@ pub struct PlannerConfig {
     pub config: AgentConfig,
     pub domain: String,
     pub workers: Vec<AgentConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FusionLaunchConfig {
+    pub project_path: String,
+    pub variants: Vec<FusionVariantConfig>,
+    pub task_description: String,
+    pub judge_config: AgentConfig,
+    #[serde(default)]
+    pub queen_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub with_planning: bool,
+    #[serde(default = "default_fusion_cli")]
+    pub default_cli: String,
+    pub default_model: Option<String>,
+}
+
+fn default_fusion_cli() -> String {
+    "claude".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FusionVariantConfig {
+    pub name: String,
+    pub cli: String,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FusionSessionMetadata {
+    base_branch: String,
+    variants: Vec<FusionVariantMetadata>,
+    judge_config: AgentConfig,
+    task_description: String,
+    decision_file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FusionVariantMetadata {
+    index: u8,
+    name: String,
+    slug: String,
+    branch: String,
+    worktree_path: String,
+    task_file: String,
+    agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FusionVariantStatus {
+    pub index: u8,
+    pub name: String,
+    pub branch: String,
+    pub worktree_path: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -362,6 +426,17 @@ impl SessionController {
         sessions.values().cloned().collect()
     }
 
+    fn emit_session_update(&self, session_id: &str) {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        };
+
+        if let (Some(app_handle), Some(session)) = (self.app_handle.as_ref(), session) {
+            let _ = app_handle.emit("session-update", SessionUpdate { session });
+        }
+    }
+
     /// Insert a session directly (for testing purposes only)
     #[cfg(test)]
     pub fn insert_test_session(&self, session: Session) {
@@ -528,6 +603,538 @@ impl SessionController {
                 args.push(prompt_arg);
             }
         }
+    }
+
+    fn run_git_in_dir(project_path: &PathBuf, args: &[&str]) -> Result<String, String> {
+        if !project_path.exists() {
+            return Err(format!("Project path does not exist: {}", project_path.display()));
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(project_path);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run git {:?}: {}", args, e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let message = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(if message.is_empty() {
+                format!("Git command failed: git {}", args.join(" "))
+            } else {
+                message
+            });
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn slugify_variant_name(name: &str) -> String {
+        let mut out = String::new();
+        let mut prev_dash = false;
+
+        for ch in name.trim().chars() {
+            let lowered = ch.to_ascii_lowercase();
+            if lowered.is_ascii_alphanumeric() {
+                out.push(lowered);
+                prev_dash = false;
+            } else if !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+
+        let out = out.trim_matches('-').to_string();
+        if out.is_empty() { "variant".to_string() } else { out }
+    }
+
+    fn unique_variant_slug(name: &str, seen: &mut HashMap<String, u16>) -> String {
+        let base = Self::slugify_variant_name(name);
+        let count = seen.entry(base.clone()).and_modify(|v| *v += 1).or_insert(1);
+        if *count == 1 {
+            base
+        } else {
+            format!("{}-{}", base, count)
+        }
+    }
+
+    fn fusion_metadata_path(project_path: &PathBuf, session_id: &str) -> PathBuf {
+        project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("fusion-config.json")
+    }
+
+    fn write_fusion_metadata(
+        project_path: &PathBuf,
+        session_id: &str,
+        metadata: &FusionSessionMetadata,
+    ) -> Result<(), String> {
+        let metadata_path = Self::fusion_metadata_path(project_path, session_id);
+        if let Some(parent) = metadata_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create fusion metadata dir: {}", e))?;
+        }
+
+        let json = serde_json::to_string_pretty(metadata)
+            .map_err(|e| format!("Failed to serialize fusion metadata: {}", e))?;
+        std::fs::write(&metadata_path, json)
+            .map_err(|e| format!("Failed to write fusion metadata: {}", e))
+    }
+
+    fn read_fusion_metadata(project_path: &PathBuf, session_id: &str) -> Result<FusionSessionMetadata, String> {
+        let metadata_path = Self::fusion_metadata_path(project_path, session_id);
+        let json = std::fs::read_to_string(&metadata_path)
+            .map_err(|e| format!("Failed to read fusion metadata {}: {}", metadata_path.display(), e))?;
+        serde_json::from_str(&json)
+            .map_err(|e| format!("Failed to parse fusion metadata: {}", e))
+    }
+
+    fn parse_task_status(content: &str) -> Option<String> {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(status) = trimmed.strip_prefix("## Status:") {
+                return Some(status.trim().to_string());
+            }
+            if let Some(status) = trimmed.strip_prefix("**Status**:") {
+                return Some(status.trim().to_string());
+            }
+        }
+        None
+    }
+
+    fn read_task_status(task_path: &str) -> String {
+        let path = PathBuf::from(task_path);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(_) => return "UNKNOWN".to_string(),
+        };
+
+        Self::parse_task_status(&content).unwrap_or_else(|| "UNKNOWN".to_string())
+    }
+
+    fn is_task_completed(task_path: &str) -> bool {
+        Self::read_task_status(task_path) == "COMPLETED"
+    }
+
+    fn write_fusion_variant_task_file(
+        project_path: &PathBuf,
+        session_id: &str,
+        variant_index: u8,
+        variant_name: &str,
+        task_description: &str,
+    ) -> Result<PathBuf, String> {
+        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+        std::fs::create_dir_all(&tasks_dir)
+            .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
+
+        let filename = format!("fusion-variant-{}-task.md", variant_index);
+        let file_path = tasks_dir.join(filename);
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+
+        let content = format!(
+r#"# Task Assignment - Fusion Variant {variant_index} ({variant_name})
+
+## Status: ACTIVE
+
+## Role Constraints
+
+- **EXECUTOR**: You have full authority to implement and fix issues.
+- **SCOPE**: Build this variant only.
+- **GIT**: Commit your changes to your fusion branch.
+
+## Instructions
+
+{task_description}
+
+## Completion Protocol
+
+When task is complete, update this file:
+1. Change Status to: COMPLETED
+2. Add a summary under a new Result section
+
+If blocked, change Status to: BLOCKED and describe the issue.
+
+---
+Last updated: {timestamp}
+"#,
+            variant_index = variant_index,
+            variant_name = variant_name,
+            task_description = task_description,
+            timestamp = timestamp,
+        );
+
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write fusion task file: {}", e))?;
+        Ok(file_path)
+    }
+
+    fn build_fusion_worker_prompt(
+        session_id: &str,
+        variant_index: u8,
+        variant_name: &str,
+        branch: &str,
+        worktree_path: &str,
+        task_description: &str,
+        cli: &str,
+    ) -> String {
+        let task_file = format!(".hive-manager/{}/tasks/fusion-variant-{}-task.md", session_id, variant_index);
+        let polling_instructions = get_polling_instructions(cli, &task_file);
+
+        format!(
+r#"You are a Fusion worker implementing variant "{variant_name}".
+Working directory: {worktree_path}
+Branch: {branch}
+
+## Your Task
+{task_description}
+
+## Rules
+- Work ONLY within your worktree directory
+- Commit all changes to your branch
+- Do NOT interact with other variants
+- When complete, update your task file status to COMPLETED
+
+## Task Coordination
+Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#,
+            variant_name = variant_name,
+            worktree_path = worktree_path,
+            branch = branch,
+            task_description = task_description,
+            task_file = task_file,
+            polling_instructions = polling_instructions,
+        )
+    }
+
+    fn build_fusion_judge_prompt(
+        session_id: &str,
+        variants: &[FusionVariantMetadata],
+        decision_file: &str,
+    ) -> String {
+        let variant_list = variants
+            .iter()
+            .map(|v| format!("- {}: {}", v.name, v.worktree_path))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let diff_commands = variants
+            .iter()
+            .map(|v| format!("git diff fusion/{session_id}/base..{}", v.branch))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+r#"You are the Judge evaluating {variant_count} competing implementations.
+
+## Variants
+{variant_list}
+
+## Evaluation Process
+1. For each variant, run:
+{diff_commands}
+2. Review code quality, correctness, test coverage, and pattern adherence
+3. Write comparison report to: {decision_file}
+
+## Constraints
+- You are read-only for code changes. Do NOT edit application code.
+- Only produce the evaluation report and recommendation.
+
+## Report Format
+# Evaluation Report
+## Variant Comparison
+| Criterion | Variant A | Variant B | Notes |
+## Recommendation
+Winner: [variant name]
+Rationale: [explanation]
+
+## Learning Submission (REQUIRED)
+
+After writing the evaluation report, submit learnings about what you observed.
+
+### Step 1: Read existing learnings to avoid duplicates
+```bash
+curl -s "http://localhost:18800/api/sessions/{session_id}/learnings"
+```
+
+### Step 2: Submit learnings (one per insight)
+```bash
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
+  -H "Content-Type: application/json" \
+  -d '{{"content": "YOUR LEARNING HERE", "category": "CATEGORY", "source": "fusion-judge"}}'
+```
+
+### What to capture:
+- **Which variant won and why** (category: "architecture")
+- **Code quality patterns** observed — good and bad (category: "code-quality")
+- **Architectural insights** from comparing approaches (category: "architecture")
+- **Anti-patterns to avoid** (category: "anti-pattern")
+"#,
+            variant_count = variants.len(),
+            variant_list = variant_list,
+            diff_commands = diff_commands,
+            decision_file = decision_file,
+            session_id = session_id,
+        )
+    }
+
+    /// Build the Master Planner's prompt for Fusion planning phase
+    fn build_fusion_master_planner_prompt(
+        session_id: &str,
+        task_description: &str,
+        variants: &[FusionVariantConfig],
+    ) -> String {
+        let variant_count = variants.len();
+        let mut variant_table = String::new();
+        for (i, v) in variants.iter().enumerate() {
+            let index = i + 1;
+            let name = if v.name.trim().is_empty() { format!("Variant {}", index) } else { v.name.trim().to_string() };
+            variant_table.push_str(&format!("| {} | {} | {} |\n", index, name, v.cli));
+        }
+
+        // Determine phase 0 based on whether a task was provided
+        let phase0 = if task_description.trim().is_empty() {
+            String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
+
+**No task was provided.** You must first ask the user what they want to work on.
+
+Ask the user: "What would you like the Fusion variants to compete on? You can:
+- Provide a GitHub issue number (e.g., #42 or just 42)
+- Describe a feature you want to implement
+- Describe a bug you want to fix
+- Describe code you want to refactor"
+
+**If user provides a GitHub Issue number:**
+1. Fetch issue details using: gh issue view <number> --json number,title,body,labels,state
+2. Extract requirements and acceptance criteria from the issue body
+
+**Once you have the task, proceed to PHASE 1.**
+
+---
+
+"#)
+        } else if task_description.trim().starts_with('#') || task_description.trim().parse::<u32>().is_ok() {
+            let issue_num = task_description.trim().trim_start_matches('#');
+            format!(r#"## PHASE 0: Fetch GitHub Issue
+
+The user wants to work on GitHub issue: **#{}**
+
+**Fetch the issue details now:**
+```bash
+gh issue view {} --json number,title,body,labels,state
+```
+
+Extract from the response:
+- Issue title and full description
+- Acceptance criteria (look for checkboxes in the body)
+- Labels (bug, feature, enhancement, etc.)
+
+**Once you have the full context, proceed to PHASE 1.**
+
+---
+
+"#, issue_num, issue_num)
+        } else {
+            format!(r#"## PHASE 0: Task Provided
+
+The user wants to work on:
+
+**{}**
+
+**Proceed directly to PHASE 1.**
+
+---
+
+"#, task_description)
+        };
+
+        format!(
+r#"# Master Planner - Fusion Mode
+
+You are the **Master Planner** for a Fusion session. Your job is to analyze the task and create a plan that documents how multiple independent variants will each tackle the same problem.
+
+## Session Info
+
+- **Session ID**: {session_id}
+- **Mode**: Fusion (competing variants)
+- **Plan Output**: `.hive-manager/{session_id}/plan.md`
+
+## Variants
+
+{variant_count} variants will compete, each implementing the SAME task independently:
+
+| # | Name | CLI |
+|---|------|-----|
+{variant_table}
+
+{phase0}
+
+## PHASE 1: Your Mission
+
+1. **Analyze the task** — understand what needs to be done, identify key decisions
+2. **Document expected approaches** — for each variant, describe what strategies or patterns they might use. Since each variant works independently, they may naturally take different approaches.
+3. **Identify evaluation criteria** — what should the Judge look for when comparing results? (correctness, code quality, performance, test coverage, etc.)
+4. **Write the plan** to `.hive-manager/{session_id}/plan.md`
+
+## Plan Format
+
+Write the plan in this structure:
+
+```markdown
+# Fusion Plan
+
+## Task Summary
+[Concise description of what needs to be built/fixed]
+
+## Key Decisions
+- [Decision points where variants may diverge]
+
+## Evaluation Criteria
+- [ ] Correctness — does it work?
+- [ ] Code quality — clean, readable, maintainable?
+- [ ] Test coverage — are edge cases handled?
+- [ ] Performance — efficient implementation?
+- [ ] Pattern adherence — follows project conventions?
+
+## Notes
+[Any additional context for the variants and judge]
+```
+
+## IMPORTANT
+- Write the plan to `.hive-manager/{session_id}/plan.md` and then STOP
+- Do NOT implement anything — you are a planner, not a coder
+- Keep the plan concise — variants will each receive the same task description
+"#,
+            session_id = session_id,
+            variant_count = variant_count,
+            variant_table = variant_table,
+            phase0 = phase0,
+        )
+    }
+
+    /// Build the Fusion Queen's prompt — monitors variants, spawns Judge when all complete
+    fn build_fusion_queen_prompt(
+        cli: &str,
+        session_id: &str,
+        variants: &[FusionVariantMetadata],
+        task_description: &str,
+    ) -> String {
+        let variant_count = variants.len();
+        let mut variant_info = String::new();
+        let mut task_files = String::new();
+        for v in variants {
+            variant_info.push_str(&format!("| {} | {} | {} | {} |\n", v.index, v.name, v.branch, v.worktree_path));
+            task_files.push_str(&format!("- Variant {} ({}): `{}`\n", v.index, v.name, v.task_file));
+        }
+
+        let hardening = if CliRegistry::needs_role_hardening(cli) {
+            r#"
+WARNING: CRITICAL ROLE CONSTRAINTS
+
+You are the QUEEN - the top-level coordinator. You do NOT implement.
+
+### You ARE allowed to:
+- Read plan.md, task files, coordination.log
+- Spawn Judge via HTTP API (use curl)
+- Monitor variant progress
+- Report status updates
+
+### You are PROHIBITED from:
+- Editing application source code
+- Running implementation commands
+- Implementing features directly
+"#
+        } else {
+            ""
+        };
+
+        format!(
+r#"# Queen Agent - Fusion Session
+
+You are the **Queen** monitoring a Fusion session where {variant_count} variants compete to implement the same task.
+{hardening}
+
+## Session Info
+
+- **Session ID**: {session_id}
+- **Mode**: Fusion (competing variants)
+- **Plan**: `.hive-manager/{session_id}/plan.md`
+- **Tools Directory**: `.hive-manager/{session_id}/tools/`
+
+## Task
+
+{task_description}
+
+## Variants
+
+| # | Name | Branch | Worktree |
+|---|------|--------|----------|
+{variant_info}
+
+## Task Files to Monitor
+
+{task_files}
+
+## Your Protocol
+
+### Phase 1: Monitor Variants
+
+Poll variant task files every 30 seconds to check for COMPLETED or FAILED status:
+
+```bash
+for file in {task_file_glob}; do echo "=== $file ==="; head -5 "$file"; done
+```
+
+A variant is complete when its task file contains `Status: COMPLETED`.
+
+### Phase 2: Spawn Judge
+
+When ALL {variant_count} variants have COMPLETED status, spawn the Judge:
+
+```bash
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"cli": "{cli}", "role": "judge"}}'
+```
+
+### Phase 3: Monitor Judge
+
+After spawning the Judge, monitor the evaluation directory:
+- Decision file: `.hive-manager/{session_id}/evaluation/decision.md`
+- When the decision file exists and is non-empty, report completion
+
+## Status Reporting
+
+Write status updates to `.hive-manager/{session_id}/coordination.log`:
+```
+[TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
+[TIMESTAMP] QUEEN: All variants complete - spawning Judge
+[TIMESTAMP] QUEEN: Judge evaluation complete
+```
+
+## Learning Tools
+
+Read tool docs in `.hive-manager/{session_id}/tools/` for:
+- `submit-learning.md` — Record observations
+- `list-learnings.md` — View existing learnings
+"#,
+            variant_count = variant_count,
+            hardening = hardening,
+            session_id = session_id,
+            task_description = task_description,
+            variant_info = variant_info,
+            task_files = task_files,
+            task_file_glob = format!(".hive-manager/{}/tasks/fusion-variant-*-task.md", session_id),
+            cli = cli,
+        )
     }
 
     /// Build the Master Planner's prompt for initial planning phase
@@ -2413,6 +3020,231 @@ Last updated: {timestamp}
         Ok(session)
     }
 
+    pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {
+        tracing::info!("launch_fusion called: with_planning={}, variants={}, task={}",
+            config.with_planning, config.variants.len(), &config.task_description);
+
+        if config.variants.is_empty() {
+            return Err("Fusion launch requires at least one variant".to_string());
+        }
+
+        if config.with_planning {
+            let session_id = Uuid::new_v4().to_string();
+            return self.launch_fusion_planning_phase(session_id, config);
+        }
+
+        let session_id = Uuid::new_v4().to_string();
+        let project_path = PathBuf::from(&config.project_path);
+        let default_cli = if config.default_cli.trim().is_empty() {
+            "claude".to_string()
+        } else {
+            config.default_cli.trim().to_string()
+        };
+
+        let mut seen_slugs: HashMap<String, u16> = HashMap::new();
+        let mut variants = Vec::new();
+
+        for (idx, variant) in config.variants.iter().enumerate() {
+            let index = (idx + 1) as u8;
+            let name = if variant.name.trim().is_empty() {
+                format!("variant-{}", index)
+            } else {
+                variant.name.trim().to_string()
+            };
+            let slug = Self::unique_variant_slug(&name, &mut seen_slugs);
+            let branch = format!("fusion/{}/{}", session_id, slug);
+            let worktree_path = project_path
+                .join(".hive-fusion")
+                .join(&session_id)
+                .join(format!("variant-{}", slug))
+                .to_string_lossy()
+                .to_string();
+            let task_file = project_path
+                .join(".hive-manager")
+                .join(&session_id)
+                .join("tasks")
+                .join(format!("fusion-variant-{}-task.md", index))
+                .to_string_lossy()
+                .to_string();
+
+            variants.push(FusionVariantMetadata {
+                index,
+                name,
+                slug,
+                branch,
+                worktree_path,
+                task_file,
+                agent_id: format!("{}-fusion-{}", session_id, index),
+            });
+        }
+
+        let session = Session {
+            id: session_id.clone(),
+            session_type: SessionType::Fusion {
+                variants: variants.iter().map(|v| v.name.clone()).collect(),
+            },
+            project_path: project_path.clone(),
+            state: SessionState::Starting,
+            created_at: Utc::now(),
+            agents: Vec::new(),
+            default_cli: default_cli.clone(),
+            default_model: config.default_model.clone(),
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session);
+        }
+        self.emit_session_update(&session_id);
+
+        let base_branch = format!("fusion/{}/base", session_id);
+        Self::run_git_in_dir(&project_path, &["branch", &base_branch, "HEAD"])?;
+
+        for (variant_idx, variant) in variants.iter().enumerate() {
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(s) = sessions.get_mut(&session_id) {
+                    s.state = SessionState::SpawningFusionVariant(variant.index);
+                }
+            }
+            self.emit_session_update(&session_id);
+
+            let worktree_path = PathBuf::from(&variant.worktree_path);
+            if let Some(parent) = worktree_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create worktree parent dir: {}", e))?;
+            }
+
+            Self::run_git_in_dir(
+                &project_path,
+                &[
+                    "worktree",
+                    "add",
+                    &variant.worktree_path,
+                    "-b",
+                    &variant.branch,
+                    &base_branch,
+                ],
+            )?;
+
+            Self::write_fusion_variant_task_file(
+                &project_path,
+                &session_id,
+                variant.index,
+                &variant.name,
+                &config.task_description,
+            )?;
+
+            let source_variant = &config.variants[variant_idx];
+            let cli = if source_variant.cli.trim().is_empty() {
+                default_cli.clone()
+            } else {
+                source_variant.cli.trim().to_string()
+            };
+            let variant_agent_config = AgentConfig {
+                cli: cli.clone(),
+                model: source_variant.model.clone().or(config.default_model.clone()),
+                flags: source_variant.flags.clone(),
+                label: Some(format!("Fusion {}", variant.name)),
+                role: None,
+                initial_prompt: Some(config.task_description.clone()),
+            };
+
+            let worker_prompt = Self::build_fusion_worker_prompt(
+                &session_id,
+                variant.index,
+                &variant.name,
+                &variant.branch,
+                &variant.worktree_path,
+                &config.task_description,
+                &cli,
+            );
+            let prompt_filename = format!("fusion-worker-{}-prompt.md", variant.index);
+            let prompt_file = Self::write_prompt_file(&project_path, &session_id, &prompt_filename, &worker_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+
+            let (cmd, mut args) = Self::build_command(&variant_agent_config);
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!(
+                "Launching Fusion variant {} ({}) on branch {} in {}",
+                variant.index,
+                variant.name,
+                variant.branch,
+                variant.worktree_path
+            );
+
+            {
+                let pty_manager = self.pty_manager.read();
+                pty_manager
+                    .create_session(
+                        variant.agent_id.clone(),
+                        AgentRole::Fusion {
+                            variant: variant.name.clone(),
+                        },
+                        &cmd,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        Some(&variant.worktree_path),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| format!("Failed to spawn Fusion variant {}: {}", variant.name, e))?;
+            }
+
+            let agent_info = AgentInfo {
+                id: variant.agent_id.clone(),
+                role: AgentRole::Fusion {
+                    variant: variant.name.clone(),
+                },
+                status: AgentStatus::Running,
+                config: variant_agent_config,
+                parent_id: None,
+            };
+
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(s) = sessions.get_mut(&session_id) {
+                    s.agents.push(agent_info);
+                    s.state = SessionState::WaitingForFusionVariants;
+                }
+            }
+            self.emit_session_update(&session_id);
+        }
+
+        let evaluation_dir = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("evaluation");
+        std::fs::create_dir_all(&evaluation_dir)
+            .map_err(|e| format!("Failed to create fusion evaluation directory: {}", e))?;
+
+        let decision_file = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("evaluation")
+            .join("decision.md")
+            .to_string_lossy()
+            .to_string();
+
+        let metadata = FusionSessionMetadata {
+            base_branch,
+            variants: variants.clone(),
+            judge_config: config.judge_config,
+            task_description: config.task_description,
+            decision_file,
+        };
+        Self::write_fusion_metadata(&project_path, &session_id, &metadata)?;
+
+        let session = self
+            .get_session(&session_id)
+            .ok_or_else(|| "Failed to read fusion session after launch".to_string())?;
+        self.init_session_storage(&session);
+        self.update_session_storage(&session_id);
+        self.ensure_task_watcher(&session_id, &project_path);
+
+        Ok(session)
+    }
+
     /// Launch the planning phase - spawns Master Planner only
     fn launch_planning_phase(&self, session_id: String, config: HiveLaunchConfig) -> Result<Session, String> {
         let project_path = PathBuf::from(&config.project_path);
@@ -2499,6 +3331,345 @@ Last updated: {timestamp}
         self.ensure_task_watcher(&session.id, &session.project_path);
 
         Ok(session)
+    }
+
+    /// Launch the planning phase for Fusion - spawns Master Planner only
+    fn launch_fusion_planning_phase(&self, session_id: String, config: FusionLaunchConfig) -> Result<Session, String> {
+        let project_path = PathBuf::from(&config.project_path);
+        let cwd = config.project_path.as_str();
+        let mut agents = Vec::new();
+
+        let planner_prompt = Self::build_fusion_master_planner_prompt(
+            &session_id,
+            &config.task_description,
+            &config.variants,
+        );
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            let planner_id = format!("{}-master-planner", session_id);
+            let queen_cfg = config.queen_config.as_ref().unwrap_or(&config.judge_config);
+            let (cmd, mut args) = Self::build_command(queen_cfg);
+
+            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!("Launching Master Planner (fusion): {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    planner_id.clone(),
+                    AgentRole::MasterPlanner,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
+
+            agents.push(AgentInfo {
+                id: planner_id,
+                role: AgentRole::MasterPlanner,
+                status: AgentStatus::Running,
+                config: queen_cfg.clone(),
+                parent_id: None,
+            });
+        }
+
+        // Store the pending Fusion config for later continuation
+        let pending_config_path = project_path.join(".hive-manager").join(&session_id).join("pending-fusion-config.json");
+        std::fs::create_dir_all(pending_config_path.parent().unwrap())
+            .map_err(|e| format!("Failed to create session directory: {}", e))?;
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        std::fs::write(&pending_config_path, config_json)
+            .map_err(|e| format!("Failed to write pending config: {}", e))?;
+
+        let variant_names: Vec<String> = config.variants.iter().map(|v| v.name.clone()).collect();
+        let session = Session {
+            id: session_id.clone(),
+            session_type: SessionType::Fusion { variants: variant_names },
+            project_path: project_path.clone(),
+            state: SessionState::Planning,
+            created_at: Utc::now(),
+            agents,
+            default_cli: if config.default_cli.trim().is_empty() { "claude".to_string() } else { config.default_cli.trim().to_string() },
+            default_model: config.default_model.clone(),
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session.clone());
+        }
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: session.clone(),
+            });
+        }
+
+        self.init_session_storage(&session);
+        self.ensure_task_watcher(&session.id, &session.project_path);
+
+        Ok(session)
+    }
+
+    /// Continue a Fusion session after planning phase - spawns Queen + Variants
+    fn continue_fusion_after_planning(&self, session_id: &str, session: &Session) -> Result<Session, String> {
+        let cwd = session.project_path.to_str().unwrap_or(".");
+
+        // Load the pending Fusion config
+        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-fusion-config.json");
+        let config_json = std::fs::read_to_string(&pending_config_path)
+            .map_err(|e| format!("Failed to read pending fusion config: {}", e))?;
+        let config: FusionLaunchConfig = serde_json::from_str(&config_json)
+            .map_err(|e| format!("Failed to parse pending fusion config: {}", e))?;
+
+        // Clean up Master Planner PTY before spawning Queen
+        let planner_id = format!("{}-master-planner", session_id);
+        if let Err(e) = self.stop_agent(session_id, &planner_id) {
+            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
+        } else {
+            tracing::info!("Stopped Master Planner {} before spawning Fusion Queen", planner_id);
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.retain(|a| a.id != planner_id);
+            }
+        }
+
+        let default_cli = if config.default_cli.trim().is_empty() {
+            "claude".to_string()
+        } else {
+            config.default_cli.trim().to_string()
+        };
+
+        // Build variant metadata (same logic as launch_fusion)
+        let mut seen_slugs: HashMap<String, u16> = HashMap::new();
+        let mut variants = Vec::new();
+
+        for (idx, variant) in config.variants.iter().enumerate() {
+            let index = (idx + 1) as u8;
+            let name = if variant.name.trim().is_empty() {
+                format!("variant-{}", index)
+            } else {
+                variant.name.trim().to_string()
+            };
+            let slug = Self::unique_variant_slug(&name, &mut seen_slugs);
+            let branch = format!("fusion/{}/{}", session_id, slug);
+            let worktree_path = session.project_path
+                .join(".hive-fusion")
+                .join(session_id)
+                .join(format!("variant-{}", slug))
+                .to_string_lossy()
+                .to_string();
+            let task_file = session.project_path
+                .join(".hive-manager")
+                .join(session_id)
+                .join("tasks")
+                .join(format!("fusion-variant-{}-task.md", index))
+                .to_string_lossy()
+                .to_string();
+
+            variants.push(FusionVariantMetadata {
+                index,
+                name,
+                slug,
+                branch,
+                worktree_path,
+                task_file,
+                agent_id: format!("{}-fusion-{}", session_id, index),
+            });
+        }
+
+        // Create git base branch and worktrees
+        let base_branch = format!("fusion/{}/base", session_id);
+        Self::run_git_in_dir(&session.project_path, &["branch", &base_branch, "HEAD"])?;
+
+        let mut new_agents = Vec::new();
+
+        // Spawn Queen agent
+        let queen_cfg = config.queen_config.as_ref().unwrap_or(&config.judge_config).clone();
+        {
+            let pty_manager = self.pty_manager.read();
+
+            let queen_id = format!("{}-queen", session_id);
+            let (cmd, mut args) = Self::build_command(&queen_cfg);
+
+            let queen_prompt = Self::build_fusion_queen_prompt(
+                &queen_cfg.cli,
+                session_id,
+                &variants,
+                &config.task_description,
+            );
+            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "fusion-queen-prompt.md", &queen_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            // Write tool docs for Queen
+            Self::write_tool_files(&session.project_path, session_id, &queen_cfg.cli)?;
+
+            tracing::info!("Launching Fusion Queen: {} {:?} in {:?}", cmd, args, cwd);
+
+            pty_manager
+                .create_session(
+                    queen_id.clone(),
+                    AgentRole::Queen,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Fusion Queen: {}", e))?;
+
+            new_agents.push(AgentInfo {
+                id: queen_id,
+                role: AgentRole::Queen,
+                status: AgentStatus::Running,
+                config: queen_cfg,
+                parent_id: None,
+            });
+        }
+
+        // Spawn variants (same logic as launch_fusion)
+        for (variant_idx, variant) in variants.iter().enumerate() {
+            let worktree_path = PathBuf::from(&variant.worktree_path);
+            if let Some(parent) = worktree_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create worktree parent dir: {}", e))?;
+            }
+
+            Self::run_git_in_dir(
+                &session.project_path,
+                &[
+                    "worktree", "add",
+                    &variant.worktree_path,
+                    "-b", &variant.branch,
+                    &base_branch,
+                ],
+            )?;
+
+            Self::write_fusion_variant_task_file(
+                &session.project_path,
+                session_id,
+                variant.index,
+                &variant.name,
+                &config.task_description,
+            )?;
+
+            let source_variant = &config.variants[variant_idx];
+            let cli = if source_variant.cli.trim().is_empty() {
+                default_cli.clone()
+            } else {
+                source_variant.cli.trim().to_string()
+            };
+            let variant_agent_config = AgentConfig {
+                cli: cli.clone(),
+                model: source_variant.model.clone().or(config.default_model.clone()),
+                flags: source_variant.flags.clone(),
+                label: Some(format!("Fusion {}", variant.name)),
+                role: None,
+                initial_prompt: Some(config.task_description.clone()),
+            };
+
+            let worker_prompt = Self::build_fusion_worker_prompt(
+                session_id,
+                variant.index,
+                &variant.name,
+                &variant.branch,
+                &variant.worktree_path,
+                &config.task_description,
+                &cli,
+            );
+            let prompt_filename = format!("fusion-worker-{}-prompt.md", variant.index);
+            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &prompt_filename, &worker_prompt)?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+
+            let (cmd, mut args) = Self::build_command(&variant_agent_config);
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!(
+                "Launching Fusion variant {} ({}) on branch {} in {}",
+                variant.index, variant.name, variant.branch, variant.worktree_path
+            );
+
+            {
+                let pty_manager = self.pty_manager.read();
+                pty_manager
+                    .create_session(
+                        variant.agent_id.clone(),
+                        AgentRole::Fusion { variant: variant.name.clone() },
+                        &cmd,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        Some(&variant.worktree_path),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| format!("Failed to spawn Fusion variant {}: {}", variant.name, e))?;
+            }
+
+            new_agents.push(AgentInfo {
+                id: variant.agent_id.clone(),
+                role: AgentRole::Fusion { variant: variant.name.clone() },
+                status: AgentStatus::Running,
+                config: variant_agent_config,
+                parent_id: None,
+            });
+        }
+
+        // Create evaluation directory
+        let evaluation_dir = session.project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("evaluation");
+        std::fs::create_dir_all(&evaluation_dir)
+            .map_err(|e| format!("Failed to create fusion evaluation directory: {}", e))?;
+
+        let decision_file = session.project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("evaluation")
+            .join("decision.md")
+            .to_string_lossy()
+            .to_string();
+
+        let metadata = FusionSessionMetadata {
+            base_branch,
+            variants: variants.clone(),
+            judge_config: config.judge_config.clone(),
+            task_description: config.task_description,
+            decision_file,
+        };
+        Self::write_fusion_metadata(&session.project_path, session_id, &metadata)?;
+
+        // Update session with new agents and Running state
+        let updated_session = {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.extend(new_agents);
+                s.state = SessionState::WaitingForFusionVariants;
+                s.clone()
+            } else {
+                return Err("Session disappeared".to_string());
+            }
+        };
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("session-update", SessionUpdate {
+                session: updated_session.clone(),
+            });
+        }
+
+        self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &updated_session.project_path);
+
+        // Clean up pending config
+        let _ = std::fs::remove_file(&pending_config_path);
+
+        Ok(updated_session)
     }
 
     /// Launch the planning phase for Swarm - spawns Master Planner only
@@ -2697,6 +3868,299 @@ Last updated: {timestamp}
         Ok(())
     }
 
+    pub async fn on_fusion_variant_completed(&self, session_id: &str, variant_index: u8) -> Result<(), SessionError> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
+
+        if !matches!(session.session_type, SessionType::Fusion { .. }) {
+            return Ok(());
+        }
+
+        let metadata = Self::read_fusion_metadata(&session.project_path, session_id)
+            .map_err(SessionError::ConfigError)?;
+        let variant = metadata
+            .variants
+            .iter()
+            .find(|v| v.index == variant_index)
+            .ok_or_else(|| SessionError::ConfigError(format!("Unknown fusion variant index: {}", variant_index)))?;
+
+        {
+            let pty_manager = self.pty_manager.read();
+            if let Err(e) = pty_manager.kill(&variant.agent_id) {
+                tracing::warn!("Failed to stop fusion variant PTY {}: {}", variant.agent_id, e);
+            }
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                if let Some(agent) = s.agents.iter_mut().find(|a| a.id == variant.agent_id) {
+                    agent.status = AgentStatus::Completed;
+                }
+            }
+        }
+        self.update_session_storage(session_id);
+
+        let already_judging = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).map(|s| {
+                matches!(
+                    s.state,
+                    SessionState::SpawningJudge
+                        | SessionState::Judging
+                        | SessionState::AwaitingVerdictSelection
+                        | SessionState::MergingWinner
+                        | SessionState::Completed
+                )
+            }).unwrap_or(false)
+        };
+        if already_judging {
+            return Ok(());
+        }
+
+        if metadata.variants.iter().all(|v| Self::is_task_completed(&v.task_file)) {
+            self.spawn_fusion_judge(session_id)
+                .map_err(SessionError::SpawnError)?;
+        }
+
+        Ok(())
+    }
+
+    fn spawn_fusion_judge(&self, session_id: &str) -> Result<(), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Fusion { .. }) {
+            return Err(format!("Session {} is not a Fusion session", session_id));
+        }
+
+        let metadata = Self::read_fusion_metadata(&session.project_path, session_id)?;
+        let judge_id = format!("{}-judge", session_id);
+
+        let judge_exists = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .map(|s| s.agents.iter().any(|a| a.id == judge_id))
+                .unwrap_or(false)
+        };
+        if judge_exists {
+            return Ok(());
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.state = SessionState::SpawningJudge;
+            }
+        }
+        self.emit_session_update(session_id);
+
+        let judge_prompt = Self::build_fusion_judge_prompt(session_id, &metadata.variants, &metadata.decision_file);
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            "fusion-judge-prompt.md",
+            &judge_prompt,
+        )?;
+        let prompt_path = prompt_file.to_string_lossy().to_string();
+
+        let mut judge_config = metadata.judge_config.clone();
+        if judge_config.cli.trim().is_empty() {
+            judge_config.cli = session.default_cli.clone();
+        }
+        if judge_config.model.is_none() {
+            judge_config.model = session.default_model.clone();
+        }
+
+        let (cmd, mut args) = Self::build_command(&judge_config);
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+        let cwd = session.project_path.to_string_lossy().to_string();
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    judge_id.clone(),
+                    AgentRole::Judge {
+                        session_id: session_id.to_string(),
+                    },
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(&cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn fusion judge: {}", e))?;
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.push(AgentInfo {
+                    id: judge_id,
+                    role: AgentRole::Judge {
+                        session_id: session_id.to_string(),
+                    },
+                    status: AgentStatus::Running,
+                    config: judge_config,
+                    parent_id: None,
+                });
+                s.state = SessionState::Judging;
+            }
+        }
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+
+        Ok(())
+    }
+
+    pub fn get_fusion_variant_statuses(&self, session_id: &str) -> Result<Vec<FusionVariantStatus>, String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Fusion { .. }) {
+            return Err(format!("Session {} is not a Fusion session", session_id));
+        }
+
+        let metadata = Self::read_fusion_metadata(&session.project_path, session_id)?;
+        Ok(metadata
+            .variants
+            .iter()
+            .map(|v| FusionVariantStatus {
+                index: v.index,
+                name: v.name.clone(),
+                branch: v.branch.clone(),
+                worktree_path: v.worktree_path.clone(),
+                status: Self::read_task_status(&v.task_file),
+            })
+            .collect())
+    }
+
+    pub fn get_fusion_evaluation(&self, session_id: &str) -> Result<(String, Option<String>), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Fusion { .. }) {
+            return Err(format!("Session {} is not a Fusion session", session_id));
+        }
+
+        let metadata = Self::read_fusion_metadata(&session.project_path, session_id)?;
+        let report = match std::fs::read_to_string(&metadata.decision_file) {
+            Ok(content) => Some(content),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(format!("Failed to read evaluation report: {}", err)),
+        };
+
+        if report.is_some() {
+            let mut should_emit = false;
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(s) = sessions.get_mut(session_id) {
+                    if s.state == SessionState::Judging {
+                        s.state = SessionState::AwaitingVerdictSelection;
+                        should_emit = true;
+                    }
+                }
+            }
+            if should_emit {
+                self.emit_session_update(session_id);
+                self.update_session_storage(session_id);
+            }
+        }
+
+        Ok((metadata.decision_file, report))
+    }
+
+    pub fn select_fusion_winner(&self, session_id: &str, variant_name: &str) -> Result<(), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Fusion { .. }) {
+            return Err(format!("Session {} is not a Fusion session", session_id));
+        }
+
+        let requested = variant_name.trim();
+        if requested.is_empty() {
+            return Err("Winner variant name cannot be empty".to_string());
+        }
+
+        let metadata = Self::read_fusion_metadata(&session.project_path, session_id)?;
+        let requested_slug = Self::slugify_variant_name(requested);
+        let winner = metadata
+            .variants
+            .iter()
+            .find(|v| v.name == requested || v.slug == requested_slug)
+            .ok_or_else(|| format!("Variant '{}' not found for session {}", requested, session_id))?;
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.state = SessionState::MergingWinner;
+            }
+        }
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+
+        Self::run_git_in_dir(&session.project_path, &["merge", "--squash", &winner.branch])?;
+
+        // Commit the squash merge (--squash only stages changes, doesn't commit)
+        Self::run_git_in_dir(
+            &session.project_path,
+            &["commit", "-m", &format!("Merge fusion winner: {}", winner.name)],
+        )?;
+
+        let mut cleanup_errors = Vec::new();
+        for variant in &metadata.variants {
+            if let Err(err) = Self::run_git_in_dir(
+                &session.project_path,
+                &["worktree", "remove", &variant.worktree_path, "--force"],
+            ) {
+                cleanup_errors.push(format!("{}: {}", variant.worktree_path, err));
+            }
+
+            let pty_manager = self.pty_manager.read();
+            if let Err(err) = pty_manager.kill(&variant.agent_id) {
+                tracing::warn!("Failed to stop variant agent {}: {}", variant.agent_id, err);
+            }
+        }
+        if let Err(err) = Self::run_git_in_dir(&session.project_path, &["worktree", "prune"]) {
+            cleanup_errors.push(format!("worktree prune: {}", err));
+        }
+
+        {
+            let pty_manager = self.pty_manager.read();
+            let judge_id = format!("{}-judge", session_id);
+            let _ = pty_manager.kill(&judge_id);
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                for agent in &mut s.agents {
+                    agent.status = AgentStatus::Completed;
+                }
+                s.state = SessionState::Completed;
+            }
+        }
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Winner merged, but worktree cleanup had issues: {}",
+                cleanup_errors.join(" | ")
+            ))
+        }
+    }
+
     /// Terminate a worker
     fn terminate_worker(&self, session_id: &str, worker_id: u8) -> Result<(), SessionError> {
         let worker_agent_id = format!("{}-worker-{}", session_id, worker_id);
@@ -2735,6 +4199,9 @@ Last updated: {timestamp}
         match &session.session_type {
             SessionType::Swarm { .. } => {
                 return self.continue_swarm_after_planning(session_id, &session);
+            }
+            SessionType::Fusion { .. } => {
+                return self.continue_fusion_after_planning(session_id, &session);
             }
             _ => {} // Continue with Hive logic below
         }
@@ -2890,7 +4357,9 @@ Last updated: {timestamp}
         // Convert persisted agents to active agents
         let agents: Vec<AgentInfo> = persisted.agents.iter().filter_map(|pa| {
             // Parse the role string (e.g., "Queen", "Planner(0)", "Worker(1)")
-            let role = if pa.role == "Queen" {
+            let role = if pa.role == "MasterPlanner" {
+                AgentRole::MasterPlanner
+            } else if pa.role == "Queen" {
                 AgentRole::Queen
             } else if pa.role.starts_with("Planner(") {
                 let index_str = pa.role.trim_start_matches("Planner(").trim_end_matches(")");
@@ -2911,6 +4380,9 @@ Last updated: {timestamp}
             } else if pa.role.starts_with("Fusion(") {
                 let variant = pa.role.trim_start_matches("Fusion(").trim_end_matches(")").to_string();
                 AgentRole::Fusion { variant }
+            } else if pa.role.starts_with("Judge(") {
+                let parsed_session_id = pa.role.trim_start_matches("Judge(").trim_end_matches(")").to_string();
+                AgentRole::Judge { session_id: parsed_session_id }
             } else {
                 return None;  // Skip unparseable roles
             };
@@ -3460,6 +4932,7 @@ Last updated: {timestamp}
                 AgentRole::Planner { index } => format!("Planner({})", index),
                 AgentRole::Worker { index, parent } => format!("Worker({},{})", index, parent.as_deref().unwrap_or("None")),
                 AgentRole::Fusion { variant } => format!("Fusion({})", variant),
+                AgentRole::Judge { session_id } => format!("Judge({})", session_id),
             };
 
             PersistedAgentInfo {
@@ -3485,6 +4958,12 @@ Last updated: {timestamp}
             SessionState::WaitingForWorker(_) => "WaitingForWorker",
             SessionState::SpawningPlanner(_) => "SpawningPlanner",
             SessionState::WaitingForPlanner(_) => "WaitingForPlanner",
+            SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant",
+            SessionState::WaitingForFusionVariants => "WaitingForFusionVariants",
+            SessionState::SpawningJudge => "SpawningJudge",
+            SessionState::Judging => "Judging",
+            SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection",
+            SessionState::MergingWinner => "MergingWinner",
             SessionState::Running => "Running",
             SessionState::Paused => "Paused",
             SessionState::Completed => "Completed",
@@ -3525,6 +5004,7 @@ Last updated: {timestamp}
                     AgentRole::Planner { index } => format!("Planner-{}", index),
                     AgentRole::Worker { index, .. } => format!("Worker-{}", index),
                     AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
+                    AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
                 };
 
                 let children: Vec<String> = session.agents.iter()
@@ -3610,6 +5090,7 @@ Last updated: {timestamp}
                         AgentRole::Planner { index } => format!("Planner-{}", index),
                         AgentRole::Worker { index, .. } => format!("Worker-{}", index),
                         AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
+                        AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
                     };
 
                     let children: Vec<String> = session.agents.iter()
@@ -3668,6 +5149,12 @@ mod tests {
         let _starting = SessionState::Starting;
         let _spawning = SessionState::SpawningWorker(1);
         let _waiting = SessionState::WaitingForWorker(1);
+        let _spawning_fusion = SessionState::SpawningFusionVariant(1);
+        let _waiting_fusion = SessionState::WaitingForFusionVariants;
+        let _spawning_judge = SessionState::SpawningJudge;
+        let _judging = SessionState::Judging;
+        let _awaiting_verdict = SessionState::AwaitingVerdictSelection;
+        let _merging_winner = SessionState::MergingWinner;
         let _running = SessionState::Running;
         let _paused = SessionState::Paused;
         let _completed = SessionState::Completed;

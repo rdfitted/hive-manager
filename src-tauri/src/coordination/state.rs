@@ -264,4 +264,5 @@ impl StateManager {
         let assignments = self.get_assignments()?;
         Ok(assignments.get(worker_id).cloned())
     }
+
 }
