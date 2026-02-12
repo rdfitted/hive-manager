@@ -124,20 +124,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let launching = false;
   let error = '';
 
-  // CLI options for solo mode
-  const cliOptions = [
-    { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.6)' },
-    { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
-    { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model' },
-    { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.3' },
-    { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Opus 4.6)' },
-    { value: 'droid', label: 'Droid', description: 'GLM 4.7 (Factory Droid CLI)' },
-    { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)' },
-  ];
-
   // Solo config
-  let soloCli = 'claude';
-  let soloModel = '';
+  let soloConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
   let soloTask = '';
 
   // Queen config (shared)
@@ -326,8 +314,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         const config: SoloLaunchConfig = {
           projectPath,
           taskDescription: soloTask,
-          cli: soloCli,
-          model: soloModel || undefined,
+          cli: soloConfig.cli,
+          model: soloConfig.model || undefined,
         };
         dispatch('launchSolo', config);
       } else {
@@ -593,25 +581,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <div class="form-section">
             <h3>Solo Configuration</h3>
             <p class="section-description">Run a single agent for a specific task without any orchestration overhead.</p>
-            
-            <div class="field">
-              <label for="solo-cli">CLI</label>
-              <select id="solo-cli" bind:value={soloCli} class="role-select">
-                {#each cliOptions as cli}
-                  <option value={cli.value} title={cli.description}>{cli.label}</option>
-                {/each}
-              </select>
-            </div>
 
-            <div class="field">
-              <label for="solo-model">Model (optional)</label>
-              <input
-                id="solo-model"
-                type="text"
-                bind:value={soloModel}
-                placeholder="e.g. opus, gemini-2.0-flash-exp"
-              />
-            </div>
+            <AgentConfigEditor bind:config={soloConfig} showLabel={false} />
 
             <div class="form-group">
               <label for="solo-task">Task Description</label>
