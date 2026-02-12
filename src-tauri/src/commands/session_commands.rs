@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tauri::State;
 
-use crate::session::{Session, SessionController, HiveLaunchConfig, SwarmLaunchConfig};
+use crate::session::{Session, SessionController, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig};
 
 pub struct SessionControllerState(pub Arc<RwLock<SessionController>>);
 
@@ -75,6 +75,15 @@ pub async fn launch_swarm(
 ) -> Result<Session, String> {
     let controller = state.0.read();
     controller.launch_swarm(config)
+}
+
+#[tauri::command]
+pub async fn launch_fusion(
+    state: State<'_, SessionControllerState>,
+    config: FusionLaunchConfig,
+) -> Result<Session, String> {
+    let controller = state.0.read();
+    controller.launch_fusion(config)
 }
 
 #[tauri::command]
