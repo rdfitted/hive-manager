@@ -160,7 +160,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     { name: 'Variant C', cli: 'claude', flags: [] },
     { name: 'Variant D', cli: 'claude', flags: [] },
   ];
-  let judgeConfig = { cli: 'claude', model: '' };
+  let judgeConfig = { cli: 'claude', model: undefined };
 
   // AgentConfig wrappers for fusion variants (so AgentConfigEditor can be used)
   let variantAgentConfigs: AgentConfig[] = fusionVariants.map(v => ({
@@ -173,14 +173,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     fusionVariants[index] = {
       ...fusionVariants[index],
       cli: detail.cli,
-      model: detail.model,
+      model: detail.model || undefined,
       flags: detail.flags,
     };
   }
 
   function handleJudgeConfigChange(detail: AgentConfig) {
     judgeAgentConfig = detail;
-    judgeConfig = { cli: detail.cli, model: detail.model, flags: detail.flags, label: detail.label };
+    judgeConfig = { cli: detail.cli, model: detail.model || undefined, flags: detail.flags, label: detail.label };
   }
 
 

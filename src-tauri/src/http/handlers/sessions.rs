@@ -50,6 +50,7 @@ pub struct LaunchFusionVariantRequest {
     pub name: String,
     pub cli: Option<String>,
     pub model: Option<String>,
+    pub flags: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -246,7 +247,7 @@ pub async fn launch_fusion(
                 name: v.name,
                 cli,
                 model: v.model,
-                flags: vec![],
+                flags: v.flags.unwrap_or_default(),
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
