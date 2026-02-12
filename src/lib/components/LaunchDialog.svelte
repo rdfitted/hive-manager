@@ -179,7 +179,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   function handleJudgeConfigChange(detail: AgentConfig) {
     judgeAgentConfig = detail;
-    judgeConfig = { cli: detail.cli, model: detail.model };
+    judgeConfig = { cli: detail.cli, model: detail.model, flags: detail.flags, label: detail.label };
   }
 
   $: activeFusionVariants = fusionVariants.slice(0, variantCount);

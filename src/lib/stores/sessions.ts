@@ -59,7 +59,7 @@ export interface FusionLaunchConfig {
   project_path: string;
   variants: FusionVariantConfig[];
   task_description: string;
-  judge_config: { cli: string; model?: string };
+  judge_config: { cli: string; model?: string; flags?: string[]; label?: string };
   with_planning: boolean;
 }
 

@@ -123,8 +123,13 @@ pub struct FusionLaunchConfig {
     pub judge_config: AgentConfig,
     #[serde(default)]
     pub with_planning: bool,
+    #[serde(default = "default_fusion_cli")]
     pub default_cli: String,
     pub default_model: Option<String>,
+}
+
+fn default_fusion_cli() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

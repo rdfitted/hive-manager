@@ -51,12 +51,18 @@ impl Default for WorkerRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    #[serde(default = "default_cli")]
     pub cli: String,              // "claude", "gemini", "opencode", "codex"
     pub model: Option<String>,    // "opus-4-6", "gemini-3-pro", etc.
+    #[serde(default)]
     pub flags: Vec<String>,       // Additional CLI flags
     pub label: Option<String>,    // Display name
     pub role: Option<WorkerRole>, // Worker role assignment
     pub initial_prompt: Option<String>, // Prompt to inject on spawn
+}
+
+fn default_cli() -> String {
+    "claude".to_string()
 }
 
 impl Default for AgentConfig {
