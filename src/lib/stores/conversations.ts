@@ -69,7 +69,8 @@ function createConversationStore() {
         if (since) url += `?since=${encodeURIComponent(since)}`;
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const messages: ConversationMessage[] = await resp.json();
+        const data = await resp.json();
+        const messages: ConversationMessage[] = data.messages ?? [];
         update((state) => ({
           ...state,
           messages,

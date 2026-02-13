@@ -2151,6 +2151,26 @@ curl -s "http://localhost:18800/api/sessions/active"
 
 Check your inbox between subtasks. Read `shared.md` for broadcasts before assigning new work.
 
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, write directly to the conversation files instead:
+
+```bash
+# Append to a worker's inbox (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @queen\nYour message here\n" >> ".hive-manager/{session_id}/conversations/worker-N.md"
+
+# Append to shared channel (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @queen\nYour message here\n" >> ".hive-manager/{session_id}/conversations/shared.md"
+
+# Read queen inbox (fallback)
+cat ".hive-manager/{session_id}/conversations/queen.md"
+
+# Read shared broadcasts (fallback)
+cat ".hive-manager/{session_id}/conversations/shared.md"
+```
+
+Always try the curl API first. Only use file fallback if curl fails.
+
 ## Learning Curation Protocol
 
 Workers record learnings during task completion. Your curation responsibilities:
@@ -2317,6 +2337,26 @@ curl -s "http://localhost:18800/api/sessions/active"
 ```
 
 Check your conversation file between subtasks. Report progress to `queen.md` after milestones. Read `shared.md` for broadcasts.
+
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, write directly to the conversation files instead:
+
+```bash
+# Append to queen's inbox (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @worker-{index}\nYour message here\n" >> ".hive-manager/{session_id}/conversations/queen.md"
+
+# Append to shared channel (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @worker-{index}\nYour message here\n" >> ".hive-manager/{session_id}/conversations/shared.md"
+
+# Read your inbox (fallback)
+cat ".hive-manager/{session_id}/conversations/worker-{index}.md"
+
+# Read shared broadcasts (fallback)
+cat ".hive-manager/{session_id}/conversations/shared.md"
+```
+
+Always try the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
