@@ -18,6 +18,7 @@ pub enum AgentRole {
 pub enum AgentStatus {
     Starting,
     Running,
+    Idle,
     WaitingForInput(String),
     Completed,
     Error(String),

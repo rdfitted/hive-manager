@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -190,12 +191,22 @@ pub struct SessionUpdate {
     pub session: Session,
 }
 
+/// Per-agent heartbeat data for stall detection
+#[derive(Debug, Clone)]
+pub struct AgentHeartbeatInfo {
+    pub last_activity: DateTime<Utc>,
+    pub status: String,
+    pub summary: Option<String>,
+}
+
 pub struct SessionController {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     pty_manager: Arc<RwLock<PtyManager>>,
     app_handle: Option<AppHandle>,
     storage: Option<Arc<SessionStorage>>,
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
+    /// session_id -> agent_id -> heartbeat info
+    agent_heartbeats: Arc<RwLock<HashMap<String, HashMap<String, AgentHeartbeatInfo>>>>,
 }
 
 // Explicitly implement Send + Sync
@@ -264,6 +275,7 @@ impl SessionController {
             app_handle: None,
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
+            agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -425,6 +437,79 @@ impl SessionController {
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
         sessions.values().cloned().collect()
+    }
+
+    // --- Heartbeat / Stall Detection ---
+
+    /// Update heartbeat for an agent. Emits Tauri event if status changed.
+    pub fn update_heartbeat(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        status: &str,
+        summary: Option<&str>,
+    ) -> Result<(), String> {
+        let now = Utc::now();
+        let prev_status = {
+            let mut heartbeats = self.agent_heartbeats.write();
+            let session_map = heartbeats.entry(session_id.to_string()).or_default();
+            let prev = session_map.get(agent_id).map(|h| h.status.clone());
+            session_map.insert(
+                agent_id.to_string(),
+                AgentHeartbeatInfo {
+                    last_activity: now,
+                    status: status.to_string(),
+                    summary: summary.map(String::from),
+                },
+            );
+            prev
+        };
+        let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
+        if status_changed {
+            if let Some(ref app_handle) = self.app_handle {
+                let _ = app_handle.emit("heartbeat-status-changed", serde_json::json!({
+                    "session_id": session_id,
+                    "agent_id": agent_id,
+                    "status": status,
+                    "summary": summary,
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Get agents with no activity for longer than threshold.
+    pub fn get_stalled_agents(
+        &self,
+        session_id: &str,
+        threshold: Duration,
+    ) -> Vec<(String, DateTime<Utc>)> {
+        let now = Utc::now();
+        let threshold_secs = threshold.as_secs() as i64;
+        let heartbeats = self.agent_heartbeats.read();
+        let Some(agents) = heartbeats.get(session_id) else {
+            return vec![];
+        };
+        agents
+            .iter()
+            .filter_map(|(agent_id, info)| {
+                let elapsed = (now - info.last_activity).num_seconds();
+                if elapsed > threshold_secs && info.status != "completed" {
+                    Some((agent_id.clone(), info.last_activity))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get heartbeat info for a session (for active sessions endpoint).
+    pub fn get_heartbeat_info(&self, session_id: &str) -> HashMap<String, AgentHeartbeatInfo> {
+        let heartbeats = self.agent_heartbeats.read();
+        heartbeats
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn emit_session_update(&self, session_id: &str) {
@@ -5218,6 +5303,7 @@ Last updated: {timestamp}
                     status: format!("{:?}", a.status),
                     current_task: None,
                     last_update: Utc::now(),
+                    last_heartbeat: None,
                 })
                 .collect();
 

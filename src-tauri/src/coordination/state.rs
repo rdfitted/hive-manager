@@ -28,6 +28,8 @@ pub struct WorkerStateInfo {
     pub status: String,
     pub current_task: Option<String>,
     pub last_update: DateTime<Utc>,
+    #[serde(default)]
+    pub last_heartbeat: Option<DateTime<Utc>>,
 }
 
 /// Agent hierarchy node
@@ -157,6 +159,7 @@ impl StateManager {
                     status: "Running".to_string(),
                     current_task: None,
                     last_update: Utc::now(),
+                    last_heartbeat: None,
                 }
             }).collect()
         })
