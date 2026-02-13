@@ -627,49 +627,65 @@ impl SessionController {
         }
     }
 
-    /// Build command/args for solo launch with direct task passing and no orchestration overhead.
-    fn build_solo_command(config: &AgentConfig, task: &str) -> (String, Vec<String>) {
+    /// Build command/args for solo launch.
+    /// When task is Some, passes it inline via CLI flags (non-interactive).
+    /// When task is None, opens the CLI in interactive mode.
+    fn build_solo_command(config: &AgentConfig, task: Option<&str>) -> (String, Vec<String>) {
         let mut args = Vec::new();
 
         match config.cli.as_str() {
             "claude" => {
-                args.push("--dangerously-skip-permissions".to_string());
-                Self::add_inline_task_to_args("claude", &mut args, task);
+                if task.is_some() {
+                    args.push("--dangerously-skip-permissions".to_string());
+                }
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("claude", &mut args, task);
+                }
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
             }
             "gemini" => {
-                Self::add_inline_task_to_args("gemini", &mut args, task);
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("gemini", &mut args, task);
+                }
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
             }
             "droid" => {
-                Self::add_inline_task_to_args("droid", &mut args, task);
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("droid", &mut args, task);
+                }
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
             }
             "codex" => {
-                Self::add_inline_task_to_args("codex", &mut args, task);
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("codex", &mut args, task);
+                }
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
             }
             "cursor" => {
-                Self::add_inline_task_to_args("cursor", &mut args, task);
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("cursor", &mut args, task);
+                }
             }
             _ => {
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
-                Self::add_inline_task_to_args(&config.cli, &mut args, task);
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args(&config.cli, &mut args, task);
+                }
             }
         }
 
@@ -2973,7 +2989,7 @@ Last updated: {timestamp}
     fn launch_solo_internal(
         &self,
         project_path: PathBuf,
-        task_description: String,
+        task_description: Option<String>,
         cli: String,
         model: Option<String>,
         flags: Vec<String>,
@@ -2986,9 +3002,9 @@ Last updated: {timestamp}
             flags,
             label: None,
             role: None,
-            initial_prompt: Some(task_description.clone()),
+            initial_prompt: task_description.clone(),
         };
-        let (cmd, args) = Self::build_solo_command(&solo_config, &task_description);
+        let (cmd, args) = Self::build_solo_command(&solo_config, task_description.as_deref());
         let solo_id = format!("{}-worker-1", session_id);
 
         {
@@ -3046,8 +3062,7 @@ Last updated: {timestamp}
         let task_description = config
             .prompt
             .clone()
-            .or_else(|| config.queen_config.initial_prompt.clone())
-            .unwrap_or_default();
+            .or_else(|| config.queen_config.initial_prompt.clone());
 
         self.launch_solo_internal(
             project_path,

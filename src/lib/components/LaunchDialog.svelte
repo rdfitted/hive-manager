@@ -305,15 +305,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         };
         dispatch('launchSwarm', config);
       } else if (mode === 'solo') {
-        if (!soloTask.trim()) {
-          error = 'Task description is required for solo mode';
-          launching = false;
-          return;
-        }
-
         const config: SoloLaunchConfig = {
           projectPath,
-          taskDescription: soloTask,
+          taskDescription: soloTask.trim() || undefined,
           cli: soloConfig.cli,
           model: soloConfig.model || undefined,
         };
@@ -589,9 +583,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               <textarea
                 id="solo-task"
                 bind:value={soloTask}
-                placeholder="What should the agent do? (Required)"
+                placeholder="What should the agent do? (Leave empty for interactive mode)"
                 rows="5"
-                required
               ></textarea>
             </div>
           </div>

@@ -68,7 +68,7 @@ pub struct LaunchFusionRequest {
 #[derive(Deserialize)]
 pub struct LaunchSoloRequest {
     pub project_path: String,
-    pub task_description: String,
+    pub task_description: Option<String>,
     pub cli: String,
     pub model: Option<String>,
     pub flags: Option<Vec<String>>,
@@ -232,10 +232,6 @@ pub async fn launch_solo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchSoloRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
-    if req.task_description.trim().is_empty() {
-        return Err(ApiError::bad_request("task_description cannot be empty"));
-    }
-
     validate_project_path(&req.project_path)?;
     validate_cli(&req.cli)?;
 
@@ -252,7 +248,7 @@ pub async fn launch_solo(
         project_path: req.project_path,
         queen_config: agent_config,
         workers: vec![],
-        prompt: Some(req.task_description),
+        prompt: req.task_description.filter(|t| !t.trim().is_empty()),
         with_planning: false,
         smoke_test: false,
     };

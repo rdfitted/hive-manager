@@ -84,7 +84,7 @@ export interface SwarmLaunchConfig {
 
 export interface SoloLaunchConfig {
   projectPath: string;
-  taskDescription: string;
+  taskDescription?: string;
   cli: string;
   model?: string;
 }

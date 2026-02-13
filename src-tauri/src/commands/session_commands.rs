@@ -83,14 +83,11 @@ pub async fn launch_swarm(
 pub async fn launch_solo(
     state: State<'_, SessionControllerState>,
     project_path: String,
-    task_description: String,
+    task_description: Option<String>,
     cli: String,
     model: Option<String>,
     flags: Option<Vec<String>>,
 ) -> Result<Session, String> {
-    if task_description.trim().is_empty() {
-        return Err("task_description cannot be empty".to_string());
-    }
     validate_project_path(&project_path).map_err(|e| e.message.clone())?;
     validate_cli(&cli).map_err(|e| e.message.clone())?;
 
@@ -107,7 +104,7 @@ pub async fn launch_solo(
         project_path,
         queen_config: agent_config,
         workers: vec![],
-        prompt: Some(task_description),
+        prompt: task_description.filter(|t| !t.trim().is_empty()),
         with_planning: false,
         smoke_test: false,
     };
