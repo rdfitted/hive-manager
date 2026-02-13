@@ -635,47 +635,70 @@ impl SessionController {
 
         match config.cli.as_str() {
             "claude" => {
-                if task.is_some() {
-                    args.push("--dangerously-skip-permissions".to_string());
+                args.push("--dangerously-skip-permissions".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
                 }
                 if let Some(task) = task {
                     Self::add_inline_task_to_args("claude", &mut args, task);
                 }
-                if let Some(ref model) = config.model {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
             }
             "gemini" => {
+                args.push("-y".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
                 if let Some(task) = task {
                     Self::add_inline_task_to_args("gemini", &mut args, task);
                 }
-                if let Some(ref model) = config.model {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-            }
-            "droid" => {
-                if let Some(task) = task {
-                    Self::add_inline_task_to_args("droid", &mut args, task);
-                }
-                if let Some(ref model) = config.model {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
             }
             "codex" => {
+                args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
                 if let Some(task) = task {
                     Self::add_inline_task_to_args("codex", &mut args, task);
                 }
+            }
+            "qwen" => {
+                args.push("-y".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("qwen", &mut args, task);
+                }
+            }
+            "opencode" => {
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("opencode", &mut args, task);
+                }
+            }
+            "cursor" => {
+                args.push("-d".to_string());
+                args.push("Ubuntu".to_string());
+                args.push("/root/.local/bin/agent".to_string());
+                args.push("--force".to_string());
+                if let Some(task) = task {
+                    Self::add_inline_task_to_args("cursor", &mut args, task);
+                }
+            }
+            "droid" => {
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
-            }
-            "cursor" => {
                 if let Some(task) = task {
-                    Self::add_inline_task_to_args("cursor", &mut args, task);
+                    Self::add_inline_task_to_args("droid", &mut args, task);
                 }
             }
             _ => {
