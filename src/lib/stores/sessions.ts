@@ -82,6 +82,13 @@ export interface SwarmLaunchConfig {
   smoke_test?: boolean;
 }
 
+export interface SoloLaunchConfig {
+  projectPath: string;
+  taskDescription?: string;
+  cli: string;
+  model?: string;
+}
+
 export type SessionState =
   | 'Planning'
   | 'PlanReady'
@@ -93,7 +100,11 @@ export type SessionState =
 
 export interface Session {
   id: string;
-  session_type: { Hive: { worker_count: number } } | { Swarm: { planner_count: number } } | { Fusion: { variants: string[] } };
+  session_type: 
+    | { Hive: { worker_count: number } } 
+    | { Swarm: { planner_count: number } } 
+    | { Fusion: { variants: string[] } }
+    | { Solo: { cli: string } };
   project_path: string;
   state: SessionState;
   created_at: string;
@@ -152,6 +163,39 @@ function createSessionsStore() {
         });
         update((state) => {
           // Only add if not already present (event listener may have added it)
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async launchSolo(config: SoloLaunchConfig) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        // Solo mode is implemented as a Hive session with 0 extra workers (just the Queen acting as the solo agent)
+        const hiveConfig: HiveLaunchConfig = {
+          project_path: config.projectPath,
+          queen_config: {
+            cli: config.cli,
+            model: config.model,
+            flags: [],
+          },
+          workers: [], // Empty workers list triggers solo mode in backend
+          prompt: config.taskDescription,
+          with_planning: false,
+        };
+        
+        const session = await invoke<Session>('launch_hive_v2', { config: hiveConfig });
+        update((state) => {
           const exists = state.sessions.some((s) => s.id === session.id);
           return {
             ...state,

@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, SoloLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
@@ -11,9 +11,10 @@
     launchHive: HiveLaunchConfig;
     launchSwarm: SwarmLaunchConfig;
     launchFusion: FusionLaunchConfig;
+    launchSolo: SoloLaunchConfig;
   }>();
 
-  type SessionMode = 'hive' | 'swarm' | 'fusion';
+  type SessionMode = 'hive' | 'swarm' | 'fusion' | 'solo';
 
   // Predefined roles with default CLIs, descriptions, and prompt templates
   const predefinedRoles = [
@@ -122,6 +123,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let prompt = '';
   let launching = false;
   let error = '';
+
+  // Solo config
+  let soloConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
+  let soloTask = '';
 
   // Queen config (shared)
   let queenConfig: AgentConfig = {
@@ -299,6 +304,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           smoke_test: smokeTest,
         };
         dispatch('launchSwarm', config);
+      } else if (mode === 'solo') {
+        const config: SoloLaunchConfig = {
+          projectPath,
+          taskDescription: soloTask.trim() || undefined,
+          cli: soloConfig.cli,
+          model: soloConfig.model || undefined,
+        };
+        dispatch('launchSolo', config);
       } else {
         const config: FusionLaunchConfig = {
           project_path: projectPath,
@@ -371,6 +384,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         >
           Fusion
         </button>
+        <button
+          class="mode-tab"
+          class:active={mode === 'solo'}
+          on:click={() => (mode = 'solo')}
+          type="button"
+        >
+          Solo
+        </button>
       </div>
 
       <form on:submit|preventDefault={() => handleSubmit(false)}>
@@ -391,10 +412,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           </div>
         </div>
 
-        <div class="form-section">
-          <h3>Queen Configuration</h3>
-          <AgentConfigEditor bind:config={queenConfig} showLabel={true} />
-        </div>
+        {#if mode !== 'solo'}
+          <div class="form-section">
+            <h3>Queen Configuration</h3>
+            <AgentConfigEditor bind:config={queenConfig} showLabel={true} />
+          </div>
+        {/if}
 
         {#if mode === 'hive'}
           <div class="form-section">
@@ -548,17 +571,36 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
           </div>
+        {:else if mode === 'solo'}
+          <div class="form-section">
+            <h3>Solo Configuration</h3>
+            <p class="section-description">Run a single agent for a specific task without any orchestration overhead.</p>
+
+            <AgentConfigEditor bind:config={soloConfig} showLabel={false} />
+
+            <div class="form-group">
+              <label for="solo-task">Task Description</label>
+              <textarea
+                id="solo-task"
+                bind:value={soloTask}
+                placeholder="What should the agent do? (Leave empty for interactive mode)"
+                rows="5"
+              ></textarea>
+            </div>
+          </div>
         {/if}
 
-        <div class="form-group">
-          <label for="prompt">Initial Prompt (optional)</label>
-          <textarea
-            id="prompt"
-            bind:value={prompt}
-            placeholder="Enter a task for the session..."
-            rows="3"
-          ></textarea>
-        </div>
+        {#if mode !== 'solo'}
+          <div class="form-group">
+            <label for="prompt">Initial Prompt (optional)</label>
+            <textarea
+              id="prompt"
+              bind:value={prompt}
+              placeholder="Enter a task for the session..."
+              rows="3"
+            ></textarea>
+          </div>
+        {/if}
 
         {#if error}
           <div class="error-message">{error}</div>

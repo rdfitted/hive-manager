@@ -98,6 +98,28 @@ How we do things in this project. Updated by AI sessions.
 - `resume_session` loads `PersistedSession` from storage, converts to active `Session`
 - `PersistedAgentInfo` stores role as String (e.g., 'Queen', 'Worker(1)') requiring string parsing
 
+### UI/UX Improvements
+- Convert text inputs to dropdown selectors for constrained options (e.g., model selection in solo mode)
+- Provide dynamic options based on selected parent option (e.g., model options change based on selected CLI)
+- This prevents invalid selections and improves user experience
+
+### Solo Mode as Zero-Worker Hive
+- Frontend maps Solo mode to a Hive session with zero workers — backend detects this and spawns a single agent directly
+- Avoids creating a separate session type flow end-to-end; reuses existing `launch_hive_v2` plumbing
+- Dedicated `launch_solo()` in controller skips orchestration: no task files, no queen prompt, no watcher setup
+
+### CLI-Specific Command Builders
+- Each CLI (claude, gemini, codex, droid, cursor) has different prompt flags (`-p`, `-q`, positional)
+- Dedicated solo command builder avoids coupling to orchestration-oriented defaults
+- Model flag passthrough varies per CLI — must be handled per-type
+
+### SessionType Variant Synchronization
+- Adding a new `SessionType` variant requires synchronized updates in:
+  - `resume_session()` — deserialization/restore path
+  - `session_to_persisted()` — persistence path
+  - All `SessionType`/`SessionTypeInfo` match arms across controller and storage
+- Missing any one causes deserialization mismatches or non-exhaustive match errors
+
 ## Model Performance Notes
 
 ### Multi-Agent Verification
@@ -106,5 +128,5 @@ How we do things in this project. Updated by AI sessions.
 - Different models catch different aspects - useful for comprehensive analysis
 
 ---
-*Curated from learnings.jsonl (15 entries) by manual session*
-*Last updated: 2026-02-05*
+*Curated from learnings.jsonl (16 entries) by manual session*
+*Last updated: 2026-02-12*

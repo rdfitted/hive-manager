@@ -3,6 +3,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tauri::State;
 
+use crate::http::handlers::{validate_cli, validate_project_path};
+use crate::pty::AgentConfig;
 use crate::session::{Session, SessionController, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig};
 
 pub struct SessionControllerState(pub Arc<RwLock<SessionController>>);
@@ -75,6 +77,40 @@ pub async fn launch_swarm(
 ) -> Result<Session, String> {
     let controller = state.0.read();
     controller.launch_swarm(config)
+}
+
+#[tauri::command]
+pub async fn launch_solo(
+    state: State<'_, SessionControllerState>,
+    project_path: String,
+    task_description: Option<String>,
+    cli: String,
+    model: Option<String>,
+    flags: Option<Vec<String>>,
+) -> Result<Session, String> {
+    validate_project_path(&project_path).map_err(|e| e.message.clone())?;
+    validate_cli(&cli).map_err(|e| e.message.clone())?;
+
+    let agent_config = AgentConfig {
+        cli,
+        model,
+        flags: flags.unwrap_or_default(),
+        label: None,
+        role: None,
+        initial_prompt: None,
+    };
+
+    let config = HiveLaunchConfig {
+        project_path,
+        queen_config: agent_config,
+        workers: vec![],
+        prompt: task_description.filter(|t| !t.trim().is_empty()),
+        with_planning: false,
+        smoke_test: false,
+    };
+
+    let controller = state.0.read();
+    controller.launch_solo(config)
 }
 
 #[tauri::command]
