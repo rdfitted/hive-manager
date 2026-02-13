@@ -14,6 +14,7 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::http::state::AppState;
+use tauri::Emitter;
 
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, resize_pty, write_to_pty, inject_to_pty,
@@ -101,7 +102,7 @@ pub fn run() {
                     let mut currently_stalled: HashSet<(String, String)> = HashSet::new();
                     for session_id in &running_session_ids {
                         let stalled = controller.get_stalled_agents(session_id, stall_threshold);
-                        for (agent_id, last_activity) in stalled {
+                        for (agent_id, _last_activity) in stalled {
                             currently_stalled.insert((session_id.clone(), agent_id.clone()));
                         }
                     }

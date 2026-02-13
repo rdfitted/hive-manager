@@ -5457,6 +5457,7 @@ Last updated: {timestamp}
                         status: format!("{:?}", a.status),
                         current_task: None,
                         last_update: Utc::now(),
+                        last_heartbeat: None,
                     })
                     .collect();
 

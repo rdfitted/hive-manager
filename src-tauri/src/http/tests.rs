@@ -9,8 +9,8 @@ use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
-use crate::session::{Session, SessionController, SessionState, SessionType};
-use crate::pty::{AgentInfo, AgentRole, AgentStatus, AgentConfig};
+use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo};
+use crate::pty::{AgentRole, AgentStatus, AgentConfig};
 use crate::coordination::InjectionManager;
 use parking_lot::RwLock;
 
@@ -2395,7 +2395,7 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
     );
 
     // POST heartbeat first
-    let _ = app
+    let _ = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
