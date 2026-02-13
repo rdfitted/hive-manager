@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -231,19 +229,6 @@ impl SessionStorage {
         Ok(())
     }
 
-    /// Create an agent-specific conversation file (e.g., worker-1.md).
-    pub fn create_agent_conversation_file(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-    ) -> Result<(), StorageError> {
-        self.create_conversation_dir(session_id)?;
-        let path = self.conversation_file_path(session_id, agent_id);
-        if !path.exists() {
-            fs::write(path, "")?;
-        }
-        Ok(())
-    }
 
     /// Save session metadata to disk
     #[allow(dead_code)]
@@ -524,8 +509,8 @@ impl SessionStorage {
         })
     }
 
-    /// Append a conversation message with fs2 exclusive file lock.
-    /// Uses spawn_blocking because fs2 locks are synchronous/blocking.
+    /// Append a conversation message to the agent's conversation file.
+    /// Uses simple append-mode file I/O (no fs2 locking) to avoid Windows "Access is denied" errors.
     pub async fn append_conversation_message(
         &self,
         session_id: &str,
@@ -533,61 +518,44 @@ impl SessionStorage {
         from: &str,
         content: &str,
     ) -> Result<(), StorageError> {
-        self.create_agent_conversation_file(session_id, agent_id)?;
+        let conversations_dir = self.session_dir(session_id).join("conversations");
+        fs::create_dir_all(&conversations_dir)?;
         let path = self.conversation_file_path(session_id, agent_id);
-        let from = from.to_string();
-        let content = content.to_string();
-        let timestamp = Utc::now();
+        let entry = format!(
+            "---\n[{}] from @{}\n{}\n\n",
+            Utc::now().to_rfc3339(),
+            from,
+            content
+        );
 
         tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
             let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-            file.lock_exclusive()?;
-
-            let result = (|| -> Result<(), StorageError> {
-                let entry = format!(
-                    "---\n[{}] from @{}\n{}\n\n",
-                    timestamp.to_rfc3339(),
-                    from,
-                    content
-                );
-                file.write_all(entry.as_bytes())?;
-                Ok(())
-            })();
-
-            let _ = file.unlock();
-            result
+            file.write_all(entry.as_bytes())?;
+            Ok(())
         })
         .await
         .map_err(|e| StorageError::InvalidPath(format!("Join error in append conversation: {}", e)))?
     }
 
-    /// Read conversation messages with optional since filter using fs2 shared lock.
-    /// Uses spawn_blocking because fs2 locks are synchronous/blocking.
+    /// Read conversation messages with optional since filter.
     pub async fn read_conversation(
         &self,
         session_id: &str,
         agent_id: &str,
         since: Option<DateTime<Utc>>,
     ) -> Result<Vec<ConversationMessage>, StorageError> {
-        self.create_agent_conversation_file(session_id, agent_id)?;
         let path = self.conversation_file_path(session_id, agent_id);
 
         tokio::task::spawn_blocking(move || -> Result<Vec<ConversationMessage>, StorageError> {
-            let mut file = OpenOptions::new().read(true).open(path)?;
-            file.lock_shared()?;
-
-            let result = (|| -> Result<Vec<ConversationMessage>, StorageError> {
-                let mut content = String::new();
-                file.read_to_string(&mut content)?;
-                let mut messages = parse_conversation_messages(&content);
-                if let Some(since_ts) = since {
-                    messages.retain(|m| m.timestamp > since_ts);
-                }
-                Ok(messages)
-            })();
-
-            let _ = file.unlock();
-            result
+            if !path.exists() {
+                return Ok(Vec::new());
+            }
+            let content = fs::read_to_string(&path)?;
+            let mut messages = parse_conversation_messages(&content);
+            if let Some(since_ts) = since {
+                messages.retain(|m| m.timestamp > since_ts);
+            }
+            Ok(messages)
         })
         .await
         .map_err(|e| StorageError::InvalidPath(format!("Join error in read conversation: {}", e)))?
