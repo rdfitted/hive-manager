@@ -1739,9 +1739,14 @@ Write to `.hive-manager/{session_id}/plan.md`:
             ));
 
             let priority = if index == 1 { "HIGH" } else if index == 2 { "MEDIUM" } else { "LOW" };
+            let task_desc = match index {
+                1 => format!("Send a message to queen via conversation API, send heartbeat, then read shared conversation -> Worker {}", index),
+                2 => format!("Read queen conversation for messages, post to shared conversation, send heartbeat with summary -> Worker {}", index),
+                _ => format!("Send heartbeat, read shared conversation, post completion message to queen -> Worker {}", index),
+            };
             task_list.push_str(&format!(
-                "- [ ] [{}] Smoke test task {}: Verify {} worker functionality -> Worker {}\n",
-                priority, index, role_label, index
+                "- [ ] [{}] Smoke test task {}: {} \n",
+                priority, index, task_desc
             ));
 
             if index > 1 {
@@ -1791,6 +1796,27 @@ Testing {worker_count} workers as configured by the user.
 
 ## Tasks
 {task_list}
+## Task Details
+
+Each worker should use the Inter-Agent Communication endpoints from their prompt.
+Workers MUST use curl to exercise the conversation and heartbeat APIs.
+
+### Task 1 (Worker 1):
+1. Send heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"working","summary":"Starting smoke test"}}'`
+2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
+3. Post to shared: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
+4. Send completed heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"completed","summary":"Smoke test done"}}'`
+
+### Task 2 (Worker 2, if present):
+1. Send heartbeat with working status
+2. Read queen conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/queen"`
+3. Read shared conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared"`
+4. Post message to queen confirming what was read
+5. Send completed heartbeat
+
+### Task N (additional workers):
+1. Send heartbeat, read shared, post completion message to queen, send completed heartbeat
+
 ## Files to Modify
 | File | Priority | Changes Needed |
 |------|----------|----------------|
@@ -1802,8 +1828,8 @@ Testing {worker_count} workers as configured by the user.
 None - this is a smoke test.
 
 ## Notes
-Smoke test completed successfully. The planning phase flow is working.
-Testing all {worker_count} configured workers.
+This smoke test validates the inter-agent conversation and heartbeat flow.
+Testing all {worker_count} configured workers with real API calls.
 ```
 
 After writing the plan, say: **"PLAN READY FOR REVIEW"**
