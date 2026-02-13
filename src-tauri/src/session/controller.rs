@@ -2043,6 +2043,7 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tasks Directory**: `.hive-manager/{session_id}/tasks/`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
+- **Conversation Files**: `.hive-manager/{session_id}/conversations/queen.md`, `.hive-manager/{session_id}/conversations/shared.md`, `.hive-manager/{session_id}/conversations/worker-N.md`
 
 {plan_section}
 
@@ -2095,6 +2096,35 @@ Add task instructions
 
 Workers poll their task files and will start when they see ACTIVE status.
 
+## Inter-Agent Communication
+
+Use these exact conversation and heartbeat endpoints:
+
+```bash
+# Check Queen inbox
+curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/queen?since=<last_check_ts>"
+
+# Message a worker
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/worker-N/append" \
+  -H "Content-Type: application/json" \
+  -d '{{"from":"queen","content":"Your message"}}'
+
+# Broadcast to all agents
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" \
+  -H "Content-Type: application/json" \
+  -d '{{"from":"queen","content":"Announcement"}}'
+
+# Heartbeat (every 60-90s)
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{{"agent_id":"queen","status":"working","summary":"Monitoring workers"}}'
+
+# Inspect active sessions and heartbeat state
+curl -s "http://localhost:18800/api/sessions/active"
+```
+
+Check your inbox between subtasks. Read `shared.md` for broadcasts before assigning new work.
+
 ## Learning Curation Protocol
 
 Workers record learnings during task completion. Your curation responsibilities:
@@ -2146,6 +2176,8 @@ Workers record learnings during task completion. Your curation responsibilities:
 5. **Spawn next worker** - When a task completes, spawn the next worker if needed
 6. **Review & integrate** - Review worker output and coordinate integration
 7. **Commit & push** - You handle final commits (workers don't push)
+
+After your orchestration objective is complete, transition to `idle` heartbeat status and continue checking your conversation file on heartbeat cadence.
 
 ## Your Task
 
@@ -2209,6 +2241,12 @@ You have full access to Claude Code tools:
 
 Your task assignments are in: `{task_file}`
 
+## Conversation Files (Session-Scoped)
+
+- Your inbox file: `.hive-manager/{session_id}/conversations/worker-{index}.md`
+- Queen channel: `.hive-manager/{session_id}/conversations/queen.md`
+- Shared broadcasts: `.hive-manager/{session_id}/conversations/shared.md`
+
 **Workflow:**
 1. Read your task file to check your current status
 2. If Status is `STANDBY` - wait and periodically re-check the file
@@ -2226,6 +2264,33 @@ Your task assignments are in: `{task_file}`
 ## Coordinator
 
 - **Queen**: {queen_id}
+
+## Inter-Agent Communication
+
+Use these exact conversation and heartbeat endpoints:
+
+```bash
+# Check your inbox
+curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/worker-{index}?since=<last_check_ts>"
+
+# Send update or question to Queen
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
+  -H "Content-Type: application/json" \
+  -d '{{"from":"worker-{index}","content":"Status update or blocker"}}'
+
+# Read shared broadcast stream
+curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared?since=<last_check_ts>"
+
+# Heartbeat (every 60-90s)
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{{"agent_id":"worker-{index}","status":"working","summary":"Current task focus"}}'
+
+# Inspect active sessions and heartbeat state
+curl -s "http://localhost:18800/api/sessions/active"
+```
+
+Check your conversation file between subtasks. Report progress to `queen.md` after milestones. Read `shared.md` for broadcasts.
 
 ## Learnings Protocol (MANDATORY)
 
@@ -2252,7 +2317,9 @@ Review `.ai-docs/project-dna.md` for patterns and conventions learned from previ
 
 ## Task Coordination
 Read {task_file}. Begin work only when Status is ACTIVE.
-Use the interactive interface to monitor your task file.{polling_instructions}"#,
+Use the interactive interface to monitor your task file.
+
+After completing your task, transition to IDLE state. Continue checking your conversation file on heartbeat cadence.{polling_instructions}"#,
             index = index,
             role_name = role_name,
             role_description = role_description,
