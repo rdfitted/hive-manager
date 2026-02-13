@@ -54,6 +54,53 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
     Ok(first_path)
 }
 
+/// Validate SubmitLearningRequest fields (session, task, insight, outcome, files_touched).
+/// Shared by submit_learning and submit_learning_for_session.
+fn validate_submit_learning_request(req: &SubmitLearningRequest) -> Result<(), ApiError> {
+    if req.session.trim().is_empty() {
+        return Err(ApiError::bad_request("Session cannot be empty"));
+    }
+    if req.task.trim().is_empty() {
+        return Err(ApiError::bad_request("Task cannot be empty"));
+    }
+    if req.insight.trim().is_empty() {
+        return Err(ApiError::bad_request("Insight cannot be empty"));
+    }
+    match req.outcome.as_str() {
+        "success" | "partial" | "failed" => {}
+        _ => {
+            return Err(ApiError::bad_request(
+                "Outcome must be one of: success, partial, failed",
+            ));
+        }
+    }
+    for file_path in &req.files_touched {
+        if file_path.contains("..") || file_path.starts_with('/') || file_path.contains('\\') {
+            return Err(ApiError::bad_request(format!(
+                "Invalid file path: {}",
+                file_path
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Build a Learning from a validated SubmitLearningRequest.
+fn learning_from_request(req: SubmitLearningRequest) -> (Learning, String) {
+    let learning_id = uuid::Uuid::new_v4().to_string();
+    let learning = Learning {
+        id: learning_id.clone(),
+        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        session: req.session,
+        task: req.task,
+        outcome: req.outcome,
+        keywords: req.keywords,
+        insight: req.insight,
+        files_touched: req.files_touched,
+    };
+    (learning, learning_id)
+}
+
 /// Apply case-insensitive filtering on learnings by category and keywords
 fn filter_learnings(learnings: Vec<Learning>, params: &LearningsFilter) -> Vec<Value> {
     let cat_lower = params.category.as_deref().map(|c| c.to_lowercase());
@@ -107,50 +154,9 @@ pub async fn submit_learning(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitLearningRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    if req.session.trim().is_empty() {
-        return Err(ApiError::bad_request("Session cannot be empty"));
-    }
-
-    if req.task.trim().is_empty() {
-        return Err(ApiError::bad_request("Task cannot be empty"));
-    }
-
-    if req.insight.trim().is_empty() {
-        return Err(ApiError::bad_request("Insight cannot be empty"));
-    }
-
-    match req.outcome.as_str() {
-        "success" | "partial" | "failed" => {}
-        _ => {
-            return Err(ApiError::bad_request(
-                "Outcome must be one of: success, partial, failed",
-            ));
-        }
-    }
-
-    for file_path in &req.files_touched {
-        if file_path.contains("..") || file_path.starts_with('/') || file_path.contains('\\') {
-            return Err(ApiError::bad_request(format!(
-                "Invalid file path: {}",
-                file_path
-            )));
-        }
-    }
-
+    validate_submit_learning_request(&req)?;
     let project_path = resolve_project_path(&state)?;
-
-    let learning_id = uuid::Uuid::new_v4().to_string();
-
-    let learning = Learning {
-        id: learning_id.clone(),
-        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        session: req.session,
-        task: req.task,
-        outcome: req.outcome,
-        keywords: req.keywords,
-        insight: req.insight,
-        files_touched: req.files_touched,
-    };
+    let (learning, learning_id) = learning_from_request(req);
 
     state
         .storage
@@ -211,51 +217,9 @@ pub async fn submit_learning_for_session(
     Json(req): Json<SubmitLearningRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     validate_session_id(&session_id)?;
+    validate_submit_learning_request(&req)?;
+    let (learning, learning_id) = learning_from_request(req);
 
-    if req.session.trim().is_empty() {
-        return Err(ApiError::bad_request("Session cannot be empty"));
-    }
-
-    if req.task.trim().is_empty() {
-        return Err(ApiError::bad_request("Task cannot be empty"));
-    }
-
-    if req.insight.trim().is_empty() {
-        return Err(ApiError::bad_request("Insight cannot be empty"));
-    }
-
-    match req.outcome.as_str() {
-        "success" | "partial" | "failed" => {}
-        _ => {
-            return Err(ApiError::bad_request(
-                "Outcome must be one of: success, partial, failed",
-            ));
-        }
-    }
-
-    for file_path in &req.files_touched {
-        if file_path.contains("..") || file_path.starts_with('/') || file_path.contains('\\') {
-            return Err(ApiError::bad_request(format!(
-                "Invalid file path: {}",
-                file_path
-            )));
-        }
-    }
-
-    let learning_id = uuid::Uuid::new_v4().to_string();
-
-    let learning = Learning {
-        id: learning_id.clone(),
-        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        session: req.session,
-        task: req.task,
-        outcome: req.outcome,
-        keywords: req.keywords,
-        insight: req.insight,
-        files_touched: req.files_touched,
-    };
-
-    // Use session-scoped storage
     state
         .storage
         .append_learning_session(&session_id, &learning)

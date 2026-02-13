@@ -1,8 +1,9 @@
 <script lang="ts">
   import PlanView from './PlanView.svelte';
   import CoordinationPanel from './CoordinationPanel.svelte';
+  import ConversationViewer from './ConversationViewer.svelte';
 
-  type Tab = 'plan' | 'logs';
+  type Tab = 'plan' | 'logs' | 'chat';
   let activeTab: Tab = $state('plan');
   let collapsed = $state(true);
 </script>
@@ -31,13 +32,22 @@
       >
         Logs
       </button>
+      <button
+        class="tab"
+        class:active={activeTab === 'chat'}
+        onclick={() => activeTab = 'chat'}
+      >
+        Chat
+      </button>
     </div>
 
     <div class="tab-content">
       {#if activeTab === 'plan'}
         <PlanView />
-      {:else}
+      {:else if activeTab === 'logs'}
         <CoordinationPanel />
+      {:else}
+        <ConversationViewer />
       {/if}
     </div>
   {/if}

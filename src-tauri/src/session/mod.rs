@@ -2,8 +2,5 @@ mod controller;
 
 pub use controller::{
     Session, SessionController, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig,
-    FusionVariantConfig, FusionVariantStatus, SessionType, AgentInfo,
+    FusionVariantConfig, FusionVariantStatus, SessionType, AgentInfo, SessionState,
 };
-
-#[cfg(test)]
-pub use controller::SessionState;

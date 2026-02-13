@@ -8,10 +8,13 @@ pub mod cli;
 mod http;
 mod watcher;
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use parking_lot::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::http::state::AppState;
+use tauri::Emitter;
 
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, resize_pty, write_to_pty, inject_to_pty,
@@ -77,6 +80,55 @@ pub fn run() {
                 let mut injection = injection_manager.write();
                 injection.set_app_handle(app.handle().clone());
             }
+
+            // Stall detection background task - runs every 60s, emits agent-stalled/agent-recovered
+            let stall_controller = session_controller.clone();
+            let stall_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let stall_threshold = Duration::from_secs(180); // 3 minutes
+                let mut known_stalled: HashSet<(String, String)> = HashSet::new();
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let controller = stall_controller.read();
+                    let sessions = controller.list_sessions();
+                    let running_session_ids: Vec<String> = sessions
+                        .iter()
+                        .filter(|s| s.state == crate::session::SessionState::Running)
+                        .map(|s| s.id.clone())
+                        .collect();
+                    drop(sessions);
+
+                    let mut currently_stalled: HashSet<(String, String)> = HashSet::new();
+                    for session_id in &running_session_ids {
+                        let stalled = controller.get_stalled_agents(session_id, stall_threshold);
+                        for (agent_id, _last_activity) in stalled {
+                            currently_stalled.insert((session_id.clone(), agent_id.clone()));
+                        }
+                    }
+                    drop(controller);
+
+                    // Emit agent-stalled for newly stalled
+                    for (sid, aid) in &currently_stalled {
+                        if !known_stalled.contains(&(sid.clone(), aid.clone())) {
+                            let _ = stall_app_handle.emit("agent-stalled", serde_json::json!({
+                                "session_id": sid,
+                                "agent_id": aid,
+                            }));
+                        }
+                    }
+                    // Emit agent-recovered for no longer stalled
+                    for (sid, aid) in known_stalled.iter() {
+                        if !currently_stalled.contains(&(sid.clone(), aid.clone())) {
+                            let _ = stall_app_handle.emit("agent-recovered", serde_json::json!({
+                                "session_id": sid,
+                                "agent_id": aid,
+                            }));
+                        }
+                    }
+                    known_stalled = currently_stalled;
+                }
+            });
 
             // Start HTTP server if enabled
             let http_config = shared_config.clone();

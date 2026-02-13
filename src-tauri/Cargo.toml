@@ -1,6 +1,6 @@
 [package]
 name = "hive-manager"
-version = "0.15.0"
+version = "0.15.1"
 description = "Multi-agent orchestration and monitoring for Claude Code workflows"
 authors = ["RDuff"]
 edition = "2021"
@@ -37,3 +37,4 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 notify = "6.1"
 tempfile = "3"
+fs2 = "0.4"

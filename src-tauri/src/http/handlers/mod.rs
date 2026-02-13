@@ -4,6 +4,8 @@ pub mod inject;
 pub mod workers;
 pub mod planners;
 pub mod learnings;
+pub mod conversations;
+pub mod heartbeats;
 
 use crate::http::error::ApiError;
 
@@ -14,6 +16,26 @@ pub fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
     if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
         return Err(ApiError::bad_request(
             "Invalid session ID: must not contain '..', '/', or '\\'",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate agent_id to prevent path traversal and malformed names.
+pub fn validate_agent_id(agent_id: &str) -> Result<(), ApiError> {
+    if agent_id.is_empty() || agent_id.len() > 64 {
+        return Err(ApiError::bad_request(
+            "Invalid agent ID: must be 1-64 characters",
+        ));
+    }
+    if agent_id.contains("..") || agent_id.contains('/') || agent_id.contains('\\') {
+        return Err(ApiError::bad_request(
+            "Invalid agent ID: must not contain '..', '/', or '\\'",
+        ));
+    }
+    if !agent_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(ApiError::bad_request(
+            "Invalid agent ID: only alphanumeric characters and hyphens are allowed",
         ));
     }
     Ok(())

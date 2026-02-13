@@ -120,6 +120,7 @@ pub async fn add_worker(
                     status: format!("{:?}", a.status),
                     current_task: None,
                     last_update: chrono::Utc::now(),
+                    last_heartbeat: None,
                 })
                 .collect();
 
@@ -136,6 +137,7 @@ pub async fn add_worker(
         status: "Running".to_string(),
         current_task: None,
         last_update: chrono::Utc::now(),
+        last_heartbeat: None,
     };
 
     let _ = state.injection_manager.read().notify_queen_worker_added(

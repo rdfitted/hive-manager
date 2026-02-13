@@ -172,6 +172,7 @@ pub async fn add_worker_to_session(
         status: "Running".to_string(),
         current_task: None,
         last_update: chrono::Utc::now(),
+        last_heartbeat: None,
     };
 
     // Notify Queen
@@ -194,6 +195,7 @@ pub async fn add_worker_to_session(
                 status: format!("{:?}", a.status),
                 current_task: None,
                 last_update: chrono::Utc::now(),
+                last_heartbeat: None,
             })
             .collect();
 

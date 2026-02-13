@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -190,12 +191,22 @@ pub struct SessionUpdate {
     pub session: Session,
 }
 
+/// Per-agent heartbeat data for stall detection
+#[derive(Debug, Clone)]
+pub struct AgentHeartbeatInfo {
+    pub last_activity: DateTime<Utc>,
+    pub status: String,
+    pub summary: Option<String>,
+}
+
 pub struct SessionController {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     pty_manager: Arc<RwLock<PtyManager>>,
     app_handle: Option<AppHandle>,
     storage: Option<Arc<SessionStorage>>,
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
+    /// session_id -> agent_id -> heartbeat info
+    agent_heartbeats: Arc<RwLock<HashMap<String, HashMap<String, AgentHeartbeatInfo>>>>,
 }
 
 // Explicitly implement Send + Sync
@@ -264,6 +275,7 @@ impl SessionController {
             app_handle: None,
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
+            agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -425,6 +437,79 @@ impl SessionController {
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
         sessions.values().cloned().collect()
+    }
+
+    // --- Heartbeat / Stall Detection ---
+
+    /// Update heartbeat for an agent. Emits Tauri event if status changed.
+    pub fn update_heartbeat(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        status: &str,
+        summary: Option<&str>,
+    ) -> Result<(), String> {
+        let now = Utc::now();
+        let prev_status = {
+            let mut heartbeats = self.agent_heartbeats.write();
+            let session_map = heartbeats.entry(session_id.to_string()).or_default();
+            let prev = session_map.get(agent_id).map(|h| h.status.clone());
+            session_map.insert(
+                agent_id.to_string(),
+                AgentHeartbeatInfo {
+                    last_activity: now,
+                    status: status.to_string(),
+                    summary: summary.map(String::from),
+                },
+            );
+            prev
+        };
+        let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
+        if status_changed {
+            if let Some(ref app_handle) = self.app_handle {
+                let _ = app_handle.emit("heartbeat-status-changed", serde_json::json!({
+                    "session_id": session_id,
+                    "agent_id": agent_id,
+                    "status": status,
+                    "summary": summary,
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Get agents with no activity for longer than threshold.
+    pub fn get_stalled_agents(
+        &self,
+        session_id: &str,
+        threshold: Duration,
+    ) -> Vec<(String, DateTime<Utc>)> {
+        let now = Utc::now();
+        let threshold_secs = threshold.as_secs() as i64;
+        let heartbeats = self.agent_heartbeats.read();
+        let Some(agents) = heartbeats.get(session_id) else {
+            return vec![];
+        };
+        agents
+            .iter()
+            .filter_map(|(agent_id, info)| {
+                let elapsed = (now - info.last_activity).num_seconds();
+                if elapsed > threshold_secs && info.status != "completed" {
+                    Some((agent_id.clone(), info.last_activity))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get heartbeat info for a session (for active sessions endpoint).
+    pub fn get_heartbeat_info(&self, session_id: &str) -> HashMap<String, AgentHeartbeatInfo> {
+        let heartbeats = self.agent_heartbeats.read();
+        heartbeats
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn emit_session_update(&self, session_id: &str) {
@@ -1654,9 +1739,14 @@ Write to `.hive-manager/{session_id}/plan.md`:
             ));
 
             let priority = if index == 1 { "HIGH" } else if index == 2 { "MEDIUM" } else { "LOW" };
+            let task_desc = match index {
+                1 => format!("Send a message to queen via conversation API, send heartbeat, then read shared conversation -> Worker {}", index),
+                2 => format!("Read queen conversation for messages, post to shared conversation, send heartbeat with summary -> Worker {}", index),
+                _ => format!("Send heartbeat, read shared conversation, post completion message to queen -> Worker {}", index),
+            };
             task_list.push_str(&format!(
-                "- [ ] [{}] Smoke test task {}: Verify {} worker functionality -> Worker {}\n",
-                priority, index, role_label, index
+                "- [ ] [{}] Smoke test task {}: {} \n",
+                priority, index, task_desc
             ));
 
             if index > 1 {
@@ -1706,6 +1796,27 @@ Testing {worker_count} workers as configured by the user.
 
 ## Tasks
 {task_list}
+## Task Details
+
+Each worker should use the Inter-Agent Communication endpoints from their prompt.
+Workers MUST use curl to exercise the conversation and heartbeat APIs.
+
+### Task 1 (Worker 1):
+1. Send heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"working","summary":"Starting smoke test"}}'`
+2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
+3. Post to shared: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
+4. Send completed heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"completed","summary":"Smoke test done"}}'`
+
+### Task 2 (Worker 2, if present):
+1. Send heartbeat with working status
+2. Read queen conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/queen"`
+3. Read shared conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared"`
+4. Post message to queen confirming what was read
+5. Send completed heartbeat
+
+### Task N (additional workers):
+1. Send heartbeat, read shared, post completion message to queen, send completed heartbeat
+
 ## Files to Modify
 | File | Priority | Changes Needed |
 |------|----------|----------------|
@@ -1717,8 +1828,8 @@ Testing {worker_count} workers as configured by the user.
 None - this is a smoke test.
 
 ## Notes
-Smoke test completed successfully. The planning phase flow is working.
-Testing all {worker_count} configured workers.
+This smoke test validates the inter-agent conversation and heartbeat flow.
+Testing all {worker_count} configured workers with real API calls.
 ```
 
 After writing the plan, say: **"PLAN READY FOR REVIEW"**
@@ -1958,6 +2069,7 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tasks Directory**: `.hive-manager/{session_id}/tasks/`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
+- **Conversation Files**: `.hive-manager/{session_id}/conversations/queen.md`, `.hive-manager/{session_id}/conversations/shared.md`, `.hive-manager/{session_id}/conversations/worker-N.md`
 
 {plan_section}
 
@@ -2010,6 +2122,55 @@ Add task instructions
 
 Workers poll their task files and will start when they see ACTIVE status.
 
+## Inter-Agent Communication
+
+Use these exact conversation and heartbeat endpoints:
+
+```bash
+# Check Queen inbox
+curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/queen?since=<last_check_ts>"
+
+# Message a worker
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/worker-N/append" \
+  -H "Content-Type: application/json" \
+  -d '{{"from":"queen","content":"Your message"}}'
+
+# Broadcast to all agents
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" \
+  -H "Content-Type: application/json" \
+  -d '{{"from":"queen","content":"Announcement"}}'
+
+# Heartbeat (every 60-90s)
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{{"agent_id":"queen","status":"working","summary":"Monitoring workers"}}'
+
+# Inspect active sessions and heartbeat state
+curl -s "http://localhost:18800/api/sessions/active"
+```
+
+Check your inbox between subtasks. Read `shared.md` for broadcasts before assigning new work.
+
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, write directly to the conversation files instead:
+
+```bash
+# Append to a worker's inbox (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @queen\nYour message here\n" >> ".hive-manager/{session_id}/conversations/worker-N.md"
+
+# Append to shared channel (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @queen\nYour message here\n" >> ".hive-manager/{session_id}/conversations/shared.md"
+
+# Read queen inbox (fallback)
+cat ".hive-manager/{session_id}/conversations/queen.md"
+
+# Read shared broadcasts (fallback)
+cat ".hive-manager/{session_id}/conversations/shared.md"
+```
+
+Always try the curl API first. Only use file fallback if curl fails.
+
 ## Learning Curation Protocol
 
 Workers record learnings during task completion. Your curation responsibilities:
@@ -2061,6 +2222,8 @@ Workers record learnings during task completion. Your curation responsibilities:
 5. **Spawn next worker** - When a task completes, spawn the next worker if needed
 6. **Review & integrate** - Review worker output and coordinate integration
 7. **Commit & push** - You handle final commits (workers don't push)
+
+After your orchestration objective is complete, transition to `idle` heartbeat status and continue checking your conversation file on heartbeat cadence.
 
 ## Your Task
 
@@ -2124,6 +2287,12 @@ You have full access to Claude Code tools:
 
 Your task assignments are in: `{task_file}`
 
+## Conversation Files (Session-Scoped)
+
+- Your inbox file: `.hive-manager/{session_id}/conversations/worker-{index}.md`
+- Queen channel: `.hive-manager/{session_id}/conversations/queen.md`
+- Shared broadcasts: `.hive-manager/{session_id}/conversations/shared.md`
+
 **Workflow:**
 1. Read your task file to check your current status
 2. If Status is `STANDBY` - wait and periodically re-check the file
@@ -2141,6 +2310,53 @@ Your task assignments are in: `{task_file}`
 ## Coordinator
 
 - **Queen**: {queen_id}
+
+## Inter-Agent Communication
+
+Use these exact conversation and heartbeat endpoints:
+
+```bash
+# Check your inbox
+curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/worker-{index}?since=<last_check_ts>"
+
+# Send update or question to Queen
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
+  -H "Content-Type: application/json" \
+  -d '{{"from":"worker-{index}","content":"Status update or blocker"}}'
+
+# Read shared broadcast stream
+curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared?since=<last_check_ts>"
+
+# Heartbeat (every 60-90s)
+curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{{"agent_id":"worker-{index}","status":"working","summary":"Current task focus"}}'
+
+# Inspect active sessions and heartbeat state
+curl -s "http://localhost:18800/api/sessions/active"
+```
+
+Check your conversation file between subtasks. Report progress to `queen.md` after milestones. Read `shared.md` for broadcasts.
+
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, write directly to the conversation files instead:
+
+```bash
+# Append to queen's inbox (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @worker-{index}\nYour message here\n" >> ".hive-manager/{session_id}/conversations/queen.md"
+
+# Append to shared channel (fallback)
+echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @worker-{index}\nYour message here\n" >> ".hive-manager/{session_id}/conversations/shared.md"
+
+# Read your inbox (fallback)
+cat ".hive-manager/{session_id}/conversations/worker-{index}.md"
+
+# Read shared broadcasts (fallback)
+cat ".hive-manager/{session_id}/conversations/shared.md"
+```
+
+Always try the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
@@ -2167,7 +2383,9 @@ Review `.ai-docs/project-dna.md` for patterns and conventions learned from previ
 
 ## Task Coordination
 Read {task_file}. Begin work only when Status is ACTIVE.
-Use the interactive interface to monitor your task file.{polling_instructions}"#,
+Use the interactive interface to monitor your task file.
+
+After completing your task, transition to IDLE state. Continue checking your conversation file on heartbeat cadence.{polling_instructions}"#,
             index = index,
             role_name = role_name,
             role_description = role_description,
@@ -5218,6 +5436,7 @@ Last updated: {timestamp}
                     status: format!("{:?}", a.status),
                     current_task: None,
                     last_update: Utc::now(),
+                    last_heartbeat: None,
                 })
                 .collect();
 
@@ -5304,6 +5523,7 @@ Last updated: {timestamp}
                         status: format!("{:?}", a.status),
                         current_task: None,
                         last_update: Utc::now(),
+                        last_heartbeat: None,
                     })
                     .collect();
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,13 @@ pub struct Learning {
     pub keywords: Vec<String>,
     pub insight: String,
     pub files_touched: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    pub timestamp: DateTime<Utc>,
+    pub from: String,
+    pub content: String,
 }
 
 #[derive(Debug, Error)]
@@ -203,9 +211,24 @@ impl SessionStorage {
         // Initialize coordination files
         fs::write(session_dir.join("coordination").join("coordination.log"), "")?;
         fs::write(session_dir.join("coordination").join("queen-inbox.md"), "# Queen Inbox\n\nNo messages yet.\n")?;
+        self.create_conversation_dir(session_id)?;
 
         Ok(session_dir)
     }
+
+    /// Create conversation directory and default files for a session.
+    pub fn create_conversation_dir(&self, session_id: &str) -> Result<(), StorageError> {
+        let conversations_dir = self.session_dir(session_id).join("conversations");
+        fs::create_dir_all(&conversations_dir)?;
+        for name in ["queen.md", "shared.md"] {
+            let path = conversations_dir.join(name);
+            if !path.exists() {
+                fs::write(path, "")?;
+            }
+        }
+        Ok(())
+    }
+
 
     /// Save session metadata to disk
     #[allow(dead_code)]
@@ -486,6 +509,64 @@ impl SessionStorage {
         })
     }
 
+    /// Append a conversation message to the agent's conversation file.
+    /// Uses simple append-mode file I/O (no fs2 locking) to avoid Windows "Access is denied" errors.
+    pub async fn append_conversation_message(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        from: &str,
+        content: &str,
+    ) -> Result<(), StorageError> {
+        let conversations_dir = self.session_dir(session_id).join("conversations");
+        fs::create_dir_all(&conversations_dir)?;
+        let path = self.conversation_file_path(session_id, agent_id);
+        let entry = format!(
+            "---\n[{}] from @{}\n{}\n\n",
+            Utc::now().to_rfc3339(),
+            from,
+            content
+        );
+
+        tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            file.write_all(entry.as_bytes())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| StorageError::InvalidPath(format!("Join error in append conversation: {}", e)))?
+    }
+
+    /// Read conversation messages with optional since filter.
+    pub async fn read_conversation(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<ConversationMessage>, StorageError> {
+        let path = self.conversation_file_path(session_id, agent_id);
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<ConversationMessage>, StorageError> {
+            if !path.exists() {
+                return Ok(Vec::new());
+            }
+            let content = fs::read_to_string(&path)?;
+            let mut messages = parse_conversation_messages(&content);
+            if let Some(since_ts) = since {
+                messages.retain(|m| m.timestamp > since_ts);
+            }
+            Ok(messages)
+        })
+        .await
+        .map_err(|e| StorageError::InvalidPath(format!("Join error in read conversation: {}", e)))?
+    }
+
+    fn conversation_file_path(&self, session_id: &str, agent_id: &str) -> PathBuf {
+        self.session_dir(session_id)
+            .join("conversations")
+            .join(format!("{}.md", agent_id))
+    }
+
     fn ai_docs_dir(project_path: &Path) -> PathBuf {
         project_path.join(".ai-docs")
     }
@@ -707,6 +788,52 @@ impl SessionStorage {
         fs::write(project_dna_file, content)?;
         Ok(())
     }
+}
+
+fn parse_conversation_messages(content: &str) -> Vec<ConversationMessage> {
+    // Entry format:
+    // ---
+    // [timestamp] from @sender
+    // message body
+    // (blank line)
+    let mut messages = Vec::new();
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return messages;
+    }
+
+    let normalized = trimmed.strip_prefix("---\n").unwrap_or(trimmed);
+    let chunks: Vec<&str> = normalized.split("\n---\n").collect();
+    for raw in chunks {
+        let chunk = raw.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut lines = chunk.lines();
+        let header = match lines.next() {
+            Some(h) => h.trim(),
+            None => continue,
+        };
+        let caps = match regex::Regex::new(r"^\[([^\]]+)\] from @([A-Za-z0-9\-]+)$")
+            .ok()
+            .and_then(|re| re.captures(header))
+        {
+            Some(c) => c,
+            None => continue,
+        };
+        let timestamp = match DateTime::parse_from_rfc3339(&caps[1]) {
+            Ok(ts) => ts.with_timezone(&Utc),
+            Err(_) => continue,
+        };
+        let from = caps[2].to_string();
+        let message_body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+        messages.push(ConversationMessage {
+            timestamp,
+            from,
+            content: message_body,
+        });
+    }
+    messages
 }
 
 impl Default for SessionStorage {

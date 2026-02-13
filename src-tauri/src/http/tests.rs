@@ -9,7 +9,8 @@ use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
-use crate::session::{Session, SessionController, SessionState, SessionType};
+use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo};
+use crate::pty::{AgentRole, AgentStatus, AgentConfig};
 use crate::coordination::InjectionManager;
 use parking_lot::RwLock;
 
@@ -64,6 +65,33 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         state: SessionState::Running,
         created_at: chrono::Utc::now(),
         agents: vec![],
+        default_cli: "claude".to_string(),
+        default_model: Some("opus-4-6".to_string()),
+    }
+}
+
+fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str]) -> Session {
+    let agents: Vec<AgentInfo> = agent_ids
+        .iter()
+        .enumerate()
+        .map(|(i, aid)| AgentInfo {
+            id: (*aid).to_string(),
+            role: AgentRole::Worker {
+                index: (i + 1) as u8,
+                parent: None,
+            },
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+        })
+        .collect();
+    Session {
+        id: id.to_string(),
+        session_type: SessionType::Hive { worker_count: 1 },
+        project_path: PathBuf::from(project_path),
+        state: SessionState::Running,
+        created_at: chrono::Utc::now(),
+        agents,
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
     }
@@ -2040,4 +2068,368 @@ async fn test_select_winner_path_traversal() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- Conversations API tests ---
+
+#[tokio::test]
+async fn test_append_conversation_and_verify_file_content() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let storage = SessionStorage::new().unwrap();
+    let session_id = format!("conv-append-{}", uuid::Uuid::new_v4());
+
+    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({
+        "from": "worker-1",
+        "content": "First conversation message"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/conversations/worker-1/append", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let conversation_file = storage
+        .session_dir(&session_id)
+        .join("conversations")
+        .join("worker-1.md");
+    let file_content = std::fs::read_to_string(conversation_file).unwrap();
+    assert!(file_content.contains("from @worker-1"));
+    assert!(file_content.contains("First conversation message"));
+
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_read_conversation_since_filter() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("conv-since-{}", uuid::Uuid::new_v4());
+
+    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+
+    let body_1 = serde_json::json!({
+        "from": "queen",
+        "content": "Before marker"
+    });
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/conversations/shared/append", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_1).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let marker = chrono::Utc::now().to_rfc3339();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let body_2 = serde_json::json!({
+        "from": "worker-1",
+        "content": "After marker"
+    });
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/conversations/shared/append", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body_2).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/conversations/shared?since={}",
+                    session_id, marker
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let messages = response_json.get("messages").unwrap().as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].get("from").unwrap().as_str().unwrap(), "worker-1");
+    assert_eq!(
+        messages[0].get("content").unwrap().as_str().unwrap(),
+        "After marker"
+    );
+
+    let storage = SessionStorage::new().unwrap();
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_conversation_rejects_path_traversal_and_invalid_agent_id() {
+    let app = setup_test_app().await;
+    let body = serde_json::json!({
+        "from": "worker-1",
+        "content": "test"
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/..evil/conversations/worker-1/append")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-safe/conversations/worker 1/append")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_conversation_concurrent_appends() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("conv-concurrent-{}", uuid::Uuid::new_v4());
+
+    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let app_clone = app.clone();
+        let session_id_clone = session_id.clone();
+        handles.push(tokio::spawn(async move {
+            let body = serde_json::json!({
+                "from": format!("worker-{}", i + 1),
+                "content": format!("message-{}", i + 1)
+            });
+            app_clone
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/sessions/{}/conversations/shared/append", session_id_clone))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_string(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+
+    for handle in handles {
+        let status = handle.await.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/conversations/shared", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let messages = response_json.get("messages").unwrap().as_array().unwrap();
+    assert_eq!(messages.len(), 5);
+
+    let storage = SessionStorage::new().unwrap();
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+// --- Heartbeat endpoint tests ---
+
+#[tokio::test]
+async fn test_post_heartbeat_updates_timestamp() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-heartbeat");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session_with_agents("session-hb", temp_dir.to_str().unwrap(), &["worker-1"]),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-hb/heartbeat")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"worker-1","status":"working","summary":"3/5 files done"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_post_heartbeat_rejects_invalid_status() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-heartbeat-invalid");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session_with_agents("session-hb-inv", temp_dir.to_str().unwrap(), &["worker-1"]),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-hb-inv/heartbeat")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"worker-1","status":"invalid","summary":"x"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_get_active_sessions_returns_only_running() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-active");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session_with_agents("session-running", temp_dir.to_str().unwrap(), &["worker-1"]),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/active")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let sessions = response_json.get("sessions").unwrap().as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].get("id").unwrap().as_str().unwrap(), "session-running");
+    let agents = sessions[0].get("agents").unwrap().as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_get_active_sessions_includes_heartbeat_after_post() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-active-hb");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session_with_agents("session-active-hb", temp_dir.to_str().unwrap(), &["worker-1"]),
+    );
+
+    // POST heartbeat first
+    let _ = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-active-hb/heartbeat")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"worker-1","status":"working","summary":"2/3 done"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // GET active sessions
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/active")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let sessions = response_json.get("sessions").unwrap().as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    let agents = sessions[0].get("agents").unwrap().as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+    assert!(agents[0].get("last_activity").unwrap().as_str().is_some());
+    assert_eq!(agents[0].get("status").unwrap().as_str().unwrap(), "working");
+    assert_eq!(agents[0].get("summary").unwrap().as_str().unwrap(), "2/3 done");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

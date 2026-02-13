@@ -5,7 +5,7 @@ use axum::{
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
-use crate::http::handlers::{health, sessions, inject, workers, planners, learnings};
+use crate::http::handlers::{health, sessions, inject, workers, planners, learnings, conversations, heartbeats};
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -16,6 +16,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health::health_check))
         .route("/api/sessions", get(sessions::list_sessions))
+        // Heartbeat routes (active must be before {id} to match)
+        .route("/api/sessions/active", get(heartbeats::get_active_sessions))
+        .route("/api/sessions/{id}/heartbeat", post(heartbeats::post_heartbeat))
         .route("/api/sessions/{id}", get(sessions::get_session))
         .route("/api/sessions/hive", post(sessions::launch_hive))
         .route("/api/sessions/swarm", post(sessions::launch_swarm))
@@ -40,6 +43,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/learnings", post(learnings::submit_learning_for_session))
         .route("/api/sessions/{id}/learnings/{learning_id}", delete(learnings::delete_learning_for_session))
         .route("/api/sessions/{id}/project-dna", get(learnings::get_project_dna_for_session))
+        // Conversation routes
+        .route("/api/sessions/{id}/conversations/{agent}", get(conversations::read_conversation))
+        .route("/api/sessions/{id}/conversations/{agent}/append", post(conversations::append_conversation))
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
         .route("/api/sessions/{id}/inject/queen", post(inject::queen_inject))
