@@ -695,12 +695,17 @@ impl SessionController {
     /// This bypasses prompt files and uses each CLI's native prompt flag/convention.
     fn add_inline_task_to_args(cli: &str, args: &mut Vec<String>, task: &str) {
         match cli {
-            "claude" | "gemini" => {
+            "claude" => {
+                // Claude: positional prompt opens interactive mode with the prompt
+                // (-p would be non-interactive print mode)
+                args.push(task.to_string());
+            }
+            "gemini" => {
                 args.push("-p".to_string());
                 args.push(task.to_string());
             }
             "codex" => {
-                args.push("-q".to_string());
+                // Codex uses positional prompt argument (no -q flag exists)
                 args.push(task.to_string());
             }
             "cursor" | "droid" => {
@@ -759,7 +764,12 @@ impl SessionController {
                 }
             }
             "cursor" => {
+                // Cursor Agent runs via WSL (same as hive mode)
+                args.push("-d".to_string());
+                args.push("Ubuntu".to_string());
+                args.push("/root/.local/bin/agent".to_string());
                 if let Some(task) = task {
+                    args.push("--force".to_string());
                     Self::add_inline_task_to_args("cursor", &mut args, task);
                 }
             }
@@ -775,7 +785,12 @@ impl SessionController {
         }
 
         args.extend(config.flags.clone());
-        (config.cli.clone(), args)
+
+        let command = match config.cli.as_str() {
+            "cursor" => "wsl".to_string(),
+            _ => config.cli.clone(),
+        };
+        (command, args)
     }
 
     fn run_git_in_dir(project_path: &PathBuf, args: &[&str]) -> Result<String, String> {
