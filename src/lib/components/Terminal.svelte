@@ -155,12 +155,32 @@
     }
   }
 
+  // Deduplication guard: track last paste to prevent double-send
+  // (xterm's built-in paste handler + our custom handler can both fire)
+  let lastPasteTime = 0;
+  let lastPasteText = '';
+  const PASTE_DEDUP_MS = 500;
+
+  function isDuplicatePaste(text: string): boolean {
+    const now = Date.now();
+    if (text === lastPasteText && now - lastPasteTime < PASTE_DEDUP_MS) {
+      return true;
+    }
+    lastPasteTime = now;
+    lastPasteText = text;
+    return false;
+  }
+
   // Handle paste events from external tools (like Wispr Flow)
   function handlePasteEvent(event: ClipboardEvent) {
     const text = event.clipboardData?.getData('text');
     if (text && term) {
       event.preventDefault();
-      sendToPty(text);
+      // Prevent xterm's built-in handler from also sending this
+      event.stopPropagation();
+      if (!isDuplicatePaste(text)) {
+        sendToPty(text);
+      }
     }
   }
 
@@ -175,7 +195,9 @@
     const text = event.clipboardData?.getData('text');
     if (text) {
       event.preventDefault();
-      sendToPty(text);
+      if (!isDuplicatePaste(text)) {
+        sendToPty(text);
+      }
     }
   }
 
@@ -265,7 +287,7 @@
               // Browser API also failed
             }
           }
-          if (text && term) {
+          if (text && term && !isDuplicatePaste(text)) {
             sendToPty(text);
           }
         })();

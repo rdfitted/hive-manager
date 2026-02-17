@@ -163,19 +163,24 @@
   });
 
   async function loadPlan(sessionId: string) {
-    loading = true;
+    // Only show loading spinner on first load (when plan is null)
+    const isFirstLoad = plan === null;
+    if (isFirstLoad) loading = true;
     error = null;
 
     try {
       // Try to load plan.md from the session directory
       const planData = await invoke<Plan | null>('get_session_plan', { sessionId });
-      plan = planData;
+      // Only update if content actually changed to avoid scroll reset
+      if (JSON.stringify(planData) !== JSON.stringify(plan)) {
+        plan = planData;
+      }
     } catch (e) {
       // Plan might not exist yet - that's okay
-      plan = null;
+      if (plan !== null) plan = null;
       console.log('No plan available:', e);
     } finally {
-      loading = false;
+      if (isFirstLoad) loading = false;
     }
   }
 
