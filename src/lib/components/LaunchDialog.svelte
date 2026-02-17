@@ -460,7 +460,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               {/each}
             </div>
           </div>
-        {:else}
+        {:else if mode === 'swarm'}
           <div class="form-section">
             <h3>Swarm Configuration</h3>
             <p class="section-description">All planners share the same configuration. Each planner gets its own set of workers.</p>

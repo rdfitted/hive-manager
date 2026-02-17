@@ -723,65 +723,62 @@ impl SessionController {
     fn build_solo_command(config: &AgentConfig, task: Option<&str>) -> (String, Vec<String>) {
         let mut args = Vec::new();
 
+        // Add CLI-specific auto-approve flags (matching build_command for hive/swarm modes)
         match config.cli.as_str() {
             "claude" => {
-                if task.is_some() {
-                    args.push("--dangerously-skip-permissions".to_string());
-                }
-                if let Some(task) = task {
-                    Self::add_inline_task_to_args("claude", &mut args, task);
-                }
+                args.push("--dangerously-skip-permissions".to_string());
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
             }
             "gemini" => {
-                if let Some(task) = task {
-                    Self::add_inline_task_to_args("gemini", &mut args, task);
-                }
+                args.push("-y".to_string());
                 if let Some(ref model) = config.model {
-                    args.push("--model".to_string());
-                    args.push(model.clone());
-                }
-            }
-            "droid" => {
-                if let Some(task) = task {
-                    Self::add_inline_task_to_args("droid", &mut args, task);
-                }
-                if let Some(ref model) = config.model {
-                    args.push("--model".to_string());
+                    args.push("-m".to_string());
                     args.push(model.clone());
                 }
             }
             "codex" => {
-                if let Some(task) = task {
-                    Self::add_inline_task_to_args("codex", &mut args, task);
-                }
+                args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
                 if let Some(ref model) = config.model {
-                    args.push("--model".to_string());
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "qwen" => {
+                args.push("-y".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "opencode" => {
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
                     args.push(model.clone());
                 }
             }
             "cursor" => {
-                // Cursor Agent runs via WSL (same as hive mode)
                 args.push("-d".to_string());
                 args.push("Ubuntu".to_string());
                 args.push("/root/.local/bin/agent".to_string());
-                if let Some(task) = task {
-                    args.push("--force".to_string());
-                    Self::add_inline_task_to_args("cursor", &mut args, task);
-                }
+                args.push("--force".to_string());
+            }
+            "droid" => {
+                // No auto-approve flag available
             }
             _ => {
                 if let Some(ref model) = config.model {
                     args.push("--model".to_string());
                     args.push(model.clone());
                 }
-                if let Some(task) = task {
-                    Self::add_inline_task_to_args(&config.cli, &mut args, task);
-                }
             }
+        }
+
+        // Add inline task if provided
+        if let Some(task) = task {
+            Self::add_inline_task_to_args(&config.cli, &mut args, task);
         }
 
         args.extend(config.flags.clone());
