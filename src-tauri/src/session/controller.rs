@@ -68,6 +68,7 @@ pub enum SessionState {
     Running,
     Paused,
     Completed,
+    Closed,
     Failed(String),
 }
 
@@ -558,6 +559,41 @@ impl SessionController {
                 }
             }
 
+            Ok(())
+        } else {
+            Err(format!("Session not found: {}", id))
+        }
+    }
+
+    pub fn close_session(&self, id: &str) -> Result<(), String> {
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(id).cloned()
+        };
+
+        if let Some(session) = session {
+            let pty_manager = self.pty_manager.read();
+            for agent in &session.agents {
+                let _ = pty_manager.kill(&agent.id);
+            }
+            drop(pty_manager);
+
+            {
+                let mut watchers = self.task_watchers.lock();
+                let _ = watchers.remove(id);
+            }
+
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(s) = sessions.get_mut(id) {
+                    if s.state != SessionState::Closed {
+                        s.state = SessionState::Closed;
+                    }
+                }
+            }
+
+            self.update_session_storage(id);
+            self.emit_session_update(id);
             Ok(())
         } else {
             Err(format!("Session not found: {}", id))
@@ -1296,6 +1332,28 @@ After spawning the Judge, monitor the evaluation directory:
 - Decision file: `.hive-manager/{session_id}/evaluation/decision.md`
 - When the decision file exists and is non-empty, report completion
 
+### Phase 4: Quality Loop After Merge (MANDATORY)
+
+After the Judge winner is selected and merge is complete, run this quality loop:
+
+1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
+2. Check for new PR review comments:
+   ```bash
+   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   ```
+3. If NEW comments exist since your last check:
+   a. Spawn a Codex worker via HTTP API:
+      ```bash
+      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+        -H "Content-Type: application/json" \
+        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
+      ```
+   b. Assign it to resolve PR comments (`code-quality` role archetype)
+   c. Wait for worker completion
+   d. Commit and push fixes
+4. If NO new comments found: exit quality loop and mark session complete
+5. Repeat from step 1 (maximum 3 iterations)
+
 ## Status Reporting
 
 Write status updates to `.hive-manager/{session_id}/coordination.log`:
@@ -1303,6 +1361,9 @@ Write status updates to `.hive-manager/{session_id}/coordination.log`:
 [TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
 [TIMESTAMP] QUEEN: All variants complete - spawning Judge
 [TIMESTAMP] QUEEN: Judge evaluation complete
+[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
+[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Quality loop complete — session done
 ```
 
 ## Learning Tools
@@ -2235,6 +2296,35 @@ Workers record learnings during task completion. Your curation responsibilities:
 6. **Review & integrate** - Review worker output and coordinate integration
 7. **Commit & push** - You handle final commits (workers don't push)
 
+## Quality Loop Protocol (MANDATORY after PR push)
+
+After you have committed and pushed all changes to the PR branch:
+
+1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
+2. Check for new PR review comments:
+   ```bash
+   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   ```
+3. If NEW comments exist since your last check:
+   a. Spawn a Codex worker via HTTP API:
+      ```bash
+      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+        -H "Content-Type: application/json" \
+        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
+      ```
+   b. Assign it to resolve PR comments (`code-quality` role archetype)
+   c. Wait for the worker to complete
+   d. Commit and push any fixes
+4. If NO new comments found: exit quality loop and mark session complete
+5. Repeat from step 1 (maximum 3 iterations)
+
+Log each iteration to `.hive-manager/{session_id}/coordination.log`:
+```
+[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
+[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Quality loop complete — session done
+```
+
 After your orchestration objective is complete, transition to `idle` heartbeat status and continue checking your conversation file on heartbeat cadence.
 
 ## Your Task
@@ -2712,6 +2802,35 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
    c. **COMMIT** domain changes
 3. Run integration tests
 4. Final commit and push
+
+## Quality Loop Protocol (MANDATORY after PR push)
+
+After all planners complete, integration is done, and changes are pushed to the PR branch:
+
+1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
+2. Check for new PR review comments:
+   ```bash
+   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   ```
+3. If NEW comments exist since your last check:
+   a. Spawn a Codex worker via HTTP API:
+      ```bash
+      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+        -H "Content-Type: application/json" \
+        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
+      ```
+   b. Assign it to resolve PR comments (`code-quality` role archetype)
+   c. Wait for worker completion
+   d. Commit and push fixes
+4. If NO new comments found: exit quality loop and mark session complete
+5. Repeat from step 1 (maximum 3 iterations)
+
+Log each iteration to `.hive-manager/{session_id}/coordination.log`:
+```
+[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
+[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Quality loop complete — session done
+```
 
 ## Your Task
 
@@ -5385,6 +5504,7 @@ Last updated: {timestamp}
             SessionState::Running => "Running",
             SessionState::Paused => "Paused",
             SessionState::Completed => "Completed",
+            SessionState::Closed => "Closed",
             SessionState::Failed(_) => "Failed",
         }.to_string();
 
@@ -5578,6 +5698,7 @@ mod tests {
         let _running = SessionState::Running;
         let _paused = SessionState::Paused;
         let _completed = SessionState::Completed;
+        let _closed = SessionState::Closed;
         let _failed = SessionState::Failed("error".to_string());
     }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { AgentConfig } from '$lib/stores/sessions';
+  import { cliOptions } from '$lib/config/clis';
 
   export let config: AgentConfig;
   export let showLabel: boolean = true;
@@ -11,17 +12,6 @@
     value: string;
     label: string;
   }
-
-  // Predefined CLI options with descriptions
-  const cliOptions = [
-    { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.6)' },
-    { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
-    { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model' },
-    { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.3' },
-    { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Opus 4.6)' },
-    { value: 'droid', label: 'Droid', description: 'GLM 4.7 (Factory Droid CLI)' },
-    { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)' },
-  ];
 
   const claudePresets: PresetOption[] = [
     { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
@@ -36,11 +26,18 @@
     { value: 'codex-gpt-5-3-xhigh', label: 'GPT-5.3 Codex (Extra high effort)' },
   ];
 
+  const geminiPresets: PresetOption[] = [
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Default)' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Fast)' },
+  ];
+
   $: presetOptions = config.cli === 'claude'
     ? claudePresets
     : config.cli === 'codex'
       ? codexPresets
-      : [];
+      : config.cli === 'gemini'
+        ? geminiPresets
+        : [];
 
   $: selectedPreset = detectPreset(config);
 
@@ -48,7 +45,9 @@
     ? 'Opus presets add --settings {"effortLevel":"high|low"}'
     : config.cli === 'codex'
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh"'
-      : '';
+      : config.cli === 'gemini'
+        ? 'Select Gemini model variant'
+        : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -64,6 +63,14 @@
     } else if (nextCli === 'codex') {
       model = 'gpt-5.3-codex';
       flags.push('-c', 'model_reasoning_effort="medium"');
+    } else if (nextCli === 'gemini') {
+      model = 'gemini-2.5-pro';
+    } else if (nextCli === 'droid') {
+      model = 'glm-4.7';
+    } else if (nextCli === 'cursor') {
+      model = 'composer-1';
+    } else if (nextCli === 'opencode') {
+      model = 'opencode/big-pickle';
     }
 
     config = {
@@ -196,6 +203,12 @@
       return 'custom';
     }
 
+    if (agent.cli === 'gemini') {
+      if (model.includes('2.5-pro')) return 'gemini-2.5-pro';
+      if (model.includes('2.5-flash')) return 'gemini-2.5-flash';
+      return 'custom';
+    }
+
     return 'custom';
   }
 
@@ -235,6 +248,12 @@
       case 'codex-gpt-5-3-xhigh':
         model = 'gpt-5.3-codex';
         flags.push('-c', 'model_reasoning_effort="xhigh"');
+        break;
+      case 'gemini-2.5-pro':
+        model = 'gemini-2.5-pro';
+        break;
+      case 'gemini-2.5-flash':
+        model = 'gemini-2.5-flash';
         break;
       default:
         return;
@@ -287,7 +306,7 @@
     </span>
   </div>
 
-  {#if config.cli === 'claude' || config.cli === 'codex'}
+  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini'}
     <div class="field">
       <label for="preset">Model &amp; Effort</label>
       <select

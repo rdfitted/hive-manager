@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import LaunchDialog from './LaunchDialog.svelte';

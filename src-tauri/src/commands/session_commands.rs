@@ -52,6 +52,15 @@ pub async fn stop_session(
 }
 
 #[tauri::command]
+pub async fn close_session(
+    state: State<'_, SessionControllerState>,
+    id: String,
+) -> Result<(), String> {
+    let controller = state.0.read();
+    controller.close_session(&id)
+}
+
+#[tauri::command]
 pub async fn stop_agent(
     state: State<'_, SessionControllerState>,
     session_id: String,

@@ -96,6 +96,7 @@ export type SessionState =
   | 'Running'
   | 'Paused'
   | 'Completed'
+  | 'Closed'
   | { Failed: string };
 
 export interface Session {
@@ -218,6 +219,22 @@ function createSessionsStore() {
           const session = state.sessions.find((s) => s.id === sessionId);
           if (session) {
             session.state = 'Completed';
+          }
+          return { ...state };
+        });
+      } catch (err) {
+        update((state) => ({ ...state, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async closeSession(sessionId: string) {
+      try {
+        await invoke('close_session', { id: sessionId });
+        update((state) => {
+          const session = state.sessions.find((s) => s.id === sessionId);
+          if (session) {
+            session.state = 'Closed';
           }
           return { ...state };
         });

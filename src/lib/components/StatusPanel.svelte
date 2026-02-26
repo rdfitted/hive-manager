@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeSession, activeAgents, type AgentInfo, type Session } from '$lib/stores/sessions';
+  import { activeSession, activeAgents, sessions, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import AgentTree from './AgentTree.svelte';
 
@@ -7,6 +7,8 @@
   let agentsCollapsed = $state(false);
   let alertsCollapsed = $state(false);
   let infoCollapsed = $state(true);
+  let showCloseConfirm = $state(false);
+  let closing = $state(false);
 
   function handleAlertClick(agentId: string) {
     ui.setFocusedAgent(agentId);
@@ -36,6 +38,23 @@
 
   function getAgentLabel(agent: AgentInfo): string {
     return agent.config?.label || getRoleName(agent.role);
+  }
+
+  function isSessionActive(state: Session['state']): boolean {
+    return state === 'Running' || state === 'Starting' || state === 'Planning' || state === 'PlanReady' || state === 'Paused';
+  }
+
+  async function handleCloseSession() {
+    if (!$activeSession) return;
+    closing = true;
+    try {
+      await sessions.closeSession($activeSession.id);
+      showCloseConfirm = false;
+    } catch (err) {
+      console.error('Failed to close session:', err);
+    } finally {
+      closing = false;
+    }
   }
 </script>
 
@@ -121,7 +140,35 @@
             </div>
           {/if}
         </section>
+
+        {#if isSessionActive($activeSession.state)}
+          <section class="section actions-section">
+            <button
+              class="close-button"
+              onclick={() => showCloseConfirm = true}
+              title="Close this session (kills all agents and marks as closed)"
+            >
+              Close Session
+            </button>
+          </section>
+        {/if}
       </div>
+
+      <!-- Close confirmation dialog -->
+      {#if showCloseConfirm}
+        <div class="confirm-overlay" onclick={() => showCloseConfirm = false} role="presentation">
+          <div class="confirm-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <h3>Close Session?</h3>
+            <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
+            <div class="confirm-actions">
+              <button class="cancel-btn" onclick={() => showCloseConfirm = false} disabled={closing}>Cancel</button>
+              <button class="confirm-btn" onclick={handleCloseSession} disabled={closing}>
+                {closing ? 'Closing...' : 'Close Session'}
+              </button>
+            </div>
+          </div>
+        </div>
+      {/if}
     {/if}
   {/if}
 </aside>
@@ -355,5 +402,106 @@
 
   .info-value.state-failed {
     color: var(--color-error);
+  }
+
+  .info-value.state-closed {
+    color: var(--color-text-muted);
+  }
+
+  .actions-section {
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .close-button {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--color-error);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-error);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .close-button:hover {
+    background: var(--color-error);
+    color: var(--color-bg);
+  }
+
+  .confirm-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+
+  .confirm-dialog {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 20px;
+    width: 220px;
+    max-width: 90%;
+  }
+
+  .confirm-dialog h3 {
+    margin: 0 0 12px 0;
+    font-size: 15px;
+    color: var(--color-text);
+  }
+
+  .confirm-dialog p {
+    margin: 0 0 16px 0;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
+  .confirm-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .cancel-btn,
+  .confirm-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .cancel-btn {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .cancel-btn:hover:not(:disabled) {
+    background: var(--color-border);
+  }
+
+  .confirm-btn {
+    background: var(--color-error);
+    color: var(--color-bg);
+  }
+
+  .confirm-btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .cancel-btn:disabled,
+  .confirm-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>
