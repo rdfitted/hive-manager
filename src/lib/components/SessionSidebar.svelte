@@ -1,7 +1,40 @@
 <script lang="ts">
-  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+
+  let closingSessionId = $state<string | null>(null);
+  let showCloseConfirm = $state<string | null>(null);
+  let closing = $state(false);
+
+  function handleCloseSession(e: Event, sessionId: string) {
+    e.stopPropagation();
+    showCloseConfirm = sessionId;
+  }
+
+  function dismissCloseConfirm() {
+    if (!closing) {
+      showCloseConfirm = null;
+    }
+  }
+
+  async function confirmCloseSession() {
+    const sessionId = showCloseConfirm;
+    if (!sessionId) return;
+
+    closing = true;
+    closingSessionId = sessionId;
+
+    try {
+      await sessions.closeSession(sessionId);
+      showCloseConfirm = null;
+    } catch (err) {
+      console.error('Failed to close session:', err);
+    } finally {
+      closing = false;
+      closingSessionId = null;
+    }
+  }
   import LaunchDialog from './LaunchDialog.svelte';
 
   interface Props {
@@ -182,15 +215,26 @@
           <ul class="session-list">
             {#each $sessions.sessions.filter(s => isActiveState(s.state)) as session}
               <li class="session-item" class:active={$activeSession?.id === session.id}>
-                <button class="session-button" onclick={() => selectSession(session.id)}>
-                  <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-                  <span class="session-meta">
-                    {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
-                      <span class="type-tag solo">Solo</span>
-                    {/if}
-                    {formatTimestamp(session.created_at)}
-                  </span>
-                </button>
+                <div class="session-row">
+                  <button class="session-button" onclick={() => selectSession(session.id)}>
+                    <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                    <span class="session-meta">
+                      {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
+                        <span class="type-tag solo">Solo</span>
+                      {/if}
+                      {formatTimestamp(session.created_at)}
+                    </span>
+                  </button>
+                  <button
+                    class="close-session-button"
+                    onclick={(e) => handleCloseSession(e, session.id)}
+                    title="Close Session"
+                    aria-label="Close Session"
+                    disabled={closingSessionId === session.id}
+                  >
+                    {closingSessionId === session.id ? '…' : '×'}
+                  </button>
+                </div>
               </li>
             {/each}
           </ul>
@@ -251,6 +295,22 @@
   on:launchFusion={handleLaunchFusion}
   on:launchSolo={handleLaunchSolo}
 />
+
+<!-- Close confirmation dialog -->
+{#if showCloseConfirm}
+  <div class="confirm-overlay" onclick={dismissCloseConfirm} role="presentation">
+    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <h3>Close Session?</h3>
+      <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
+      <div class="confirm-actions">
+        <button class="cancel-btn" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
+        <button class="confirm-btn" onclick={confirmCloseSession} disabled={closing}>
+          {closing ? 'Closing...' : 'Close Session'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .sidebar {
@@ -389,6 +449,39 @@
     background: var(--color-surface-hover);
   }
 
+  .session-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .session-row .session-button {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .close-session-button {
+    width: 28px;
+    min-width: 28px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .close-session-button:hover:not(:disabled) {
+    background: var(--color-surface-hover);
+    border-color: var(--color-border);
+    color: var(--color-text);
+  }
+
+  .close-session-button:disabled {
+    cursor: wait;
+    opacity: 0.7;
+  }
+
   .session-path {
     font-size: 13px;
     color: var(--color-text);
@@ -494,5 +587,78 @@
   .load-button:hover {
     background: var(--color-accent);
     color: var(--color-bg);
+  }
+
+  .confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+
+  .confirm-dialog {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 20px;
+    width: 220px;
+  }
+
+  .confirm-dialog h3 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .confirm-dialog p {
+    margin: 0 0 16px 0;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+  }
+
+  .confirm-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .cancel-btn,
+  .confirm-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .cancel-btn {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .cancel-btn:hover:not(:disabled) {
+    background: var(--color-border);
+  }
+
+  .confirm-btn {
+    background: var(--color-error);
+    color: var(--color-bg);
+  }
+
+  .confirm-btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .cancel-btn:disabled,
+  .confirm-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

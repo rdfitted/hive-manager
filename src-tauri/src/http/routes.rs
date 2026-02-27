@@ -28,6 +28,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/fusion/status", get(sessions::get_fusion_status))
         .route("/api/sessions/{id}/fusion/evaluation", get(sessions::get_fusion_evaluation))
         .route("/api/sessions/{id}/stop", post(sessions::stop_session))
+        .route("/api/sessions/{id}/close", post(sessions::close_session))
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))
         .route("/api/sessions/{id}/workers", post(workers::add_worker))

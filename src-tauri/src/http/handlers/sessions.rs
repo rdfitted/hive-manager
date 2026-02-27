@@ -429,3 +429,25 @@ pub async fn stop_session(
         "message": format!("Session {} stopped", id)
     })))
 }
+
+/// POST /api/sessions/{id}/close - Close a session
+pub async fn close_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_session_id(&id)?;
+
+    let controller = state.session_controller.write();
+    controller.close_session(&id)
+        .map_err(|e| {
+            if e.starts_with("Session not found") {
+                ApiError::not_found(e)
+            } else {
+                ApiError::internal(e)
+            }
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "message": format!("Session {} closed", id)
+    })))
+}

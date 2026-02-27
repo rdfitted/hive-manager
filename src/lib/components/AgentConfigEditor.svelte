@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { AgentConfig } from '$lib/stores/sessions';
+  import { cliOptions } from '$lib/config/clis';
 
   export let config: AgentConfig;
   export let showLabel: boolean = true;
@@ -12,21 +13,13 @@
     label: string;
   }
 
-  // Predefined CLI options with descriptions
-  const cliOptions = [
-    { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.6)' },
-    { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
-    { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model' },
-    { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.3' },
-    { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Opus 4.6)' },
-    { value: 'droid', label: 'Droid', description: 'GLM 4.7 (Factory Droid CLI)' },
-    { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)' },
-  ];
-
   const claudePresets: PresetOption[] = [
     { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
     { value: 'claude-opus-4-6-low', label: 'Opus 4.6 (Low effort)' },
+    { value: 'claude-opus-4-5', label: 'Opus 4.5' },
+    { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
     { value: 'claude-sonnet-4-5', label: 'Sonnet 4.5' },
+    { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
   ];
 
   const codexPresets: PresetOption[] = [
@@ -36,11 +29,22 @@
     { value: 'codex-gpt-5-3-xhigh', label: 'GPT-5.3 Codex (Extra high effort)' },
   ];
 
+  const geminiPresets: PresetOption[] = [
+    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+    { value: 'gemini-3-pro-preview', label: 'Gemini 3.0 Pro Preview' },
+    { value: 'gemini-3-flash-preview', label: 'Gemini 3.0 Flash Preview' },
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
+  ];
+
   $: presetOptions = config.cli === 'claude'
     ? claudePresets
     : config.cli === 'codex'
       ? codexPresets
-      : [];
+      : config.cli === 'gemini'
+        ? geminiPresets
+        : [];
 
   $: selectedPreset = detectPreset(config);
 
@@ -48,7 +52,9 @@
     ? 'Opus presets add --settings {"effortLevel":"high|low"}'
     : config.cli === 'codex'
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh"'
-      : '';
+      : config.cli === 'gemini'
+        ? 'Gemini model IDs for `gemini -m`'
+        : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -64,6 +70,16 @@
     } else if (nextCli === 'codex') {
       model = 'gpt-5.3-codex';
       flags.push('-c', 'model_reasoning_effort="medium"');
+    } else if (nextCli === 'gemini') {
+      model = 'gemini-3.1-pro-preview';
+    } else if (nextCli === 'droid') {
+      model = 'glm-4.7';
+    } else if (nextCli === 'cursor') {
+      model = 'composer-1';
+    } else if (nextCli === 'opencode') {
+      model = 'opencode/big-pickle';
+    } else if (nextCli === 'qwen') {
+      model = 'qwen3-coder';
     }
 
     config = {
@@ -169,9 +185,10 @@
     if (agent.cli === 'claude') {
       const effort = parseClaudeEffort(flags);
 
-      if (model.includes('sonnet')) {
-        return 'claude-sonnet-4-5';
-      }
+      if (model.includes('haiku')) return 'claude-haiku-4-5';
+      if (model.includes('sonnet-4-6') || model.includes('sonnet-4.6')) return 'claude-sonnet-4-6';
+      if (model.includes('sonnet')) return 'claude-sonnet-4-5';
+      if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
 
       if ((model.includes('opus') || model === '') && effort === 'low') {
         return 'claude-opus-4-6-low';
@@ -196,6 +213,17 @@
       return 'custom';
     }
 
+    if (agent.cli === 'gemini') {
+      if (model === 'gemini-3.1-pro-preview-customtools') return 'gemini-3.1-pro-preview';
+      if (model === 'gemini-3.1-pro-preview') return 'gemini-3.1-pro-preview';
+      if (model === 'gemini-3-pro-preview') return 'gemini-3-pro-preview';
+      if (model === 'gemini-3-flash-preview') return 'gemini-3-flash-preview';
+      if (model === 'gemini-2.5-pro') return 'gemini-2.5-pro';
+      if (model === 'gemini-2.5-flash') return 'gemini-2.5-flash';
+      if (model === 'gemini-2.5-flash-lite') return 'gemini-2.5-flash-lite';
+      return 'custom';
+    }
+
     return 'custom';
   }
 
@@ -217,8 +245,17 @@
         model = 'claude-opus-4-6';
         flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
         break;
+      case 'claude-opus-4-5':
+        model = 'claude-opus-4-5';
+        break;
+      case 'claude-sonnet-4-6':
+        model = 'claude-sonnet-4-6';
+        break;
       case 'claude-sonnet-4-5':
         model = 'claude-sonnet-4-5-20250929';
+        break;
+      case 'claude-haiku-4-5':
+        model = 'claude-haiku-4-5';
         break;
       case 'codex-gpt-5-3-low':
         model = 'gpt-5.3-codex';
@@ -235,6 +272,14 @@
       case 'codex-gpt-5-3-xhigh':
         model = 'gpt-5.3-codex';
         flags.push('-c', 'model_reasoning_effort="xhigh"');
+        break;
+      case 'gemini-3.1-pro-preview':
+      case 'gemini-3-pro-preview':
+      case 'gemini-3-flash-preview':
+      case 'gemini-2.5-pro':
+      case 'gemini-2.5-flash':
+      case 'gemini-2.5-flash-lite':
+        model = preset;
         break;
       default:
         return;
@@ -287,7 +332,7 @@
     </span>
   </div>
 
-  {#if config.cli === 'claude' || config.cli === 'codex'}
+  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini'}
     <div class="field">
       <label for="preset">Model &amp; Effort</label>
       <select

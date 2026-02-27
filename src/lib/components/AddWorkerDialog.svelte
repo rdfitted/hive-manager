@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { coordination, type WorkerRole, type AddWorkerRequest } from '$lib/stores/coordination';
   import { activeSession, activeAgents } from '$lib/stores/sessions';
+  import { cliOptions, defaultRoles } from '$lib/config/clis';
 
   export let open = false;
 
@@ -10,13 +11,13 @@
     added: { workerId: string };
   }>();
 
-  // Predefined roles (all default to claude for compatibility)
+  // Predefined roles with CLI defaults matching backend default_roles
   const predefinedRoles: { type: string; label: string; cli: string; description: string; category: 'dev' | 'review' }[] = [
     // Development roles
     { type: 'backend', label: 'Backend', cli: 'claude', description: 'Server-side logic, APIs, databases', category: 'dev' },
-    { type: 'frontend', label: 'Frontend', cli: 'claude', description: 'UI components, state management', category: 'dev' },
-    { type: 'coherence', label: 'Coherence', cli: 'claude', description: 'Code consistency, API contracts', category: 'dev' },
-    { type: 'simplify', label: 'Simplify', cli: 'claude', description: 'Code simplification, refactoring', category: 'dev' },
+    { type: 'frontend', label: 'Frontend', cli: 'gemini', description: 'UI components, state management', category: 'dev' },
+    { type: 'coherence', label: 'Coherence', cli: 'droid', description: 'Code consistency, API contracts', category: 'dev' },
+    { type: 'simplify', label: 'Simplify', cli: 'codex', description: 'Code simplification, refactoring', category: 'dev' },
     // Review & QA roles
     { type: 'reviewer', label: 'Reviewer', cli: 'claude', description: 'Deep code review: security, edge cases, architecture', category: 'review' },
     { type: 'reviewer-quick', label: 'Quick Review', cli: 'claude', description: 'Fast review: obvious bugs, code style', category: 'review' },
@@ -25,17 +26,6 @@
     { type: 'code-quality', label: 'Code Quality', cli: 'claude', description: 'Resolve PR comments, ensure standards', category: 'review' },
     // Custom
     { type: 'custom', label: 'Custom', cli: 'claude', description: 'Define your own role', category: 'dev' },
-  ];
-
-  // CLI options
-  const cliOptions = [
-    { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.6)' },
-    { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
-    { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model' },
-    { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.3' },
-    { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Opus 4.6)' },
-    { value: 'droid', label: 'Droid', description: 'GLM 4.7 (Factory Droid CLI)' },
-    { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)' },
   ];
 
   let selectedRoleType = 'backend';

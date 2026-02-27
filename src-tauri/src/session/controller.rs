@@ -52,22 +52,24 @@ impl From<String> for SessionError {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
-    Planning,      // Master Planner is running
-    PlanReady,     // Plan generated, waiting for user to continue
+    Planning,
+    PlanReady,
     Starting,
-    SpawningWorker(u8),      // Which worker is being spawned (sequential mode)
-    WaitingForWorker(u8),    // Which worker we're waiting on (sequential mode)
-    SpawningPlanner(u8),     // Which planner is being spawned (Swarm sequential mode)
-    WaitingForPlanner(u8),   // Which planner we're waiting on (Swarm sequential mode)
-    SpawningFusionVariant(u8),    // Which fusion variant is being spawned
-    WaitingForFusionVariants,     // All variants running, waiting for completion
-    SpawningJudge,                // Launching judge after all variants complete
-    Judging,                      // Judge evaluating implementations
-    AwaitingVerdictSelection,     // User choosing winner
-    MergingWinner,                // Merging winning variant
+    SpawningWorker(u8),
+    WaitingForWorker(u8),
+    SpawningPlanner(u8),
+    WaitingForPlanner(u8),
+    SpawningFusionVariant(u8),
+    WaitingForFusionVariants,
+    SpawningJudge,
+    Judging,
+    AwaitingVerdictSelection,
+    MergingWinner,
     Running,
     Paused,
     Completed,
+    Closing,
+    Closed,
     Failed(String),
 }
 
@@ -562,6 +564,56 @@ impl SessionController {
         } else {
             Err(format!("Session not found: {}", id))
         }
+    }
+
+    pub fn close_session(&self, id: &str) -> Result<(), String> {
+        let agent_ids: Vec<String> = {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(id) {
+                session.state = SessionState::Closing;
+                session.agents.iter().map(|a| a.id.clone()).collect()
+            } else {
+                return Err(format!("Session not found: {}", id));
+            }
+        };
+
+        let kill_errors: Vec<String> = {
+            let pty_manager = self.pty_manager.read();
+            let mut errors = Vec::new();
+            for agent_id in &agent_ids {
+                if let Err(e) = pty_manager.kill(agent_id) {
+                    errors.push(format!("{}: {}", agent_id, e));
+                }
+            }
+            errors
+        };
+
+        {
+            let mut watchers = self.task_watchers.lock();
+            let _ = watchers.remove(id);
+        }
+
+        {
+            let mut heartbeats = self.agent_heartbeats.write();
+            heartbeats.remove(id);
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(id) {
+                for agent in &mut session.agents {
+                    agent.status = AgentStatus::Completed;
+                }
+                session.state = SessionState::Closed;
+            }
+        }
+
+        self.update_session_storage(id);
+        self.emit_session_update(id);
+        if !kill_errors.is_empty() {
+            tracing::warn!("Session {} closed with PTY kill errors: {}", id, kill_errors.join(" | "));
+        }
+        Ok(())
     }
 
     pub fn stop_agent(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
@@ -1296,6 +1348,28 @@ After spawning the Judge, monitor the evaluation directory:
 - Decision file: `.hive-manager/{session_id}/evaluation/decision.md`
 - When the decision file exists and is non-empty, report completion
 
+### Phase 4: Quality Loop After Merge (MANDATORY)
+
+After the Judge winner is selected and merge is complete, run this quality loop:
+
+1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
+2. Check for new PR review comments:
+   ```bash
+   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   ```
+3. If NEW comments exist since your last check:
+   a. Spawn a Codex worker via HTTP API:
+      ```bash
+      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+        -H "Content-Type: application/json" \
+        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
+      ```
+   b. Assign it to resolve PR comments (`code-quality` role archetype)
+   c. Wait for worker completion
+   d. Commit and push fixes
+4. If NO new comments found: exit quality loop and mark session complete
+5. Repeat from step 1 (maximum 3 iterations)
+
 ## Status Reporting
 
 Write status updates to `.hive-manager/{session_id}/coordination.log`:
@@ -1303,6 +1377,9 @@ Write status updates to `.hive-manager/{session_id}/coordination.log`:
 [TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
 [TIMESTAMP] QUEEN: All variants complete - spawning Judge
 [TIMESTAMP] QUEEN: Judge evaluation complete
+[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
+[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Quality loop complete — session done
 ```
 
 ## Learning Tools
@@ -2235,6 +2312,35 @@ Workers record learnings during task completion. Your curation responsibilities:
 6. **Review & integrate** - Review worker output and coordinate integration
 7. **Commit & push** - You handle final commits (workers don't push)
 
+## Quality Loop Protocol (MANDATORY after PR push)
+
+After you have committed and pushed all changes to the PR branch:
+
+1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
+2. Check for new PR review comments:
+   ```bash
+   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   ```
+3. If NEW comments exist since your last check:
+   a. Spawn a Codex worker via HTTP API:
+      ```bash
+      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+        -H "Content-Type: application/json" \
+        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
+      ```
+   b. Assign it to resolve PR comments (`code-quality` role archetype)
+   c. Wait for the worker to complete
+   d. Commit and push any fixes
+4. If NO new comments found: exit quality loop and mark session complete
+5. Repeat from step 1 (maximum 3 iterations)
+
+Log each iteration to `.hive-manager/{session_id}/coordination.log`:
+```
+[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
+[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Quality loop complete — session done
+```
+
 After your orchestration objective is complete, transition to `idle` heartbeat status and continue checking your conversation file on heartbeat cadence.
 
 ## Your Task
@@ -2712,6 +2818,35 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
    c. **COMMIT** domain changes
 3. Run integration tests
 4. Final commit and push
+
+## Quality Loop Protocol (MANDATORY after PR push)
+
+After all planners complete, integration is done, and changes are pushed to the PR branch:
+
+1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
+2. Check for new PR review comments:
+   ```bash
+   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   ```
+3. If NEW comments exist since your last check:
+   a. Spawn a Codex worker via HTTP API:
+      ```bash
+      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+        -H "Content-Type: application/json" \
+        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
+      ```
+   b. Assign it to resolve PR comments (`code-quality` role archetype)
+   c. Wait for worker completion
+   d. Commit and push fixes
+4. If NO new comments found: exit quality loop and mark session complete
+5. Repeat from step 1 (maximum 3 iterations)
+
+Log each iteration to `.hive-manager/{session_id}/coordination.log`:
+```
+[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
+[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Quality loop complete — session done
+```
 
 ## Your Task
 
@@ -4830,7 +4965,10 @@ Last updated: {timestamp}
             id: persisted.id.clone(),
             session_type,
             project_path: PathBuf::from(persisted.project_path),
-            state: SessionState::Completed,  // Persisted sessions are completed
+            state: match persisted.state.as_str() {
+                "Closed" => SessionState::Closed,
+                _ => SessionState::Completed,
+            },
             created_at: persisted.created_at,
             agents,
             default_cli: persisted.default_cli.clone(),
@@ -5087,10 +5225,6 @@ Last updated: {timestamp}
             sessions.get(session_id).cloned()
         }.ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-        // Allow adding workers when:
-        // - Running: Normal operation
-        // - WaitingForWorker: Queen spawning workers sequentially (Hive mode)
-        // - WaitingForPlanner: Planner spawning workers (Swarm mode)
         let can_add_worker = matches!(
             session.state,
             SessionState::Running | SessionState::WaitingForWorker(_) | SessionState::WaitingForPlanner(_)
@@ -5140,13 +5274,15 @@ Last updated: {timestamp}
             args
         );
 
+        let worker_role = AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) };
+
         // Spawn PTY
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
                 .create_session(
                     worker_id.clone(),
-                    AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) },
+                    worker_role.clone(),
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     Some(cwd),
@@ -5162,7 +5298,7 @@ Last updated: {timestamp}
 
         let agent_info = AgentInfo {
             id: worker_id.clone(),
-            role: AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) },
+            role: worker_role,
             status: AgentStatus::Running,
             config: agent_config,
             parent_id: Some(actual_parent_id),
@@ -5176,15 +5312,7 @@ Last updated: {timestamp}
             }
         }
 
-        // Emit session update
-        if let Some(ref app_handle) = self.app_handle {
-            let sessions = self.sessions.read();
-            if let Some(session) = sessions.get(session_id) {
-                let _ = app_handle.emit("session-update", SessionUpdate {
-                    session: session.clone(),
-                });
-            }
-        }
+        self.emit_session_update(session_id);
 
         // Update session storage
         self.update_session_storage(session_id);
@@ -5385,6 +5513,8 @@ Last updated: {timestamp}
             SessionState::Running => "Running",
             SessionState::Paused => "Paused",
             SessionState::Completed => "Completed",
+            SessionState::Closing => "Closing",
+            SessionState::Closed => "Closed",
             SessionState::Failed(_) => "Failed",
         }.to_string();
 
@@ -5578,6 +5708,7 @@ mod tests {
         let _running = SessionState::Running;
         let _paused = SessionState::Paused;
         let _completed = SessionState::Completed;
+        let _closed = SessionState::Closed;
         let _failed = SessionState::Failed("error".to_string());
     }
 

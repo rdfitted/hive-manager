@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, SoloLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
@@ -17,6 +17,7 @@
   type SessionMode = 'hive' | 'swarm' | 'fusion' | 'solo';
 
   // Predefined roles with default CLIs, descriptions, and prompt templates
+  // CLI defaults match backend default_roles in storage/mod.rs
   const predefinedRoles = [
     {
       type: 'backend',
@@ -34,7 +35,7 @@ Do NOT work on frontend/UI code unless it directly interfaces with your backend 
     {
       type: 'frontend',
       label: 'Frontend',
-      cli: 'claude',
+      cli: 'gemini',
       description: 'UI components, styling, UX',
       promptTemplate: `You are the FRONTEND specialist. Focus on:
 - UI components, layouts, and styling
@@ -47,7 +48,7 @@ Do NOT work on backend/server code unless it directly interfaces with your front
     {
       type: 'coherence',
       label: 'Coherence',
-      cli: 'claude',
+      cli: 'droid',
       description: 'Ensures code consistency',
       promptTemplate: `You are the COHERENCE specialist. Focus on:
 - Ensuring consistent code patterns across the codebase
@@ -60,7 +61,7 @@ Review changes made by other workers and flag inconsistencies.`
     {
       type: 'simplify',
       label: 'Simplify',
-      cli: 'claude',
+      cli: 'codex',
       description: 'Refactors and simplifies code',
       promptTemplate: `You are the SIMPLIFY specialist. Focus on:
 - Reducing code complexity and nesting
@@ -135,26 +136,32 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     label: undefined,
   };
 
+  function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
+    const generalRole = predefinedRoles.find((r) => r.type === 'general')!;
+    const role = predefinedRoles.find((r) => r.type === roleType) ?? generalRole;
+    return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
+  }
+
   // Hive workers with roles - preset team of 6
   let hiveWorkers: (AgentConfig & { selectedRole: string })[] = [
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'frontend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'coherence' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'simplify' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'reviewer' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'resolver' },
+    createDefaultConfig('backend'),
+    createDefaultConfig('frontend'),
+    createDefaultConfig('coherence'),
+    createDefaultConfig('simplify'),
+    createDefaultConfig('reviewer'),
+    createDefaultConfig('resolver'),
   ];
 
   // Simplified Swarm config - same config for all planners
   let plannerCount = 2;
   let plannerConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
   let workersPerPlanner: (AgentConfig & { selectedRole: string })[] = [
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'frontend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'coherence' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'simplify' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'reviewer' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'resolver' },
+    createDefaultConfig('backend'),
+    createDefaultConfig('frontend'),
+    createDefaultConfig('coherence'),
+    createDefaultConfig('simplify'),
+    createDefaultConfig('reviewer'),
+    createDefaultConfig('resolver'),
   ];
 
   // Fusion config
@@ -165,7 +172,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     { name: 'Variant C', cli: 'claude', flags: [] },
     { name: 'Variant D', cli: 'claude', flags: [] },
   ];
-  let judgeConfig = { cli: 'claude', model: undefined };
+  let judgeConfig: { cli: string; model?: string; flags?: string[]; label?: string } = { cli: 'claude' };
 
   // AgentConfig wrappers for fusion variants (so AgentConfigEditor can be used)
   let variantAgentConfigs: AgentConfig[] = fusionVariants.map(v => ({
@@ -190,11 +197,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
 
   $: activeFusionVariants = fusionVariants.slice(0, variantCount);
-
-  function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
-    const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
-    return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
-  }
 
   function updateWorkerCli(workerIndex: number) {
     const worker = hiveWorkers[workerIndex];
