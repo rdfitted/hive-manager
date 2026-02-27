@@ -7,7 +7,7 @@
   let agentsCollapsed = $state(false);
   let alertsCollapsed = $state(false);
   let infoCollapsed = $state(true);
-  let showCloseConfirm = $state(false);
+  let showCloseConfirm = $state<string | null>(null);
   let closing = $state(false);
 
   function handleAlertClick(agentId: string) {
@@ -47,11 +47,12 @@
   }
 
   async function handleCloseSession() {
-    if (!$activeSession) return;
+    const sessionId = showCloseConfirm;
+    if (!sessionId) return;
     closing = true;
     try {
-      await sessions.closeSession($activeSession.id);
-      showCloseConfirm = false;
+      await sessions.closeSession(sessionId);
+      showCloseConfirm = null;
     } catch (err) {
       console.error('Failed to close session:', err);
     } finally {
@@ -61,7 +62,7 @@
 
   function dismissCloseConfirm() {
     if (!closing) {
-      showCloseConfirm = false;
+      showCloseConfirm = null;
     }
   }
 </script>
@@ -153,7 +154,7 @@
           <section class="section actions-section">
             <button
               class="close-button"
-              onclick={() => showCloseConfirm = true}
+              onclick={() => showCloseConfirm = $activeSession?.id ?? null}
               title="Close this session (kills all agents and marks as closed)"
             >
               Close Session
