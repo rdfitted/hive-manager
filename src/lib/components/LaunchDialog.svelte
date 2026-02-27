@@ -137,7 +137,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   };
 
   function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
-    const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
+    const generalRole = predefinedRoles.find((r) => r.type === 'general')!;
+    const role = predefinedRoles.find((r) => r.type === roleType) ?? generalRole;
     return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
   }
 

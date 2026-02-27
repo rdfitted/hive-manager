@@ -4,15 +4,34 @@
   import { onMount } from 'svelte';
 
   let closingSessionId = $state<string | null>(null);
+  let showCloseConfirm = $state<string | null>(null);
+  let closing = $state(false);
 
-  async function handleCloseSession(e: Event, sessionId: string) {
+  function handleCloseSession(e: Event, sessionId: string) {
     e.stopPropagation();
+    showCloseConfirm = sessionId;
+  }
+
+  function dismissCloseConfirm() {
+    if (!closing) {
+      showCloseConfirm = null;
+    }
+  }
+
+  async function confirmCloseSession() {
+    const sessionId = showCloseConfirm;
+    if (!sessionId) return;
+
+    closing = true;
     closingSessionId = sessionId;
+
     try {
       await sessions.closeSession(sessionId);
+      showCloseConfirm = null;
     } catch (err) {
       console.error('Failed to close session:', err);
     } finally {
+      closing = false;
       closingSessionId = null;
     }
   }
@@ -276,6 +295,22 @@
   on:launchFusion={handleLaunchFusion}
   on:launchSolo={handleLaunchSolo}
 />
+
+<!-- Close confirmation dialog -->
+{#if showCloseConfirm}
+  <div class="confirm-overlay" onclick={dismissCloseConfirm} role="presentation">
+    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+      <h3>Close Session?</h3>
+      <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
+      <div class="confirm-actions">
+        <button class="cancel-btn" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
+        <button class="confirm-btn" onclick={confirmCloseSession} disabled={closing}>
+          {closing ? 'Closing...' : 'Close Session'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .sidebar {
@@ -552,5 +587,78 @@
   .load-button:hover {
     background: var(--color-accent);
     color: var(--color-bg);
+  }
+
+  .confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+
+  .confirm-dialog {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 20px;
+    width: 220px;
+  }
+
+  .confirm-dialog h3 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .confirm-dialog p {
+    margin: 0 0 16px 0;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+  }
+
+  .confirm-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .cancel-btn,
+  .confirm-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .cancel-btn {
+    background: var(--color-surface-hover);
+    color: var(--color-text);
+  }
+
+  .cancel-btn:hover:not(:disabled) {
+    background: var(--color-border);
+  }
+
+  .confirm-btn {
+    background: var(--color-error);
+    color: var(--color-bg);
+  }
+
+  .confirm-btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .cancel-btn:disabled,
+  .confirm-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

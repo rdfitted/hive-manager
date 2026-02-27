@@ -58,6 +58,12 @@
       closing = false;
     }
   }
+
+  function dismissCloseConfirm() {
+    if (!closing) {
+      showCloseConfirm = false;
+    }
+  }
 </script>
 
 <aside class="status-panel" class:collapsed>
@@ -158,12 +164,12 @@
 
       <!-- Close confirmation dialog -->
       {#if showCloseConfirm}
-        <div class="confirm-overlay" onclick={() => showCloseConfirm = false} role="presentation">
+        <div class="confirm-overlay" onclick={dismissCloseConfirm} role="presentation">
           <div class="confirm-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <h3>Close Session?</h3>
             <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
             <div class="confirm-actions">
-              <button class="cancel-btn" onclick={() => showCloseConfirm = false} disabled={closing}>Cancel</button>
+              <button class="cancel-btn" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
               <button class="confirm-btn" onclick={handleCloseSession} disabled={closing}>
                 {closing ? 'Closing...' : 'Close Session'}
               </button>

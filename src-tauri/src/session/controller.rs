@@ -52,22 +52,23 @@ impl From<String> for SessionError {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
-    Planning,      // Master Planner is running
-    PlanReady,     // Plan generated, waiting for user to continue
+    Planning,
+    PlanReady,
     Starting,
-    SpawningWorker(u8),      // Which worker is being spawned (sequential mode)
-    WaitingForWorker(u8),    // Which worker we're waiting on (sequential mode)
-    SpawningPlanner(u8),     // Which planner is being spawned (Swarm sequential mode)
-    WaitingForPlanner(u8),   // Which planner we're waiting on (Swarm sequential mode)
-    SpawningFusionVariant(u8),    // Which fusion variant is being spawned
-    WaitingForFusionVariants,     // All variants running, waiting for completion
-    SpawningJudge,                // Launching judge after all variants complete
-    Judging,                      // Judge evaluating implementations
-    AwaitingVerdictSelection,     // User choosing winner
-    MergingWinner,                // Merging winning variant
+    SpawningWorker(u8),
+    WaitingForWorker(u8),
+    SpawningPlanner(u8),
+    WaitingForPlanner(u8),
+    SpawningFusionVariant(u8),
+    WaitingForFusionVariants,
+    SpawningJudge,
+    Judging,
+    AwaitingVerdictSelection,
+    MergingWinner,
     Running,
     Paused,
     Completed,
+    Closing,
     Closed,
     Failed(String),
 }
@@ -566,50 +567,53 @@ impl SessionController {
     }
 
     pub fn close_session(&self, id: &str) -> Result<(), String> {
-        let session = {
-            let sessions = self.sessions.read();
-            sessions.get(id).cloned()
+        let agent_ids: Vec<String> = {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(id) {
+                session.state = SessionState::Closing;
+                session.agents.iter().map(|a| a.id.clone()).collect()
+            } else {
+                return Err(format!("Session not found: {}", id));
+            }
         };
 
-        if let Some(session) = session {
+        let kill_errors: Vec<String> = {
             let pty_manager = self.pty_manager.read();
-            let mut kill_errors = Vec::new();
-            for agent in &session.agents {
-                if let Err(e) = pty_manager.kill(&agent.id) {
-                    kill_errors.push(format!("{}: {}", agent.id, e));
+            let mut errors = Vec::new();
+            for agent_id in &agent_ids {
+                if let Err(e) = pty_manager.kill(agent_id) {
+                    errors.push(format!("{}: {}", agent_id, e));
                 }
             }
-            drop(pty_manager);
+            errors
+        };
 
-            {
-                let mut watchers = self.task_watchers.lock();
-                let _ = watchers.remove(id);
-            }
-
-            {
-                let mut heartbeats = self.agent_heartbeats.write();
-                heartbeats.remove(id);
-            }
-
-            {
-                let mut sessions = self.sessions.write();
-                if let Some(s) = sessions.get_mut(id) {
-                    for agent in &mut s.agents {
-                        agent.status = AgentStatus::Completed;
-                    }
-                    s.state = SessionState::Closed;
-                }
-            }
-
-            self.update_session_storage(id);
-            self.emit_session_update(id);
-            if !kill_errors.is_empty() {
-                tracing::warn!("Session {} closed with PTY kill errors: {}", id, kill_errors.join(" | "));
-            }
-            Ok(())
-        } else {
-            Err(format!("Session not found: {}", id))
+        {
+            let mut watchers = self.task_watchers.lock();
+            let _ = watchers.remove(id);
         }
+
+        {
+            let mut heartbeats = self.agent_heartbeats.write();
+            heartbeats.remove(id);
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(id) {
+                for agent in &mut session.agents {
+                    agent.status = AgentStatus::Completed;
+                }
+                session.state = SessionState::Closed;
+            }
+        }
+
+        self.update_session_storage(id);
+        self.emit_session_update(id);
+        if !kill_errors.is_empty() {
+            tracing::warn!("Session {} closed with PTY kill errors: {}", id, kill_errors.join(" | "));
+        }
+        Ok(())
     }
 
     pub fn stop_agent(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
@@ -5221,10 +5225,6 @@ Last updated: {timestamp}
             sessions.get(session_id).cloned()
         }.ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-        // Allow adding workers when:
-        // - Running: Normal operation
-        // - WaitingForWorker: Queen spawning workers sequentially (Hive mode)
-        // - WaitingForPlanner: Planner spawning workers (Swarm mode)
         let can_add_worker = matches!(
             session.state,
             SessionState::Running | SessionState::WaitingForWorker(_) | SessionState::WaitingForPlanner(_)
@@ -5274,13 +5274,15 @@ Last updated: {timestamp}
             args
         );
 
+        let worker_role = AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) };
+
         // Spawn PTY
         {
             let pty_manager = self.pty_manager.read();
             pty_manager
                 .create_session(
                     worker_id.clone(),
-                    AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) },
+                    worker_role.clone(),
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     Some(cwd),
@@ -5296,7 +5298,7 @@ Last updated: {timestamp}
 
         let agent_info = AgentInfo {
             id: worker_id.clone(),
-            role: AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) },
+            role: worker_role,
             status: AgentStatus::Running,
             config: agent_config,
             parent_id: Some(actual_parent_id),
@@ -5310,15 +5312,7 @@ Last updated: {timestamp}
             }
         }
 
-        // Emit session update
-        if let Some(ref app_handle) = self.app_handle {
-            let sessions = self.sessions.read();
-            if let Some(session) = sessions.get(session_id) {
-                let _ = app_handle.emit("session-update", SessionUpdate {
-                    session: session.clone(),
-                });
-            }
-        }
+        self.emit_session_update(session_id);
 
         // Update session storage
         self.update_session_storage(session_id);
@@ -5519,6 +5513,7 @@ Last updated: {timestamp}
             SessionState::Running => "Running",
             SessionState::Paused => "Paused",
             SessionState::Completed => "Completed",
+            SessionState::Closing => "Closing",
             SessionState::Closed => "Closed",
             SessionState::Failed(_) => "Failed",
         }.to_string();
