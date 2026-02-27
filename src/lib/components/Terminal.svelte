@@ -171,25 +171,14 @@
     return false;
   }
 
-  // Handle paste events from external tools (like Wispr Flow)
-  function handlePasteEvent(event: ClipboardEvent) {
-    const text = event.clipboardData?.getData('text');
-    if (text && term) {
-      event.preventDefault();
-      // Prevent xterm's built-in handler from also sending this
-      event.stopPropagation();
-      if (!isDuplicatePaste(text)) {
-        sendToPty(text);
-      }
-    }
-  }
-
   // Global paste handler for when terminal has focus but paste targets document
+  // (e.g., paste from external tools like Wispr Flow that target the document body)
+  // Redirects the paste into the terminal so xterm's onData handles it.
   function handleGlobalPaste(event: ClipboardEvent) {
     // Only handle if this terminal is focused
     if (!isFocused || !term) return;
 
-    // Check if target is already our terminal (avoid double handling)
+    // If target is already inside our terminal, xterm handles it natively
     if (terminalContainer?.contains(event.target as Node)) return;
 
     const text = event.clipboardData?.getData('text');
@@ -227,9 +216,6 @@
     // Open terminal in container
     term.open(terminalContainer);
 
-    // Add paste event listener for external tools like Wispr Flow
-    terminalContainer.addEventListener('paste', handlePasteEvent);
-
     // Try to load WebGL addon for better performance
     try {
       const webglAddon = new WebglAddon();
@@ -249,10 +235,10 @@
       if (event.type !== 'keydown') return true;
 
       // Shift+Enter inserts newline without submitting
+      // Use bracketed paste mode so CLIs treat it as literal text, not command submission
       if (event.key === 'Enter' && event.shiftKey) {
         if (term) {
-          term.write('\r\n');
-          sendToPty('\n');
+          sendToPty('\x1b[200~\n\x1b[201~');
         }
         return false;
       }
@@ -272,26 +258,10 @@
       }
 
       // Ctrl+Shift+V or Ctrl+V = Paste
+      // Let the browser fire the native paste event, which xterm handles via onData.
+      // Returning true allows xterm's default paste flow (single send, no duplicate).
       if (event.ctrlKey && (event.key === 'V' || event.key === 'v')) {
-        (async () => {
-          let text: string | null = null;
-          try {
-            text = await readText();
-          } catch {
-            // Tauri API failed, try browser
-          }
-          if (!text) {
-            try {
-              text = await navigator.clipboard.readText();
-            } catch {
-              // Browser API also failed
-            }
-          }
-          if (text && term && !isDuplicatePaste(text)) {
-            sendToPty(text);
-          }
-        })();
-        return false;
+        return true;
       }
 
       // Ctrl+C without selection = send interrupt (let it pass through)
@@ -366,7 +336,6 @@
     if (resizeTimeout) clearTimeout(resizeTimeout);
     document.removeEventListener('click', handleGlobalClick);
     document.removeEventListener('paste', handleGlobalPaste);
-    terminalContainer?.removeEventListener('paste', handlePasteEvent);
     if (unlistenOutput) unlistenOutput();
     if (unlistenStatus) unlistenStatus();
     if (resizeObserver) resizeObserver.disconnect();
