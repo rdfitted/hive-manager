@@ -16,7 +16,10 @@
   const claudePresets: PresetOption[] = [
     { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
     { value: 'claude-opus-4-6-low', label: 'Opus 4.6 (Low effort)' },
+    { value: 'claude-opus-4-5', label: 'Opus 4.5' },
+    { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
     { value: 'claude-sonnet-4-5', label: 'Sonnet 4.5' },
+    { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
   ];
 
   const codexPresets: PresetOption[] = [
@@ -182,9 +185,10 @@
     if (agent.cli === 'claude') {
       const effort = parseClaudeEffort(flags);
 
-      if (model.includes('sonnet')) {
-        return 'claude-sonnet-4-5';
-      }
+      if (model.includes('haiku')) return 'claude-haiku-4-5';
+      if (model.includes('sonnet-4-6') || model.includes('sonnet-4.6')) return 'claude-sonnet-4-6';
+      if (model.includes('sonnet')) return 'claude-sonnet-4-5';
+      if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
 
       if ((model.includes('opus') || model === '') && effort === 'low') {
         return 'claude-opus-4-6-low';
@@ -241,8 +245,17 @@
         model = 'claude-opus-4-6';
         flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
         break;
+      case 'claude-opus-4-5':
+        model = 'claude-opus-4-5';
+        break;
+      case 'claude-sonnet-4-6':
+        model = 'claude-sonnet-4-6';
+        break;
       case 'claude-sonnet-4-5':
         model = 'claude-sonnet-4-5-20250929';
+        break;
+      case 'claude-haiku-4-5':
+        model = 'claude-haiku-4-5';
         break;
       case 'codex-gpt-5-3-low':
         model = 'gpt-5.3-codex';

@@ -1,6 +1,6 @@
 {
   "name": "hive-manager",
-  "version": "0.15.4",
+  "version": "0.15.5",
   "description": "Multi-agent orchestration and monitoring for Claude Code workflows",
   "type": "module",
   "scripts": {
