@@ -439,7 +439,13 @@ pub async fn close_session(
 
     let controller = state.session_controller.write();
     controller.close_session(&id)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(|e| {
+            if e.starts_with("Session not found") {
+                ApiError::not_found(e)
+            } else {
+                ApiError::internal(e)
+            }
+        })?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Session {} closed", id)

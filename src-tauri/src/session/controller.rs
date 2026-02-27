@@ -573,8 +573,11 @@ impl SessionController {
 
         if let Some(session) = session {
             let pty_manager = self.pty_manager.read();
+            let mut kill_errors = Vec::new();
             for agent in &session.agents {
-                let _ = pty_manager.kill(&agent.id);
+                if let Err(e) = pty_manager.kill(&agent.id) {
+                    kill_errors.push(format!("{}: {}", agent.id, e));
+                }
             }
             drop(pty_manager);
 
@@ -584,16 +587,25 @@ impl SessionController {
             }
 
             {
+                let mut heartbeats = self.agent_heartbeats.write();
+                heartbeats.remove(id);
+            }
+
+            {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(id) {
-                    if s.state != SessionState::Closed {
-                        s.state = SessionState::Closed;
+                    for agent in &mut s.agents {
+                        agent.status = AgentStatus::Completed;
                     }
+                    s.state = SessionState::Closed;
                 }
             }
 
             self.update_session_storage(id);
             self.emit_session_update(id);
+            if !kill_errors.is_empty() {
+                tracing::warn!("Session {} closed with PTY kill errors: {}", id, kill_errors.join(" | "));
+            }
             Ok(())
         } else {
             Err(format!("Session not found: {}", id))
@@ -4949,7 +4961,10 @@ Last updated: {timestamp}
             id: persisted.id.clone(),
             session_type,
             project_path: PathBuf::from(persisted.project_path),
-            state: SessionState::Completed,  // Persisted sessions are completed
+            state: match persisted.state.as_str() {
+                "Closed" => SessionState::Closed,
+                _ => SessionState::Completed,
+            },
             created_at: persisted.created_at,
             agents,
             default_cli: persisted.default_cli.clone(),

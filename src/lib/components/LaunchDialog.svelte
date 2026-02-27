@@ -136,26 +136,31 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     label: undefined,
   };
 
+  function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
+    const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
+    return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
+  }
+
   // Hive workers with roles - preset team of 6
   let hiveWorkers: (AgentConfig & { selectedRole: string })[] = [
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'frontend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'coherence' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'simplify' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'reviewer' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'resolver' },
+    createDefaultConfig('backend'),
+    createDefaultConfig('frontend'),
+    createDefaultConfig('coherence'),
+    createDefaultConfig('simplify'),
+    createDefaultConfig('reviewer'),
+    createDefaultConfig('resolver'),
   ];
 
   // Simplified Swarm config - same config for all planners
   let plannerCount = 2;
   let plannerConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
   let workersPerPlanner: (AgentConfig & { selectedRole: string })[] = [
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'backend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'frontend' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'coherence' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'simplify' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'reviewer' },
-    { cli: 'claude', flags: [], label: undefined, selectedRole: 'resolver' },
+    createDefaultConfig('backend'),
+    createDefaultConfig('frontend'),
+    createDefaultConfig('coherence'),
+    createDefaultConfig('simplify'),
+    createDefaultConfig('reviewer'),
+    createDefaultConfig('resolver'),
   ];
 
   // Fusion config
@@ -191,11 +196,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
 
   $: activeFusionVariants = fusionVariants.slice(0, variantCount);
-
-  function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
-    const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles[4];
-    return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
-  }
 
   function updateWorkerCli(workerIndex: number) {
     const worker = hiveWorkers[workerIndex];

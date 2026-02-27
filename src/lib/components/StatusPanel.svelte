@@ -41,7 +41,9 @@
   }
 
   function isSessionActive(state: Session['state']): boolean {
-    return state === 'Running' || state === 'Starting' || state === 'Planning' || state === 'PlanReady' || state === 'Paused';
+    if (state === 'Completed' || state === 'Closed') return false;
+    if (typeof state === 'object' && state !== null && 'Failed' in state) return false;
+    return true;
   }
 
   async function handleCloseSession() {

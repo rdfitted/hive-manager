@@ -75,6 +75,8 @@
       model = 'composer-1';
     } else if (nextCli === 'opencode') {
       model = 'opencode/big-pickle';
+    } else if (nextCli === 'qwen') {
+      model = 'qwen3-coder';
     }
 
     config = {
