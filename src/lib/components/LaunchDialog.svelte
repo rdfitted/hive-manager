@@ -166,7 +166,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     { name: 'Variant C', cli: 'claude', flags: [] },
     { name: 'Variant D', cli: 'claude', flags: [] },
   ];
-  let judgeConfig = { cli: 'claude', model: undefined };
+  let judgeConfig: { cli: string; model?: string; flags?: string[]; label?: string } = { cli: 'claude' };
 
   // AgentConfig wrappers for fusion variants (so AgentConfigEditor can be used)
   let variantAgentConfigs: AgentConfig[] = fusionVariants.map(v => ({

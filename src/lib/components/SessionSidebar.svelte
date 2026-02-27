@@ -2,6 +2,20 @@
   import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+
+  let closingSessionId = $state<string | null>(null);
+
+  async function handleCloseSession(e: Event, sessionId: string) {
+    e.stopPropagation();
+    closingSessionId = sessionId;
+    try {
+      await sessions.closeSession(sessionId);
+    } catch (err) {
+      console.error('Failed to close session:', err);
+    } finally {
+      closingSessionId = null;
+    }
+  }
   import LaunchDialog from './LaunchDialog.svelte';
 
   interface Props {
@@ -182,15 +196,26 @@
           <ul class="session-list">
             {#each $sessions.sessions.filter(s => isActiveState(s.state)) as session}
               <li class="session-item" class:active={$activeSession?.id === session.id}>
-                <button class="session-button" onclick={() => selectSession(session.id)}>
-                  <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-                  <span class="session-meta">
-                    {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
-                      <span class="type-tag solo">Solo</span>
-                    {/if}
-                    {formatTimestamp(session.created_at)}
-                  </span>
-                </button>
+                <div class="session-row">
+                  <button class="session-button" onclick={() => selectSession(session.id)}>
+                    <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                    <span class="session-meta">
+                      {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
+                        <span class="type-tag solo">Solo</span>
+                      {/if}
+                      {formatTimestamp(session.created_at)}
+                    </span>
+                  </button>
+                  <button
+                    class="close-session-button"
+                    onclick={(e) => handleCloseSession(e, session.id)}
+                    title="Close Session"
+                    aria-label="Close Session"
+                    disabled={closingSessionId === session.id}
+                  >
+                    {closingSessionId === session.id ? '…' : '×'}
+                  </button>
+                </div>
               </li>
             {/each}
           </ul>
@@ -387,6 +412,39 @@
 
   .session-button:hover {
     background: var(--color-surface-hover);
+  }
+
+  .session-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .session-row .session-button {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .close-session-button {
+    width: 28px;
+    min-width: 28px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .close-session-button:hover:not(:disabled) {
+    background: var(--color-surface-hover);
+    border-color: var(--color-border);
+    color: var(--color-text);
+  }
+
+  .close-session-button:disabled {
+    cursor: wait;
+    opacity: 0.7;
   }
 
   .session-path {

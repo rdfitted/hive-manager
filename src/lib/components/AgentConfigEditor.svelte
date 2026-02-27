@@ -27,8 +27,17 @@
   ];
 
   const geminiPresets: PresetOption[] = [
-    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Default)' },
-    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Fast)' },
+    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+    { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview' },
+    { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview' },
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
+    { value: 'auto-gemini-3', label: 'Auto (Gemini 3)' },
+    { value: 'auto-gemini-2.5', label: 'Auto (Gemini 2.5)' },
+    { value: 'pro', label: 'Alias: pro' },
+    { value: 'flash', label: 'Alias: flash' },
+    { value: 'flash-lite', label: 'Alias: flash-lite' },
   ];
 
   $: presetOptions = config.cli === 'claude'
@@ -46,7 +55,7 @@
     : config.cli === 'codex'
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh"'
       : config.cli === 'gemini'
-        ? 'Select Gemini model variant'
+        ? 'CLI-valid Gemini model IDs and aliases for `gemini -m`'
         : '';
 
   function handleCliChange(e: Event) {
@@ -64,7 +73,7 @@
       model = 'gpt-5.3-codex';
       flags.push('-c', 'model_reasoning_effort="medium"');
     } else if (nextCli === 'gemini') {
-      model = 'gemini-2.5-pro';
+      model = 'gemini-3.1-pro-preview';
     } else if (nextCli === 'droid') {
       model = 'glm-4.7';
     } else if (nextCli === 'cursor') {
@@ -204,8 +213,18 @@
     }
 
     if (agent.cli === 'gemini') {
-      if (model.includes('2.5-pro')) return 'gemini-2.5-pro';
-      if (model.includes('2.5-flash')) return 'gemini-2.5-flash';
+      if (model === 'gemini-3.1-pro-preview-customtools') return 'gemini-3.1-pro-preview';
+      if (model === 'gemini-3.1-pro-preview') return 'gemini-3.1-pro-preview';
+      if (model === 'gemini-3-pro-preview') return 'gemini-3-pro-preview';
+      if (model === 'gemini-3-flash-preview') return 'gemini-3-flash-preview';
+      if (model === 'gemini-2.5-pro') return 'gemini-2.5-pro';
+      if (model === 'gemini-2.5-flash') return 'gemini-2.5-flash';
+      if (model === 'gemini-2.5-flash-lite') return 'gemini-2.5-flash-lite';
+      if (model === 'auto-gemini-3') return 'auto-gemini-3';
+      if (model === 'auto-gemini-2.5') return 'auto-gemini-2.5';
+      if (model === 'pro') return 'pro';
+      if (model === 'flash') return 'flash';
+      if (model === 'flash-lite') return 'flash-lite';
       return 'custom';
     }
 
@@ -249,11 +268,18 @@
         model = 'gpt-5.3-codex';
         flags.push('-c', 'model_reasoning_effort="xhigh"');
         break;
+      case 'gemini-3.1-pro-preview':
+      case 'gemini-3-pro-preview':
+      case 'gemini-3-flash-preview':
       case 'gemini-2.5-pro':
-        model = 'gemini-2.5-pro';
-        break;
       case 'gemini-2.5-flash':
-        model = 'gemini-2.5-flash';
+      case 'gemini-2.5-flash-lite':
+      case 'auto-gemini-3':
+      case 'auto-gemini-2.5':
+      case 'pro':
+      case 'flash':
+      case 'flash-lite':
+        model = preset;
         break;
       default:
         return;
