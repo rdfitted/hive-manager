@@ -68,7 +68,23 @@
     brightWhite: '#c0caf5',
   };
 
+  // Dedup guard for sendToPty: prevents double-send from xterm firing both
+  // paste and input events for the same pasted content
+  let lastSendTime = 0;
+  let lastSendData = '';
+  const SEND_DEDUP_MS = 100;
+
   async function sendToPty(data: string) {
+    // Deduplicate multi-character sends (paste). Single chars (typing) are exempt.
+    if (data.length > 1) {
+      const now = Date.now();
+      if (data === lastSendData && now - lastSendTime < SEND_DEDUP_MS) {
+        return;
+      }
+      lastSendTime = now;
+      lastSendData = data;
+    }
+
     try {
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
@@ -155,22 +171,6 @@
     }
   }
 
-  // Deduplication guard: track last paste to prevent double-send
-  // (xterm's built-in paste handler + our custom handler can both fire)
-  let lastPasteTime = 0;
-  let lastPasteText = '';
-  const PASTE_DEDUP_MS = 500;
-
-  function isDuplicatePaste(text: string): boolean {
-    const now = Date.now();
-    if (text === lastPasteText && now - lastPasteTime < PASTE_DEDUP_MS) {
-      return true;
-    }
-    lastPasteTime = now;
-    lastPasteText = text;
-    return false;
-  }
-
   // Global paste handler for when terminal has focus but paste targets document
   // (e.g., paste from external tools like Wispr Flow that target the document body)
   // Redirects the paste into the terminal so xterm's onData handles it.
@@ -181,12 +181,15 @@
     // If target is already inside our terminal, xterm handles it natively
     if (terminalContainer?.contains(event.target as Node)) return;
 
+    // If xterm's internal textarea has focus, xterm will handle the paste
+    // via onData — don't also send it here
+    const xtermTextarea = terminalContainer?.querySelector('.xterm-helper-textarea');
+    if (xtermTextarea && document.activeElement === xtermTextarea) return;
+
     const text = event.clipboardData?.getData('text');
     if (text) {
       event.preventDefault();
-      if (!isDuplicatePaste(text)) {
-        sendToPty(text);
-      }
+      sendToPty(text);
     }
   }
 
