@@ -261,10 +261,28 @@
       }
 
       // Ctrl+Shift+V or Ctrl+V = Paste
-      // Let the browser fire the native paste event, which xterm handles via onData.
-      // Returning true allows xterm's default paste flow (single send, no duplicate).
+      // Read clipboard explicitly via Tauri API (native paste events don't reliably
+      // carry clipboardData in Tauri's webview).
       if (event.ctrlKey && (event.key === 'V' || event.key === 'v')) {
-        return true;
+        (async () => {
+          let text: string | null = null;
+          try {
+            text = await readText();
+          } catch {
+            // Tauri API failed, try browser fallback
+          }
+          if (!text) {
+            try {
+              text = await navigator.clipboard.readText();
+            } catch {
+              // Browser API also failed
+            }
+          }
+          if (text && term) {
+            sendToPty(text);
+          }
+        })();
+        return false;
       }
 
       // Ctrl+C without selection = send interrupt (let it pass through)
