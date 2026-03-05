@@ -68,23 +68,12 @@
     brightWhite: '#c0caf5',
   };
 
-  // Dedup guard for sendToPty: prevents double-send from xterm firing both
-  // paste and input events for the same pasted content
-  let lastSendTime = 0;
-  let lastSendData = '';
-  const SEND_DEDUP_MS = 100;
+  // Flag to suppress paste events that the browser fires AFTER our Ctrl+V
+  // handler already read the clipboard via Tauri API. Without this, xterm's
+  // internal paste listener also fires onData → double send.
+  let suppressPaste = false;
 
   async function sendToPty(data: string) {
-    // Deduplicate multi-character sends (paste). Single chars (typing) are exempt.
-    if (data.length > 1) {
-      const now = Date.now();
-      if (data === lastSendData && now - lastSendTime < SEND_DEDUP_MS) {
-        return;
-      }
-      lastSendTime = now;
-      lastSendData = data;
-    }
-
     try {
       const encoder = new TextEncoder();
       const bytes = Array.from(encoder.encode(data));
@@ -219,6 +208,17 @@
     // Open terminal in container
     term.open(terminalContainer);
 
+    // Capture-phase paste listener: suppresses paste events that the browser
+    // fires after our Ctrl+V handler already sent clipboard content via Tauri API.
+    // Must be capture phase to fire before xterm's own paste listener.
+    terminalContainer.addEventListener('paste', (e) => {
+      if (suppressPaste) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        suppressPaste = false;
+      }
+    }, true);
+
     // Try to load WebGL addon for better performance
     try {
       const webglAddon = new WebglAddon();
@@ -262,8 +262,11 @@
 
       // Ctrl+Shift+V or Ctrl+V = Paste
       // Read clipboard explicitly via Tauri API (native paste events don't reliably
-      // carry clipboardData in Tauri's webview).
+      // carry clipboardData in Tauri's webview). Suppress any browser paste event
+      // that fires despite returning false, to prevent xterm double-sending.
       if (event.ctrlKey && (event.key === 'V' || event.key === 'v')) {
+        suppressPaste = true;
+        setTimeout(() => { suppressPaste = false; }, 500);
         (async () => {
           let text: string | null = null;
           try {
