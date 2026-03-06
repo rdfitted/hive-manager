@@ -369,7 +369,7 @@ impl SessionStorage {
             command: "codex".to_string(),
             auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
             model_flag: Some("-m".to_string()),
-            default_model: "gpt-5.3-codex".to_string(),
+            default_model: "gpt-5.4".to_string(),
             env: None,
         });
 
@@ -412,7 +412,7 @@ impl SessionStorage {
         });
         default_roles.insert("simplify".to_string(), RoleDefaults {
             cli: "codex".to_string(),
-            model: "gpt-5.3-codex".to_string(),
+            model: "gpt-5.4".to_string(),
         });
 
         AppConfig {

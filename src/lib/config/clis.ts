@@ -16,7 +16,7 @@ export const cliOptions: CliOption[] = [
   { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.6)' },
   { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model' },
-  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.3' },
+  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.4' },
   { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Opus 4.6)' },
   { value: 'droid', label: 'Droid', description: 'GLM 4.7 (Factory Droid CLI)' },
   { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)' },
@@ -35,7 +35,7 @@ export const defaultRoles: Record<string, RoleDefaults> = {
   backend: { cli: 'claude', model: 'opus-4-6' },
   frontend: { cli: 'gemini', model: 'gemini-2.5-pro' },
   coherence: { cli: 'droid', model: 'glm-4.7' },
-  simplify: { cli: 'codex', model: 'gpt-5.3-codex' },
+  simplify: { cli: 'codex', model: 'gpt-5.4' },
   // Review & QA roles default to claude
   reviewer: { cli: 'claude', model: 'claude-opus-4-6' },
   'reviewer-quick': { cli: 'claude', model: 'claude-opus-4-6' },

@@ -23,6 +23,10 @@
   ];
 
   const codexPresets: PresetOption[] = [
+    { value: 'codex-gpt-5-4-low', label: 'GPT-5.4 (Low effort)' },
+    { value: 'codex-gpt-5-4-medium', label: 'GPT-5.4 (Medium effort)' },
+    { value: 'codex-gpt-5-4-high', label: 'GPT-5.4 (High effort)' },
+    { value: 'codex-gpt-5-4-xhigh', label: 'GPT-5.4 (Extra high effort)' },
     { value: 'codex-gpt-5-3-low', label: 'GPT-5.3 Codex (Low effort)' },
     { value: 'codex-gpt-5-3-medium', label: 'GPT-5.3 Codex (Medium effort)' },
     { value: 'codex-gpt-5-3-high', label: 'GPT-5.3 Codex (High effort)' },
@@ -68,7 +72,7 @@
       model = 'claude-opus-4-6';
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
-      model = 'gpt-5.3-codex';
+      model = 'gpt-5.4';
       flags.push('-c', 'model_reasoning_effort="medium"');
     } else if (nextCli === 'gemini') {
       model = 'gemini-3.1-pro-preview';
@@ -203,8 +207,13 @@
 
     if (agent.cli === 'codex') {
       const effort = parseCodexEffort(flags);
+      const isGpt54 = model.includes('gpt-5.4');
       const isGpt53 = model.includes('gpt-5.3');
 
+      if (isGpt54 && effort === 'low') return 'codex-gpt-5-4-low';
+      if (isGpt54 && effort === 'medium') return 'codex-gpt-5-4-medium';
+      if (isGpt54 && effort === 'high') return 'codex-gpt-5-4-high';
+      if (isGpt54 && effort === 'xhigh') return 'codex-gpt-5-4-xhigh';
       if (isGpt53 && effort === 'low') return 'codex-gpt-5-3-low';
       if (isGpt53 && effort === 'medium') return 'codex-gpt-5-3-medium';
       if (isGpt53 && effort === 'high') return 'codex-gpt-5-3-high';
@@ -256,6 +265,22 @@
         break;
       case 'claude-haiku-4-5':
         model = 'claude-haiku-4-5';
+        break;
+      case 'codex-gpt-5-4-low':
+        model = 'gpt-5.4';
+        flags.push('-c', 'model_reasoning_effort="low"');
+        break;
+      case 'codex-gpt-5-4-medium':
+        model = 'gpt-5.4';
+        flags.push('-c', 'model_reasoning_effort="medium"');
+        break;
+      case 'codex-gpt-5-4-high':
+        model = 'gpt-5.4';
+        flags.push('-c', 'model_reasoning_effort="high"');
+        break;
+      case 'codex-gpt-5-4-xhigh':
+        model = 'gpt-5.4';
+        flags.push('-c', 'model_reasoning_effort="xhigh"');
         break;
       case 'codex-gpt-5-3-low':
         model = 'gpt-5.3-codex';

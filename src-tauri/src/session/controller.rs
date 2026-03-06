@@ -1735,7 +1735,7 @@ gemini -y -i "Analyze the codebase structure for: [TASK]. List relevant files by
 # Use Claude's Task tool with Explore agent
 
 # Scout 3 - Related Code (Codex if available, or another Gemini)
-codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex "Find code related to: [TASK]"
+codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4 "Find code related to: [TASK]"
 ```
 
 ---
