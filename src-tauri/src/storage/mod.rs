@@ -414,10 +414,6 @@ impl SessionStorage {
             cli: "codex".to_string(),
             model: "gpt-5.4".to_string(),
         });
-        default_roles.insert("code-quality".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.4".to_string(),
-        });
 
         AppConfig {
             clis,
