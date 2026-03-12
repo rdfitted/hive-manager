@@ -41,7 +41,7 @@ export const defaultRoles: Record<string, RoleDefaults> = {
   'reviewer-quick': { cli: 'claude', model: 'claude-opus-4-6' },
   resolver: { cli: 'claude', model: 'claude-opus-4-6' },
   tester: { cli: 'claude', model: 'claude-opus-4-6' },
-  'code-quality': { cli: 'claude', model: 'claude-opus-4-6' },
+  'code-quality': { cli: 'codex', model: 'gpt-5.4' },
   // General purpose
   general: { cli: 'claude', model: 'claude-opus-4-6' },
 };
