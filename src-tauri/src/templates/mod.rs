@@ -227,13 +227,15 @@ Once activated:
 
 ## Phase 3: QA Execution
 
-You start with NO QA workers — spawn them individually based on what the milestone requires.
+You start with NO QA workers — you MUST spawn at least one. Do NOT evaluate criteria yourself without QA workers.
+
+**You are a coordinator, not a tester.** Your job is to spawn workers, collect their evidence, and grade. Never skip spawning.
 
 1. Read the contract criteria and determine which specializations are needed:
+   - `api` — if criteria involve HTTP endpoints, payloads, status codes, or API communication (DEFAULT — spawn this if unsure)
    - `ui` — if criteria involve visual flows, interactions, or rendering
-   - `api` — if criteria involve HTTP endpoints, payloads, or status codes
    - `a11y` — if criteria involve accessibility, keyboard nav, or screen readers
-2. Spawn ONE worker at a time, wait for its findings, then decide if you need another:
+2. **Always spawn at least one QA worker.** For smoke tests, spawn `api` at minimum:
    ```bash
    curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
@@ -241,7 +243,7 @@ You start with NO QA workers — spawn them individually based on what the miles
    ```
 3. **Poll worker results every {{active_poll_interval}}** (`sleep {{active_poll_secs}}`) — read each worker's task file for COMPLETED status
 4. Once a worker completes, read its findings, then decide if you need to spawn another
-5. Only spawn what you need — if the contract has no UI criteria, skip the UI worker
+5. If a specialization isn't needed, skip it — but you must have at least one worker's evidence before rendering a verdict
 
 ## Verdict Rules
 
