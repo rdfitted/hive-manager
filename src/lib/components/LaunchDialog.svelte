@@ -121,9 +121,22 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   let mode: SessionMode = 'hive';
   let projectPath = '';
+  let sessionName = '';
+  let sessionColor = '';
   let prompt = '';
   let launching = false;
   let error = '';
+
+  const COLORS = [
+    { name: 'Blue', value: '#7aa2f7' },
+    { name: 'Purple', value: '#bb9af7' },
+    { name: 'Green', value: '#9ece6a' },
+    { name: 'Yellow', value: '#e0af68' },
+    { name: 'Cyan', value: '#7dcfff' },
+    { name: 'Red', value: '#f7768e' },
+    { name: 'Orange', value: '#ff9e64' },
+    { name: 'Pink', value: '#f7b1d1' },
+  ];
 
   // Solo config
   let soloConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
@@ -304,6 +317,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         }));
 
         const config: HiveLaunchConfig = {
+          name: sessionName.trim() || undefined,
+          color: sessionColor || undefined,
           project_path: projectPath,
           queen_config: queenConfig,
           workers: workersWithRoles,
@@ -325,6 +340,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         }));
 
         const config: SwarmLaunchConfig = {
+          name: sessionName.trim() || undefined,
+          color: sessionColor || undefined,
           project_path: projectPath,
           queen_config: queenConfig,
           planner_count: plannerCount,
@@ -340,6 +357,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         dispatch('launchSwarm', config);
       } else if (mode === 'solo') {
         const config: SoloLaunchConfig = {
+          name: sessionName.trim() || undefined,
+          color: sessionColor || undefined,
           projectPath,
           taskDescription: soloTask.trim() || undefined,
           cli: soloConfig.cli,
@@ -348,6 +367,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         dispatch('launchSolo', config);
       } else {
         const config: FusionLaunchConfig = {
+          name: sessionName.trim() || undefined,
+          color: sessionColor || undefined,
           project_path: projectPath,
           variants: activeFusionVariants,
           task_description: prompt,
@@ -388,16 +409,16 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
 {#if show}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="dialog-overlay" on:click={handleOverlayClick} role="presentation">
+  <div class="dialog-overlay" onclick={handleOverlayClick} role="presentation">
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="dialog" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div class="dialog" onclick|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
       <h2>Launch New Session</h2>
 
       <div class="mode-tabs">
         <button
           class="mode-tab"
           class:active={mode === 'hive'}
-          on:click={() => (mode = 'hive')}
+          onclick={() => (mode = 'hive')}
           type="button"
         >
           Hive
@@ -405,7 +426,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         <button
           class="mode-tab"
           class:active={mode === 'swarm'}
-          on:click={() => (mode = 'swarm')}
+          onclick={() => (mode = 'swarm')}
           type="button"
         >
           Swarm
@@ -413,7 +434,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         <button
           class="mode-tab"
           class:active={mode === 'fusion'}
-          on:click={() => (mode = 'fusion')}
+          onclick={() => (mode = 'fusion')}
           type="button"
         >
           Fusion
@@ -421,14 +442,48 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         <button
           class="mode-tab"
           class:active={mode === 'solo'}
-          on:click={() => (mode = 'solo')}
+          onclick={() => (mode = 'solo')}
           type="button"
         >
           Solo
         </button>
       </div>
 
-      <form on:submit|preventDefault={() => handleSubmit(false)}>
+      <form onsubmit={(e) => { e.preventDefault(); handleSubmit(false); }}>
+        <div class="form-row">
+          <div class="form-group flex-2">
+            <label for="sessionName">Session Name (optional)</label>
+            <input
+              id="sessionName"
+              type="text"
+              bind:value={sessionName}
+              placeholder="e.g. Refactor API"
+            />
+          </div>
+          <div class="form-group flex-1">
+            <label>Session Color</label>
+            <div class="color-picker-inline">
+              {#each COLORS as color}
+                <button
+                  type="button"
+                  class="color-circle"
+                  style:background={color.value}
+                  class:selected={sessionColor === color.value}
+                  onclick={() => sessionColor = color.value}
+                  title={color.name}
+                >
+                </button>
+              {/each}
+              <button
+                type="button"
+                class="color-circle clear"
+                onclick={() => sessionColor = ''}
+                title="Clear color"
+              >×</button>
+            </div>
+          </div>
+        </div>
+
         <div class="form-group">
           <label for="projectPath">Project Path</label>
           <div class="path-picker">
@@ -798,6 +853,54 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 13px;
     font-weight: 500;
     color: var(--color-text);
+  }
+
+  .form-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .flex-1 { flex: 1; }
+  .flex-2 { flex: 2; }
+
+  .color-picker-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+  }
+
+  .color-circle {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+    padding: 0;
+  }
+
+  .color-circle:hover {
+    transform: scale(1.2);
+  }
+
+  .color-circle.selected {
+    border-color: var(--color-text);
+    transform: scale(1.1);
+  }
+
+  .color-circle.clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-surface-hover);
+    color: var(--color-text-muted);
+    font-size: 14px;
+    border: 1px solid var(--color-border);
   }
 
   .form-group input,

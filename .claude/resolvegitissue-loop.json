@@ -1,0 +1,30 @@
+{
+    "issue_number": 17,
+    "branch_name": "issue/17-session-scoped-learnings-api",
+    "iteration": 1,
+    "max_iterations": 10,
+    "test_command": "cargo test",
+    "github": {
+        "repo": "rdfitted/hive-manager",
+        "fetch_on_iteration": true,
+        "post_progress": true,
+        "last_fetched_at": "2026-02-05T19:15:00Z"
+    },
+    "acceptance_criteria": [
+        {"id": "ac-multi-hive", "text": "User can run two Hive sessions against different projects simultaneously", "status": "pending"},
+        {"id": "ac-worker-a", "text": "Workers in Session A submit learnings to Project A's .ai-docs/learnings.jsonl", "status": "pending"},
+        {"id": "ac-worker-b", "text": "Workers in Session B submit learnings to Project B's .ai-docs/learnings.jsonl", "status": "pending"},
+        {"id": "ac-queen-a", "text": "Queen in Session A reviews only Project A's learnings", "status": "pending"},
+        {"id": "ac-queen-b", "text": "Queen in Session B reviews only Project B's learnings", "status": "pending"},
+        {"id": "ac-dna-scoped", "text": "Project DNA retrieval is session-scoped", "status": "pending"},
+        {"id": "ac-backward-single", "text": "Old /api/learnings endpoints work when only one project is active", "status": "pending"},
+        {"id": "ac-backward-multi", "text": "Old endpoints return helpful error when multiple projects are active, suggesting new endpoints", "status": "pending"},
+        {"id": "ac-no-arbitrary-paths", "text": "No agent can write learnings to arbitrary filesystem paths", "status": "pending"},
+        {"id": "ac-404-invalid", "text": "Session_id validation returns 404 for non-existent sessions", "status": "pending"},
+        {"id": "ac-files-validation", "text": "File path validation in files_touched is preserved", "status": "pending"},
+        {"id": "ac-completed-sessions", "text": "Completed sessions don't interfere with active session path resolution", "status": "pending"},
+        {"id": "ac-resumption", "text": "Session resumption doesn't break learning endpoints for other active sessions", "status": "pending"},
+        {"id": "ac-concurrent", "text": "Concurrent learning submissions from multiple workers in same session work correctly", "status": "pending"}
+    ],
+    "iteration_history": []
+}

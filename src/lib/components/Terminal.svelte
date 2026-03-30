@@ -6,6 +6,7 @@
   import { SearchAddon } from '@xterm/addon-search';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
   import { activeAgents } from '$lib/stores/sessions';
   import '@xterm/xterm/css/xterm.css';
@@ -23,15 +24,18 @@
   let fitAddon: FitAddon | null = null;
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
+  let unlistenDragDrop: UnlistenFn | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let lastDims = { cols: 0, rows: 0 };
   let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+  let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // Context menu state
   let showContextMenu = $state(false);
   let contextMenuX = $state(0);
   let contextMenuY = $state(0);
   let hasSelection = $state(false);
+  let isDragActive = $state(false);
 
   // Track agent status from store
   let agent = $derived($activeAgents.find(a => a.id === agentId));
@@ -75,12 +79,71 @@
 
   async function sendToPty(data: string) {
     try {
-      const encoder = new TextEncoder();
-      const bytes = Array.from(encoder.encode(data));
-      await invoke('write_to_pty', { id: agentId, data: bytes });
+      await invoke('write_to_pty', { id: agentId, data });
     } catch (err) {
       console.error('[Terminal] Failed to write to PTY:', err);
     }
+  }
+
+  function shellEscapePath(path: string): string {
+    if (!path.includes("'")) {
+      return `'${path}'`;
+    }
+
+    return `"${path.replace(/(["`$\\])/g, '\\$1')}"`;
+  }
+
+  function isPointerInsideTerminal(position: { x: number; y: number }): boolean {
+    if (!terminalContainer) return false;
+
+    const rect = terminalContainer.getBoundingClientRect();
+    const scale = window.devicePixelRatio || 1;
+    const left = rect.left * scale;
+    const right = rect.right * scale;
+    const top = rect.top * scale;
+    const bottom = rect.bottom * scale;
+
+    return position.x >= left && position.x <= right && position.y >= top && position.y <= bottom;
+  }
+
+  function setDragActive(active: boolean) {
+    if (dragLeaveTimeout) {
+      clearTimeout(dragLeaveTimeout);
+      dragLeaveTimeout = null;
+    }
+
+    isDragActive = active;
+  }
+
+  function handleDomDragOver(event: DragEvent) {
+    event.preventDefault();
+    event.dataTransfer!.dropEffect = 'copy';
+  }
+
+  function handleDomDragEnter(event: DragEvent) {
+    event.preventDefault();
+  }
+
+  function handleDomDragLeave(event: DragEvent) {
+    event.preventDefault();
+
+    if (event.currentTarget === event.target) {
+      dragLeaveTimeout = setTimeout(() => {
+        isDragActive = false;
+      }, 30);
+    }
+  }
+
+  function handleDomDrop(event: DragEvent) {
+    event.preventDefault();
+  }
+
+  async function handleDroppedPaths(paths: string[]) {
+    if (paths.length === 0) return;
+
+    const payload = paths.map(shellEscapePath).join('\n');
+    await sendToPty(payload);
+    term?.focus();
   }
 
   function handleQuickAction(action: string) {
@@ -187,6 +250,27 @@
     document.addEventListener('click', handleGlobalClick);
     // Add global paste listener for tools like Wispr Flow
     document.addEventListener('paste', handleGlobalPaste);
+
+    unlistenDragDrop = await getCurrentWindow().onDragDropEvent(async (event) => {
+      switch (event.payload.type) {
+        case 'enter':
+        case 'over':
+          setDragActive(isPointerInsideTerminal(event.payload.position));
+          break;
+        case 'drop':
+          if (isPointerInsideTerminal(event.payload.position)) {
+            setDragActive(false);
+            await handleDroppedPaths(event.payload.paths);
+          } else {
+            isDragActive = false;
+          }
+          break;
+        case 'leave':
+          isDragActive = false;
+          break;
+      }
+    });
+
     // Create terminal instance
     term = new XTerm({
       theme: tokyoNightTheme,
@@ -358,10 +442,12 @@
 
   onDestroy(() => {
     if (resizeTimeout) clearTimeout(resizeTimeout);
+    if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
     document.removeEventListener('click', handleGlobalClick);
     document.removeEventListener('paste', handleGlobalPaste);
     if (unlistenOutput) unlistenOutput();
     if (unlistenStatus) unlistenStatus();
+    if (unlistenDragDrop) unlistenDragDrop();
     if (resizeObserver) resizeObserver.disconnect();
     if (term) term.dispose();
   });
@@ -381,7 +467,20 @@
   bind:this={terminalContainer}
   oncontextmenu={handleContextMenu}
   onclick={closeContextMenu}
+  ondragenter={handleDomDragEnter}
+  ondragover={handleDomDragOver}
+  ondragleave={handleDomDragLeave}
+  ondrop={handleDomDrop}
 >
+  {#if isDragActive}
+    <div class="drop-overlay">
+      <div class="drop-card">
+        <span class="drop-title">Drop file here</span>
+        <span class="drop-copy">Absolute path(s) will be pasted into the terminal.</span>
+      </div>
+    </div>
+  {/if}
+
   {#if isWaiting}
     <div class="quick-response-overlay">
       <div class="quick-response-bar">
@@ -438,6 +537,47 @@
 
   .terminal-wrapper :global(.xterm-viewport) {
     background: #1a1b26 !important;
+  }
+
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 12;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      linear-gradient(180deg, rgba(122, 162, 247, 0.14), rgba(122, 162, 247, 0.08)),
+      rgba(26, 27, 38, 0.72);
+    border: 2px dashed rgba(125, 207, 255, 0.9);
+    pointer-events: none;
+  }
+
+  .drop-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 16px 20px;
+    min-width: 240px;
+    border-radius: 10px;
+    background: rgba(36, 40, 59, 0.92);
+    border: 1px solid rgba(125, 207, 255, 0.35);
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+    text-align: center;
+  }
+
+  .drop-title {
+    color: #7dcfff;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .drop-copy {
+    color: #a9b1d6;
+    font-size: 12px;
+    line-height: 1.4;
   }
 
   .quick-response-overlay {

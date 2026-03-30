@@ -194,6 +194,51 @@
       launching = false;
     }
   }
+
+  const COLORS = [
+    { name: 'Blue', value: '#7aa2f7' },
+    { name: 'Purple', value: '#bb9af7' },
+    { name: 'Green', value: '#9ece6a' },
+    { name: 'Yellow', value: '#e0af68' },
+    { name: 'Cyan', value: '#7dcfff' },
+    { name: 'Red', value: '#f7768e' },
+    { name: 'Orange', value: '#ff9e64' },
+    { name: 'Pink', value: '#f7b1d1' },
+  ];
+
+  let editingSessionId = $state<string | null>(null);
+  let editName = $state('');
+  let editColor = $state<string | undefined>(undefined);
+  let showColorPicker = $state(false);
+
+  function startEdit(session: Session) {
+    editingSessionId = session.id;
+    editName = session.name || session.project_path.split(/[/\\]/).pop() || '';
+    editColor = session.color;
+    showColorPicker = false;
+  }
+
+  async function saveMetadata() {
+    if (!editingSessionId) return;
+    try {
+      await sessions.updateSessionMetadata(editingSessionId, editName, editColor);
+      editingSessionId = null;
+    } catch (err) {
+      console.error('Failed to update metadata:', err);
+    }
+  }
+
+  function cancelEdit() {
+    editingSessionId = null;
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      saveMetadata();
+    } else if (e.key === 'Escape') {
+      cancelEdit();
+    }
+  }
 </script>
 
 <aside class="sidebar" class:collapsed={sidebarCollapsed}>
@@ -217,16 +262,57 @@
         {:else}
           <ul class="session-list">
             {#each $sessions.sessions.filter(s => isActiveState(s.state)) as session}
-              <li class="session-item" class:active={$activeSession?.id === session.id}>
+              <li class="session-item" class:active={$activeSession?.id === session.id} style:--session-color={session.color || 'transparent'}>
                 <div class="session-row">
                   <button class="session-button" onclick={() => selectSession(session.id)}>
-                    <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-                    <span class="session-meta">
-                      {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
-                        <span class="type-tag solo">Solo</span>
-                      {/if}
-                      {formatTimestamp(session.created_at)}
-                    </span>
+                    {#if editingSessionId === session.id}
+                      <div class="edit-container" onclick={e => e.stopPropagation()}>
+                        <input
+                          type="text"
+                          bind:value={editName}
+                          onkeydown={handleKeydown}
+                          placeholder="Session Name"
+                          aria-label="Session Name"
+                          autofocus
+                        />
+                        <div class="edit-actions">
+                          <button class="color-toggle" onclick={() => showColorPicker = !showColorPicker} title="Choose Color" style:background={editColor || 'var(--color-bg-secondary)'}>
+                          </button>
+                          {#if showColorPicker}
+                            <div class="color-picker">
+                              {#each COLORS as color}
+                                <button
+                                  class="color-option"
+                                  style:background={color.value}
+                                  class:selected={editColor === color.value}
+                                  onclick={() => { editColor = color.value; showColorPicker = false; }}
+                                  title={color.name}
+                                >
+                                </button>
+                              {/each}
+                              <button
+                                class="color-option clear"
+                                onclick={() => { editColor = undefined; showColorPicker = false; }}
+                                title="Clear Color"
+                              >×</button>
+                            </div>
+                          {/if}
+                          <button class="save-btn" onclick={saveMetadata} title="Save">✓</button>
+                          <button class="cancel-btn-inline" onclick={cancelEdit} title="Cancel">×</button>
+                        </div>
+                      </div>
+                    {:else}
+                      <span class="session-path">
+                        {session.name || session.project_path.split(/[/\\]/).pop()}
+                        <button class="edit-btn" onclick={(e) => { e.stopPropagation(); startEdit(session); }} title="Rename Session">✎</button>
+                      </span>
+                      <span class="session-meta">
+                        {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
+                          <span class="type-tag solo">Solo</span>
+                        {/if}
+                        {formatTimestamp(session.created_at)}
+                      </span>
+                    {/if}
                   </button>
                   <button
                     class="close-session-button"
@@ -428,6 +514,8 @@
 
   .session-item {
     margin-bottom: 4px;
+    border-left: 3px solid var(--session-color);
+    border-radius: 4px;
   }
 
   .session-item.active .session-button {
@@ -442,10 +530,126 @@
     align-items: flex-start;
     padding: 8px 10px;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: 0 4px 4px 0;
     background: transparent;
     cursor: pointer;
     transition: all 0.15s ease;
+  }
+
+  .edit-btn {
+    opacity: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    padding: 2px 4px;
+    margin-left: 4px;
+    transition: all 0.15s ease;
+  }
+
+  .session-path:hover .edit-btn {
+    opacity: 1;
+  }
+
+  .edit-btn:hover {
+    color: var(--color-accent);
+    background: var(--color-bg-secondary);
+    border-radius: 3px;
+  }
+
+  .edit-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .edit-container input {
+    width: 100%;
+    background: var(--color-bg);
+    border: 1px solid var(--color-accent);
+    border-radius: 4px;
+    color: var(--color-text);
+    padding: 4px 8px;
+    font-size: 13px;
+  }
+
+  .edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    position: relative;
+  }
+
+  .color-toggle {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+  }
+
+  .color-picker {
+    position: absolute;
+    top: 24px;
+    left: 0;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 6px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px;
+    z-index: 20;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+
+  .color-option {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 1px solid rgba(0,0,0,0.2);
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .color-option.selected {
+    border: 2px solid var(--color-text);
+  }
+
+  .color-option.clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    background: var(--color-bg-secondary);
+  }
+
+  .save-btn, .cancel-btn-inline {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .save-btn {
+    color: var(--color-success);
+  }
+
+  .save-btn:hover {
+    background: rgba(158, 206, 106, 0.1);
+  }
+
+  .cancel-btn-inline {
+    color: var(--color-error);
+  }
+
+  .cancel-btn-inline:hover {
+    background: rgba(247, 118, 142, 0.1);
   }
 
   .session-button:hover {

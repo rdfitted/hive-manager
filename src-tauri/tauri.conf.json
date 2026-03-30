@@ -20,6 +20,7 @@
         "minHeight": 600,
         "decorations": true,
         "resizable": true,
+        "dragDropEnabled": false,
         "devtools": true
       }
     ],
