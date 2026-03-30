@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeSession, sessions } from '$lib/stores/sessions';
+  import { activeSession, sessions, serdeEnumVariantName, type Session } from '$lib/stores/sessions';
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -30,23 +30,29 @@
   let lastSessionId: string | null = null;
   let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+  function sessionStateKind(state: Session['state'] | undefined): string | undefined {
+    return state === undefined ? undefined : serdeEnumVariantName(state);
+  }
+
   // Check if session is in a planning-related state
   function isPlanning(): boolean {
-    return $activeSession?.state === 'Planning';
+    return sessionStateKind($activeSession?.state) === 'Planning';
   }
 
   function isPlanReady(): boolean {
-    return $activeSession?.state === 'PlanReady';
+    return sessionStateKind($activeSession?.state) === 'PlanReady';
   }
 
   // Check if we're in an interactive planning state (Planning or PlanReady with Master Planner still running)
   function canRefine(): boolean {
     if (!$activeSession) return false;
-    const state = $activeSession.state;
-    if (state !== 'Planning' && state !== 'PlanReady') return false;
-    // Check if Master Planner agent exists and is running
-    const masterPlanner = $activeSession.agents.find(a => a.role === 'MasterPlanner');
-    return masterPlanner?.status === 'Running';
+    const sk = sessionStateKind($activeSession.state);
+    if (sk !== 'Planning' && sk !== 'PlanReady') return false;
+    const masterPlanner = $activeSession.agents.find(
+      (a) => serdeEnumVariantName(a.role) === 'MasterPlanner'
+    );
+    const st = masterPlanner?.status;
+    return serdeEnumVariantName(st) === 'Running';
   }
 
   async function handleContinue() {
@@ -70,7 +76,9 @@
 
     try {
       // Find the Master Planner agent
-      const masterPlanner = $activeSession.agents.find(a => a.role === 'MasterPlanner');
+      const masterPlanner = $activeSession.agents.find(
+        (a) => serdeEnumVariantName(a.role) === 'MasterPlanner'
+      );
       if (!masterPlanner) {
         throw new Error('Master Planner not found');
       }
@@ -97,7 +105,7 @@
   // Start polling for plan
   function startPolling() {
     const state = $activeSession?.state;
-    const interval = state === 'Running' ? 5000 : 2000;
+    const interval = serdeEnumVariantName(state) === 'Running' ? 5000 : 2000;
     
     // If interval already exists, check if it's the right frequency
     // For simplicity, we'll just restart it if the state changed significantly
@@ -155,7 +163,8 @@
     }
 
     // Start/stop polling based on state
-    if (state === 'Planning' || state === 'PlanReady' || state === 'Running') {
+    const sk = state === undefined ? undefined : serdeEnumVariantName(state);
+    if (sk === 'Planning' || sk === 'PlanReady' || sk === 'Running') {
       startPolling();
     } else {
       stopPolling();

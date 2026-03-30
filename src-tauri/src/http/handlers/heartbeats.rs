@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
-use crate::session::SessionState;
 use super::validate_session_id;
 use super::validate_agent_id;
 
@@ -82,7 +81,7 @@ pub async fn post_heartbeat(
     ))
 }
 
-/// GET /api/sessions/active - Returns sessions with Running state and agent heartbeats
+/// GET /api/sessions/active - Returns active sessions and agent heartbeats
 pub async fn get_active_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ActiveSessionsResponse>, ApiError> {
@@ -91,7 +90,7 @@ pub async fn get_active_sessions(
 
     let sessions: Vec<ActiveSessionInfo> = all_sessions
         .into_iter()
-        .filter(|s| s.state == SessionState::Running)
+        .filter(|s| s.state.is_active())
         .map(|session| {
             let agents_with_heartbeats = controller.get_heartbeat_info(&session.id);
             let agents: Vec<ActiveAgentInfo> = session

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AgentInfo } from '$lib/stores/sessions';
+  import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
   import Terminal from './Terminal.svelte';
 
   interface Props {
@@ -29,11 +29,13 @@
 
   function getRoleLabel(agent: AgentInfo) {
     if (agent.config?.label) return agent.config.label;
-    if (agent.role === 'Queen') return 'Queen';
-    if (typeof agent.role === 'object') {
+    if (serdeEnumVariantName(agent.role) === 'Queen') return 'Queen';
+    if (typeof agent.role === 'object' && agent.role !== null) {
       if ('Planner' in agent.role) return `Planner ${agent.role.Planner.index}`;
       if ('Worker' in agent.role) return `Worker ${agent.role.Worker.index}`;
+      if ('QaWorker' in agent.role) return `QA Worker ${agent.role.QaWorker.index}`;
     }
+    if (serdeEnumVariantName(agent.role) === 'Evaluator') return 'Evaluator';
     return 'Agent';
   }
 </script>

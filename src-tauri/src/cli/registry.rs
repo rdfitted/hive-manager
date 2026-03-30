@@ -129,6 +129,15 @@ impl CliRegistry {
     pub fn needs_role_hardening(cli: &str) -> bool {
         matches!(Self::get_behavior(cli), CliBehavior::ActionProne)
     }
+
+    /// Evaluators should default to a skeptical, instruction-following profile
+    /// even when the underlying CLI is more action-prone in other roles.
+    pub fn get_behavior_for_role(cli: &str, role_type: Option<&str>) -> CliBehavior {
+        match role_type.map(str::to_ascii_lowercase).as_deref() {
+            Some("evaluator") => CliBehavior::InstructionFollowing,
+            _ => Self::get_behavior(cli),
+        }
+    }
 }
 
 /// A built command ready for execution
@@ -319,5 +328,17 @@ mod tests {
         assert!(!CliRegistry::needs_role_hardening("qwen"));
         assert!(!CliRegistry::needs_role_hardening("codex"));
         assert!(!CliRegistry::needs_role_hardening("droid"));
+    }
+
+    #[test]
+    fn test_get_behavior_for_evaluator_role() {
+        assert!(matches!(
+            CliRegistry::get_behavior_for_role("claude", Some("evaluator")),
+            CliBehavior::InstructionFollowing
+        ));
+        assert!(matches!(
+            CliRegistry::get_behavior_for_role("claude", Some("backend")),
+            CliBehavior::ActionProne
+        ));
     }
 }

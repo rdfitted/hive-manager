@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { sessions, activeSession, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, serdeEnumVariantName, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
 
@@ -105,7 +105,10 @@
   }
 
   function isActiveState(state: Session['state']): boolean {
-    return state === 'Running' || state === 'Starting' || state === 'Planning' || state === 'PlanReady';
+    if (typeof state === 'object' && state !== null && 'Failed' in state) return false;
+    const v = serdeEnumVariantName(state);
+    if (v === 'Completed' || v === 'Closed' || v === 'Closing' || v === 'Failed') return false;
+    return true;
   }
 
   function selectSession(sessionId: string) {

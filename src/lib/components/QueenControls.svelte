@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { activeSession, activeAgents, type AgentStatus } from '$lib/stores/sessions';
+  import { activeSession, activeAgents, serdeEnumVariantName, type AgentStatus } from '$lib/stores/sessions';
   import BranchSelector from './BranchSelector.svelte';
 
   const dispatch = createEventDispatcher<{
@@ -9,7 +9,7 @@
 
   function getAgentLabel(agent: { id: string; config: { label?: string }; role: unknown }): string {
     if (agent.config?.label) return agent.config.label;
-    if (agent.role === 'Queen') return 'Queen';
+    if (serdeEnumVariantName(agent.role) === 'Queen') return 'Queen';
     if (agent.role && typeof agent.role === 'object' && 'Worker' in agent.role) {
       const idx = (agent.role as { Worker: { index: number } }).Worker.index;
       return `Worker ${idx}`;
@@ -22,9 +22,10 @@
   }
 
   function getAgentStatusInfo(status: AgentStatus): { icon: string; color: string } {
-    if (status === 'Running') return { icon: '●', color: 'var(--color-running, #7aa2f7)' };
-    if (status === 'Completed') return { icon: '✓', color: 'var(--color-success, #9ece6a)' };
-    if (status === 'Starting') return { icon: '◐', color: 'var(--text-secondary, #565f89)' };
+    const sk = serdeEnumVariantName(status);
+    if (sk === 'Running') return { icon: '●', color: 'var(--color-running, #7aa2f7)' };
+    if (sk === 'Completed') return { icon: '✓', color: 'var(--color-success, #9ece6a)' };
+    if (sk === 'Starting') return { icon: '◐', color: 'var(--text-secondary, #565f89)' };
     if (typeof status === 'object' && 'WaitingForInput' in status) return { icon: '⏳', color: 'var(--color-warning, #e0af68)' };
     if (typeof status === 'object' && 'Error' in status) return { icon: '✗', color: 'var(--color-error, #f7768e)' };
     return { icon: '○', color: 'var(--text-secondary, #565f89)' };

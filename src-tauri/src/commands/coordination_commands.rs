@@ -187,7 +187,14 @@ pub async fn add_worker_to_session(
         let workers: Vec<WorkerStateInfo> = session
             .agents
             .iter()
-            .filter(|a| !matches!(a.role, crate::pty::AgentRole::Queen))
+            .filter(|a| {
+                !matches!(
+                    a.role,
+                    crate::pty::AgentRole::Queen
+                        | crate::pty::AgentRole::Evaluator
+                        | crate::pty::AgentRole::QaWorker { .. }
+                )
+            })
             .map(|a| WorkerStateInfo {
                 id: a.id.clone(),
                 role: a.config.role.clone().unwrap_or_default(),

@@ -19,6 +19,20 @@ struct FusionVariantCompletedPayload {
     task_file: String,
 }
 
+#[derive(Clone, Serialize)]
+struct AgentTaskCompletedPayload {
+    session_id: String,
+    agent_id: String,
+    task_file: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PeerEventPayload {
+    session_id: String,
+    event_type: String,
+    path: String,
+}
+
 pub struct TaskFileWatcher {
     #[allow(dead_code)] // Must keep watcher alive to maintain file watching
     watcher: RecommendedWatcher,
@@ -41,6 +55,9 @@ impl TaskFileWatcher {
         // Watch the tasks directory
         let tasks_path = session_path.join("tasks");
         watcher.watch(&tasks_path, RecursiveMode::NonRecursive)?;
+        let peer_path = session_path.join("peer");
+        std::fs::create_dir_all(&peer_path).ok();
+        watcher.watch(&peer_path, RecursiveMode::NonRecursive)?;
 
         let session_id_owned = session_id.to_string();
         let app_handle_clone = app_handle.clone();
@@ -90,6 +107,29 @@ impl TaskFileWatcher {
         None
     }
 
+    fn extract_evaluator_id(path: &Path) -> Option<String> {
+        let filename = path.file_name()?.to_str()?;
+        if filename == "evaluator-task.md" {
+            return Some("evaluator".to_string());
+        }
+        if filename.starts_with("qa-worker-") && filename.ends_with("-task.md") {
+            let index = filename
+                .strip_prefix("qa-worker-")?
+                .strip_suffix("-task.md")?;
+            return Some(format!("qa-worker-{}", index));
+        }
+        None
+    }
+
+    fn peer_event_type(path: &Path) -> Option<&'static str> {
+        match path.file_name()?.to_str()? {
+            "milestone-ready.json" => Some("milestone-ready"),
+            "qa-verdict.json" => Some("qa-verdict"),
+            "evaluator-feedback.json" => Some("evaluator-feedback"),
+            _ => None,
+        }
+    }
+
     fn handle_event(
         event: &Event,
         session_id: &str,
@@ -98,9 +138,26 @@ impl TaskFileWatcher {
         debounce: Duration,
     ) {
         for path in &event.paths {
+            if let Some(event_type) = Self::peer_event_type(path) {
+                let _ = app_handle.emit(
+                    event_type,
+                    PeerEventPayload {
+                        session_id: session_id.to_string(),
+                        event_type: event_type.to_string(),
+                        path: path.to_string_lossy().to_string(),
+                    },
+                );
+                if Self::is_debounced(last_emit, debounce) {
+                    return;
+                }
+                let _ = app_handle.emit("plan-update", session_id);
+                return;
+            }
+
             let worker_id = Self::extract_worker_id(path);
             let fusion_variant_index = Self::extract_fusion_variant(path);
-            if worker_id.is_none() && fusion_variant_index.is_none() {
+            let evaluator_agent_id = Self::extract_evaluator_id(path);
+            if worker_id.is_none() && fusion_variant_index.is_none() && evaluator_agent_id.is_none() {
                 continue;
             }
 
@@ -121,9 +178,18 @@ impl TaskFileWatcher {
                         let payload = FusionVariantCompletedPayload {
                             session_id: session_id.to_string(),
                             variant_index,
-                            task_file,
+                            task_file: task_file.clone(),
                         };
                         let _ = app_handle.emit("fusion-variant-completed", payload);
+                    }
+
+                    if let Some(agent_id) = evaluator_agent_id {
+                        let payload = AgentTaskCompletedPayload {
+                            session_id: session_id.to_string(),
+                            agent_id,
+                            task_file: task_file.clone(),
+                        };
+                        let _ = app_handle.emit("evaluator-task-completed", payload);
                     }
 
                     if Self::is_debounced(last_emit, debounce) {
@@ -163,5 +229,41 @@ mod tests {
         assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-foo-task.md")), None);
         assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-task.md")), None);
         assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-1.md")), None);
+    }
+
+    #[test]
+    fn test_extract_evaluator_id() {
+        assert_eq!(
+            TaskFileWatcher::extract_evaluator_id(&PathBuf::from("evaluator-task.md")),
+            Some("evaluator".to_string())
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_evaluator_id(&PathBuf::from("qa-worker-3-task.md")),
+            Some("qa-worker-3".to_string())
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_evaluator_id(&PathBuf::from("worker-3-task.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_peer_event_type() {
+        assert_eq!(
+            TaskFileWatcher::peer_event_type(&PathBuf::from("milestone-ready.json")),
+            Some("milestone-ready")
+        );
+        assert_eq!(
+            TaskFileWatcher::peer_event_type(&PathBuf::from("qa-verdict.json")),
+            Some("qa-verdict")
+        );
+        assert_eq!(
+            TaskFileWatcher::peer_event_type(&PathBuf::from("evaluator-feedback.json")),
+            Some("evaluator-feedback")
+        );
+        assert_eq!(
+            TaskFileWatcher::peer_event_type(&PathBuf::from("other.json")),
+            None
+        );
     }
 }

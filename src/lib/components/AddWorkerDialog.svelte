@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { coordination, type WorkerRole, type AddWorkerRequest } from '$lib/stores/coordination';
-  import { activeSession, activeAgents } from '$lib/stores/sessions';
+  import { activeSession, activeAgents, serdeEnumVariantName } from '$lib/stores/sessions';
   import { cliOptions, defaultRoles } from '$lib/config/clis';
 
   export let open = false;
@@ -46,7 +46,9 @@
 
   // Get possible parents (Queen or Planners)
   $: parentOptions = $activeAgents.filter(
-    (a) => a.role === 'Queen' || (typeof a.role === 'object' && 'Planner' in a.role)
+    (a) =>
+      serdeEnumVariantName(a.role) === 'Queen' ||
+      (typeof a.role === 'object' && a.role !== null && 'Planner' in a.role)
   );
 
   function close() {

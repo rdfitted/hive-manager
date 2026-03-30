@@ -67,6 +67,8 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
+        max_qa_iterations: 3,
+        qa_timeout_secs: 300,
     }
 }
 
@@ -94,6 +96,8 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         agents,
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
+        max_qa_iterations: 3,
+        qa_timeout_secs: 300,
     }
 }
 
@@ -1771,6 +1775,8 @@ fn test_persisted_session_serializes_default_cli() {
         state: "Running".to_string(),
         default_cli: "gemini".to_string(),
         default_model: Some("gemini-2.5-pro".to_string()),
+        max_qa_iterations: 3,
+        qa_timeout_secs: 300,
     };
 
     let json = serde_json::to_string(&session).unwrap();
@@ -1803,6 +1809,8 @@ fn test_persisted_session_legacy_json_defaults_to_claude() {
         session.default_model, None,
         "Legacy sessions without default_model should fallback to None"
     );
+    assert_eq!(session.max_qa_iterations, 3);
+    assert_eq!(session.qa_timeout_secs, 300);
 }
 
 // --- Fusion mode smoke tests ---

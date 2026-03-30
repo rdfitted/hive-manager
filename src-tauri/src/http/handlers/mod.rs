@@ -2,6 +2,7 @@ pub mod health;
 pub mod sessions;
 pub mod inject;
 pub mod workers;
+pub mod evaluator;
 pub mod planners;
 pub mod learnings;
 pub mod conversations;

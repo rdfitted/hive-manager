@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import type { AgentInfo } from '$lib/stores/sessions';
+  import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
 
   export let agent: AgentInfo;
   export let childrenMap: Map<string | null, AgentInfo[]>;
@@ -11,40 +11,67 @@
   const dispatch = createEventDispatcher<{ select: string }>();
 
   function getRoleName(role: AgentInfo['role']): string {
-    if (role === 'Queen') return 'Queen';
-    if (typeof role === 'object') {
+    if (typeof role === 'object' && role !== null) {
       if ('Planner' in role) return `Planner ${role.Planner.index}`;
       if ('Worker' in role) return `Worker ${role.Worker.index}`;
+      if ('QaWorker' in role) return `QA Worker ${role.QaWorker.index}`;
       if ('Fusion' in role) return role.Fusion.variant;
     }
+    const k = serdeEnumVariantName(role);
+    if (k === 'Queen') return 'Queen';
+    if (k === 'Evaluator') return 'Evaluator';
+    if (k === 'Judge') return 'Judge';
+    if (k === 'MasterPlanner') return 'Master Planner';
     return 'Agent';
   }
 
   function getRoleIcon(role: AgentInfo['role']): string {
-    if (role === 'Queen') return '♕';
-    if (typeof role === 'object') {
+    if (typeof role === 'object' && role !== null) {
       if ('Planner' in role) return '◆';
       if ('Worker' in role) return '●';
+      if ('QaWorker' in role) return '🔬';
       if ('Fusion' in role) return '◎';
     }
+    const k = serdeEnumVariantName(role);
+    if (k === 'Queen') return '♕';
+    if (k === 'Evaluator') return '🔍';
+    if (k === 'Judge') return '⚖';
+    if (k === 'MasterPlanner') return '📋';
     return '○';
   }
 
+  function getRoleColor(role: AgentInfo['role']): string {
+    if (typeof role === 'object' && role !== null && 'QaWorker' in role) return '#9333ea'; // Purple
+    const k = serdeEnumVariantName(role);
+    if (k === 'Queen') return 'var(--color-primary)';
+    if (k === 'Evaluator') return '#d946ef'; // Fuchsia
+    return 'var(--color-text-muted)';
+  }
+
   function getStatusIcon(status: AgentInfo['status']): string {
-    if (status === 'Running') return '█';
-    if (typeof status === 'object' && 'WaitingForInput' in status) return '⏳';
-    if (status === 'Completed') return '✓';
-    if (status === 'Starting') return '○';
-    if (typeof status === 'object' && 'Error' in status) return '✗';
+    if (typeof status === 'object' && status !== null && 'WaitingForInput' in status) return '⏳';
+    if (typeof status === 'object' && status !== null && 'Error' in status) return '✗';
+    const k = serdeEnumVariantName(status);
+    if (k === 'Running') return '█';
+    if (k === 'Completed') return '✓';
+    if (k === 'Starting') return '○';
     return '?';
   }
 
-  function getStatusColor(status: AgentInfo['status']): string {
-    if (status === 'Running') return 'var(--color-running)';
-    if (typeof status === 'object' && 'WaitingForInput' in status) return 'var(--color-warning)';
-    if (status === 'Completed') return 'var(--color-success)';
-    if (status === 'Starting') return 'var(--color-text-muted)';
-    if (typeof status === 'object' && 'Error' in status) return 'var(--color-error)';
+  function getStatusColor(status: AgentInfo['status'], role: AgentInfo['role']): string {
+    const rk = serdeEnumVariantName(role);
+    const sk = serdeEnumVariantName(status);
+    const isQaWorkerRole = typeof role === 'object' && role !== null && 'QaWorker' in role;
+    if (rk === 'Evaluator' || isQaWorkerRole) {
+      if (sk === 'Running') return rk === 'Evaluator' ? '#d946ef' : '#9333ea';
+    }
+
+    if (sk === 'Running') return 'var(--color-running)';
+    if (typeof status === 'object' && status !== null && 'WaitingForInput' in status)
+      return 'var(--color-warning)';
+    if (sk === 'Completed') return 'var(--color-success)';
+    if (sk === 'Starting') return 'var(--color-text-muted)';
+    if (typeof status === 'object' && status !== null && 'Error' in status) return 'var(--color-error)';
     return 'var(--color-text)';
   }
 
@@ -91,12 +118,12 @@
       <span class="chevron-spacer"></span>
     {/if}
 
-    <span class="role-icon">{getRoleIcon(agent.role)}</span>
+    <span class="role-icon" style="color: {getRoleColor(agent.role)}; opacity: 1;">{getRoleIcon(agent.role)}</span>
     <span class="label">{displayLabel}</span>
 
     <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
 
-    <span class="status-indicator" style="color: {getStatusColor(agent.status)}">
+    <span class="status-indicator" style="color: {getStatusColor(agent.status, agent.role)}">
       {getStatusIcon(agent.status)}
     </span>
   </div>
