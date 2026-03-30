@@ -141,7 +141,7 @@ pub enum SessionState {
     AwaitingVerdictSelection,
     MergingWinner,
     SpawningEvaluator,
-    QaInProgress,
+    QaInProgress { iteration: Option<u8> },
     QaPassed,
     QaFailed { iteration: u8 },
     QaMaxRetriesExceeded,
@@ -161,7 +161,7 @@ impl SessionState {
                 | SessionState::WaitingForWorker(_)
                 | SessionState::WaitingForPlanner(_)
                 | SessionState::SpawningEvaluator
-                | SessionState::QaInProgress
+                | SessionState::QaInProgress { .. }
                 | SessionState::QaFailed { .. }
         )
     }
@@ -314,6 +314,36 @@ pub struct SessionController {
 // Explicitly implement Send + Sync
 unsafe impl Send for SessionController {}
 unsafe impl Sync for SessionController {}
+
+fn is_terminal_session_state(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::QaMaxRetriesExceeded
+            | SessionState::Completed
+            | SessionState::Closed
+            | SessionState::Failed(_)
+    )
+}
+
+fn qa_in_progress_state(state: &SessionState) -> SessionState {
+    match state {
+        SessionState::QaFailed { iteration } => SessionState::QaInProgress {
+            iteration: Some(*iteration),
+        },
+        SessionState::QaInProgress { iteration } => SessionState::QaInProgress {
+            iteration: *iteration,
+        },
+        _ => SessionState::QaInProgress { iteration: None },
+    }
+}
+
+fn next_qa_failure_iteration(state: &SessionState) -> u8 {
+    match state {
+        SessionState::QaFailed { iteration } => iteration.saturating_add(1),
+        SessionState::QaInProgress { iteration } => iteration.unwrap_or(0).saturating_add(1),
+        _ => 1,
+    }
+}
 
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
 fn get_polling_instructions(cli: &str, task_file: &str, role_type: Option<&str>) -> String {
@@ -652,6 +682,7 @@ impl SessionController {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(id) {
                     s.state = SessionState::Completed;
+                    s.auth_strategy = AuthStrategy::None;
                 }
             }
 
@@ -709,6 +740,7 @@ impl SessionController {
                     agent.status = AgentStatus::Completed;
                 }
                 session.state = SessionState::Closed;
+                session.auth_strategy = AuthStrategy::None;
             }
         }
 
@@ -4825,7 +4857,7 @@ Last updated: {timestamp}
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            session.state = SessionState::QaInProgress;
+            session.state = qa_in_progress_state(&session.state);
             session.qa_timeout_secs
         };
         self.emit_session_update(session_id);
@@ -4837,8 +4869,15 @@ Last updated: {timestamp}
 
     #[allow(dead_code)]
     pub fn on_qa_verdict(&self, session_id: &str, verdict: &str) -> Result<SessionState, String> {
-        self.cancel_qa_timeout(session_id);
         let normalized = verdict.trim().to_ascii_uppercase();
+        if !matches!(
+            normalized.as_str(),
+            "PASS" | "QA_VERDICT: PASS" | "FAIL" | "QA_VERDICT: FAIL"
+        ) {
+            return Err(format!("Unsupported QA verdict '{}'", verdict));
+        }
+
+        self.cancel_qa_timeout(session_id);
         match normalized.as_str() {
             "PASS" | "QA_VERDICT: PASS" => {
                 {
@@ -4868,17 +4907,13 @@ Last updated: {timestamp}
                         .get_mut(session_id)
                         .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-                    let next_iteration = match session.state {
-                        SessionState::QaFailed { iteration } => iteration.saturating_add(1),
-                        _ => 1,
-                    };
+                    let next_iteration = next_qa_failure_iteration(&session.state);
 
                     if next_iteration > session.max_qa_iterations {
                         session.state = SessionState::QaMaxRetriesExceeded;
+                        session.auth_strategy = AuthStrategy::None;
                     } else {
-                        session.state = SessionState::QaFailed {
-                            iteration: next_iteration,
-                        };
+                        session.state = SessionState::QaFailed { iteration: next_iteration };
                     }
 
                     session.state.clone()
@@ -4889,7 +4924,7 @@ Last updated: {timestamp}
 
                 Ok(next_state)
             }
-            _ => Err(format!("Unsupported QA verdict '{}'", verdict)),
+            _ => unreachable!("unsupported verdict already validated"),
         }
     }
 
@@ -4933,7 +4968,7 @@ Last updated: {timestamp}
                 let sessions = sessions.read();
                 sessions
                     .get(&sid)
-                    .map(|s| matches!(s.state, SessionState::QaInProgress))
+                    .map(|s| matches!(s.state, SessionState::QaInProgress { .. }))
                     .unwrap_or(false)
             };
 
@@ -5255,6 +5290,7 @@ Last updated: {timestamp}
                     agent.status = AgentStatus::Completed;
                 }
                 s.state = SessionState::Completed;
+                s.auth_strategy = AuthStrategy::None;
             }
         }
         self.emit_session_update(session_id);
@@ -5496,19 +5532,26 @@ Last updated: {timestamp}
             })
         }).collect();
 
+        let state = parse_persisted_session_state(&persisted.state);
+        let auth_strategy = if is_terminal_session_state(&state) {
+            AuthStrategy::None
+        } else {
+            AuthStrategy::from_persisted(&persisted.auth_strategy)
+        };
+
         // Create session object
         let session = Session {
             id: persisted.id.clone(),
             session_type,
             project_path: PathBuf::from(persisted.project_path),
-            state: parse_persisted_session_state(&persisted.state),
+            state,
             created_at: persisted.created_at,
             agents,
             default_cli: persisted.default_cli.clone(),
             default_model: persisted.default_model.clone(),
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
-            auth_strategy: AuthStrategy::from_persisted(&persisted.auth_strategy),
+            auth_strategy,
         };
 
         // Add to in-memory sessions
@@ -5770,7 +5813,7 @@ Last updated: {timestamp}
                 | SessionState::WaitingForWorker(_)
                 | SessionState::WaitingForPlanner(_)
                 | SessionState::SpawningEvaluator
-                | SessionState::QaInProgress
+                | SessionState::QaInProgress { .. }
                 | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
                 | SessionState::QaMaxRetriesExceeded
@@ -5940,7 +5983,7 @@ Last updated: {timestamp}
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             current.agents.push(agent_info.clone());
-            current.state = SessionState::QaInProgress;
+            current.state = qa_in_progress_state(&current.state);
             current.qa_timeout_secs
         };
 
@@ -6043,7 +6086,7 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.push(agent_info.clone());
-                current.state = SessionState::QaInProgress;
+                current.state = qa_in_progress_state(&current.state);
             }
         }
 
@@ -6222,7 +6265,12 @@ Last updated: {timestamp}
             }
         }).collect();
 
-        let state_str = serialize_session_state(&session.state).to_string();
+        let state_str = serialize_session_state(&session.state);
+        let auth_strategy = if is_terminal_session_state(&session.state) {
+            AuthStrategy::None
+        } else {
+            session.auth_strategy.clone()
+        };
 
         PersistedSession {
             id: session.id.clone(),
@@ -6235,7 +6283,7 @@ Last updated: {timestamp}
             default_model: session.default_model.clone(),
             max_qa_iterations: session.max_qa_iterations,
             qa_timeout_secs: session.qa_timeout_secs,
-            auth_strategy: session.auth_strategy.persist_value(),
+            auth_strategy: auth_strategy.persist_value(),
         }
     }
 
@@ -6437,6 +6485,20 @@ fn parse_indexed_role(role: &str, prefix: &str) -> Option<(u8, Option<String>)> 
 }
 
 fn parse_persisted_session_state(state: &str) -> SessionState {
+    if let Some(iteration) = state.strip_prefix("QaInProgress:") {
+        return SessionState::QaInProgress {
+            iteration: iteration.parse::<u8>().ok().filter(|iteration| *iteration > 0),
+        };
+    }
+    if let Some(iteration) = state.strip_prefix("QaFailed:") {
+        let iteration = iteration
+            .parse::<u8>()
+            .ok()
+            .filter(|iteration| *iteration > 0)
+            .unwrap_or(1);
+        return SessionState::QaFailed { iteration };
+    }
+
     match state {
         "Planning" => SessionState::Planning,
         "PlanReady" => SessionState::PlanReady,
@@ -6452,7 +6514,7 @@ fn parse_persisted_session_state(state: &str) -> SessionState {
         "AwaitingVerdictSelection" => SessionState::AwaitingVerdictSelection,
         "MergingWinner" => SessionState::MergingWinner,
         "SpawningEvaluator" => SessionState::SpawningEvaluator,
-        "QaInProgress" => SessionState::QaInProgress,
+        "QaInProgress" => SessionState::QaInProgress { iteration: None },
         "QaPassed" => SessionState::QaPassed,
         "QaFailed" => SessionState::QaFailed { iteration: 1 },
         "QaMaxRetriesExceeded" => SessionState::QaMaxRetriesExceeded,
@@ -6465,32 +6527,35 @@ fn parse_persisted_session_state(state: &str) -> SessionState {
     }
 }
 
-fn serialize_session_state(state: &SessionState) -> &'static str {
+fn serialize_session_state(state: &SessionState) -> String {
     match state {
-        SessionState::Planning => "Planning",
-        SessionState::PlanReady => "PlanReady",
-        SessionState::Starting => "Starting",
-        SessionState::SpawningWorker(_) => "SpawningWorker",
-        SessionState::WaitingForWorker(_) => "WaitingForWorker",
-        SessionState::SpawningPlanner(_) => "SpawningPlanner",
-        SessionState::WaitingForPlanner(_) => "WaitingForPlanner",
-        SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant",
-        SessionState::WaitingForFusionVariants => "WaitingForFusionVariants",
-        SessionState::SpawningJudge => "SpawningJudge",
-        SessionState::Judging => "Judging",
-        SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection",
-        SessionState::MergingWinner => "MergingWinner",
-        SessionState::SpawningEvaluator => "SpawningEvaluator",
-        SessionState::QaInProgress => "QaInProgress",
-        SessionState::QaPassed => "QaPassed",
-        SessionState::QaFailed { .. } => "QaFailed",
-        SessionState::QaMaxRetriesExceeded => "QaMaxRetriesExceeded",
-        SessionState::Running => "Running",
-        SessionState::Paused => "Paused",
-        SessionState::Completed => "Completed",
-        SessionState::Closing => "Closing",
-        SessionState::Closed => "Closed",
-        SessionState::Failed(_) => "Failed",
+        SessionState::Planning => "Planning".to_string(),
+        SessionState::PlanReady => "PlanReady".to_string(),
+        SessionState::Starting => "Starting".to_string(),
+        SessionState::SpawningWorker(_) => "SpawningWorker".to_string(),
+        SessionState::WaitingForWorker(_) => "WaitingForWorker".to_string(),
+        SessionState::SpawningPlanner(_) => "SpawningPlanner".to_string(),
+        SessionState::WaitingForPlanner(_) => "WaitingForPlanner".to_string(),
+        SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant".to_string(),
+        SessionState::WaitingForFusionVariants => "WaitingForFusionVariants".to_string(),
+        SessionState::SpawningJudge => "SpawningJudge".to_string(),
+        SessionState::Judging => "Judging".to_string(),
+        SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection".to_string(),
+        SessionState::MergingWinner => "MergingWinner".to_string(),
+        SessionState::SpawningEvaluator => "SpawningEvaluator".to_string(),
+        SessionState::QaInProgress { iteration } => match iteration {
+            Some(iteration) if *iteration > 0 => format!("QaInProgress:{}", iteration),
+            _ => "QaInProgress".to_string(),
+        },
+        SessionState::QaPassed => "QaPassed".to_string(),
+        SessionState::QaFailed { iteration } => format!("QaFailed:{}", iteration),
+        SessionState::QaMaxRetriesExceeded => "QaMaxRetriesExceeded".to_string(),
+        SessionState::Running => "Running".to_string(),
+        SessionState::Paused => "Paused".to_string(),
+        SessionState::Completed => "Completed".to_string(),
+        SessionState::Closing => "Closing".to_string(),
+        SessionState::Closed => "Closed".to_string(),
+        SessionState::Failed(_) => "Failed".to_string(),
     }
 }
 
@@ -6560,7 +6625,7 @@ mod tests {
         let _awaiting_verdict = SessionState::AwaitingVerdictSelection;
         let _merging_winner = SessionState::MergingWinner;
         let _spawning_evaluator = SessionState::SpawningEvaluator;
-        let _qa_in_progress = SessionState::QaInProgress;
+        let _qa_in_progress = SessionState::QaInProgress { iteration: None };
         let _qa_passed = SessionState::QaPassed;
         let _qa_failed = SessionState::QaFailed { iteration: 1 };
         let _qa_max_retries = SessionState::QaMaxRetriesExceeded;
@@ -6580,10 +6645,25 @@ mod tests {
 
     #[test]
     fn persisted_qa_state_round_trip_uses_safe_fallbacks() {
-        assert_eq!(parse_persisted_session_state("QaInProgress"), SessionState::QaInProgress);
+        assert_eq!(
+            parse_persisted_session_state("QaInProgress"),
+            SessionState::QaInProgress { iteration: None }
+        );
+        assert_eq!(
+            parse_persisted_session_state("QaInProgress:2"),
+            SessionState::QaInProgress { iteration: Some(2) }
+        );
         assert_eq!(
             parse_persisted_session_state("QaFailed"),
             SessionState::QaFailed { iteration: 1 }
+        );
+        assert_eq!(
+            parse_persisted_session_state("QaFailed:3"),
+            SessionState::QaFailed { iteration: 3 }
+        );
+        assert_eq!(
+            serialize_session_state(&SessionState::QaInProgress { iteration: Some(2) }),
+            "QaInProgress:2"
         );
         assert_eq!(serialize_session_state(&SessionState::QaPassed), "QaPassed");
     }

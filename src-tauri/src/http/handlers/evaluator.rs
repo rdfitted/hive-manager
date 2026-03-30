@@ -255,7 +255,7 @@ fn require_qa_in_progress(
         .get_session(session_id)
         .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
 
-    if matches!(session.state, SessionState::QaInProgress) {
+    if matches!(session.state, SessionState::QaInProgress { .. }) {
         return Ok(());
     }
 

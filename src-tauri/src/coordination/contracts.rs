@@ -129,11 +129,19 @@ fn parse_criterion_line(line: &str) -> Result<ContractCriterion, ContractParseEr
         let (category, desc) = rest
             .split_once(']')
             .ok_or_else(|| ContractParseError::InvalidCriterion(line.to_string()))?;
+        let category = category.trim();
         let description = desc.trim();
         if description.is_empty() {
             return Err(ContractParseError::InvalidCriterion(line.to_string()));
         }
-        (Some(category.trim().to_string()), description.to_string())
+        (
+            if category.is_empty() {
+                None
+            } else {
+                Some(category.to_string())
+            },
+            description.to_string(),
+        )
     } else {
         (None, remainder.to_string())
     };
@@ -187,5 +195,24 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ContractParseError::MissingPassThreshold));
+    }
+
+    #[test]
+    fn treats_empty_category_brackets_as_uncategorized() {
+        let contract = parse_sprint_contract(
+            r#"# Sprint Contract: Empty Category
+
+## Acceptance Criteria
+1. [] Description stays valid
+
+## Pass Threshold
+- Criterion 1 must PASS
+"#,
+        )
+        .unwrap();
+
+        let criterion = contract.criterion(1).unwrap();
+        assert_eq!(criterion.category, None);
+        assert_eq!(criterion.description, "Description stays valid");
     }
 }
