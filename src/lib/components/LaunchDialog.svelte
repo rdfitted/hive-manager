@@ -261,6 +261,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     }
   }
 
+  let withPlanning = true;
+  let withEvaluator = true;
+  let evaluatorConfig: AgentConfig = {
+    cli: 'claude',
+    flags: [],
+    label: 'Evaluator',
+  };
+
   async function handleSubmit(smokeTest: boolean = false) {
     if (!projectPath.trim()) return;
 
@@ -282,8 +290,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           queen_config: queenConfig,
           workers: workersWithRoles,
           prompt: prompt || undefined,
-          with_planning: true, // Planning is always enabled
+          with_planning: withPlanning,
           smoke_test: smokeTest,
+          // Backend needs to support evaluator config in HiveLaunchConfig
+          // For now we assume backend handles with_evaluator flag or config
+          ...({ with_evaluator: withEvaluator, evaluator_config: withEvaluator ? evaluatorConfig : undefined } as any)
         };
         dispatch('launchHive', config);
       } else if (mode === 'swarm') {
@@ -418,6 +429,34 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <div class="form-section">
             <h3>Queen Configuration</h3>
             <AgentConfigEditor bind:config={queenConfig} showLabel={true} />
+          </div>
+
+          <div class="form-section">
+            <h3>Orchestration Options</h3>
+            <div class="checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" bind:checked={withPlanning} />
+                <div class="checkbox-text">
+                  <span class="checkbox-title">Enable Planning Phase</span>
+                  <span class="checkbox-description">Master Planner analyzes the project and creates a task list before workers start.</span>
+                </div>
+              </label>
+            </div>
+            <div class="checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" bind:checked={withEvaluator} />
+                <div class="checkbox-text">
+                  <span class="checkbox-title">Enable Evaluator Peer</span>
+                  <span class="checkbox-description">Independent agent that verifies milestone completion and manages QA workers.</span>
+                </div>
+              </label>
+            </div>
+            {#if withEvaluator}
+              <div class="evaluator-config subsection">
+                <h4>Evaluator Configuration</h4>
+                <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />
+              </div>
+            {/if}
           </div>
         {/if}
 

@@ -9,7 +9,7 @@ use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
-use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo};
+use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig};
 use crate::coordination::InjectionManager;
 use parking_lot::RwLock;
@@ -69,6 +69,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         default_model: Some("opus-4-6".to_string()),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        auth_strategy: AuthStrategy::default(),
     }
 }
 
@@ -98,6 +99,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         default_model: Some("opus-4-6".to_string()),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        auth_strategy: AuthStrategy::default(),
     }
 }
 
@@ -1777,6 +1779,7 @@ fn test_persisted_session_serializes_default_cli() {
         default_model: Some("gemini-2.5-pro".to_string()),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        auth_strategy: String::new(),
     };
 
     let json = serde_json::to_string(&session).unwrap();

@@ -42,6 +42,9 @@ export const defaultRoles: Record<string, RoleDefaults> = {
   resolver: { cli: 'claude', model: 'claude-opus-4-6' },
   tester: { cli: 'claude', model: 'claude-opus-4-6' },
   'code-quality': { cli: 'codex', model: 'gpt-5.4' },
+  // Evaluator & QA roles
+  evaluator: { cli: 'claude', model: 'claude-opus-4-6' },
+  'qa-worker': { cli: 'claude', model: 'claude-opus-4-6' },
   // General purpose
   general: { cli: 'claude', model: 'claude-opus-4-6' },
 };

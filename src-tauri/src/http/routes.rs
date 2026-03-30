@@ -35,6 +35,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Evaluator routes
         .route("/api/sessions/{id}/evaluators", get(evaluator::list_evaluators))
         .route("/api/sessions/{id}/evaluators", post(evaluator::add_evaluator))
+        .route("/api/sessions/{id}/auth/dev-login", get(evaluator::dev_login))
+        .route("/api/sessions/{id}/qa/force-pass", post(evaluator::force_pass))
+        .route("/api/sessions/{id}/qa/force-fail", post(evaluator::force_fail))
         // Planner routes (Swarm mode)
         .route("/api/sessions/{id}/planners", get(planners::list_planners))
         .route("/api/sessions/{id}/planners", post(planners::add_planner))

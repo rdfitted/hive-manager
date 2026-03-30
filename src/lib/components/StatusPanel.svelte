@@ -2,6 +2,8 @@
   import { activeSession, activeAgents, sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import AgentTree from './AgentTree.svelte';
+  import QaFeedbackPanel from './QaFeedbackPanel.svelte';
+  import { invoke } from '@tauri-apps/api/core';
 
   let collapsed = $state(true);
   let agentsCollapsed = $state(false);
@@ -9,6 +11,34 @@
   let infoCollapsed = $state(true);
   let showCloseConfirm = $state<string | null>(null);
   let closing = $state(false);
+  let showForceFailConfirm = $state(false);
+  let forceFailing = $state(false);
+
+  // Milestone tracking
+  let completedMilestones = $state(0);
+  let totalMilestones = $state(0);
+
+  type SessionPlan = {
+    tasks?: Array<{ status?: string }>;
+  };
+
+  $effect(() => {
+    if ($activeSession?.id) {
+      loadMilestoneCounts($activeSession.id);
+    }
+  });
+
+  async function loadMilestoneCounts(sessionId: string) {
+    try {
+      const plan = await invoke<SessionPlan>('get_session_plan', { sessionId });
+      if (plan && plan.tasks) {
+        totalMilestones = plan.tasks.length;
+        completedMilestones = plan.tasks.filter((task) => task.status === 'completed').length;
+      }
+    } catch (e) {
+      // Plan might not exist yet
+    }
+  }
 
   function handleAlertClick(agentId: string) {
     ui.setFocusedAgent(agentId);
@@ -86,6 +116,65 @@
       showCloseConfirm = null;
     }
   }
+
+  function dismissForceFailConfirm() {
+    if (!forceFailing) {
+      showForceFailConfirm = false;
+    }
+  }
+
+  function handleDialogKeydown(event: KeyboardEvent) {
+    event.stopPropagation();
+  }
+
+  // Operator controls — use HTTP API (Tauri commands not yet registered)
+  async function postSessionAction(path: string, errorMessage: string): Promise<boolean> {
+    const sessionId = $activeSession?.id;
+    if (!sessionId) return false;
+    try {
+      const res = await fetch(`http://localhost:18800/api/sessions/${sessionId}${path}`, { method: 'POST' });
+      if (!res.ok) {
+        const body = await res.text();
+        console.error(errorMessage, body);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error(errorMessage, err);
+      return false;
+    }
+  }
+
+  async function handleSkipQa() {
+    await postSessionAction('/qa/force-pass', 'Failed to skip QA:');
+  }
+
+  async function handleForcePass() {
+    await postSessionAction('/qa/force-pass', 'Failed to force pass milestone:');
+  }
+
+  async function handleForceFail() {
+    forceFailing = true;
+    try {
+      const ok = await postSessionAction('/qa/force-fail', 'Failed to force fail milestone:');
+      if (ok) {
+        showForceFailConfirm = false;
+      }
+    } finally {
+      forceFailing = false;
+    }
+  }
+
+  function isQaPhase(state: Session['state']): boolean {
+    const v = serdeEnumVariantName(state);
+    return (
+      v === 'SpawningEvaluator' ||
+      v === 'QaInProgress' ||
+      v === 'QaPassed' ||
+      v === 'QaMaxRetriesExceeded' ||
+      (typeof state === 'object' && state !== null && 'QaFailed' in state)
+    );
+  }
 </script>
 
 <aside class="status-panel" class:collapsed>
@@ -93,6 +182,11 @@
     <span class="panel-icon">📊</span>
     {#if !collapsed}
       <h2>Status</h2>
+      {#if totalMilestones > 0}
+        <div class="milestone-badge" title="Milestone Progress">
+          {completedMilestones}/{totalMilestones}
+        </div>
+      {/if}
     {/if}
   </button>
 
@@ -104,6 +198,12 @@
       </div>
     {:else}
       <div class="panel-content">
+        {#if isQaPhase($activeSession.state)}
+          <section class="section">
+            <QaFeedbackPanel />
+          </section>
+        {/if}
+
         <section class="section">
           <button class="section-header" onclick={() => agentsCollapsed = !agentsCollapsed}>
             <span class="chevron" class:collapsed={agentsCollapsed}>▼</span>
@@ -173,6 +273,19 @@
 
         {#if isSessionActive($activeSession.state)}
           <section class="section actions-section">
+            <div class="operator-controls">
+              {#if serdeEnumVariantName($activeSession.state) === 'QaInProgress'}
+                <button class="op-button skip" onclick={handleSkipQa}>Skip QA</button>
+              {/if}
+
+              {#if isQaPhase($activeSession.state)}
+                <div class="op-group">
+                  <button class="op-button pass" onclick={handleForcePass}>Force Pass</button>
+                  <button class="op-button fail" onclick={() => showForceFailConfirm = true}>Force Fail</button>
+                </div>
+              {/if}
+            </div>
+
             <button
               class="close-button"
               onclick={() => showCloseConfirm = $activeSession?.id ?? null}
@@ -186,14 +299,54 @@
 
       <!-- Close confirmation dialog -->
       {#if showCloseConfirm}
-        <div class="confirm-overlay" onclick={dismissCloseConfirm} role="presentation">
-          <div class="confirm-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div
+          class="confirm-overlay"
+          onclick={dismissCloseConfirm}
+          onkeydown={(event) => event.key === 'Escape' && dismissCloseConfirm()}
+          role="presentation"
+        >
+          <div
+            class="confirm-dialog"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={handleDialogKeydown}
+            role="dialog"
+            aria-modal="true"
+            tabindex="-1"
+          >
             <h3>Close Session?</h3>
             <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
             <div class="confirm-actions">
               <button class="cancel-btn" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
               <button class="confirm-btn" onclick={handleCloseSession} disabled={closing}>
                 {closing ? 'Closing...' : 'Close Session'}
+              </button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Force Fail confirmation dialog -->
+      {#if showForceFailConfirm}
+        <div
+          class="confirm-overlay"
+          onclick={dismissForceFailConfirm}
+          onkeydown={(event) => event.key === 'Escape' && dismissForceFailConfirm()}
+          role="presentation"
+        >
+          <div
+            class="confirm-dialog"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={handleDialogKeydown}
+            role="dialog"
+            aria-modal="true"
+            tabindex="-1"
+          >
+            <h3>Force Fail Milestone?</h3>
+            <p>This will immediately fail the current milestone and trigger a retry or termination. Are you sure?</p>
+            <div class="confirm-actions">
+              <button class="cancel-btn" onclick={dismissForceFailConfirm} disabled={forceFailing}>Cancel</button>
+              <button class="confirm-btn" onclick={handleForceFail} disabled={forceFailing}>
+                {forceFailing ? 'Failing...' : 'Force Fail'}
               </button>
             </div>
           </div>

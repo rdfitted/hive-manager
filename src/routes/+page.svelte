@@ -241,8 +241,10 @@
             {@const isVisible = agent.id === focusedAgentId}
             {@const roleName = agent.config?.label ||
               (agent.role === 'Queen' ? 'Queen' :
+               agent.role === 'Evaluator' ? 'Evaluator' :
                typeof agent.role === 'object' && 'Planner' in agent.role ? `Planner ${agent.role.Planner.index}` :
                typeof agent.role === 'object' && 'Worker' in agent.role ? `Worker ${agent.role.Worker.index}` :
+               typeof agent.role === 'object' && 'QaWorker' in agent.role ? `QA Worker ${agent.role.QaWorker.index}` :
                'Agent')}
             <div class="focused-terminal" class:hidden={!isVisible}>
               <div class="terminal-header">

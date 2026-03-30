@@ -10,9 +10,10 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::cli::{CliRegistry, CliBehavior};
+use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::SessionStorage;
-use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
+use crate::templates::{PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +53,69 @@ impl From<String> for SessionError {
 
 const DEFAULT_MAX_QA_ITERATIONS: u8 = 3;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
+
+/// Authentication strategy for QA workers accessing the session
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AuthStrategy {
+    /// No authentication required (default for backward compat)
+    None,
+    /// Dev bypass with a per-session token (localhost only)
+    DevBypass { token: String },
+}
+
+impl Default for AuthStrategy {
+    fn default() -> Self {
+        AuthStrategy::None
+    }
+}
+
+impl AuthStrategy {
+    fn dev_bypass() -> Self {
+        Self::DevBypass {
+            token: Uuid::new_v4().to_string(),
+        }
+    }
+
+    fn from_persisted(value: &str) -> Self {
+        match value {
+            "" | "None" => Self::None,
+            token if token.starts_with("DevBypass:") => Self::DevBypass {
+                token: token.trim_start_matches("DevBypass:").to_string(),
+            },
+            _ => Self::None,
+        }
+    }
+
+    fn persist_value(&self) -> String {
+        match self {
+            Self::None => String::new(),
+            Self::DevBypass { token } => format!("DevBypass:{}", token),
+        }
+    }
+
+    fn apply_prompt_variables(
+        &self,
+        session_id: &str,
+        variables: &mut HashMap<String, String>,
+    ) {
+        match self {
+            Self::DevBypass { token } => {
+                variables.insert(
+                    "auth_bypass_url".to_string(),
+                    format!(
+                        "http://localhost:18800/api/sessions/{}/auth/dev-login?token={}",
+                        session_id, token
+                    ),
+                );
+                variables.insert("auth_bypass_token".to_string(), token.clone());
+            }
+            Self::None => {
+                variables.insert("auth_bypass_url".to_string(), "(not configured)".to_string());
+                variables.insert("auth_bypass_token".to_string(), String::new());
+            }
+        }
+    }
+}
 
 fn default_max_qa_iterations() -> u8 {
     DEFAULT_MAX_QA_ITERATIONS
@@ -218,6 +282,8 @@ pub struct Session {
     pub default_model: Option<String>,
     pub max_qa_iterations: u8,
     pub qa_timeout_secs: u64,
+    #[serde(default)]
+    pub auth_strategy: AuthStrategy,
 }
 
 #[derive(Clone, Serialize)]
@@ -241,6 +307,8 @@ pub struct SessionController {
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
     /// session_id -> agent_id -> heartbeat info
     agent_heartbeats: Arc<RwLock<HashMap<String, HashMap<String, AgentHeartbeatInfo>>>>,
+    /// QA timeout cancel handles: session_id -> abort handle
+    qa_timeout_handles: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 // Explicitly implement Send + Sync
@@ -310,6 +378,7 @@ impl SessionController {
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
+            qa_timeout_handles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -443,6 +512,7 @@ impl SessionController {
             default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -1159,58 +1229,64 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 
     #[allow(dead_code)]
     fn build_evaluator_prompt(session_id: &str, config: &AgentConfig) -> String {
-        let custom_instructions = config
-            .initial_prompt
-            .as_deref()
-            .unwrap_or("Review the milestone output, coordinate QA workers when necessary, and post a final verdict back to the Queen.");
+        let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
+            "Review the milestone handoff, coordinate QA workers only when evidence is missing, and return a strict contract-based verdict to the Queen.",
+        );
 
-        format!(
-r#"# Evaluator - Hive Session
+        let mut variables = HashMap::new();
+        variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
 
-You are the Evaluator for session `{session_id}`.
-
-## Core Responsibilities
-- Review milestone-ready outputs from the Queen
-- Coordinate QA workers if targeted verification is needed
-- Return one of these exact verdict markers:
-  - `QA_VERDICT: PASS`
-  - `QA_VERDICT: FAIL`
-
-## Default Guidance
-{custom_instructions}
-
-## Timeout Policy
-- If QA cannot complete within the configured timeout window, report a pass with warning so the session can continue.
-"#,
-            session_id = session_id,
-            custom_instructions = custom_instructions,
-        )
+        Self::render_named_prompt("roles/evaluator", session_id, None, variables)
     }
 
     #[allow(dead_code)]
-    fn build_qa_worker_prompt(session_id: &str, index: u8, config: &AgentConfig) -> String {
+    fn build_qa_worker_prompt(session_id: &str, index: u8, config: &AgentConfig, auth: &AuthStrategy) -> String {
+        let (template_name, default_guidance) = match (index - 1) % 3 {
+            0 => (
+                "roles/qa-worker-ui",
+                "Validate the full UI flow, capture screenshot evidence, and report failures only with criterion-numbered proof.",
+            ),
+            1 => (
+                "roles/qa-worker-api",
+                "Exercise the API surface directly, include concrete request and response evidence, and fail ambiguous behavior.",
+            ),
+            _ => (
+                "roles/qa-worker-a11y",
+                "Audit accessibility rigorously with tooling and manual keyboard checks, then report criterion-numbered findings with exact defects.",
+            ),
+        };
+
         let custom_instructions = config
             .initial_prompt
             .as_deref()
-            .unwrap_or("Inspect the assigned milestone, validate behavior carefully, and report concrete findings back to the Evaluator.");
+            .unwrap_or(default_guidance);
 
-        format!(
-r#"# QA Worker {index} - Hive Session
+        let mut variables = HashMap::new();
+        variables.insert("qa_worker_index".to_string(), index.to_string());
+        variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
 
-You are QA Worker {index} for session `{session_id}`.
+        auth.apply_prompt_variables(session_id, &mut variables);
 
-## Responsibilities
-- Validate the assigned milestone or fix
-- Produce concise, evidence-based findings
-- Escalate only concrete failures or regressions
+        Self::render_named_prompt(template_name, session_id, None, variables)
+    }
 
-## Default Guidance
-{custom_instructions}
-"#,
-            index = index,
-            session_id = session_id,
-            custom_instructions = custom_instructions,
-        )
+    fn render_named_prompt(
+        template_name: &str,
+        session_id: &str,
+        task: Option<String>,
+        variables: HashMap<String, String>,
+    ) -> String {
+        let engine = TemplateEngine::default();
+        let context = PromptContext {
+            session_id: session_id.to_string(),
+            task,
+            variables,
+            ..PromptContext::default()
+        };
+
+        engine
+            .render_template(template_name, &context)
+            .unwrap_or_else(|_| format!("Template '{}' failed to render for session {}", template_name, session_id))
     }
 
     /// Build the Master Planner's prompt for Fusion planning phase
@@ -1293,6 +1369,12 @@ You are the **Master Planner** for a Fusion session. Your job is to analyze the 
 - **Session ID**: {session_id}
 - **Mode**: Fusion (competing variants)
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
+
+## Project Knowledge Intake
+
+Before investigating, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
 
 ## Variants
 
@@ -1574,6 +1656,12 @@ You are the **Master Planner** orchestrating a multi-agent investigation to crea
 - **Session ID**: {session_id}
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
 
+## Project Knowledge Intake
+
+Before investigating, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
 ## Configured Workers
 
 The user has configured **{worker_count} workers** for this session:
@@ -1781,6 +1869,12 @@ You are the **Master Planner** orchestrating a Swarm investigation to create a d
 - **Session ID**: {session_id}
 - **Mode**: Swarm (hierarchical)
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
+
+## Project Knowledge Intake
+
+Before investigating, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
 
 ## Swarm Configuration
 
@@ -2250,6 +2344,12 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
 - **Conversation Files**: `.hive-manager/{session_id}/conversations/queen.md`, `.hive-manager/{session_id}/conversations/shared.md`, `.hive-manager/{session_id}/conversations/worker-N.md`
 
+## Project Knowledge Intake
+
+Before assigning work, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
 {plan_section}
 
 ## Your Workers
@@ -2391,6 +2491,13 @@ Workers record learnings during task completion. Your curation responsibilities:
 - After each major task phase completes
 - Before creating a PR
 - When learnings count exceeds 10
+
+## QA Milestone Handoff
+
+When a milestone is ready for QA:
+1. Signal `MILESTONE_READY` to the Evaluator through the peer channel.
+2. Include milestone name, contract path, implementation scope, and known risks.
+3. Confirm the coordination runtime mirrored the handoff into `.hive-manager/{session_id}/peer/milestone-ready.json`.
 
 ## Coordination Protocol
 
@@ -2783,6 +2890,12 @@ You are the **Queen** orchestrating a multi-agent Swarm session. You spawn and c
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
 
+## Project Knowledge Intake
+
+Before assigning work, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
 ## Planners to Spawn
 
 You will spawn {planner_count} planners SEQUENTIALLY. Each planner spawns their own workers.
@@ -2868,6 +2981,13 @@ Workers and planners record learnings during task completion. Your curation resp
 - After each planner completes its domain
 - Before creating a PR
 - When learnings count exceeds 10
+
+## QA Milestone Handoff
+
+When a milestone is ready for QA:
+1. Signal `MILESTONE_READY` to the Evaluator through the peer channel.
+2. Include milestone name, contract path, implementation scope, and known risks.
+3. Confirm the coordination runtime mirrored the handoff into `.hive-manager/{session_id}/peer/milestone-ready.json`.
 
 ## SEQUENTIAL SPAWNING PROTOCOL WITH COMMITS (CRITICAL)
 
@@ -3501,6 +3621,7 @@ Last updated: {timestamp}
             default_model: model,
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -3643,6 +3764,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -3734,6 +3856,7 @@ Last updated: {timestamp}
             default_model: config.default_model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -3961,6 +4084,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -4047,6 +4171,7 @@ Last updated: {timestamp}
             default_model: config.default_model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -4393,6 +4518,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -4555,20 +4681,25 @@ Last updated: {timestamp}
             return Ok(());
         }
 
-        {
+        let timeout_secs = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.state = SessionState::QaInProgress;
+                session.qa_timeout_secs
+            } else {
+                DEFAULT_QA_TIMEOUT_SECS
             }
-        }
+        };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        self.start_qa_timeout(session_id, timeout_secs);
 
         Ok(())
     }
 
     #[allow(dead_code)]
     pub fn on_qa_verdict(&self, session_id: &str, verdict: &str) -> Result<SessionState, String> {
+        self.cancel_qa_timeout(session_id);
         let normalized = verdict.trim().to_ascii_uppercase();
         match normalized.as_str() {
             "PASS" | "QA_VERDICT: PASS" => {
@@ -4634,7 +4765,78 @@ Last updated: {timestamp}
                 .unwrap_or(DEFAULT_QA_TIMEOUT_SECS)
         );
         self.on_qa_verdict(session_id, "QA_VERDICT: PASS")?;
+
+        // Emit qa-timeout event
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("qa-timeout", serde_json::json!({
+                "session_id": session_id,
+                "action": "pass-with-warning"
+            }));
+        }
+
         Ok(())
+    }
+
+    /// Start a QA timeout timer. On expiry, auto-passes QA with a warning.
+    /// Cancel by calling `cancel_qa_timeout`.
+    pub fn start_qa_timeout(&self, session_id: &str, timeout_secs: u64) {
+        // Cancel any existing timer
+        self.cancel_qa_timeout(session_id);
+
+        let sid = session_id.to_string();
+        let sessions = Arc::clone(&self.sessions);
+        let app_handle = self.app_handle.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
+
+            // Check if still QaInProgress before timing out
+            let is_qa = {
+                let sessions = sessions.read();
+                sessions
+                    .get(&sid)
+                    .map(|s| matches!(s.state, SessionState::QaInProgress))
+                    .unwrap_or(false)
+            };
+
+            if is_qa {
+                tracing::warn!("QA timeout fired for session {} after {}s — auto-passing", sid, timeout_secs);
+
+                // Transition directly to Running (skip transient QaPassed to avoid race)
+                let updated_session = {
+                    let mut sessions = sessions.write();
+                    if let Some(session) = sessions.get_mut(&sid) {
+                        session.state = SessionState::Running;
+                        Some(session.clone())
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(ref app_handle) = app_handle {
+                    // Emit session update so frontend sees the state change
+                    if let Some(session) = updated_session {
+                        let _ = app_handle.emit("session-update", SessionUpdate { session });
+                    }
+                    let _ = app_handle.emit("qa-timeout", serde_json::json!({
+                        "session_id": sid,
+                        "action": "pass-with-warning"
+                    }));
+                }
+            }
+        });
+
+        let abort_handle = handle.abort_handle();
+        let mut handles = self.qa_timeout_handles.lock();
+        handles.insert(session_id.to_string(), abort_handle);
+    }
+
+    /// Cancel a pending QA timeout timer
+    pub fn cancel_qa_timeout(&self, session_id: &str) {
+        let mut handles = self.qa_timeout_handles.lock();
+        if let Some(handle) = handles.remove(session_id) {
+            handle.abort();
+        }
     }
 
     pub async fn on_fusion_variant_completed(&self, session_id: &str, variant_index: u8) -> Result<(), SessionError> {
@@ -5168,6 +5370,7 @@ Last updated: {timestamp}
             default_model: persisted.default_model.clone(),
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
+            auth_strategy: AuthStrategy::from_persisted(&persisted.auth_strategy),
         };
 
         // Add to in-memory sessions
@@ -5388,6 +5591,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -5590,17 +5794,21 @@ Last updated: {timestamp}
             parent_id: None,
         };
 
-        {
+        let timeout_secs = {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.push(agent_info.clone());
                 current.state = SessionState::QaInProgress;
+                current.qa_timeout_secs
+            } else {
+                DEFAULT_QA_TIMEOUT_SECS
             }
-        }
+        };
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
         self.ensure_task_watcher(session_id, &session.project_path);
+        self.start_qa_timeout(session_id, timeout_secs);
 
         Ok(agent_info)
     }
@@ -5636,7 +5844,7 @@ Last updated: {timestamp}
             + 1;
 
         let qa_worker_id = format!("{}-qa-worker-{}", session_id, next_index);
-        let qa_worker_prompt = Self::build_qa_worker_prompt(session_id, next_index, &config);
+        let qa_worker_prompt = Self::build_qa_worker_prompt(session_id, next_index, &config, &session.auth_strategy);
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -5871,6 +6079,7 @@ Last updated: {timestamp}
             default_model: session.default_model.clone(),
             max_qa_iterations: session.max_qa_iterations,
             qa_timeout_secs: session.qa_timeout_secs,
+            auth_strategy: session.auth_strategy.persist_value(),
         }
     }
 

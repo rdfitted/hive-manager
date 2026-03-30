@@ -49,6 +49,8 @@ export interface HiveLaunchConfig {
   workers: AgentConfig[];
   prompt?: string;
   with_planning?: boolean;
+  with_evaluator?: boolean;
+  evaluator_config?: AgentConfig;
   smoke_test?: boolean;
 }
 

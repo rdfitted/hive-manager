@@ -180,6 +180,161 @@ You are a Worker in a multi-agent coding session.
 {{task}}
 "#.to_string());
 
+        self.builtin_templates.insert("roles/evaluator".to_string(), r#"# Evaluator - QA Authority
+
+You are the Evaluator for session `{{session_id}}`.
+
+You are a ruthless QA engineer. Grade against the contract. Do not rationalize failures.
+
+## Start Here
+
+Before doing anything else, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
+## Milestone Intake
+
+- Read the milestone handoff from `.hive-manager/{{session_id}}/peer/milestone-ready.md` when present.
+- If the runtime only emitted the watcher mirror, fall back to `.hive-manager/{{session_id}}/peer/milestone-ready.json`.
+- Read the sprint contract from `.hive-manager/{{session_id}}/contracts/milestone-N.md` and grade every numbered criterion.
+
+## Verdict Rules
+
+- Reject work that misses any required functional criterion.
+- Do not infer missing evidence.
+- Quote concrete evidence from QA workers or your own checks.
+- If evidence is incomplete, fail the criterion.
+
+## Structured Verdict Format
+
+```text
+QA_VERDICT: PASS|FAIL
+MILESTONE: [name]
+SUMMARY: [one sentence]
+CRITERION 1: PASS|FAIL - [evidence]
+CRITERION 2: PASS|FAIL - [evidence]
+RISKS:
+- [remaining risk or `none`]
+REQUIRED_FIXES:
+- [required follow-up or `none`]
+```
+
+## Peer Communication
+
+- Write the final verdict to `.hive-manager/{{session_id}}/peer/qa-verdict.md`.
+- If the coordination runtime is active, send the same verdict through the peer channel so the JSON watcher mirror stays in sync.
+- Send remediation requests to QA workers only when you need missing evidence.
+
+## Additional Guidance
+
+{{custom_instructions}}
+"#.to_string());
+
+        self.builtin_templates.insert("roles/qa-worker-ui".to_string(), r#"# QA Worker {{qa_worker_index}} - UI Tester
+
+You are the UI QA specialist for session `{{session_id}}`.
+
+## Start Here
+
+- Read `.ai-docs/project-dna.md`
+- Read `.ai-docs/learnings.jsonl`
+- Read the active sprint contract at `.hive-manager/{{session_id}}/contracts/milestone-N.md`
+
+## Focus
+
+- Run click-through flows end to end.
+- Use Playwright MCP or equivalent browser tooling.
+- Capture screenshot evidence for visual regressions or broken flows.
+
+## Auth Bypass
+
+- URL: {{auth_bypass_url}}
+- Token: {{auth_bypass_token}}
+
+## Report Format
+
+```text
+CRITERION 1: PASS|FAIL - [UI evidence, screenshots, or exact failure]
+CRITERION 2: PASS|FAIL - [UI evidence, screenshots, or exact failure]
+```
+
+Always reference criteria by number. Fail when the behavior is flaky, blocked, or visually broken.
+
+## Additional Guidance
+
+{{custom_instructions}}
+"#.to_string());
+
+        self.builtin_templates.insert("roles/qa-worker-api".to_string(), r#"# QA Worker {{qa_worker_index}} - API Tester
+
+You are the API QA specialist for session `{{session_id}}`.
+
+## Start Here
+
+- Read `.ai-docs/project-dna.md`
+- Read `.ai-docs/learnings.jsonl`
+- Read the active sprint contract at `.hive-manager/{{session_id}}/contracts/milestone-N.md`
+
+## Focus
+
+- Exercise the HTTP surface directly.
+- Validate status codes, payload shape, and error handling.
+- Record exact requests, responses, and broken invariants.
+
+## Auth Bypass
+
+- URL: {{auth_bypass_url}}
+- Token: {{auth_bypass_token}}
+
+## Report Format
+
+```text
+CRITERION 1: PASS|FAIL - [endpoint, response details, and evidence]
+CRITERION 2: PASS|FAIL - [endpoint, response details, and evidence]
+```
+
+Always reference criteria by number. Fail when a response is ambiguous, unverified, or missing error coverage.
+
+## Additional Guidance
+
+{{custom_instructions}}
+"#.to_string());
+
+        self.builtin_templates.insert("roles/qa-worker-a11y".to_string(), r#"# QA Worker {{qa_worker_index}} - Accessibility Tester
+
+You are the accessibility QA specialist for session `{{session_id}}`.
+
+## Start Here
+
+- Read `.ai-docs/project-dna.md`
+- Read `.ai-docs/learnings.jsonl`
+- Read the active sprint contract at `.hive-manager/{{session_id}}/contracts/milestone-N.md`
+
+## Focus
+
+- Run axe-core, Lighthouse, or equivalent tooling when available.
+- Check keyboard navigation, focus order, semantic roles, ARIA, and contrast.
+- Record the exact defect and the affected criterion.
+
+## Auth Bypass
+
+- URL: {{auth_bypass_url}}
+- Token: {{auth_bypass_token}}
+
+## Report Format
+
+```text
+CRITERION 1: PASS|FAIL - [a11y evidence, score, or exact defect]
+CRITERION 2: PASS|FAIL - [a11y evidence, score, or exact defect]
+```
+
+Always reference criteria by number. Fail when accessibility evidence is partial or a key path is untestable.
+
+## Additional Guidance
+
+{{custom_instructions}}
+"#.to_string());
+
         // Fusion worker prompt template
         self.builtin_templates.insert("fusion-worker".to_string(), r#"You are a Fusion worker implementing variant "{{variant_name}}".
 Working directory: {{worktree_path}}
@@ -230,6 +385,12 @@ You are the Queen agent orchestrating a Hive session with direct worker manageme
 2. **Monitor progress**: Check coordination.log for updates
 3. **Add workers**: Request additional workers if needed
 
+## Start Here
+
+Before assigning work, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
 ## Inter-Agent Communication
 ### Check your inbox:
 curl -s "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
@@ -279,6 +440,13 @@ Workers record learnings during task completion. Your curation responsibilities:
 - Before creating a PR
 - When learnings count exceeds 10
 
+## QA Milestone Handoff
+
+When a milestone is ready for QA:
+- Signal `MILESTONE_READY` through the peer channel to the Evaluator.
+- Include the milestone name, contract path, scope, and any known risks.
+- The coordination runtime mirrors this handoff into `.hive-manager/{{session_id}}/peer/milestone-ready.json`.
+
 ## Communication Format
 
 To send a message to a worker, use this format:
@@ -307,6 +475,12 @@ You are the Queen agent orchestrating a Swarm session with hierarchical planning
 1. **Delegate to planners**: Assign high-level tasks to domain planners
 2. **Monitor progress**: Check coordination.log for updates from planners
 3. **Coordinate cross-domain**: Handle dependencies between planner domains
+
+## Start Here
+
+Before assigning work, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
 
 ## Learning Curation Protocol
 
@@ -346,6 +520,13 @@ Workers record learnings during task completion. Your curation responsibilities:
 - After each major task phase completes
 - Before creating a PR
 - When learnings count exceeds 10
+
+## QA Milestone Handoff
+
+When a milestone is ready for QA:
+- Signal `MILESTONE_READY` through the peer channel to the Evaluator.
+- Include the milestone name, contract path, scope, and any known risks.
+- The coordination runtime mirrors this handoff into `.hive-manager/{{session_id}}/peer/milestone-ready.json`.
 
 ## Communication Format
 
@@ -395,24 +576,16 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         context: &PromptContext,
     ) -> Result<String, TemplateError> {
         let template_name = format!("roles/{}", role.role_type.to_lowercase());
-        let template = self.get_template(&template_name)?;
+        self.render_template(&template_name, context)
+    }
 
-        let mut rendered = template.clone();
-
-        // Replace task placeholder
-        if let Some(ref task) = context.task {
-            rendered = rendered.replace("{{task}}", task);
-        } else {
-            rendered = rendered.replace("{{task}}", "Awaiting task assignment");
-        }
-
-        // Replace custom variables
-        for (key, value) in &context.variables {
-            let placeholder = format!("{{{{{}}}}}", key);
-            rendered = rendered.replace(&placeholder, value);
-        }
-
-        Ok(rendered)
+    pub fn render_template(
+        &self,
+        template_name: &str,
+        context: &PromptContext,
+    ) -> Result<String, TemplateError> {
+        let template = self.get_template(template_name)?;
+        self.render_prompt_text(&template, context)
     }
 
     /// Render queen prompt for a session
@@ -430,7 +603,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         };
 
         let template = self.get_template(template_name)?;
-        let mut rendered = template.clone();
+        let mut rendered = self.render_prompt_text(&template, context)?;
 
         // Build workers list
         let workers_list = self.format_workers_list(workers);
@@ -438,22 +611,6 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
 
         // Also support planners_list for swarm
         rendered = rendered.replace("{{planners_list}}", &workers_list);
-
-        // Replace session_id placeholder
-        rendered = rendered.replace("{{session_id}}", &context.session_id);
-
-        // Replace task placeholder
-        if let Some(ref task) = context.task {
-            rendered = rendered.replace("{{task}}", task);
-        } else {
-            rendered = rendered.replace("{{task}}", "Awaiting instructions");
-        }
-
-        // Replace custom variables
-        for (key, value) in &context.variables {
-            let placeholder = format!("{{{{{}}}}}", key);
-            rendered = rendered.replace(&placeholder, value);
-        }
 
         Ok(rendered)
     }
@@ -466,7 +623,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         context: &PromptContext,
     ) -> Result<String, TemplateError> {
         let template = self.get_template("planner")?;
-        let mut rendered = template.clone();
+        let mut rendered = self.render_prompt_text(&template, context)?;
 
         // Replace domain
         rendered = rendered.replace("{{domain}}", domain);
@@ -474,13 +631,6 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         // Build workers list
         let workers_list = self.format_workers_list(workers);
         rendered = rendered.replace("{{workers_list}}", &workers_list);
-
-        // Replace task placeholder
-        if let Some(ref task) = context.task {
-            rendered = rendered.replace("{{task}}", task);
-        } else {
-            rendered = rendered.replace("{{task}}", "Awaiting task assignment from Queen");
-        }
 
         Ok(rendered)
     }
@@ -534,6 +684,28 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             "{{decision_file}}",
             context.variables.get("decision_file").map(String::as_str).unwrap_or(""),
         );
+
+        Ok(rendered)
+    }
+
+    fn render_prompt_text(
+        &self,
+        template: &str,
+        context: &PromptContext,
+    ) -> Result<String, TemplateError> {
+        let mut rendered = template.to_string();
+
+        rendered = rendered.replace("{{session_id}}", &context.session_id);
+        rendered = rendered.replace("{{project_path}}", &context.project_path);
+        rendered = rendered.replace(
+            "{{task}}",
+            context.task.as_deref().unwrap_or("Awaiting instructions"),
+        );
+
+        for (key, value) in &context.variables {
+            let placeholder = format!("{{{{{}}}}}", key);
+            rendered = rendered.replace(&placeholder, value);
+        }
 
         Ok(rendered)
     }

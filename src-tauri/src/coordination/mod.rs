@@ -1,6 +1,8 @@
+mod contracts;
 mod state;
 mod injection;
 
+pub use contracts::*;
 pub use state::*;
 pub use injection::*;
 

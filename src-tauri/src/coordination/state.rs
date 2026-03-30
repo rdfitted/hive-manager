@@ -9,12 +9,19 @@ use thiserror::Error;
 
 use crate::pty::WorkerRole;
 
+use super::{parse_sprint_contract, SprintContract};
+
+#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum StateError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("contract parse error: {0}")]
+    ContractParse(String),
+    #[error("contracts are immutable once QA begins for session state: {0}")]
+    ContractLocked(String),
     #[allow(dead_code)]
     #[error("Session not found: {0}")]
     SessionNotFound(String),
@@ -89,6 +96,10 @@ impl StateManager {
         self.session_path.join("peer")
     }
 
+    fn contracts_dir(&self) -> PathBuf {
+        self.session_path.join("contracts")
+    }
+
     /// Ensure state directory exists
     fn ensure_state_dir(&self) -> Result<(), StateError> {
         fs::create_dir_all(self.state_dir())?;
@@ -97,6 +108,25 @@ impl StateManager {
 
     fn ensure_peer_dir(&self) -> Result<(), StateError> {
         fs::create_dir_all(self.peer_dir())?;
+        Ok(())
+    }
+
+    fn ensure_contracts_dir(&self) -> Result<(), StateError> {
+        fs::create_dir_all(self.contracts_dir())?;
+        Ok(())
+    }
+
+    fn write_atomic_text(&self, target: PathBuf, content: &str) -> Result<(), StateError> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| StateError::Io(std::io::Error::other("target has no parent directory")))?;
+        fs::create_dir_all(parent)?;
+
+        let mut temp = NamedTempFile::new_in(parent)?;
+        use std::io::Write;
+        temp.write_all(content.as_bytes())?;
+        temp.persist(target)
+            .map_err(|err| StateError::Io(err.error))?;
         Ok(())
     }
 
@@ -110,14 +140,7 @@ impl StateManager {
         let peer_dir = self.peer_dir();
         let target = peer_dir.join(file_name);
         let json = serde_json::to_string_pretty(record)?;
-
-        let mut temp = NamedTempFile::new_in(&peer_dir)?;
-        use std::io::Write;
-        temp.write_all(json.as_bytes())?;
-        temp.persist(target)
-            .map_err(|err| StateError::Io(err.error))?;
-
-        Ok(())
+        self.write_atomic_text(target, &json)
     }
 
     /// Update the workers.md file (Queen reads this)
@@ -371,6 +394,44 @@ impl StateManager {
         Ok(assignments.get(worker_id).cloned())
     }
 
+    #[allow(dead_code)]
+    pub fn write_contract(
+        &self,
+        milestone_index: u8,
+        markdown: &str,
+        session_state: &str,
+        qa_locked: bool,
+    ) -> Result<SprintContract, StateError> {
+        if qa_locked {
+            return Err(StateError::ContractLocked(session_state.to_string()));
+        }
+
+        self.ensure_contracts_dir()?;
+
+        let contract = parse_sprint_contract(markdown)
+            .map_err(|err| StateError::ContractParse(err.to_string()))?;
+        let target = self
+            .contracts_dir()
+            .join(format!("milestone-{}.md", milestone_index));
+        self.write_atomic_text(target, markdown)?;
+        Ok(contract)
+    }
+
+    #[allow(dead_code)]
+    pub fn read_contract(&self, milestone_index: u8) -> Result<Option<SprintContract>, StateError> {
+        let path = self
+            .contracts_dir()
+            .join(format!("milestone-{}.md", milestone_index));
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let markdown = fs::read_to_string(path)?;
+        let contract = parse_sprint_contract(&markdown)
+            .map_err(|err| StateError::ContractParse(err.to_string()))?;
+        Ok(Some(contract))
+    }
+
 }
 
 #[cfg(test)]
@@ -398,5 +459,49 @@ mod tests {
         assert!(temp.path().join("peer").read_dir().unwrap().all(|entry| {
             !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")
         }));
+    }
+
+    #[test]
+    fn contract_round_trip_preserves_numbered_criteria() {
+        let temp = TempDir::new().unwrap();
+        let manager = StateManager::new(temp.path().to_path_buf());
+        let markdown = r#"# Sprint Contract: Dashboard polish
+
+## Acceptance Criteria
+1. [FUNC] Dashboard loads with current account data
+2. [A11Y] Keyboard navigation reaches every control
+
+## Pass Threshold
+- All FUNC criteria must PASS
+- Scored criteria average >= 7/10
+"#;
+
+        let written = manager
+            .write_contract(2, markdown, "Running", false)
+            .unwrap();
+        let read_back = manager.read_contract(2).unwrap().unwrap();
+
+        assert_eq!(written, read_back);
+        assert_eq!(read_back.criterion(1).unwrap().description, "Dashboard loads with current account data");
+    }
+
+    #[test]
+    fn contract_writes_fail_once_qa_is_locked() {
+        let temp = TempDir::new().unwrap();
+        let manager = StateManager::new(temp.path().to_path_buf());
+        let markdown = r#"# Sprint Contract: Locked
+
+## Acceptance Criteria
+1. [FUNC] Something passes
+
+## Pass Threshold
+- All FUNC criteria must PASS
+"#;
+
+        let err = manager
+            .write_contract(1, markdown, "QaInProgress", true)
+            .unwrap_err();
+
+        assert!(matches!(err, StateError::ContractLocked(state) if state == "QaInProgress"));
     }
 }

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -10,8 +10,11 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole};
+use crate::session::{AuthStrategy, SessionController, SessionState};
 
-use super::{validate_cli, validate_session_id};
+use super::validate_session_id;
+// validate_cli used by add_evaluator
+use super::validate_cli;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AddEvaluatorRequest {
@@ -103,5 +106,125 @@ pub async fn list_evaluators(
         "session_id": session_id,
         "evaluators": evaluators,
         "count": evaluators.len()
+    })))
+}
+
+// --- Dev Login Endpoint ---
+
+#[derive(Debug, Deserialize)]
+pub struct DevLoginQuery {
+    pub token: String,
+}
+
+pub async fn dev_login(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Query(query): Query<DevLoginQuery>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    let controller = state.session_controller.read();
+    let session = controller
+        .get_session(&session_id)
+        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+
+    match &session.auth_strategy {
+        AuthStrategy::DevBypass { token } if *token == query.token => {
+            Ok(Json(json!({
+                "session_id": session_id,
+                "auth": "dev-bypass",
+                "granted": true
+            })))
+        }
+        AuthStrategy::DevBypass { .. } => {
+            Err(ApiError::new(StatusCode::UNAUTHORIZED, "Invalid dev-bypass token"))
+        }
+        AuthStrategy::None => {
+            Err(ApiError::not_found("Auth not configured for this session"))
+        }
+    }
+}
+
+// --- Force Pass / Force Fail Endpoints ---
+
+fn require_qa_in_progress(
+    controller: &SessionController,
+    session_id: &str,
+    action: &str,
+) -> Result<(), ApiError> {
+    let session = controller
+        .get_session(session_id)
+        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+
+    if matches!(session.state, SessionState::QaInProgress) {
+        return Ok(());
+    }
+
+    Err(ApiError::bad_request(format!(
+        "Cannot {}: session is in {:?} state, expected QaInProgress",
+        action, session.state
+    )))
+}
+
+fn append_operator_log(state: &AppState, session_id: &str, action: &str, detail: &str) {
+    let msg = crate::coordination::CoordinationMessage::system(
+        "OPERATOR",
+        &format!("[{}] Operator forced {} for session {}", action, detail, session_id),
+    );
+    let _ = state.storage.append_coordination_log(session_id, &msg);
+}
+
+pub async fn force_pass(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    {
+        let controller = state.session_controller.read();
+        require_qa_in_progress(&controller, &session_id, "force-pass")?;
+    }
+
+    // on_qa_verdict uses internal write locks on sessions, so use read() on controller
+    {
+        let controller = state.session_controller.read();
+        controller
+            .on_qa_verdict(&session_id, "QA_VERDICT: PASS")
+            .map_err(ApiError::internal)?;
+    }
+
+    append_operator_log(&state, &session_id, "FORCE-PASS", "QA pass");
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "action": "force-pass",
+        "new_state": "Running"
+    })))
+}
+
+pub async fn force_fail(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    {
+        let controller = state.session_controller.read();
+        require_qa_in_progress(&controller, &session_id, "force-fail")?;
+    }
+
+    let new_state = {
+        let controller = state.session_controller.read();
+        controller
+            .on_qa_verdict(&session_id, "QA_VERDICT: FAIL")
+            .map_err(ApiError::internal)?
+    };
+
+    append_operator_log(&state, &session_id, "FORCE-FAIL", "QA fail");
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "action": "force-fail",
+        "new_state": format!("{:?}", new_state)
     })))
 }

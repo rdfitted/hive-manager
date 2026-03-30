@@ -29,6 +29,33 @@ How we do things in this project. Updated by AI sessions.
 - Consolidate raw PR comments into distinct concerns before spawning agents (12 comments -> 7 concerns -> 21 agents instead of 36)
 - Workflow: fetch comments -> group by concern -> spawn 3 agents -> categorize by consensus -> implement fixes -> commit
 
+### Session Defaults Propagation
+- Store `default_cli` and `default_model` on PersistedSession/Session structs with `#[serde(default)]` for backward compat
+- HTTP handlers read session defaults instead of hardcoding "claude"/"opus"
+- Add `model` field to AddWorkerRequest to allow per-worker model overrides
+- Reuse first session lookup result instead of re-acquiring locks for each handler that needs defaults
+
+### Fusion Mode Coordination
+- `StateManager` tracks per-variant state with JSON persistence (Serialize/Deserialize on all new types)
+- `InjectionManager.judge_inject()` sends evaluation context to judge PTY including variant paths and evaluation report location
+- `TaskFileWatcher` detects `fusion-variant-N-task.md` completion events, emits `fusion-variant-completed` and `all-variants-completed` events
+- Pattern: extend existing coordination modules (state, injection, watcher) rather than creating new ones
+
+### Evaluator Peer Architecture (PR #37)
+- Evaluator is a root peer alongside Queen (parent_id: None), NOT a child agent
+- QA workers are children of Evaluator, separate from Queen's worker hierarchy
+- Bidirectional authority enforcement: Queen blocked from QA workers, Evaluator blocked from Queen workers
+- Peer communication via atomic file writes in `.hive-manager/{id}/peer/` directory
+- State machine: `MilestoneReady` -> `SpawningEvaluator` -> `QaInProgress` -> `QaPassed`/`QaFailed` -> `QaMaxRetriesExceeded`
+- `is_active()` vs `is_monitorable()`: use `is_monitorable()` for heartbeat monitoring (excludes post-verdict states)
+- Peer-state persistence must happen AFTER successful PTY delivery, not before (atomicity)
+
+### Serde Enum Normalization in Frontend
+- Rust Serde externally-tagged enums serialize as `{ "VariantName": data }` or `{ "VariantName": null }`, not plain strings
+- Frontend must normalize with a helper like `serdeEnumVariantName(value)` that extracts the key from object variants
+- Apply to ALL comparison sites: role checks, status badges, sidebar filters, tree rendering
+- Easy to miss: `agent.status` comparisons break silently when they receive `{ "Running": null }` instead of `"Running"`
+
 ### Integration Tests Over Unit Tests
 - Prefer integration tests that exercise the full HTTP handler stack (Axum router via `oneshot()`)
 - Unit tests that only verify serde deserialization are redundant when integration tests cover the same validation end-to-end
@@ -50,6 +77,12 @@ How we do things in this project. Updated by AI sessions.
 - Tool documentation strings embedded in prompt templates easily drift from handler validation
 - submit-learning.md documented wrong outcome values, causing workers to get 400 errors
 - Always update embedded docs when changing validation rules
+
+### Reactive Store Race Conditions in Svelte Modals
+- Confirmation modals for destructive actions must capture the target entity ID when opened, not when confirmed
+- Svelte reactive stores (`$activeSession`) can change between modal open and confirm
+- Never read store at confirm time for the action target — capture into a local variable at open time
+- SessionSidebar had the correct pattern; StatusPanel was inconsistent (fixed in PR review)
 
 ## Code Conventions
 
@@ -88,6 +121,16 @@ How we do things in this project. Updated by AI sessions.
 - `files_touched` body field also validated for traversal characters
 - Defense-in-depth: could also add validation in `SessionStorage::session_dir()`
 
+### Security: CLI Allowlist Validation
+- `validate_cli()` in `http/handlers/mod.rs` checks against `VALID_CLIS` allowlist
+- `VALID_CLIS` must stay synchronized with `default_config()` in `storage/mod.rs`
+- Applied to all handlers accepting CLI input (workers, planners)
+
+### Security: Evaluator Authority Enforcement
+- `evaluator_inject()` restricts targets to Queen and QA workers only — no planners, no other evaluators
+- `queen_inject()` blocks targeting QA workers — enforces hierarchy boundary
+- Use ID suffix patterns (`-evaluator`, `-qa-worker-`, `-queen`) for authority checks
+
 ### Prompt Template Structure in controller.rs
 - Queen prompt (standard Hive): includes Learning Curation Protocol, tool table, sequential spawning
 - Queen prompt (Swarm): similar but with planner-focused curation protocol
@@ -120,6 +163,21 @@ How we do things in this project. Updated by AI sessions.
   - All `SessionType`/`SessionTypeInfo` match arms across controller and storage
 - Missing any one causes deserialization mismatches or non-exhaustive match errors
 
+### AgentRole Enum Expansion Protocol
+- Adding a new `AgentRole` variant touches 35+ match sites across controller, handlers, commands, coordination
+- Rust compiler catches all exhaustive match failures — fix ALL before merging
+- Frontend `AgentRole` type must exactly mirror Rust enum serialization shape (object variants, not strings)
+- Filters in workers/planners handlers must explicitly exclude new roles from listings
+- Hierarchy in `coordination/state.rs` must place new root agents with `parent_id: None`
+
+### CLI Worker Reliability (Hive Sessions)
+- **codex**: May stall on interactive approval; performs well when it runs (5-25min). Always have replacements ready.
+- **gemini**: Fast (~7-12min), completes quickly. Good for frontend, data model changes.
+- **cursor**: Good for review/test tasks. WSL environment may lack Rust toolchain.
+- **claude**: Most reliable for autonomous work. Best for complex multi-site refactors.
+- **droid**: Fastest (~2min). Excellent for handler changes, validation, straightforward tasks.
+- **Strategy**: Monitor `git diff --stat` — no changes for >5min = likely stalled. Re-assign immediately.
+
 ## Model Performance Notes
 
 ### Multi-Agent Verification
@@ -127,6 +185,14 @@ How we do things in this project. Updated by AI sessions.
 - All 7 concerns in PR #19 were validated VALID by 3/3 agents (high confidence)
 - Different models catch different aspects - useful for comprehensive analysis
 
+## Hot Files
+Files frequently modified across sessions — pay extra attention:
+- `src-tauri/src/session/controller.rs` — 4200+ lines, prompt templates, state machine, match blocks for every enum. Modified in nearly every session.
+- `src-tauri/src/storage/mod.rs` — Dual storage paths, role defaults, session persistence. Touched for any new role or config.
+- `src-tauri/src/http/handlers/` — Each new feature adds or modifies handler files. Validation must be consistent.
+- `src-tauri/src/coordination/injection.rs` — Authority enforcement, inject methods. Critical for security.
+- `src/lib/stores/sessions.ts` — Frontend type unions must mirror Rust enums exactly.
+
 ---
-*Curated from learnings.jsonl (16 entries) by manual session*
-*Last updated: 2026-02-12*
+*Curated from learnings.jsonl (23 entries) + 1 hive session payload*
+*Last updated: 2026-03-30*
