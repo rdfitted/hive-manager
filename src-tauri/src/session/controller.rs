@@ -6094,8 +6094,21 @@ Last updated: {timestamp}
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
         let evaluator_id = parent_id.unwrap_or_else(|| format!("{}-evaluator", session_id));
-        if !session.agents.iter().any(|agent| agent.id == evaluator_id) {
-            return Err(format!("Evaluator {} not found for session {}", evaluator_id, session_id));
+        let parent_agent = session.agents.iter().find(|agent| agent.id == evaluator_id);
+        match parent_agent {
+            Some(agent) if matches!(agent.role, AgentRole::Evaluator) => {}
+            Some(_) => {
+                return Err(format!(
+                    "Cannot add QA worker: parent '{}' is not an Evaluator",
+                    evaluator_id
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "Evaluator {} not found for session {}",
+                    evaluator_id, session_id
+                ));
+            }
         }
 
         if config.cli.trim().is_empty() {

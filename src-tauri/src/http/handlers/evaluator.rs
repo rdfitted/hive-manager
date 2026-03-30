@@ -80,6 +80,10 @@ fn map_add_qa_worker_error(error: String) -> ApiError {
         return ApiError::bad_request(error);
     }
 
+    if error.contains("is not an Evaluator") {
+        return ApiError::bad_request(error);
+    }
+
     if error.starts_with("Cannot add")
         || error.starts_with("Invalid")
         || error.contains("expected")
@@ -197,7 +201,7 @@ pub async fn add_qa_worker(
         initial_prompt: req.initial_task,
     };
 
-    let worker_id = {
+    let agent_info = {
         let controller = state.session_controller.write();
         controller
             .add_qa_worker(
@@ -207,19 +211,21 @@ pub async fn add_qa_worker(
                 req.parent_id,
             )
             .map_err(map_add_qa_worker_error)?
-            .id
     };
 
-    let index = worker_id
-        .rsplit('-')
-        .next()
-        .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(1);
+    let index = match &agent_info.role {
+        AgentRole::QaWorker { index, .. } => *index,
+        _ => {
+            return Err(ApiError::internal(
+                "add_qa_worker returned a non-QaWorker role".to_string(),
+            ));
+        }
+    };
 
     Ok((
         StatusCode::CREATED,
         Json(AddQaWorkerResponse {
-            worker_id,
+            worker_id: agent_info.id,
             role: qa_specialization_label(&req.specialization).to_string(),
             cli,
             status: "Running".to_string(),
