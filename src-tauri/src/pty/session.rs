@@ -121,6 +121,13 @@ impl MasterPtyHandle {
     }
 }
 
+/// Maximum chunk size for PTY writes (16KB) - respects Windows pipe buffer limits
+const CHUNK_SIZE: usize = 16 * 1024;
+
+/// Bracketed paste mode escape sequences
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
 pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
@@ -212,17 +219,51 @@ impl PtySession {
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
         tracing::debug!("PTY write: {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
         let mut writer = self.writer.lock();
-        let result = writer.0.write_all(data);
-        if let Err(ref e) = result {
-            tracing::error!("PTY write_all failed: {}", e);
+
+        // Write in chunks to respect Windows pipe buffer limits
+        for chunk in data.chunks(CHUNK_SIZE) {
+            let result = writer.0.write_all(chunk);
+            if let Err(ref e) = result {
+                tracing::error!("PTY write_all failed: {}", e);
+                return Err(PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+            }
+            let flush_result = writer.0.flush();
+            if let Err(ref e) = flush_result {
+                tracing::error!("PTY flush failed: {}", e);
+                return Err(PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+            }
         }
-        result?;
-        let flush_result = writer.0.flush();
-        if let Err(ref e) = flush_result {
-            tracing::error!("PTY flush failed: {}", e);
-        }
-        flush_result?;
+
         tracing::debug!("PTY write complete");
+        Ok(())
+    }
+
+    /// Write with bracketed paste mode wrapping - used for paste operations
+    pub fn write_bracketed(&self, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PTY write_bracketed: {} bytes", data.len());
+        let mut writer = self.writer.lock();
+
+        // Send bracketed paste start sequence
+        writer.0.write_all(BRACKETED_PASTE_START)
+            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        writer.0.flush()
+            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        // Write data in chunks with flush between each
+        for chunk in data.chunks(CHUNK_SIZE) {
+            writer.0.write_all(chunk)
+                .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            writer.0.flush()
+                .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        }
+
+        // Send bracketed paste end sequence
+        writer.0.write_all(BRACKETED_PASTE_END)
+            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        writer.0.flush()
+            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        tracing::debug!("PTY write_bracketed complete");
         Ok(())
     }
 

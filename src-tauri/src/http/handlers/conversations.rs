@@ -13,7 +13,7 @@ use crate::http::state::AppState;
 use crate::storage::ConversationMessage;
 use super::{validate_agent_id, validate_session_id};
 
-const MAX_MESSAGE_CONTENT_LEN: usize = 4096;
+const MAX_MESSAGE_CONTENT_LEN: usize = 1_048_576; // 1MB - allows large pastes
 const MAX_FROM_LEN: usize = 64;
 
 #[derive(Debug, Deserialize)]
