@@ -1595,27 +1595,26 @@ After spawning the Judge, monitor the evaluation directory:
 - Decision file: `.hive-manager/{session_id}/evaluation/decision.md`
 - When the decision file exists and is non-empty, report completion
 
-### Phase 4: Quality Loop After Merge (MANDATORY)
+### Phase 4: Quality Reconciliation After Merge (MANDATORY)
 
-After the Judge winner is selected and merge is complete, run this quality loop:
+After the Judge winner is selected and merge is complete:
 
-1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
-2. Check for new PR review comments:
+1. Push the PR branch — this triggers CodeRabbit and Gemini reviewers
+2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
+3. Collect ALL findings:
+   a. Evaluator QA verdicts (from queen conversation)
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+   c. Your own code integrity concerns
+4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
-   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-3. If NEW comments exist since your last check:
-   a. Spawn a Codex worker via HTTP API:
-      ```bash
-      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-        -H "Content-Type: application/json" \
-        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
-      ```
-   b. Assign it to resolve PR comments (`code-quality` role archetype)
-   c. Wait for worker completion
-   d. Commit and push fixes
-4. If NO new comments found: exit quality loop and mark session complete
-5. Repeat from step 1 (maximum 3 iterations)
+5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+6. Commit and push
+7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
+8. If NO new comments: exit quality loop and mark session complete
 
 ## Status Reporting
 
@@ -2707,32 +2706,62 @@ When a milestone is ready for QA:
 6. **Review & integrate** - Review worker output and coordinate integration
 7. **Commit & push** - You handle final commits (workers don't push)
 
-## Quality Loop Protocol (MANDATORY after PR push)
+## Quality Reconciliation Protocol (MANDATORY after PR push)
 
 After you have committed and pushed all changes to the PR branch:
 
-1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
-2. Check for new PR review comments:
+### Step 1: Push PR and Start the Clock
+- Push the PR branch to GitHub
+- This triggers CodeRabbit and Gemini reviewers automatically
+- WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
+
+### Step 2: Collect ALL Findings
+Gather feedback from every source:
+
+a. **Evaluator QA verdicts** (if Evaluator is active):
+   ```bash
+   curl -s "http://localhost:18800/api/sessions/{{{{session_id}}}}/conversations/queen?since=0" | jq '.messages[] | select(.from == "evaluator")'
+   ```
+
+b. **CodeRabbit + Gemini PR comments**:
    ```bash
    gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
    ```
-3. If NEW comments exist since your last check:
-   a. Spawn a Codex worker via HTTP API:
-      ```bash
-      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-        -H "Content-Type: application/json" \
-        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
-      ```
-   b. Assign it to resolve PR comments (`code-quality` role archetype)
-   c. Wait for the worker to complete
-   d. Commit and push any fixes
-4. If NO new comments found: exit quality loop and mark session complete
-5. Repeat from step 1 (maximum 3 iterations)
+
+c. **Your own code integrity concerns** from reviewing the diff
+
+### Step 3: Spawn Reconciler (if findings exist)
+If there are findings from ANY source, spawn a **Reconciler** — a high-effort sub-agent that triages and deduplicates:
+
+```bash
+curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE the following findings into a unified fix list.\n\n## Evaluator QA Verdicts\n<paste evaluator findings>\n\n## External Reviewer Comments (CodeRabbit/Gemini)\n<paste PR comments>\n\n## Queen Code Integrity Concerns\n<paste your concerns>\n\nFor each finding:\n1. Deduplicate — group related comments about the same issue\n2. Detect conflicts — flag where a UX fix and a code refactor touch the same file\n3. Prioritize — HIGH (blocking), MEDIUM (should fix), LOW (nice to have)\n4. Produce a unified fix list as numbered items with file paths\n\nWrite the reconciled fix list to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
+```
+
+### Step 4: Execute Fixes
+Once the Reconciler completes and `.hive-manager/{{{{session_id}}}}/reconciliation.md` exists:
+
+a. Read the reconciled fix list
+b. Spawn code-quality workers to address the unified list:
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"code-quality","cli":"codex","initial_task":"<assign specific fixes from reconciliation.md>"}}'
+   ```
+c. Wait for workers to complete
+d. Review changes, commit, and push
+
+### Step 5: Repeat or Complete
+1. If NEW comments arrive after the push: repeat from Step 2 (maximum 3 iterations)
+2. If NO new comments found: exit quality loop and mark session complete
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
-[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
+[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
+[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
+[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete — session done
 ```
 
@@ -2768,6 +2797,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
                 "resolver" => "Address all reviewer findings: fix HIGH/MEDIUM issues, document skipped items with rationale.",
                 "tester" => "Run test suite, fix failures, document difficulties that couldn't be resolved.",
                 "code-quality" => "Resolve PR comments from external reviewers, ensure code meets quality standards.",
+                "reconciler" => "Deep-think reconciliation: collect Evaluator QA verdicts, CodeRabbit comments, and Gemini findings. Triage conflicts, deduplicate, and produce a unified fix list with priorities.",
                 _ => "General development tasks as assigned.",
             })
             .unwrap_or("General development tasks as assigned.");
@@ -3231,32 +3261,33 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 3. Run integration tests
 4. Final commit and push
 
-## Quality Loop Protocol (MANDATORY after PR push)
+## Quality Reconciliation Protocol (MANDATORY after PR push)
 
 After all planners complete, integration is done, and changes are pushed to the PR branch:
 
-1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
-2. Check for new PR review comments:
+1. Push triggers CodeRabbit and Gemini reviewers automatically
+2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
+3. Collect ALL findings:
+   a. Evaluator QA verdicts (from queen conversation)
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+   c. Your own code integrity concerns
+4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
-   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-3. If NEW comments exist since your last check:
-   a. Spawn a Codex worker via HTTP API:
-      ```bash
-      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-        -H "Content-Type: application/json" \
-        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
-      ```
-   b. Assign it to resolve PR comments (`code-quality` role archetype)
-   c. Wait for worker completion
-   d. Commit and push fixes
-4. If NO new comments found: exit quality loop and mark session complete
-5. Repeat from step 1 (maximum 3 iterations)
+5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+6. Commit and push
+7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
+8. If NO new comments: exit quality loop and mark session complete
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
-[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
+[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
+[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
+[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete — session done
 ```
 
