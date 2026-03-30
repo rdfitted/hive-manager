@@ -123,7 +123,7 @@ pub async fn add_evaluator(
     let evaluator_id = {
         let controller = state.session_controller.write();
         controller
-            .launch_evaluator(&session_id, config)
+            .launch_evaluator(&session_id, config, false)
             .map_err(ApiError::internal)?
             .id
     };

@@ -1284,13 +1284,25 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
     }
 
     #[allow(dead_code)]
-    fn build_evaluator_prompt(session_id: &str, config: &AgentConfig) -> String {
+    fn build_evaluator_prompt(session_id: &str, config: &AgentConfig, smoke_test: bool) -> String {
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
             "Review the milestone handoff, coordinate QA workers only when evidence is missing, and return a strict contract-based verdict to the Queen.",
         );
 
         let mut variables = HashMap::new();
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
+
+        if smoke_test {
+            variables.insert("idle_poll_interval".to_string(), "30 seconds".to_string());
+            variables.insert("idle_poll_secs".to_string(), "30".to_string());
+            variables.insert("active_poll_interval".to_string(), "15 seconds".to_string());
+            variables.insert("active_poll_secs".to_string(), "15".to_string());
+        } else {
+            variables.insert("idle_poll_interval".to_string(), "20 minutes".to_string());
+            variables.insert("idle_poll_secs".to_string(), "1200".to_string());
+            variables.insert("active_poll_interval".to_string(), "5 minutes".to_string());
+            variables.insert("active_poll_secs".to_string(), "300".to_string());
+        }
 
         Self::render_named_prompt("roles/evaluator", session_id, None, variables)
     }
@@ -4135,6 +4147,7 @@ Last updated: {timestamp}
             config.with_evaluator,
             config.evaluator_config.clone(),
             config.qa_workers.as_deref(),
+            config.smoke_test,
         )?;
 
         Ok(session)
@@ -5032,7 +5045,7 @@ Last updated: {timestamp}
                 }
             };
 
-            self.launch_evaluator(session_id, config)?;
+            self.launch_evaluator(session_id, config, false)?;
             return Ok(());
         }
 
@@ -5635,6 +5648,7 @@ Last updated: {timestamp}
             config.with_evaluator,
             config.evaluator_config.clone(),
             config.qa_workers.as_deref(),
+            config.smoke_test,
         )?;
 
         // Clean up pending config file
@@ -5873,6 +5887,7 @@ Last updated: {timestamp}
             config.with_evaluator,
             config.evaluator_config.clone(),
             config.qa_workers.as_deref(),
+            config.smoke_test,
         )?;
 
         // Clean up pending config file (keep swarm-planners.json for Queen reference)
@@ -5990,6 +6005,7 @@ Last updated: {timestamp}
             config.with_evaluator,
             config.evaluator_config.clone(),
             config.qa_workers.as_deref(),
+            config.smoke_test,
         )?;
 
         Ok(session)
@@ -6001,6 +6017,7 @@ Last updated: {timestamp}
         with_evaluator: bool,
         evaluator_config: Option<AgentConfig>,
         _qa_workers: Option<&[QaWorkerConfig]>,
+        smoke_test: bool,
     ) -> Result<(), String> {
         if !with_evaluator {
             return Ok(());
@@ -6017,7 +6034,7 @@ Last updated: {timestamp}
 
         // Launch evaluator only — QA workers are spawned by the Evaluator
         // itself after activation, based on milestone contract criteria
-        let _evaluator = self.launch_evaluator(session_id, evaluator_config)?;
+        let _evaluator = self.launch_evaluator(session_id, evaluator_config, smoke_test)?;
 
         Ok(())
     }
@@ -6140,7 +6157,7 @@ Last updated: {timestamp}
     }
 
     #[allow(dead_code)]
-    pub fn launch_evaluator(&self, session_id: &str, mut config: AgentConfig) -> Result<AgentInfo, String> {
+    pub fn launch_evaluator(&self, session_id: &str, mut config: AgentConfig, smoke_test: bool) -> Result<AgentInfo, String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -6171,7 +6188,7 @@ Last updated: {timestamp}
 
         Self::write_tool_files(&session.project_path, session_id, &config.cli)?;
 
-        let evaluator_prompt = Self::build_evaluator_prompt(session_id, &config);
+        let evaluator_prompt = Self::build_evaluator_prompt(session_id, &config, smoke_test);
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,

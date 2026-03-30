@@ -194,7 +194,7 @@ You are spawned early — workers are still building. Use this time wisely, then
    - `.ai-docs/project-dna.md`
    - `.ai-docs/learnings.jsonl`
 
-2. **Enter polling loop** — check for activation every 20 minutes:
+2. **Enter polling loop** — check for activation every **{{idle_poll_interval}}**:
    ```bash
    # Send heartbeat (keeps you alive in the session)
    curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/heartbeat" \
@@ -214,7 +214,7 @@ You are spawned early — workers are still building. Use this time wisely, then
 
 4. Sleep between polls to conserve context:
    ```bash
-   sleep 1200
+   sleep {{idle_poll_secs}}
    ```
 
 ## Phase 2: Milestone Intake (after activation)
@@ -239,8 +239,9 @@ You start with NO QA workers — spawn them individually based on what the miles
      -H "Content-Type: application/json" \
      -d '{"specialization": "api", "cli": "claude"}'
    ```
-3. Read each worker's task file for results before spawning the next
-4. Only spawn what you need — if the contract has no UI criteria, skip the UI worker
+3. **Poll worker results every {{active_poll_interval}}** (`sleep {{active_poll_secs}}`) — read each worker's task file for COMPLETED status
+4. Once a worker completes, read its findings, then decide if you need to spawn another
+5. Only spawn what you need — if the contract has no UI criteria, skip the UI worker
 
 ## Verdict Rules
 
