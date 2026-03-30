@@ -10,9 +10,10 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::cli::{CliRegistry, CliBehavior};
+use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::SessionStorage;
-use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
+use crate::templates::{PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +54,69 @@ impl From<String> for SessionError {
 const DEFAULT_MAX_QA_ITERATIONS: u8 = 3;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
 
+/// Authentication strategy for QA workers accessing the session
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AuthStrategy {
+    /// No authentication required (default for backward compat)
+    None,
+    /// Dev bypass with a per-session token (localhost only)
+    DevBypass { token: String },
+}
+
+impl Default for AuthStrategy {
+    fn default() -> Self {
+        AuthStrategy::None
+    }
+}
+
+impl AuthStrategy {
+    fn dev_bypass() -> Self {
+        Self::DevBypass {
+            token: Uuid::new_v4().to_string(),
+        }
+    }
+
+    fn from_persisted(value: &str) -> Self {
+        match value {
+            "" | "None" => Self::None,
+            token if token.starts_with("DevBypass:") => Self::DevBypass {
+                token: token.trim_start_matches("DevBypass:").to_string(),
+            },
+            _ => Self::None,
+        }
+    }
+
+    fn persist_value(&self) -> String {
+        match self {
+            Self::None => String::new(),
+            Self::DevBypass { token } => format!("DevBypass:{}", token),
+        }
+    }
+
+    fn apply_prompt_variables(
+        &self,
+        session_id: &str,
+        variables: &mut HashMap<String, String>,
+    ) {
+        match self {
+            Self::DevBypass { token } => {
+                variables.insert(
+                    "auth_bypass_url".to_string(),
+                    format!(
+                        "http://localhost:18800/api/sessions/{}/auth/dev-login?token={}",
+                        session_id, token
+                    ),
+                );
+                variables.insert("auth_bypass_token".to_string(), token.clone());
+            }
+            Self::None => {
+                variables.insert("auth_bypass_url".to_string(), "(not configured)".to_string());
+                variables.insert("auth_bypass_token".to_string(), String::new());
+            }
+        }
+    }
+}
+
 fn default_max_qa_iterations() -> u8 {
     DEFAULT_MAX_QA_ITERATIONS
 }
@@ -77,7 +141,7 @@ pub enum SessionState {
     AwaitingVerdictSelection,
     MergingWinner,
     SpawningEvaluator,
-    QaInProgress,
+    QaInProgress { iteration: Option<u8> },
     QaPassed,
     QaFailed { iteration: u8 },
     QaMaxRetriesExceeded,
@@ -97,7 +161,7 @@ impl SessionState {
                 | SessionState::WaitingForWorker(_)
                 | SessionState::WaitingForPlanner(_)
                 | SessionState::SpawningEvaluator
-                | SessionState::QaInProgress
+                | SessionState::QaInProgress { .. }
                 | SessionState::QaFailed { .. }
         )
     }
@@ -121,6 +185,12 @@ pub struct HiveLaunchConfig {
     #[serde(default)]
     pub with_planning: bool,  // If true, spawn Master Planner first
     #[serde(default)]
+    pub with_evaluator: bool,
+    #[serde(default)]
+    pub evaluator_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub qa_workers: Option<Vec<QaWorkerConfig>>,
+    #[serde(default)]
     pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 }
 
@@ -135,11 +205,29 @@ pub struct SwarmLaunchConfig {
     #[serde(default)]
     pub with_planning: bool,  // If true, spawn Master Planner first
     #[serde(default)]
+    pub with_evaluator: bool,
+    #[serde(default)]
+    pub evaluator_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub qa_workers: Option<Vec<QaWorkerConfig>>,
+    #[serde(default)]
     pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 
     // Legacy support - if planners vec is provided, use it instead
     #[serde(default)]
     pub planners: Vec<PlannerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaWorkerConfig {
+    pub specialization: String,
+    pub cli: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub flags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +306,8 @@ pub struct Session {
     pub default_model: Option<String>,
     pub max_qa_iterations: u8,
     pub qa_timeout_secs: u64,
+    #[serde(default)]
+    pub auth_strategy: AuthStrategy,
 }
 
 #[derive(Clone, Serialize)]
@@ -241,11 +331,43 @@ pub struct SessionController {
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
     /// session_id -> agent_id -> heartbeat info
     agent_heartbeats: Arc<RwLock<HashMap<String, HashMap<String, AgentHeartbeatInfo>>>>,
+    /// QA timeout cancel handles: session_id -> abort handle
+    qa_timeout_handles: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 // Explicitly implement Send + Sync
 unsafe impl Send for SessionController {}
 unsafe impl Sync for SessionController {}
+
+fn is_terminal_session_state(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::QaMaxRetriesExceeded
+            | SessionState::Completed
+            | SessionState::Closed
+            | SessionState::Failed(_)
+    )
+}
+
+fn qa_in_progress_state(state: &SessionState) -> SessionState {
+    match state {
+        SessionState::QaFailed { iteration } => SessionState::QaInProgress {
+            iteration: Some(*iteration),
+        },
+        SessionState::QaInProgress { iteration } => SessionState::QaInProgress {
+            iteration: *iteration,
+        },
+        _ => SessionState::QaInProgress { iteration: None },
+    }
+}
+
+fn next_qa_failure_iteration(state: &SessionState) -> u8 {
+    match state {
+        SessionState::QaFailed { iteration } => iteration.saturating_add(1),
+        SessionState::QaInProgress { iteration } => iteration.unwrap_or(0).saturating_add(1),
+        _ => 1,
+    }
+}
 
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
 fn get_polling_instructions(cli: &str, task_file: &str, role_type: Option<&str>) -> String {
@@ -310,6 +432,7 @@ impl SessionController {
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
+            qa_timeout_handles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -443,6 +566,7 @@ impl SessionController {
             default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -582,6 +706,7 @@ impl SessionController {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(id) {
                     s.state = SessionState::Completed;
+                    s.auth_strategy = AuthStrategy::None;
                 }
             }
 
@@ -639,6 +764,7 @@ impl SessionController {
                     agent.status = AgentStatus::Completed;
                 }
                 session.state = SessionState::Closed;
+                session.auth_strategy = AuthStrategy::None;
             }
         }
 
@@ -1158,59 +1284,96 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
     }
 
     #[allow(dead_code)]
-    fn build_evaluator_prompt(session_id: &str, config: &AgentConfig) -> String {
-        let custom_instructions = config
-            .initial_prompt
-            .as_deref()
-            .unwrap_or("Review the milestone output, coordinate QA workers when necessary, and post a final verdict back to the Queen.");
+    fn build_evaluator_prompt(session_id: &str, config: &AgentConfig, smoke_test: bool) -> String {
+        let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
+            "Review the milestone handoff, coordinate QA workers only when evidence is missing, and return a strict contract-based verdict to the Queen.",
+        );
 
-        format!(
-r#"# Evaluator - Hive Session
+        let mut variables = HashMap::new();
+        variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
 
-You are the Evaluator for session `{session_id}`.
+        if smoke_test {
+            variables.insert("idle_poll_interval".to_string(), "30 seconds".to_string());
+            variables.insert("idle_poll_secs".to_string(), "30".to_string());
+            variables.insert("active_poll_interval".to_string(), "15 seconds".to_string());
+            variables.insert("active_poll_secs".to_string(), "15".to_string());
+        } else {
+            variables.insert("idle_poll_interval".to_string(), "20 minutes".to_string());
+            variables.insert("idle_poll_secs".to_string(), "1200".to_string());
+            variables.insert("active_poll_interval".to_string(), "5 minutes".to_string());
+            variables.insert("active_poll_secs".to_string(), "300".to_string());
+        }
 
-## Core Responsibilities
-- Review milestone-ready outputs from the Queen
-- Coordinate QA workers if targeted verification is needed
-- Return one of these exact verdict markers:
-  - `QA_VERDICT: PASS`
-  - `QA_VERDICT: FAIL`
-
-## Default Guidance
-{custom_instructions}
-
-## Timeout Policy
-- If QA cannot complete within the configured timeout window, report a pass with warning so the session can continue.
-"#,
-            session_id = session_id,
-            custom_instructions = custom_instructions,
-        )
+        Self::render_named_prompt("roles/evaluator", session_id, None, variables)
     }
 
     #[allow(dead_code)]
-    fn build_qa_worker_prompt(session_id: &str, index: u8, config: &AgentConfig) -> String {
+    fn build_qa_worker_prompt(
+        session_id: &str,
+        index: u8,
+        specialization: &str,
+        config: &AgentConfig,
+        auth: &AuthStrategy,
+    ) -> String {
+        let (template_name, default_guidance) = match specialization {
+            "ui" => (
+                "roles/qa-worker-ui",
+                "Validate the full UI flow, capture screenshot evidence, and report failures only with criterion-numbered proof.",
+            ),
+            "api" => (
+                "roles/qa-worker-api",
+                "Exercise the API surface directly, include concrete request and response evidence, and fail ambiguous behavior.",
+            ),
+            "a11y" => (
+                "roles/qa-worker-a11y",
+                "Audit accessibility rigorously with tooling and manual keyboard checks, then report criterion-numbered findings with exact defects.",
+            ),
+            _ => (
+                "roles/qa-worker-api",
+                "Exercise the API surface directly, include concrete request and response evidence, and fail ambiguous behavior.",
+            ),
+        };
+
         let custom_instructions = config
             .initial_prompt
             .as_deref()
-            .unwrap_or("Inspect the assigned milestone, validate behavior carefully, and report concrete findings back to the Evaluator.");
+            .unwrap_or(default_guidance);
 
-        format!(
-r#"# QA Worker {index} - Hive Session
+        let mut variables = HashMap::new();
+        variables.insert("qa_worker_index".to_string(), index.to_string());
+        variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
 
-You are QA Worker {index} for session `{session_id}`.
+        auth.apply_prompt_variables(session_id, &mut variables);
 
-## Responsibilities
-- Validate the assigned milestone or fix
-- Produce concise, evidence-based findings
-- Escalate only concrete failures or regressions
+        Self::render_named_prompt(template_name, session_id, None, variables)
+    }
 
-## Default Guidance
-{custom_instructions}
-"#,
-            index = index,
-            session_id = session_id,
-            custom_instructions = custom_instructions,
-        )
+    fn qa_worker_label(specialization: &str) -> &'static str {
+        match specialization {
+            "ui" => "UI QA",
+            "api" => "API QA",
+            "a11y" => "A11Y QA",
+            _ => "QA Worker",
+        }
+    }
+
+    fn render_named_prompt(
+        template_name: &str,
+        session_id: &str,
+        task: Option<String>,
+        variables: HashMap<String, String>,
+    ) -> String {
+        let engine = TemplateEngine::default();
+        let context = PromptContext {
+            session_id: session_id.to_string(),
+            task,
+            variables,
+            ..PromptContext::default()
+        };
+
+        engine
+            .render_template(template_name, &context)
+            .unwrap_or_else(|_| format!("Template '{}' failed to render for session {}", template_name, session_id))
     }
 
     /// Build the Master Planner's prompt for Fusion planning phase
@@ -1293,6 +1456,12 @@ You are the **Master Planner** for a Fusion session. Your job is to analyze the 
 - **Session ID**: {session_id}
 - **Mode**: Fusion (competing variants)
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
+
+## Project Knowledge Intake
+
+Before investigating, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
 
 ## Variants
 
@@ -1438,27 +1607,26 @@ After spawning the Judge, monitor the evaluation directory:
 - Decision file: `.hive-manager/{session_id}/evaluation/decision.md`
 - When the decision file exists and is non-empty, report completion
 
-### Phase 4: Quality Loop After Merge (MANDATORY)
+### Phase 4: Quality Reconciliation After Merge (MANDATORY)
 
-After the Judge winner is selected and merge is complete, run this quality loop:
+After the Judge winner is selected and merge is complete:
 
-1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
-2. Check for new PR review comments:
+1. Push the PR branch — this triggers CodeRabbit and Gemini reviewers
+2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
+3. Collect ALL findings:
+   a. Evaluator QA verdicts (from queen conversation)
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+   c. Your own code integrity concerns
+4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
-   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-3. If NEW comments exist since your last check:
-   a. Spawn a Codex worker via HTTP API:
-      ```bash
-      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-        -H "Content-Type: application/json" \
-        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
-      ```
-   b. Assign it to resolve PR comments (`code-quality` role archetype)
-   c. Wait for worker completion
-   d. Commit and push fixes
-4. If NO new comments found: exit quality loop and mark session complete
-5. Repeat from step 1 (maximum 3 iterations)
+5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+6. Commit and push
+7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
+8. If NO new comments: exit quality loop and mark session complete
 
 ## Status Reporting
 
@@ -1573,6 +1741,12 @@ You are the **Master Planner** orchestrating a multi-agent investigation to crea
 
 - **Session ID**: {session_id}
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
+
+## Project Knowledge Intake
+
+Before investigating, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
 
 ## Configured Workers
 
@@ -1782,6 +1956,12 @@ You are the **Master Planner** orchestrating a Swarm investigation to create a d
 - **Mode**: Swarm (hierarchical)
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
 
+## Project Knowledge Intake
+
+Before investigating, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
 ## Swarm Configuration
 
 - **Planners**: {planner_count}
@@ -1899,7 +2079,12 @@ Write to `.hive-manager/{session_id}/plan.md`:
     }
 
     /// Build a minimal smoke test prompt that creates a simple plan without real investigation
-    fn build_smoke_test_prompt(session_id: &str, workers: &[AgentConfig]) -> String {
+    fn build_smoke_test_prompt(
+        session_id: &str,
+        workers: &[AgentConfig],
+        with_evaluator: bool,
+        qa_workers: Option<&[QaWorkerConfig]>,
+    ) -> String {
         // Build worker table and task list based on configured workers
         let mut worker_table = String::new();
         let mut task_list = String::new();
@@ -1936,6 +2121,70 @@ Write to `.hive-manager/{session_id}/plan.md`:
         if dependencies.is_empty() {
             dependencies = "None - single worker smoke test.".to_string();
         }
+
+        // Build evaluator/QA section if configured
+        let evaluator_section = if with_evaluator {
+            let qa_list = qa_workers.unwrap_or(&[]);
+            let mut qa_table = String::new();
+            let mut qa_tasks = String::new();
+            for (i, qw) in qa_list.iter().enumerate() {
+                let idx = i + 1;
+                let label = qw.label.as_deref().unwrap_or(Self::qa_worker_label(&qw.specialization));
+                qa_table.push_str(&format!("| QA Worker {} | {} | {} | {} |\n", idx, label, qw.specialization, qw.cli));
+                qa_tasks.push_str(&format!(
+                    "### QA Worker {} ({} - {}):\n\
+                     1. Read the evaluator prompt: `curl -s \"http://localhost:18800/api/sessions/{}/evaluators\"`\n\
+                     2. Exercise the {} endpoint smoke test\n\
+                     3. Post QA findings to shared conversation\n\
+                     4. Mark task file as COMPLETED\n\n",
+                    idx, label, qw.specialization, session_id, qw.specialization
+                ));
+            }
+            if qa_table.is_empty() {
+                qa_table = "| (no QA workers configured) | - | - | - |\n".to_string();
+                qa_tasks = "No QA workers configured. Evaluator will self-assess.\n".to_string();
+            }
+            format!(
+r#"
+
+## Evaluator & QA Configuration
+
+An **Evaluator** agent will be spawned after workers complete. It reviews the milestone handoff
+and coordinates QA workers to validate the work.
+
+| QA Worker | Label | Specialization | CLI |
+|-----------|-------|----------------|-----|
+{qa_table}
+## Evaluator Smoke Test Tasks
+
+After all worker tasks complete, the Evaluator will:
+1. List evaluators: `curl -s "http://localhost:18800/api/sessions/{session_id}/evaluators"`
+2. Review worker task files for COMPLETED status
+3. Coordinate QA workers (if any) to validate
+
+{qa_tasks}### Evaluator Verdict:
+1. Collect QA worker results
+2. Post verdict to queen conversation: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"evaluator","content":"QA_VERDICT: PASS - smoke test validated"}}'`
+"#,
+                qa_table = qa_table.trim_end(),
+                qa_tasks = qa_tasks,
+                session_id = session_id,
+            )
+        } else {
+            String::new()
+        };
+
+        let evaluator_test_items = if with_evaluator {
+            let qa_count = qa_workers.map(|q| q.len()).unwrap_or(0);
+            format!(
+                "\n4. Evaluator spawns and reviews worker output\n\
+                 5. {} QA worker(s) exercise their specialization\n\
+                 6. Evaluator posts QA_VERDICT to queen",
+                qa_count
+            )
+        } else {
+            String::new()
+        };
 
         format!(
 r#"# Smoke Test - Quick Flow Validation
@@ -1995,7 +2244,7 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
 
 ### Task N (additional workers):
 1. Send heartbeat, read shared, post completion message to queen, send completed heartbeat
-
+{evaluator_section}
 ## Files to Modify
 | File | Priority | Changes Needed |
 |------|----------|----------------|
@@ -2016,17 +2265,25 @@ After writing the plan, say: **"PLAN READY FOR REVIEW"**
 This tests that:
 1. Master Planner can write to the plan file
 2. User can see and approve the plan
-3. Flow continues to spawn Queen and all {worker_count} Workers"#,
+3. Flow continues to spawn Queen and all {worker_count} Workers{evaluator_test_items}"#,
             session_id = session_id,
             worker_count = workers.len(),
             worker_table = worker_table.trim_end(),
             task_list = task_list.trim_end(),
-            dependencies = dependencies.trim_end()
+            dependencies = dependencies.trim_end(),
+            evaluator_section = evaluator_section,
+            evaluator_test_items = evaluator_test_items,
         )
     }
 
     /// Build a smoke test prompt for Swarm mode that accounts for planners AND workers
-    fn build_swarm_smoke_test_prompt(session_id: &str, planner_count: u8, workers_per_planner: &[AgentConfig]) -> String {
+    fn build_swarm_smoke_test_prompt(
+        session_id: &str,
+        planner_count: u8,
+        workers_per_planner: &[AgentConfig],
+        with_evaluator: bool,
+        qa_workers: Option<&[QaWorkerConfig]>,
+    ) -> String {
         let workers_per = workers_per_planner.len();
         let total_workers = planner_count as usize * workers_per;
 
@@ -2069,6 +2326,50 @@ This tests that:
                 ));
             }
         }
+
+        // Build evaluator/QA section if configured
+        let evaluator_section = if with_evaluator {
+            let qa_list = qa_workers.unwrap_or(&[]);
+            let mut qa_info = String::new();
+            for (i, qw) in qa_list.iter().enumerate() {
+                let label = qw.label.as_deref().unwrap_or(Self::qa_worker_label(&qw.specialization));
+                qa_info.push_str(&format!("| QA Worker {} | {} | {} | {} |\n", i + 1, label, qw.specialization, qw.cli));
+            }
+            if qa_info.is_empty() {
+                qa_info = "| (no QA workers configured) | - | - | - |\n".to_string();
+            }
+            format!(
+r#"
+
+## Evaluator & QA Configuration
+
+An **Evaluator** agent validates work after all planners complete.
+
+| QA Worker | Label | Specialization | CLI |
+|-----------|-------|----------------|-----|
+{qa_info}
+After all planner domains complete, the Evaluator will:
+1. Review all worker outputs across all domains
+2. Coordinate QA workers to validate each domain
+3. Post QA_VERDICT to queen conversation
+"#,
+                qa_info = qa_info.trim_end(),
+            )
+        } else {
+            String::new()
+        };
+
+        let evaluator_test_items = if with_evaluator {
+            let qa_count = qa_workers.map(|q| q.len()).unwrap_or(0);
+            format!(
+                "\n6. Evaluator reviews all planner outputs\n\
+                 7. {} QA worker(s) validate domain results\n\
+                 8. Evaluator posts QA_VERDICT to queen",
+                qa_count
+            )
+        } else {
+            String::new()
+        };
 
         format!(
 r#"# Swarm Smoke Test - Quick Flow Validation
@@ -2120,7 +2421,7 @@ Testing {planner_count} planners, each with {workers_per} workers ({total_worker
 
 Each Planner spawns their workers sequentially and assigns subtasks:
 {worker_breakdown}
-
+{evaluator_section}
 ## Files to Modify
 | File | Priority | Changes Needed |
 |------|----------|----------------|
@@ -2146,14 +2447,16 @@ This tests that:
 2. User can see and approve the plan
 3. Flow continues to spawn Queen who spawns {planner_count} Planners sequentially
 4. Each Planner spawns {workers_per} Workers sequentially
-5. Queen commits between each Planner completion"#,
+5. Queen commits between each Planner completion{evaluator_test_items}"#,
             session_id = session_id,
             planner_count = planner_count,
             workers_per = workers_per,
             total_workers = total_workers,
             planner_table = planner_table.trim_end(),
             domain_tasks = domain_tasks.trim_end(),
-            worker_breakdown = worker_breakdown.trim_end()
+            worker_breakdown = worker_breakdown.trim_end(),
+            evaluator_section = evaluator_section,
+            evaluator_test_items = evaluator_test_items,
         )
     }
 
@@ -2249,6 +2552,12 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 - **Tasks Directory**: `.hive-manager/{session_id}/tasks/`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
 - **Conversation Files**: `.hive-manager/{session_id}/conversations/queen.md`, `.hive-manager/{session_id}/conversations/shared.md`, `.hive-manager/{session_id}/conversations/worker-N.md`
+
+## Project Knowledge Intake
+
+Before assigning work, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
 
 {plan_section}
 
@@ -2392,6 +2701,45 @@ Workers record learnings during task completion. Your curation responsibilities:
 - Before creating a PR
 - When learnings count exceeds 10
 
+## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
+
+When ALL workers have completed their tasks, you MUST signal the Evaluator:
+
+1. **Write the milestone-ready file** (this is what the Evaluator polls for):
+   ```bash
+   mkdir -p .hive-manager/{session_id}/peer
+   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
+   # Milestone Ready
+
+   ## Status: MILESTONE_READY
+   ## Milestone: [name or "smoke-test"]
+   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
+   ## Scope: [brief description of what was implemented]
+   ## Risks: [known risks or "none"]
+   MILESTONE_EOF
+   ```
+
+2. **Also notify the Evaluator via conversation** (backup signal):
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
+     -H "Content-Type: application/json" \
+     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
+   ```
+
+3. For smoke tests: write a simple contract for the Evaluator to grade against:
+   ```bash
+   mkdir -p .hive-manager/{session_id}/contracts
+   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
+   # Smoke Test Contract
+
+   ## Criteria
+   1. All workers spawned and ran successfully
+   2. Heartbeat API exercised by all workers
+   3. Conversation API exercised (queen inbox + shared channel)
+   4. All task files transitioned to COMPLETED status
+   CONTRACT_EOF
+   ```
+
 ## Coordination Protocol
 
 1. **Read the plan** - Check `.hive-manager/{session_id}/plan.md` if it exists
@@ -2401,33 +2749,64 @@ Workers record learnings during task completion. Your curation responsibilities:
 5. **Spawn next worker** - When a task completes, spawn the next worker if needed
 6. **Review & integrate** - Review worker output and coordinate integration
 7. **Commit & push** - You handle final commits (workers don't push)
+8. **Signal Evaluator** - Once all tasks are done, write milestone-ready (see above)
 
-## Quality Loop Protocol (MANDATORY after PR push)
+## Quality Reconciliation Protocol (MANDATORY after PR push)
 
 After you have committed and pushed all changes to the PR branch:
 
-1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
-2. Check for new PR review comments:
+### Step 1: Push PR and Start the Clock
+- Push the PR branch to GitHub
+- This triggers CodeRabbit and Gemini reviewers automatically
+- WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
+
+### Step 2: Collect ALL Findings
+Gather feedback from every source:
+
+a. **Evaluator QA verdicts** (if Evaluator is active):
+   ```bash
+   curl -s "http://localhost:18800/api/sessions/{{{{session_id}}}}/conversations/queen?since=0" | jq '.messages[] | select(.from == "evaluator")'
+   ```
+
+b. **CodeRabbit + Gemini PR comments**:
    ```bash
    gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
    ```
-3. If NEW comments exist since your last check:
-   a. Spawn a Codex worker via HTTP API:
-      ```bash
-      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-        -H "Content-Type: application/json" \
-        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
-      ```
-   b. Assign it to resolve PR comments (`code-quality` role archetype)
-   c. Wait for the worker to complete
-   d. Commit and push any fixes
-4. If NO new comments found: exit quality loop and mark session complete
-5. Repeat from step 1 (maximum 3 iterations)
+
+c. **Your own code integrity concerns** from reviewing the diff
+
+### Step 3: Spawn Reconciler (if findings exist)
+If there are findings from ANY source, spawn a **Reconciler** — a high-effort sub-agent that triages and deduplicates:
+
+```bash
+curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE the following findings into a unified fix list.\n\n## Evaluator QA Verdicts\n<paste evaluator findings>\n\n## External Reviewer Comments (CodeRabbit/Gemini)\n<paste PR comments>\n\n## Queen Code Integrity Concerns\n<paste your concerns>\n\nFor each finding:\n1. Deduplicate — group related comments about the same issue\n2. Detect conflicts — flag where a UX fix and a code refactor touch the same file\n3. Prioritize — HIGH (blocking), MEDIUM (should fix), LOW (nice to have)\n4. Produce a unified fix list as numbered items with file paths\n\nWrite the reconciled fix list to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
+```
+
+### Step 4: Execute Fixes
+Once the Reconciler completes and `.hive-manager/{{{{session_id}}}}/reconciliation.md` exists:
+
+a. Read the reconciled fix list
+b. Spawn code-quality workers to address the unified list:
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"code-quality","cli":"codex","initial_task":"<assign specific fixes from reconciliation.md>"}}'
+   ```
+c. Wait for workers to complete
+d. Review changes, commit, and push
+
+### Step 5: Repeat or Complete
+1. If NEW comments arrive after the push: repeat from Step 2 (maximum 3 iterations)
+2. If NO new comments found: exit quality loop and mark session complete
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
-[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
+[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
+[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
+[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete — session done
 ```
 
@@ -2463,6 +2842,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
                 "resolver" => "Address all reviewer findings: fix HIGH/MEDIUM issues, document skipped items with rationale.",
                 "tester" => "Run test suite, fix failures, document difficulties that couldn't be resolved.",
                 "code-quality" => "Resolve PR comments from external reviewers, ensure code meets quality standards.",
+                "reconciler" => "Deep-think reconciliation: collect Evaluator QA verdicts, CodeRabbit comments, and Gemini findings. Triage conflicts, deduplicate, and produce a unified fix list with priorities.",
                 _ => "General development tasks as assigned.",
             })
             .unwrap_or("General development tasks as assigned.");
@@ -2783,6 +3163,12 @@ You are the **Queen** orchestrating a multi-agent Swarm session. You spawn and c
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
 
+## Project Knowledge Intake
+
+Before assigning work, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
 ## Planners to Spawn
 
 You will spawn {planner_count} planners SEQUENTIALLY. Each planner spawns their own workers.
@@ -2869,6 +3255,45 @@ Workers and planners record learnings during task completion. Your curation resp
 - Before creating a PR
 - When learnings count exceeds 10
 
+## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
+
+When ALL workers/planners have completed, you MUST signal the Evaluator:
+
+1. **Write the milestone-ready file** (this is what the Evaluator polls for):
+   ```bash
+   mkdir -p .hive-manager/{session_id}/peer
+   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
+   # Milestone Ready
+
+   ## Status: MILESTONE_READY
+   ## Milestone: [name or "smoke-test"]
+   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
+   ## Scope: [brief description of what was implemented]
+   ## Risks: [known risks or "none"]
+   MILESTONE_EOF
+   ```
+
+2. **Also notify the Evaluator via conversation** (backup signal):
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
+     -H "Content-Type: application/json" \
+     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
+   ```
+
+3. For smoke tests: write a simple contract for the Evaluator to grade against:
+   ```bash
+   mkdir -p .hive-manager/{session_id}/contracts
+   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
+   # Smoke Test Contract
+
+   ## Criteria
+   1. All workers spawned and ran successfully
+   2. Heartbeat API exercised by all workers
+   3. Conversation API exercised (queen inbox + shared channel)
+   4. All task files transitioned to COMPLETED status
+   CONTRACT_EOF
+   ```
+
 ## SEQUENTIAL SPAWNING PROTOCOL WITH COMMITS (CRITICAL)
 
 You MUST spawn planners ONE AT A TIME and COMMIT between each:
@@ -2913,32 +3338,33 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 3. Run integration tests
 4. Final commit and push
 
-## Quality Loop Protocol (MANDATORY after PR push)
+## Quality Reconciliation Protocol (MANDATORY after PR push)
 
 After all planners complete, integration is done, and changes are pushed to the PR branch:
 
-1. WAIT 10 minutes (`sleep 600`) for reviewers to post comments
-2. Check for new PR review comments:
+1. Push triggers CodeRabbit and Gemini reviewers automatically
+2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
+3. Collect ALL findings:
+   a. Evaluator QA verdicts (from queen conversation)
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+   c. Your own code integrity concerns
+4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
-   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-3. If NEW comments exist since your last check:
-   a. Spawn a Codex worker via HTTP API:
-      ```bash
-      curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-        -H "Content-Type: application/json" \
-        -d '{{"role_type":"code-quality","cli":"{cli}"}}'
-      ```
-   b. Assign it to resolve PR comments (`code-quality` role archetype)
-   c. Wait for worker completion
-   d. Commit and push fixes
-4. If NO new comments found: exit quality loop and mark session complete
-5. Repeat from step 1 (maximum 3 iterations)
+5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+6. Commit and push
+7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
+8. If NO new comments: exit quality loop and mark session complete
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
-[TIMESTAMP] QUEEN: Found/No new PR comments
+[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
+[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
+[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
+[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete — session done
 ```
 
@@ -3055,6 +3481,66 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 "#, session_id = session_id, default_cli = default_cli);
 
         Self::write_tool_file(project_path, session_id, "spawn-worker.md", &spawn_worker_tool)?;
+
+        let spawn_qa_worker_tool = format!(r#"# Spawn QA Worker Tool
+
+Spawn a QA worker for the Evaluator.
+
+## HTTP API
+
+**Endpoint:** `POST http://localhost:18800/api/sessions/{session_id}/qa-workers`
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{{
+  "specialization": "ui",
+  "cli": "{default_cli}",
+  "initial_task": "Optional QA assignment"
+}}
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| specialization | string | Yes | QA specialization: `ui`, `api`, or `a11y` |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
+| model | string | No | Optional model override |
+| label | string | No | Custom label for the QA worker |
+| initial_task | string | No | Initial QA assignment |
+| parent_id | string | No | Parent evaluator ID (defaults to `{session_id}-evaluator`) |
+
+## Example Usage
+
+```bash
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/qa-workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"specialization": "ui", "cli": "{default_cli}"}}'
+
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/qa-workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"specialization": "api", "cli": "{default_cli}", "initial_task": "Validate milestone criteria 1-3 via HTTP requests"}}'
+```
+
+## Response
+
+```json
+{{
+  "worker_id": "{session_id}-qa-worker-N",
+  "role": "UI QA",
+  "cli": "{default_cli}",
+  "status": "Running",
+  "task_file": ".hive-manager/{session_id}/tasks/qa-worker-N-task.md"
+}}
+```
+"#, session_id = session_id, default_cli = default_cli);
+
+        Self::write_tool_file(project_path, session_id, "spawn-qa-worker.md", &spawn_qa_worker_tool)?;
 
         // List Workers tool
         let list_workers_tool = format!(r#"# List Workers Tool
@@ -3445,6 +3931,66 @@ Last updated: {timestamp}
 
         Ok(file_path)
     }
+
+    fn write_qa_task_file(
+        project_path: &PathBuf,
+        session_id: &str,
+        worker_index: u8,
+        specialization: &str,
+        initial_task: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+        std::fs::create_dir_all(&tasks_dir)
+            .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
+
+        let filename = format!("qa-worker-{}-task.md", worker_index);
+        let file_path = tasks_dir.join(&filename);
+
+        let (status, task_content) = if let Some(task) = initial_task {
+            ("ACTIVE", task.to_string())
+        } else {
+            ("STANDBY", "Awaiting QA assignment from the Evaluator. Monitor this file for updates.".to_string())
+        };
+
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let content = format!(
+"# Task Assignment - QA Worker {worker_index} ({specialization})
+
+## Status: {status}
+
+## Role Constraints
+
+- **EXECUTOR**: You have full authority to test and verify behavior within your QA specialization.
+- **SCOPE**: Stay within the assigned QA specialization and report criterion-numbered evidence.
+- **GIT**: Do NOT push or commit. Provide evidence and findings for the Evaluator to act on.
+
+## Instructions
+
+{task_content}
+
+## Completion Protocol
+
+When task is complete, update this file:
+1. Change Status to: COMPLETED
+2. Add a summary under a new Result section
+
+If blocked, change Status to: BLOCKED and describe the issue.
+
+---
+Last updated: {timestamp}
+",
+            worker_index = worker_index,
+            specialization = specialization,
+            status = status,
+            task_content = task_content,
+            timestamp = timestamp
+        );
+
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write QA task file: {}", e))?;
+
+        Ok(file_path)
+    }
     fn launch_solo_internal(
         &self,
         project_path: PathBuf,
@@ -3501,6 +4047,7 @@ Last updated: {timestamp}
             default_model: model,
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -3643,6 +4190,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -3659,6 +4207,13 @@ Last updated: {timestamp}
         // Initialize session storage
         self.init_session_storage(&session);
         self.ensure_task_watcher(&session.id, &session.project_path);
+        self.spawn_launch_evaluator_agents(
+            &session.id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+            config.smoke_test,
+        )?;
 
         Ok(session)
     }
@@ -3734,6 +4289,7 @@ Last updated: {timestamp}
             default_model: config.default_model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -3899,7 +4455,7 @@ Last updated: {timestamp}
         // Build the appropriate prompt based on mode
         let planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
-            Self::build_smoke_test_prompt(&session_id, &config.workers)
+            Self::build_smoke_test_prompt(&session_id, &config.workers, config.with_evaluator, config.qa_workers.as_deref())
         } else {
             // Pass workers info to Master Planner so it knows how many tasks to create
             let prompt = config.prompt.as_deref().unwrap_or("");
@@ -3961,6 +4517,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -4047,6 +4604,7 @@ Last updated: {timestamp}
             default_model: config.default_model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -4331,7 +4889,7 @@ Last updated: {timestamp}
         let planner_count = if config.planners.is_empty() { config.planner_count } else { config.planners.len() as u8 };
         let planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode (swarm) - {} planners, {} workers each", planner_count, config.workers_per_planner.len());
-            Self::build_swarm_smoke_test_prompt(&session_id, planner_count, &config.workers_per_planner)
+            Self::build_swarm_smoke_test_prompt(&session_id, planner_count, &config.workers_per_planner, config.with_evaluator, config.qa_workers.as_deref())
         } else {
             // Pass planners and workers info to Master Planner so it knows the full scope
             let prompt = config.prompt.as_deref().unwrap_or("");
@@ -4393,6 +4951,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -4551,18 +5110,21 @@ Last updated: {timestamp}
                 }
             };
 
-            self.launch_evaluator(session_id, config)?;
+            self.launch_evaluator(session_id, config, false)?;
             return Ok(());
         }
 
-        {
+        let timeout_secs = {
             let mut sessions = self.sessions.write();
-            if let Some(session) = sessions.get_mut(session_id) {
-                session.state = SessionState::QaInProgress;
-            }
-        }
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            session.state = qa_in_progress_state(&session.state);
+            session.qa_timeout_secs
+        };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        self.start_qa_timeout(session_id, timeout_secs);
 
         Ok(())
     }
@@ -4570,6 +5132,14 @@ Last updated: {timestamp}
     #[allow(dead_code)]
     pub fn on_qa_verdict(&self, session_id: &str, verdict: &str) -> Result<SessionState, String> {
         let normalized = verdict.trim().to_ascii_uppercase();
+        if !matches!(
+            normalized.as_str(),
+            "PASS" | "QA_VERDICT: PASS" | "FAIL" | "QA_VERDICT: FAIL"
+        ) {
+            return Err(format!("Unsupported QA verdict '{}'", verdict));
+        }
+
+        self.cancel_qa_timeout(session_id);
         match normalized.as_str() {
             "PASS" | "QA_VERDICT: PASS" => {
                 {
@@ -4599,17 +5169,13 @@ Last updated: {timestamp}
                         .get_mut(session_id)
                         .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-                    let next_iteration = match session.state {
-                        SessionState::QaFailed { iteration } => iteration.saturating_add(1),
-                        _ => 1,
-                    };
+                    let next_iteration = next_qa_failure_iteration(&session.state);
 
                     if next_iteration > session.max_qa_iterations {
                         session.state = SessionState::QaMaxRetriesExceeded;
+                        session.auth_strategy = AuthStrategy::None;
                     } else {
-                        session.state = SessionState::QaFailed {
-                            iteration: next_iteration,
-                        };
+                        session.state = SessionState::QaFailed { iteration: next_iteration };
                     }
 
                     session.state.clone()
@@ -4620,7 +5186,7 @@ Last updated: {timestamp}
 
                 Ok(next_state)
             }
-            _ => Err(format!("Unsupported QA verdict '{}'", verdict)),
+            _ => unreachable!("unsupported verdict already validated"),
         }
     }
 
@@ -4634,7 +5200,78 @@ Last updated: {timestamp}
                 .unwrap_or(DEFAULT_QA_TIMEOUT_SECS)
         );
         self.on_qa_verdict(session_id, "QA_VERDICT: PASS")?;
+
+        // Emit qa-timeout event
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("qa-timeout", serde_json::json!({
+                "session_id": session_id,
+                "action": "pass-with-warning"
+            }));
+        }
+
         Ok(())
+    }
+
+    /// Start a QA timeout timer. On expiry, auto-passes QA with a warning.
+    /// Cancel by calling `cancel_qa_timeout`.
+    pub fn start_qa_timeout(&self, session_id: &str, timeout_secs: u64) {
+        // Cancel any existing timer
+        self.cancel_qa_timeout(session_id);
+
+        let sid = session_id.to_string();
+        let sessions = Arc::clone(&self.sessions);
+        let app_handle = self.app_handle.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
+
+            // Check if still QaInProgress before timing out
+            let is_qa = {
+                let sessions = sessions.read();
+                sessions
+                    .get(&sid)
+                    .map(|s| matches!(s.state, SessionState::QaInProgress { .. }))
+                    .unwrap_or(false)
+            };
+
+            if is_qa {
+                tracing::warn!("QA timeout fired for session {} after {}s — auto-passing", sid, timeout_secs);
+
+                // Transition directly to Running (skip transient QaPassed to avoid race)
+                let updated_session = {
+                    let mut sessions = sessions.write();
+                    if let Some(session) = sessions.get_mut(&sid) {
+                        session.state = SessionState::Running;
+                        Some(session.clone())
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(ref app_handle) = app_handle {
+                    // Emit session update so frontend sees the state change
+                    if let Some(session) = updated_session {
+                        let _ = app_handle.emit("session-update", SessionUpdate { session });
+                    }
+                    let _ = app_handle.emit("qa-timeout", serde_json::json!({
+                        "session_id": sid,
+                        "action": "pass-with-warning"
+                    }));
+                }
+            }
+        });
+
+        let abort_handle = handle.abort_handle();
+        let mut handles = self.qa_timeout_handles.lock();
+        handles.insert(session_id.to_string(), abort_handle);
+    }
+
+    /// Cancel a pending QA timeout timer
+    pub fn cancel_qa_timeout(&self, session_id: &str) {
+        let mut handles = self.qa_timeout_handles.lock();
+        if let Some(handle) = handles.remove(session_id) {
+            handle.abort();
+        }
     }
 
     pub async fn on_fusion_variant_completed(&self, session_id: &str, variant_index: u8) -> Result<(), SessionError> {
@@ -4915,6 +5552,7 @@ Last updated: {timestamp}
                     agent.status = AgentStatus::Completed;
                 }
                 s.state = SessionState::Completed;
+                s.auth_strategy = AuthStrategy::None;
             }
         }
         self.emit_session_update(session_id);
@@ -5070,6 +5708,13 @@ Last updated: {timestamp}
         self.update_session_storage(session_id);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
+        self.spawn_launch_evaluator_agents(
+            session_id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+            config.smoke_test,
+        )?;
 
         // Clean up pending config file
         let _ = std::fs::remove_file(&pending_config_path);
@@ -5156,18 +5801,26 @@ Last updated: {timestamp}
             })
         }).collect();
 
+        let state = parse_persisted_session_state(&persisted.state);
+        let auth_strategy = if is_terminal_session_state(&state) {
+            AuthStrategy::None
+        } else {
+            AuthStrategy::from_persisted(&persisted.auth_strategy)
+        };
+
         // Create session object
         let session = Session {
             id: persisted.id.clone(),
             session_type,
             project_path: PathBuf::from(persisted.project_path),
-            state: parse_persisted_session_state(&persisted.state),
+            state,
             created_at: persisted.created_at,
             agents,
             default_cli: persisted.default_cli.clone(),
             default_model: persisted.default_model.clone(),
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
+            auth_strategy,
         };
 
         // Add to in-memory sessions
@@ -5294,6 +5947,13 @@ Last updated: {timestamp}
         // Update storage
         self.update_session_storage(session_id);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
+        self.spawn_launch_evaluator_agents(
+            session_id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+            config.smoke_test,
+        )?;
 
         // Clean up pending config file (keep swarm-planners.json for Queen reference)
         let _ = std::fs::remove_file(&pending_config_path);
@@ -5388,6 +6048,7 @@ Last updated: {timestamp}
             default_model: config.queen_config.model.clone(),
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: AuthStrategy::dev_bypass(),
         };
 
         {
@@ -5404,8 +6065,43 @@ Last updated: {timestamp}
         // Initialize session storage if available
         self.init_session_storage(&session);
         self.ensure_task_watcher(&session.id, &session.project_path);
+        self.spawn_launch_evaluator_agents(
+            &session.id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+            config.smoke_test,
+        )?;
 
         Ok(session)
+    }
+
+    fn spawn_launch_evaluator_agents(
+        &self,
+        session_id: &str,
+        with_evaluator: bool,
+        evaluator_config: Option<AgentConfig>,
+        _qa_workers: Option<&[QaWorkerConfig]>,
+        smoke_test: bool,
+    ) -> Result<(), String> {
+        if !with_evaluator {
+            return Ok(());
+        }
+
+        let evaluator_config = evaluator_config.unwrap_or(AgentConfig {
+            cli: String::new(),
+            model: None,
+            flags: vec![],
+            label: Some("Evaluator".to_string()),
+            role: None,
+            initial_prompt: None,
+        });
+
+        // Launch evaluator only — QA workers are spawned by the Evaluator
+        // itself after activation, based on milestone contract criteria
+        let _evaluator = self.launch_evaluator(session_id, evaluator_config, smoke_test)?;
+
+        Ok(())
     }
 
     /// Add a worker to an existing session
@@ -5428,7 +6124,7 @@ Last updated: {timestamp}
                 | SessionState::WaitingForWorker(_)
                 | SessionState::WaitingForPlanner(_)
                 | SessionState::SpawningEvaluator
-                | SessionState::QaInProgress
+                | SessionState::QaInProgress { .. }
                 | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
                 | SessionState::QaMaxRetriesExceeded
@@ -5526,7 +6222,7 @@ Last updated: {timestamp}
     }
 
     #[allow(dead_code)]
-    pub fn launch_evaluator(&self, session_id: &str, mut config: AgentConfig) -> Result<AgentInfo, String> {
+    pub fn launch_evaluator(&self, session_id: &str, mut config: AgentConfig, smoke_test: bool) -> Result<AgentInfo, String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -5555,7 +6251,9 @@ Last updated: {timestamp}
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
 
-        let evaluator_prompt = Self::build_evaluator_prompt(session_id, &config);
+        Self::write_tool_files(&session.project_path, session_id, &config.cli)?;
+
+        let evaluator_prompt = Self::build_evaluator_prompt(session_id, &config, smoke_test);
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -5590,17 +6288,20 @@ Last updated: {timestamp}
             parent_id: None,
         };
 
-        {
+        let timeout_secs = {
             let mut sessions = self.sessions.write();
-            if let Some(current) = sessions.get_mut(session_id) {
-                current.agents.push(agent_info.clone());
-                current.state = SessionState::QaInProgress;
-            }
-        }
+            let current = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            current.agents.push(agent_info.clone());
+            current.state = qa_in_progress_state(&current.state);
+            current.qa_timeout_secs
+        };
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
         self.ensure_task_watcher(session_id, &session.project_path);
+        self.start_qa_timeout(session_id, timeout_secs);
 
         Ok(agent_info)
     }
@@ -5610,6 +6311,7 @@ Last updated: {timestamp}
         &self,
         session_id: &str,
         mut config: AgentConfig,
+        specialization: String,
         parent_id: Option<String>,
     ) -> Result<AgentInfo, String> {
         let session = self
@@ -5617,8 +6319,21 @@ Last updated: {timestamp}
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
         let evaluator_id = parent_id.unwrap_or_else(|| format!("{}-evaluator", session_id));
-        if !session.agents.iter().any(|agent| agent.id == evaluator_id) {
-            return Err(format!("Evaluator {} not found for session {}", evaluator_id, session_id));
+        let parent_agent = session.agents.iter().find(|agent| agent.id == evaluator_id);
+        match parent_agent {
+            Some(agent) if matches!(agent.role, AgentRole::Evaluator) => {}
+            Some(_) => {
+                return Err(format!(
+                    "Cannot add QA worker: parent '{}' is not an Evaluator",
+                    evaluator_id
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "Evaluator {} not found for session {}",
+                    evaluator_id, session_id
+                ));
+            }
         }
 
         if config.cli.trim().is_empty() {
@@ -5626,6 +6341,9 @@ Last updated: {timestamp}
         }
         if config.model.is_none() {
             config.model = session.default_model.clone();
+        }
+        if config.label.is_none() {
+            config.label = Some(Self::qa_worker_label(&specialization).to_string());
         }
 
         let next_index = session
@@ -5636,7 +6354,20 @@ Last updated: {timestamp}
             + 1;
 
         let qa_worker_id = format!("{}-qa-worker-{}", session_id, next_index);
-        let qa_worker_prompt = Self::build_qa_worker_prompt(session_id, next_index, &config);
+        Self::write_qa_task_file(
+            &session.project_path,
+            session_id,
+            next_index,
+            &specialization,
+            config.initial_prompt.as_deref(),
+        )?;
+        let qa_worker_prompt = Self::build_qa_worker_prompt(
+            session_id,
+            next_index,
+            &specialization,
+            &config,
+            &session.auth_strategy,
+        );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -5679,7 +6410,7 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.push(agent_info.clone());
-                current.state = SessionState::QaInProgress;
+                current.state = qa_in_progress_state(&current.state);
             }
         }
 
@@ -5858,7 +6589,12 @@ Last updated: {timestamp}
             }
         }).collect();
 
-        let state_str = serialize_session_state(&session.state).to_string();
+        let state_str = serialize_session_state(&session.state);
+        let auth_strategy = if is_terminal_session_state(&session.state) {
+            AuthStrategy::None
+        } else {
+            session.auth_strategy.clone()
+        };
 
         PersistedSession {
             id: session.id.clone(),
@@ -5871,6 +6607,7 @@ Last updated: {timestamp}
             default_model: session.default_model.clone(),
             max_qa_iterations: session.max_qa_iterations,
             qa_timeout_secs: session.qa_timeout_secs,
+            auth_strategy: auth_strategy.persist_value(),
         }
     }
 
@@ -6072,6 +6809,20 @@ fn parse_indexed_role(role: &str, prefix: &str) -> Option<(u8, Option<String>)> 
 }
 
 fn parse_persisted_session_state(state: &str) -> SessionState {
+    if let Some(iteration) = state.strip_prefix("QaInProgress:") {
+        return SessionState::QaInProgress {
+            iteration: iteration.parse::<u8>().ok().filter(|iteration| *iteration > 0),
+        };
+    }
+    if let Some(iteration) = state.strip_prefix("QaFailed:") {
+        let iteration = iteration
+            .parse::<u8>()
+            .ok()
+            .filter(|iteration| *iteration > 0)
+            .unwrap_or(1);
+        return SessionState::QaFailed { iteration };
+    }
+
     match state {
         "Planning" => SessionState::Planning,
         "PlanReady" => SessionState::PlanReady,
@@ -6087,7 +6838,7 @@ fn parse_persisted_session_state(state: &str) -> SessionState {
         "AwaitingVerdictSelection" => SessionState::AwaitingVerdictSelection,
         "MergingWinner" => SessionState::MergingWinner,
         "SpawningEvaluator" => SessionState::SpawningEvaluator,
-        "QaInProgress" => SessionState::QaInProgress,
+        "QaInProgress" => SessionState::QaInProgress { iteration: None },
         "QaPassed" => SessionState::QaPassed,
         "QaFailed" => SessionState::QaFailed { iteration: 1 },
         "QaMaxRetriesExceeded" => SessionState::QaMaxRetriesExceeded,
@@ -6100,32 +6851,35 @@ fn parse_persisted_session_state(state: &str) -> SessionState {
     }
 }
 
-fn serialize_session_state(state: &SessionState) -> &'static str {
+fn serialize_session_state(state: &SessionState) -> String {
     match state {
-        SessionState::Planning => "Planning",
-        SessionState::PlanReady => "PlanReady",
-        SessionState::Starting => "Starting",
-        SessionState::SpawningWorker(_) => "SpawningWorker",
-        SessionState::WaitingForWorker(_) => "WaitingForWorker",
-        SessionState::SpawningPlanner(_) => "SpawningPlanner",
-        SessionState::WaitingForPlanner(_) => "WaitingForPlanner",
-        SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant",
-        SessionState::WaitingForFusionVariants => "WaitingForFusionVariants",
-        SessionState::SpawningJudge => "SpawningJudge",
-        SessionState::Judging => "Judging",
-        SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection",
-        SessionState::MergingWinner => "MergingWinner",
-        SessionState::SpawningEvaluator => "SpawningEvaluator",
-        SessionState::QaInProgress => "QaInProgress",
-        SessionState::QaPassed => "QaPassed",
-        SessionState::QaFailed { .. } => "QaFailed",
-        SessionState::QaMaxRetriesExceeded => "QaMaxRetriesExceeded",
-        SessionState::Running => "Running",
-        SessionState::Paused => "Paused",
-        SessionState::Completed => "Completed",
-        SessionState::Closing => "Closing",
-        SessionState::Closed => "Closed",
-        SessionState::Failed(_) => "Failed",
+        SessionState::Planning => "Planning".to_string(),
+        SessionState::PlanReady => "PlanReady".to_string(),
+        SessionState::Starting => "Starting".to_string(),
+        SessionState::SpawningWorker(_) => "SpawningWorker".to_string(),
+        SessionState::WaitingForWorker(_) => "WaitingForWorker".to_string(),
+        SessionState::SpawningPlanner(_) => "SpawningPlanner".to_string(),
+        SessionState::WaitingForPlanner(_) => "WaitingForPlanner".to_string(),
+        SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant".to_string(),
+        SessionState::WaitingForFusionVariants => "WaitingForFusionVariants".to_string(),
+        SessionState::SpawningJudge => "SpawningJudge".to_string(),
+        SessionState::Judging => "Judging".to_string(),
+        SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection".to_string(),
+        SessionState::MergingWinner => "MergingWinner".to_string(),
+        SessionState::SpawningEvaluator => "SpawningEvaluator".to_string(),
+        SessionState::QaInProgress { iteration } => match iteration {
+            Some(iteration) if *iteration > 0 => format!("QaInProgress:{}", iteration),
+            _ => "QaInProgress".to_string(),
+        },
+        SessionState::QaPassed => "QaPassed".to_string(),
+        SessionState::QaFailed { iteration } => format!("QaFailed:{}", iteration),
+        SessionState::QaMaxRetriesExceeded => "QaMaxRetriesExceeded".to_string(),
+        SessionState::Running => "Running".to_string(),
+        SessionState::Paused => "Paused".to_string(),
+        SessionState::Completed => "Completed".to_string(),
+        SessionState::Closing => "Closing".to_string(),
+        SessionState::Closed => "Closed".to_string(),
+        SessionState::Failed(_) => "Failed".to_string(),
     }
 }
 
@@ -6178,7 +6932,8 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_persisted_session_state, serialize_session_state, SessionState};
+    use super::{parse_persisted_session_state, serialize_session_state, AgentConfig, AuthStrategy, SessionController, SessionState};
+    use std::path::PathBuf;
 
     #[test]
     fn session_state_variants_exist() {
@@ -6194,7 +6949,7 @@ mod tests {
         let _awaiting_verdict = SessionState::AwaitingVerdictSelection;
         let _merging_winner = SessionState::MergingWinner;
         let _spawning_evaluator = SessionState::SpawningEvaluator;
-        let _qa_in_progress = SessionState::QaInProgress;
+        let _qa_in_progress = SessionState::QaInProgress { iteration: None };
         let _qa_passed = SessionState::QaPassed;
         let _qa_failed = SessionState::QaFailed { iteration: 1 };
         let _qa_max_retries = SessionState::QaMaxRetriesExceeded;
@@ -6214,12 +6969,64 @@ mod tests {
 
     #[test]
     fn persisted_qa_state_round_trip_uses_safe_fallbacks() {
-        assert_eq!(parse_persisted_session_state("QaInProgress"), SessionState::QaInProgress);
+        assert_eq!(
+            parse_persisted_session_state("QaInProgress"),
+            SessionState::QaInProgress { iteration: None }
+        );
+        assert_eq!(
+            parse_persisted_session_state("QaInProgress:2"),
+            SessionState::QaInProgress { iteration: Some(2) }
+        );
         assert_eq!(
             parse_persisted_session_state("QaFailed"),
             SessionState::QaFailed { iteration: 1 }
         );
+        assert_eq!(
+            parse_persisted_session_state("QaFailed:3"),
+            SessionState::QaFailed { iteration: 3 }
+        );
+        assert_eq!(
+            serialize_session_state(&SessionState::QaInProgress { iteration: Some(2) }),
+            "QaInProgress:2"
+        );
         assert_eq!(serialize_session_state(&SessionState::QaPassed), "QaPassed");
+    }
+
+    #[test]
+    fn qa_worker_prompt_uses_requested_specialization() {
+        let prompt = SessionController::build_qa_worker_prompt(
+            "session-123",
+            1,
+            "a11y",
+            &AgentConfig::default(),
+            &AuthStrategy::default(),
+        );
+
+        assert!(prompt.contains("Accessibility Tester"));
+        assert!(prompt.contains("axe-core"));
+        assert!(!prompt.contains("UI Tester"));
+    }
+
+    #[test]
+    fn write_tool_files_includes_spawn_qa_worker_doc() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        SessionController::write_tool_files(
+            &PathBuf::from(temp_dir.path()),
+            "session-123",
+            "claude",
+        )
+        .expect("write tool files");
+
+        let tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("spawn-qa-worker.md");
+        let content = std::fs::read_to_string(tool_path).expect("read QA tool doc");
+
+        assert!(content.contains("/api/sessions/session-123/qa-workers"));
+        assert!(content.contains("\"specialization\": \"ui\""));
     }
 }
 

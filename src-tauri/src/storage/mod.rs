@@ -97,6 +97,8 @@ pub struct PersistedSession {
     pub max_qa_iterations: u8,
     #[serde(default = "default_qa_timeout_secs")]
     pub qa_timeout_secs: u64,
+    #[serde(default)]
+    pub auth_strategy: String,
 }
 
 fn default_cli() -> String {

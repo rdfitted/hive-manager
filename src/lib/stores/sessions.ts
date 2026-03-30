@@ -49,7 +49,18 @@ export interface HiveLaunchConfig {
   workers: AgentConfig[];
   prompt?: string;
   with_planning?: boolean;
+  with_evaluator?: boolean;
+  evaluator_config?: AgentConfig;
+  qa_workers?: QaWorkerConfig[];
   smoke_test?: boolean;
+}
+
+export interface QaWorkerConfig {
+  specialization: 'ui' | 'api' | 'a11y';
+  cli: string;
+  model?: string;
+  flags: string[];
+  label?: string;
 }
 
 export interface FusionVariantConfig {
@@ -82,6 +93,9 @@ export interface SwarmLaunchConfig {
   workers_per_planner: AgentConfig[];     // Workers config (applied to each planner)
   prompt?: string;
   with_planning?: boolean;
+  with_evaluator?: boolean;
+  evaluator_config?: AgentConfig;
+  qa_workers?: QaWorkerConfig[];
   smoke_test?: boolean;
 }
 

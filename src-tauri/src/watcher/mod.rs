@@ -58,6 +58,9 @@ impl TaskFileWatcher {
         let peer_path = session_path.join("peer");
         std::fs::create_dir_all(&peer_path).ok();
         watcher.watch(&peer_path, RecursiveMode::NonRecursive)?;
+        let contracts_path = session_path.join("contracts");
+        std::fs::create_dir_all(&contracts_path).ok();
+        watcher.watch(&contracts_path, RecursiveMode::NonRecursive)?;
 
         let session_id_owned = session_id.to_string();
         let app_handle_clone = app_handle.clone();
@@ -130,6 +133,15 @@ impl TaskFileWatcher {
         }
     }
 
+    fn contract_event_type(path: &Path) -> Option<&'static str> {
+        let filename = path.file_name()?.to_str()?;
+        if filename.starts_with("milestone-") && filename.ends_with(".md") {
+            Some("contract-created")
+        } else {
+            None
+        }
+    }
+
     fn handle_event(
         event: &Event,
         session_id: &str,
@@ -140,6 +152,19 @@ impl TaskFileWatcher {
         let mut should_emit_plan_update = false;
 
         for path in &event.paths {
+            if let Some(event_type) = Self::contract_event_type(path) {
+                let _ = app_handle.emit(
+                    event_type,
+                    PeerEventPayload {
+                        session_id: session_id.to_string(),
+                        event_type: event_type.to_string(),
+                        path: path.to_string_lossy().to_string(),
+                    },
+                );
+                should_emit_plan_update = true;
+                continue;
+            }
+
             if let Some(event_type) = Self::peer_event_type(path) {
                 let _ = app_handle.emit(
                     event_type,
@@ -262,6 +287,22 @@ mod tests {
         );
         assert_eq!(
             TaskFileWatcher::peer_event_type(&PathBuf::from("other.json")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_contract_event_type() {
+        assert_eq!(
+            TaskFileWatcher::contract_event_type(&PathBuf::from("milestone-1.md")),
+            Some("contract-created")
+        );
+        assert_eq!(
+            TaskFileWatcher::contract_event_type(&PathBuf::from("milestone-final.md")),
+            Some("contract-created")
+        );
+        assert_eq!(
+            TaskFileWatcher::contract_event_type(&PathBuf::from("milestone-1.json")),
             None
         );
     }

@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
@@ -261,6 +261,32 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     }
   }
 
+  let withPlanning = true;
+  let withEvaluator = true;
+  let evaluatorConfig: AgentConfig = {
+    cli: 'claude',
+    flags: [],
+    label: 'Evaluator',
+  };
+
+  let qaWorkers: QaWorkerConfig[] = [
+    { specialization: 'ui', cli: 'claude', flags: [] },
+    { specialization: 'api', cli: 'claude', flags: [] },
+    { specialization: 'a11y', cli: 'claude', flags: [] },
+  ];
+
+  function addQaWorker() {
+    if (qaWorkers.length < 6) {
+      qaWorkers = [...qaWorkers, { specialization: 'ui', cli: 'claude', flags: [] }];
+    }
+  }
+
+  function removeQaWorker(index: number) {
+    if (qaWorkers.length > 0) {
+      qaWorkers = qaWorkers.filter((_, i) => i !== index);
+    }
+  }
+
   async function handleSubmit(smokeTest: boolean = false) {
     if (!projectPath.trim()) return;
 
@@ -282,8 +308,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           queen_config: queenConfig,
           workers: workersWithRoles,
           prompt: prompt || undefined,
-          with_planning: true, // Planning is always enabled
+          with_planning: withPlanning,
           smoke_test: smokeTest,
+          with_evaluator: withEvaluator,
+          evaluator_config: withEvaluator ? evaluatorConfig : undefined,
+          qa_workers: withEvaluator ? qaWorkers : undefined,
         };
         dispatch('launchHive', config);
       } else if (mode === 'swarm') {
@@ -304,6 +333,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           prompt: prompt || undefined,
           with_planning: true, // Planning is always enabled
           smoke_test: smokeTest,
+          with_evaluator: withEvaluator,
+          evaluator_config: withEvaluator ? evaluatorConfig : undefined,
+          qa_workers: withEvaluator ? qaWorkers : undefined,
         };
         dispatch('launchSwarm', config);
       } else if (mode === 'solo') {
@@ -418,6 +450,72 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <div class="form-section">
             <h3>Queen Configuration</h3>
             <AgentConfigEditor bind:config={queenConfig} showLabel={true} />
+          </div>
+
+          <div class="form-section">
+            <h3>Orchestration Options</h3>
+            <div class="checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" bind:checked={withPlanning} />
+                <div class="checkbox-text">
+                  <span class="checkbox-title">Enable Planning Phase</span>
+                  <span class="checkbox-description">Master Planner analyzes the project and creates a task list before workers start.</span>
+                </div>
+              </label>
+            </div>
+            <div class="checkbox-group">
+              <label class="checkbox-label">
+                <input type="checkbox" bind:checked={withEvaluator} />
+                <div class="checkbox-text">
+                  <span class="checkbox-title">Enable Evaluator Peer</span>
+                  <span class="checkbox-description">Independent agent that verifies milestone completion and manages QA workers.</span>
+                </div>
+              </label>
+            </div>
+            {#if withEvaluator}
+              <div class="evaluator-config subsection">
+                <h4>Evaluator Configuration</h4>
+                <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />
+              </div>
+
+              <div class="qa-workers-config subsection">
+                <div class="section-header">
+                  <h4>QA Workers ({qaWorkers.length})</h4>
+                  <button type="button" class="add-button small" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>
+                    + Add
+                  </button>
+                </div>
+                <div class="workers-list">
+                  {#each qaWorkers as worker, i (i)}
+                    <div class="worker-card qa-worker-card">
+                      <div class="card-header">
+                        <span class="card-title">QA Worker {i + 1}</span>
+                        <button
+                          type="button"
+                          class="remove-button small"
+                          on:click={() => removeQaWorker(i)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      <div class="role-selector small">
+                        <label for="qa-spec-{i}">Specialization</label>
+                        <select
+                          id="qa-spec-{i}"
+                          bind:value={worker.specialization}
+                          class="role-select"
+                        >
+                          <option value="ui">UI Tester</option>
+                          <option value="api">API Tester</option>
+                          <option value="a11y">A11Y Tester</option>
+                        </select>
+                      </div>
+                      <AgentConfigEditor bind:config={worker} showLabel={false} />
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
           </div>
         {/if}
 
@@ -841,6 +939,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: 6px;
+  }
+
+  .qa-worker-card {
+    border-left: 3px solid #9333ea;
   }
 
   .worker-mini-card {

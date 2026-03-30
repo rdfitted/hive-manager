@@ -2,7 +2,7 @@ import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-export type MessageType = 'Task' | 'Progress' | 'Completion' | 'Error' | 'System' | 'Judge';
+export type MessageType = 'Task' | 'Progress' | 'Completion' | 'Error' | 'System' | 'Judge' | 'PeerFeedback' | 'MilestoneReady' | 'QaVerdict';
 
 export interface CoordinationMessage {
   id: string;

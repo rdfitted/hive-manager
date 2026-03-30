@@ -115,6 +115,9 @@ pub async fn launch_solo(
         workers: vec![],
         prompt: task_description.filter(|t| !t.trim().is_empty()),
         with_planning: false,
+        with_evaluator: false,
+        evaluator_config: None,
+        qa_workers: None,
         smoke_test: false,
     };
 

@@ -9,7 +9,7 @@ use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
-use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo};
+use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig};
 use crate::coordination::InjectionManager;
 use parking_lot::RwLock;
@@ -69,6 +69,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         default_model: Some("opus-4-6".to_string()),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        auth_strategy: AuthStrategy::default(),
     }
 }
 
@@ -98,6 +99,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         default_model: Some("opus-4-6".to_string()),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        auth_strategy: AuthStrategy::default(),
     }
 }
 
@@ -1762,6 +1764,152 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_add_qa_worker_rejects_invalid_cli() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-invalid-qa-cli");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-qa-cli-test", temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({
+        "specialization": "ui",
+        "cli": "invalid-command"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-qa-cli-test/qa-workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let error_msg = response_json.get("error").unwrap().as_str().unwrap();
+    assert!(error_msg.contains("Invalid CLI"), "Error should mention invalid CLI: {}", error_msg);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_add_qa_worker_rejects_invalid_specialization() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-invalid-qa-specialization");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-qa-specialization", temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({
+        "specialization": "performance"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-qa-specialization/qa-workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let error_msg = response_json.get("error").unwrap().as_str().unwrap();
+    assert!(error_msg.contains("Invalid QA specialization"), "Error should mention invalid specialization: {}", error_msg);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_add_qa_worker_rejects_path_traversal_session_id() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "specialization": "ui"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/..evil/qa-workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let error_msg = response_json.get("error").unwrap().as_str().unwrap();
+    assert!(error_msg.contains("Invalid session ID"), "Error should mention invalid session ID: {}", error_msg);
+}
+
+#[tokio::test]
+async fn test_add_qa_worker_valid_request_reaches_controller() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-valid-qa-worker");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let mut session = make_test_session("session-qa-valid", temp_dir.to_str().unwrap());
+    session.agents.push(AgentInfo {
+        id: "session-qa-valid-evaluator".to_string(),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+    });
+    controller.read().insert_test_session(session);
+
+    let body = serde_json::json!({
+        "specialization": "a11y",
+        "cli": "droid"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-qa-valid/qa-workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Valid QA worker request should pass handler validation and reach controller logic"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 // --- PersistedSession serde tests ---
 
 #[test]
@@ -1777,6 +1925,7 @@ fn test_persisted_session_serializes_default_cli() {
         default_model: Some("gemini-2.5-pro".to_string()),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        auth_strategy: String::new(),
     };
 
     let json = serde_json::to_string(&session).unwrap();
