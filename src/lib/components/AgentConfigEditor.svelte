@@ -42,13 +42,21 @@
     { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
   ];
 
+  const cursorPresets: PresetOption[] = [
+    { value: 'composer-2', label: 'Composer 2.0' },
+    { value: 'composer-2-fast', label: 'Composer 2.0 Fast' },
+    { value: 'composer-1', label: 'Composer 1' },
+  ];
+
   $: presetOptions = config.cli === 'claude'
     ? claudePresets
     : config.cli === 'codex'
       ? codexPresets
       : config.cli === 'gemini'
         ? geminiPresets
-        : [];
+        : config.cli === 'cursor'
+          ? cursorPresets
+          : [];
 
   $: selectedPreset = detectPreset(config);
 
@@ -58,7 +66,9 @@
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh"'
       : config.cli === 'gemini'
         ? 'Gemini model IDs for `gemini -m`'
-        : '';
+        : config.cli === 'cursor'
+          ? 'Cursor Composer mode selection'
+          : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -79,7 +89,7 @@
     } else if (nextCli === 'droid') {
       model = 'glm-4.7';
     } else if (nextCli === 'cursor') {
-      model = 'composer-1';
+      model = 'composer-2';
     } else if (nextCli === 'opencode') {
       model = 'opencode/big-pickle';
     } else if (nextCli === 'qwen') {
@@ -233,6 +243,13 @@
       return 'custom';
     }
 
+    if (agent.cli === 'cursor') {
+      if (model === 'composer-2') return 'composer-2';
+      if (model === 'composer-2-fast') return 'composer-2-fast';
+      if (model === 'composer-1') return 'composer-1';
+      return 'custom';
+    }
+
     return 'custom';
   }
 
@@ -306,6 +323,11 @@
       case 'gemini-2.5-flash-lite':
         model = preset;
         break;
+      case 'composer-2':
+      case 'composer-2-fast':
+      case 'composer-1':
+        model = preset;
+        break;
       default:
         return;
     }
@@ -357,7 +379,7 @@
     </span>
   </div>
 
-  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini'}
+  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini' || config.cli === 'cursor'}
     <div class="field">
       <label for="preset">Model &amp; Effort</label>
       <select
