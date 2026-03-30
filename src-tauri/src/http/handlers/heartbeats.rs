@@ -90,7 +90,7 @@ pub async fn get_active_sessions(
 
     let sessions: Vec<ActiveSessionInfo> = all_sessions
         .into_iter()
-        .filter(|s| s.state.is_active())
+        .filter(|s| s.state.is_monitorable())
         .map(|session| {
             let agents_with_heartbeats = controller.get_heartbeat_info(&session.id);
             let agents: Vec<ActiveAgentInfo> = session

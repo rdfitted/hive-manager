@@ -12,6 +12,7 @@
 
   function getRoleName(role: AgentInfo['role']): string {
     if (typeof role === 'object' && role !== null) {
+      if ('Judge' in role) return 'Judge';
       if ('Planner' in role) return `Planner ${role.Planner.index}`;
       if ('Worker' in role) return `Worker ${role.Worker.index}`;
       if ('QaWorker' in role) return `QA Worker ${role.QaWorker.index}`;
@@ -20,13 +21,13 @@
     const k = serdeEnumVariantName(role);
     if (k === 'Queen') return 'Queen';
     if (k === 'Evaluator') return 'Evaluator';
-    if (k === 'Judge') return 'Judge';
     if (k === 'MasterPlanner') return 'Master Planner';
     return 'Agent';
   }
 
   function getRoleIcon(role: AgentInfo['role']): string {
     if (typeof role === 'object' && role !== null) {
+      if ('Judge' in role) return '⚖';
       if ('Planner' in role) return '◆';
       if ('Worker' in role) return '●';
       if ('QaWorker' in role) return '🔬';
@@ -35,7 +36,6 @@
     const k = serdeEnumVariantName(role);
     if (k === 'Queen') return '♕';
     if (k === 'Evaluator') return '🔍';
-    if (k === 'Judge') return '⚖';
     if (k === 'MasterPlanner') return '📋';
     return '○';
   }

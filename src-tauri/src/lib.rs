@@ -94,7 +94,7 @@ pub fn run() {
                     let sessions = controller.list_sessions();
                     let running_session_ids: Vec<String> = sessions
                         .iter()
-                        .filter(|s| s.state.is_active())
+                        .filter(|s| s.state.is_monitorable())
                         .map(|s| s.id.clone())
                         .collect();
                     drop(sessions);

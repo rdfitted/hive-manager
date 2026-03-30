@@ -6,7 +6,7 @@ export type AgentRole =
   | 'MasterPlanner'
   | 'Queen'
   | 'Evaluator'
-  | 'Judge'
+  | { Judge: { session_id: string } }
   | { Planner: { index: number } }
   | { Worker: { index: number; parent: string | null } }
   | { QaWorker: { index: number; parent: string | null } }

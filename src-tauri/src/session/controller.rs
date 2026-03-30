@@ -90,7 +90,7 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    pub fn is_active(&self) -> bool {
+    pub fn is_monitorable(&self) -> bool {
         matches!(
             self,
             SessionState::Running
@@ -98,9 +98,7 @@ impl SessionState {
                 | SessionState::WaitingForPlanner(_)
                 | SessionState::SpawningEvaluator
                 | SessionState::QaInProgress
-                | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
-                | SessionState::QaMaxRetriesExceeded
         )
     }
 }
@@ -250,8 +248,8 @@ unsafe impl Send for SessionController {}
 unsafe impl Sync for SessionController {}
 
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
-fn get_polling_instructions(cli: &str, task_file: &str) -> String {
-    match CliRegistry::get_behavior(cli) {
+fn get_polling_instructions(cli: &str, task_file: &str, role_type: Option<&str>) -> String {
+    match CliRegistry::get_behavior_for_role(cli, role_type) {
         CliBehavior::ExplicitPolling => {
             format!(
                 r#"
@@ -1061,7 +1059,7 @@ Last updated: {timestamp}
         cli: &str,
     ) -> String {
         let task_file = format!(".hive-manager/{}/tasks/fusion-variant-{}-task.md", session_id, variant_index);
-        let polling_instructions = get_polling_instructions(cli, &task_file);
+        let polling_instructions = get_polling_instructions(cli, &task_file, None);
 
         format!(
 r#"You are a Fusion worker implementing variant "{variant_name}".
@@ -2470,7 +2468,11 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             .unwrap_or("General development tasks as assigned.");
 
         let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index);
-        let polling_instructions = get_polling_instructions(&config.cli, &task_file);
+        let polling_instructions = get_polling_instructions(
+            &config.cli,
+            &task_file,
+            config.role.as_ref().map(|role| role.role_type.as_str()),
+        );
 
         format!(
 r#"# Worker {index} ({role_name}) - Hive Session

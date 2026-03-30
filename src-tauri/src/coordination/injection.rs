@@ -86,14 +86,14 @@ impl InjectionManager {
             .append_coordination_log(session_id, &coord_message)
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
+        // Only persist watcher-visible state after PTY delivery succeeds.
+        self.write_to_agent(target_worker_id, message)?;
+
         if target_worker_id.ends_with("-evaluator") {
             self.write_session_peer_message(session_id, |state| {
                 state.write_milestone_ready(queen_id, target_worker_id, message)
             })?;
         }
-
-        // Write to worker's PTY stdin
-        self.write_to_agent(target_worker_id, message)?;
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
@@ -121,8 +121,15 @@ impl InjectionManager {
                 "Evaluator cannot inject directly into Queen workers".to_string(),
             ));
         }
+        let target_is_queen = target_agent_id.ends_with("-queen");
+        let target_is_qa_worker = is_qa_worker_id(target_agent_id);
+        if !target_is_queen && !target_is_qa_worker {
+            return Err(InjectionError::NotAuthorized(
+                "Evaluator can only inject into the Queen or QA workers".to_string(),
+            ));
+        }
 
-        let coord_message = if target_agent_id.ends_with("-queen") {
+        let coord_message = if target_is_queen {
             CoordinationMessage::qa_verdict(
                 &format_agent_display(evaluator_id),
                 &format_agent_display(target_agent_id),
@@ -140,7 +147,10 @@ impl InjectionManager {
             .append_coordination_log(session_id, &coord_message)
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
-        if target_agent_id.ends_with("-queen") {
+        // Only persist watcher-visible state after PTY delivery succeeds.
+        self.write_to_agent(target_agent_id, message)?;
+
+        if target_is_queen {
             self.write_session_peer_message(session_id, |state| {
                 state.write_qa_verdict(evaluator_id, target_agent_id, message)
             })?;
@@ -149,8 +159,6 @@ impl InjectionManager {
                 state.write_evaluator_feedback(evaluator_id, target_agent_id, message)
             })?;
         }
-
-        self.write_to_agent(target_agent_id, message)?;
 
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("coordination-message", &coord_message);

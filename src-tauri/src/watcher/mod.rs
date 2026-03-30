@@ -137,6 +137,8 @@ impl TaskFileWatcher {
         last_emit: &Arc<Mutex<Instant>>,
         debounce: Duration,
     ) {
+        let mut should_emit_plan_update = false;
+
         for path in &event.paths {
             if let Some(event_type) = Self::peer_event_type(path) {
                 let _ = app_handle.emit(
@@ -147,11 +149,8 @@ impl TaskFileWatcher {
                         path: path.to_string_lossy().to_string(),
                     },
                 );
-                if Self::is_debounced(last_emit, debounce) {
-                    return;
-                }
-                let _ = app_handle.emit("plan-update", session_id);
-                return;
+                should_emit_plan_update = true;
+                continue;
             }
 
             let worker_id = Self::extract_worker_id(path);
@@ -192,13 +191,13 @@ impl TaskFileWatcher {
                         let _ = app_handle.emit("evaluator-task-completed", payload);
                     }
 
-                    if Self::is_debounced(last_emit, debounce) {
-                        return;
-                    }
-                    let _ = app_handle.emit("plan-update", session_id);
-                    return;
+                    should_emit_plan_update = true;
                 }
             }
+        }
+
+        if should_emit_plan_update && !Self::is_debounced(last_emit, debounce) {
+            let _ = app_handle.emit("plan-update", session_id);
         }
     }
 }
