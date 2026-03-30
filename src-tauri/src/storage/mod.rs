@@ -93,10 +93,22 @@ pub struct PersistedSession {
     pub default_cli: String,
     #[serde(default)]
     pub default_model: Option<String>,
+    #[serde(default = "default_max_qa_iterations")]
+    pub max_qa_iterations: u8,
+    #[serde(default = "default_qa_timeout_secs")]
+    pub qa_timeout_secs: u64,
 }
 
 fn default_cli() -> String {
     "claude".to_string()
+}
+
+fn default_max_qa_iterations() -> u8 {
+    3
+}
+
+fn default_qa_timeout_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +429,14 @@ impl SessionStorage {
         default_roles.insert("code-quality".to_string(), RoleDefaults {
             cli: "codex".to_string(),
             model: "gpt-5.4".to_string(),
+        });
+        default_roles.insert("evaluator".to_string(), RoleDefaults {
+            cli: "qwen".to_string(),
+            model: "qwen3-coder".to_string(),
+        });
+        default_roles.insert("qa-worker".to_string(), RoleDefaults {
+            cli: "gemini".to_string(),
+            model: "gemini-2.5-pro".to_string(),
         });
 
         AppConfig {

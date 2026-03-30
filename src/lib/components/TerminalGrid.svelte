@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AgentInfo } from '$lib/stores/sessions';
+  import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
   import Terminal from './Terminal.svelte';
 
   interface Props {
@@ -29,11 +29,14 @@
 
   function getRoleLabel(agent: AgentInfo) {
     if (agent.config?.label) return agent.config.label;
-    if (agent.role === 'Queen') return 'Queen';
-    if (typeof agent.role === 'object') {
+    if (serdeEnumVariantName(agent.role) === 'Queen') return 'Queen';
+    if (typeof agent.role === 'object' && agent.role !== null) {
+      if ('Judge' in agent.role) return 'Judge';
       if ('Planner' in agent.role) return `Planner ${agent.role.Planner.index}`;
       if ('Worker' in agent.role) return `Worker ${agent.role.Worker.index}`;
+      if ('QaWorker' in agent.role) return `QA Worker ${agent.role.QaWorker.index}`;
     }
+    if (serdeEnumVariantName(agent.role) === 'Evaluator') return 'Evaluator';
     return 'Agent';
   }
 </script>
@@ -44,6 +47,7 @@
   class:scrollable={agents.length > 9}
 >
   {#each agents as agent (agent.id)}
+    {@const status = serdeEnumVariantName(agent.status)}
     <div 
       class="terminal-item" 
       class:focused={agent.id === focusedAgentId}
@@ -55,12 +59,12 @@
           <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
           <span class="status-indicator" 
             class:waiting={typeof agent.status === 'object' && 'WaitingForInput' in agent.status} 
-            class:running={agent.status === 'Running'} 
-            class:completed={agent.status === 'Completed'}
+            class:running={status === 'Running'} 
+            class:completed={status === 'Completed'}
           >
-             {agent.status === 'Running' ? '█' : 
+             {status === 'Running' ? '█' : 
               (typeof agent.status === 'object' && 'WaitingForInput' in agent.status) ? '⏳' : 
-              agent.status === 'Completed' ? '✓' : '○'}
+              status === 'Completed' ? '✓' : '○'}
           </span>
         </div>
       </div>

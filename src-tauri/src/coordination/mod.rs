@@ -15,6 +15,9 @@ pub enum MessageType {
     Completion,
     Error,
     System,
+    PeerFeedback,
+    MilestoneReady,
+    QaVerdict,
 }
 
 /// A coordination message between agents
@@ -46,6 +49,18 @@ impl CoordinationMessage {
 
     pub fn task(from: &str, to: &str, content: &str) -> Self {
         Self::new(from, to, content, MessageType::Task)
+    }
+
+    pub fn peer_feedback(from: &str, to: &str, content: &str) -> Self {
+        Self::new(from, to, content, MessageType::PeerFeedback)
+    }
+
+    pub fn milestone_ready(from: &str, to: &str, content: &str) -> Self {
+        Self::new(from, to, content, MessageType::MilestoneReady)
+    }
+
+    pub fn qa_verdict(from: &str, to: &str, content: &str) -> Self {
+        Self::new(from, to, content, MessageType::QaVerdict)
     }
 
     #[allow(dead_code)]

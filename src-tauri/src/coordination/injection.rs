@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::pty::PtyManager;
 use crate::storage::SessionStorage;
 
-use super::{CoordinationMessage, WorkerStateInfo};
+use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 
 #[derive(Debug, Error)]
 pub enum InjectionError {
@@ -61,22 +61,105 @@ impl InjectionManager {
                 "Only Queen can inject messages to workers".to_string(),
             ));
         }
+        if is_qa_worker_id(target_worker_id) {
+            return Err(InjectionError::NotAuthorized(
+                "Queen cannot inject directly into QA workers".to_string(),
+            ));
+        }
 
         // Log to coordination.log
-        let coord_message = CoordinationMessage::task(
-            &format_agent_display(queen_id),
-            &format_agent_display(target_worker_id),
-            message,
-        );
+        let coord_message = if target_worker_id.ends_with("-evaluator") {
+            CoordinationMessage::milestone_ready(
+                &format_agent_display(queen_id),
+                &format_agent_display(target_worker_id),
+                message,
+            )
+        } else {
+            CoordinationMessage::task(
+                &format_agent_display(queen_id),
+                &format_agent_display(target_worker_id),
+                message,
+            )
+        };
 
         self.storage
             .append_coordination_log(session_id, &coord_message)
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
-        // Write to worker's PTY stdin
+        // Only persist watcher-visible state after PTY delivery succeeds.
         self.write_to_agent(target_worker_id, message)?;
 
+        if target_worker_id.ends_with("-evaluator") {
+            self.write_session_peer_message(session_id, |state| {
+                state.write_milestone_ready(queen_id, target_worker_id, message)
+            })?;
+        }
+
         // Emit event for UI
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit("coordination-message", &coord_message);
+        }
+
+        Ok(())
+    }
+
+    /// Evaluator injects a message to the Queen or its QA workers.
+    pub fn evaluator_inject(
+        &self,
+        session_id: &str,
+        evaluator_id: &str,
+        target_agent_id: &str,
+        message: &str,
+    ) -> Result<(), InjectionError> {
+        if !evaluator_id.ends_with("-evaluator") {
+            return Err(InjectionError::NotAuthorized(
+                "Only the Evaluator can inject peer QA messages".to_string(),
+            ));
+        }
+        if is_queen_worker_id(target_agent_id) {
+            return Err(InjectionError::NotAuthorized(
+                "Evaluator cannot inject directly into Queen workers".to_string(),
+            ));
+        }
+        let target_is_queen = target_agent_id.ends_with("-queen");
+        let target_is_qa_worker = is_qa_worker_id(target_agent_id);
+        if !target_is_queen && !target_is_qa_worker {
+            return Err(InjectionError::NotAuthorized(
+                "Evaluator can only inject into the Queen or QA workers".to_string(),
+            ));
+        }
+
+        let coord_message = if target_is_queen {
+            CoordinationMessage::qa_verdict(
+                &format_agent_display(evaluator_id),
+                &format_agent_display(target_agent_id),
+                message,
+            )
+        } else {
+            CoordinationMessage::peer_feedback(
+                &format_agent_display(evaluator_id),
+                &format_agent_display(target_agent_id),
+                message,
+            )
+        };
+
+        self.storage
+            .append_coordination_log(session_id, &coord_message)
+            .map_err(|e| InjectionError::StorageError(e.to_string()))?;
+
+        // Only persist watcher-visible state after PTY delivery succeeds.
+        self.write_to_agent(target_agent_id, message)?;
+
+        if target_is_queen {
+            self.write_session_peer_message(session_id, |state| {
+                state.write_qa_verdict(evaluator_id, target_agent_id, message)
+            })?;
+        } else {
+            self.write_session_peer_message(session_id, |state| {
+                state.write_evaluator_feedback(evaluator_id, target_agent_id, message)
+            })?;
+        }
+
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("coordination-message", &coord_message);
         }
@@ -308,6 +391,29 @@ impl InjectionManager {
         Ok(())
     }
 
+    fn write_session_peer_message<F>(&self, session_id: &str, write_fn: F) -> Result<(), InjectionError>
+    where
+        F: FnOnce(&StateManager) -> Result<(), super::StateError>,
+    {
+        let persisted = self
+            .storage
+            .load_session(session_id)
+            .map_err(|e| InjectionError::StorageError(e.to_string()))?;
+        let session_path = std::path::PathBuf::from(persisted.project_path)
+            .join(".hive-manager")
+            .join(session_id);
+        let state = StateManager::new(session_path);
+        write_fn(&state).map_err(|e| InjectionError::StorageError(e.to_string()))
+    }
+
+}
+
+fn is_qa_worker_id(agent_id: &str) -> bool {
+    agent_id.contains("-qa-worker-")
+}
+
+fn is_queen_worker_id(agent_id: &str) -> bool {
+    agent_id.contains("-worker-") && !agent_id.contains("-qa-worker-")
 }
 
 /// Format agent ID for display (extract role from full ID)
@@ -316,6 +422,14 @@ fn format_agent_display(agent_id: &str) -> String {
     // Extract the role part
     if agent_id.ends_with("-queen") {
         "QUEEN".to_string()
+    } else if agent_id.ends_with("-evaluator") {
+        "EVALUATOR".to_string()
+    } else if agent_id.contains("-qa-worker-") {
+        if let Some(idx) = agent_id.rfind("-qa-worker-") {
+            format!("QA-WORKER-{}", &agent_id[idx + 11..])
+        } else {
+            "QA-WORKER".to_string()
+        }
     } else if agent_id.contains("-worker-") {
         // Extract worker number
         if let Some(idx) = agent_id.rfind("-worker-") {
@@ -347,9 +461,20 @@ mod tests {
     #[test]
     fn test_format_agent_display() {
         assert_eq!(format_agent_display("abc123-queen"), "QUEEN");
+        assert_eq!(format_agent_display("abc123-evaluator"), "EVALUATOR");
+        assert_eq!(format_agent_display("abc123-qa-worker-3"), "QA-WORKER-3");
         assert_eq!(format_agent_display("abc123-worker-1"), "WORKER-1");
         assert_eq!(format_agent_display("abc123-worker-12"), "WORKER-12");
         assert_eq!(format_agent_display("abc123-planner-1"), "PLANNER-1");
         assert_eq!(format_agent_display("abc123-planner-1-worker-2"), "WORKER-2");
+    }
+
+    #[test]
+    fn test_role_boundaries() {
+        assert!(is_qa_worker_id("abc123-qa-worker-2"));
+        assert!(!is_qa_worker_id("abc123-worker-2"));
+        assert!(is_queen_worker_id("abc123-worker-2"));
+        assert!(!is_queen_worker_id("abc123-qa-worker-2"));
+        assert!(!is_queen_worker_id("abc123-evaluator"));
     }
 }

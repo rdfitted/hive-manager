@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { activeAgents, activeSession, sessions } from '$lib/stores/sessions';
+  import { activeAgents, activeSession, sessions, serdeEnumVariantName } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import Terminal from './Terminal.svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   let fusionAgents = $derived($activeAgents.filter(a => typeof a.role === 'object' && 'Fusion' in a.role));
-  let queenAgent = $derived($activeAgents.find(a => a.role === 'Queen'));
+  let queenAgent = $derived($activeAgents.find((a) => serdeEnumVariantName(a.role) === 'Queen'));
   let judgeAgent = $derived($activeAgents.find(a => typeof a.role === 'object' && 'Judge' in a.role));
   let completedVariants = $derived($coordination.fusionState.completedVariants);
   let judgeReport = $derived($coordination.fusionState.judgeReport);

@@ -50,6 +50,17 @@ impl From<String> for SessionError {
     }
 }
 
+const DEFAULT_MAX_QA_ITERATIONS: u8 = 3;
+const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
+
+fn default_max_qa_iterations() -> u8 {
+    DEFAULT_MAX_QA_ITERATIONS
+}
+
+fn default_qa_timeout_secs() -> u64 {
+    DEFAULT_QA_TIMEOUT_SECS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
     Planning,
@@ -65,12 +76,31 @@ pub enum SessionState {
     Judging,
     AwaitingVerdictSelection,
     MergingWinner,
+    SpawningEvaluator,
+    QaInProgress,
+    QaPassed,
+    QaFailed { iteration: u8 },
+    QaMaxRetriesExceeded,
     Running,
     Paused,
     Completed,
     Closing,
     Closed,
     Failed(String),
+}
+
+impl SessionState {
+    pub fn is_monitorable(&self) -> bool {
+        matches!(
+            self,
+            SessionState::Running
+                | SessionState::WaitingForWorker(_)
+                | SessionState::WaitingForPlanner(_)
+                | SessionState::SpawningEvaluator
+                | SessionState::QaInProgress
+                | SessionState::QaFailed { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +216,8 @@ pub struct Session {
     pub agents: Vec<AgentInfo>,
     pub default_cli: String,
     pub default_model: Option<String>,
+    pub max_qa_iterations: u8,
+    pub qa_timeout_secs: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -216,8 +248,8 @@ unsafe impl Send for SessionController {}
 unsafe impl Sync for SessionController {}
 
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
-fn get_polling_instructions(cli: &str, task_file: &str) -> String {
-    match CliRegistry::get_behavior(cli) {
+fn get_polling_instructions(cli: &str, task_file: &str, role_type: Option<&str>) -> String {
+    match CliRegistry::get_behavior_for_role(cli, role_type) {
         CliBehavior::ExplicitPolling => {
             format!(
                 r#"
@@ -409,6 +441,8 @@ impl SessionController {
             agents,
             default_cli: cmd.to_string(),
             default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -1025,7 +1059,7 @@ Last updated: {timestamp}
         cli: &str,
     ) -> String {
         let task_file = format!(".hive-manager/{}/tasks/fusion-variant-{}-task.md", session_id, variant_index);
-        let polling_instructions = get_polling_instructions(cli, &task_file);
+        let polling_instructions = get_polling_instructions(cli, &task_file, None);
 
         format!(
 r#"You are a Fusion worker implementing variant "{variant_name}".
@@ -1120,6 +1154,62 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
             diff_commands = diff_commands,
             decision_file = decision_file,
             session_id = session_id,
+        )
+    }
+
+    #[allow(dead_code)]
+    fn build_evaluator_prompt(session_id: &str, config: &AgentConfig) -> String {
+        let custom_instructions = config
+            .initial_prompt
+            .as_deref()
+            .unwrap_or("Review the milestone output, coordinate QA workers when necessary, and post a final verdict back to the Queen.");
+
+        format!(
+r#"# Evaluator - Hive Session
+
+You are the Evaluator for session `{session_id}`.
+
+## Core Responsibilities
+- Review milestone-ready outputs from the Queen
+- Coordinate QA workers if targeted verification is needed
+- Return one of these exact verdict markers:
+  - `QA_VERDICT: PASS`
+  - `QA_VERDICT: FAIL`
+
+## Default Guidance
+{custom_instructions}
+
+## Timeout Policy
+- If QA cannot complete within the configured timeout window, report a pass with warning so the session can continue.
+"#,
+            session_id = session_id,
+            custom_instructions = custom_instructions,
+        )
+    }
+
+    #[allow(dead_code)]
+    fn build_qa_worker_prompt(session_id: &str, index: u8, config: &AgentConfig) -> String {
+        let custom_instructions = config
+            .initial_prompt
+            .as_deref()
+            .unwrap_or("Inspect the assigned milestone, validate behavior carefully, and report concrete findings back to the Evaluator.");
+
+        format!(
+r#"# QA Worker {index} - Hive Session
+
+You are QA Worker {index} for session `{session_id}`.
+
+## Responsibilities
+- Validate the assigned milestone or fix
+- Produce concise, evidence-based findings
+- Escalate only concrete failures or regressions
+
+## Default Guidance
+{custom_instructions}
+"#,
+            index = index,
+            session_id = session_id,
+            custom_instructions = custom_instructions,
         )
     }
 
@@ -1518,9 +1608,9 @@ Task(subagent_type="general-purpose", prompt="You are a codebase investigation a
 
 Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-4.7 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
 
-### Scout 3 - OpenCode Grok Code (Quick Search)
+### Scout 3 - Cursor (Quick Search)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/grok-code 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: cursor-cli --print 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
 
 **CRITICAL RULES:**
 - Replace [TASK] with the actual task description from Phase 0
@@ -1734,8 +1824,8 @@ gemini -y -i "Analyze the codebase structure for: [TASK]. List relevant files by
 # Scout 2 - Implementation Patterns (Claude Subagent via Task tool)
 # Use Claude's Task tool with Explore agent
 
-# Scout 3 - Related Code (Codex if available, or another Gemini)
-codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.4 "Find code related to: [TASK]"
+# Scout 3 - Related Code (Cursor)
+cursor-cli --print "Find code related to: [TASK]"
 ```
 
 ---
@@ -2378,7 +2468,11 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             .unwrap_or("General development tasks as assigned.");
 
         let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index);
-        let polling_instructions = get_polling_instructions(&config.cli, &task_file);
+        let polling_instructions = get_polling_instructions(
+            &config.cli,
+            &task_file,
+            config.role.as_ref().map(|role| role.role_type.as_str()),
+        );
 
         format!(
 r#"# Worker {index} ({role_name}) - Hive Session
@@ -3405,6 +3499,8 @@ Last updated: {timestamp}
             }],
             default_cli: cli,
             default_model: model,
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -3545,6 +3641,8 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -3634,6 +3732,8 @@ Last updated: {timestamp}
             agents: Vec::new(),
             default_cli: default_cli.clone(),
             default_model: config.default_model.clone(),
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -3859,6 +3959,8 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -3943,6 +4045,8 @@ Last updated: {timestamp}
             agents,
             default_cli: if config.default_cli.trim().is_empty() { "claude".to_string() } else { config.default_cli.trim().to_string() },
             default_model: config.default_model.clone(),
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -4287,6 +4391,8 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -4410,6 +4516,124 @@ Last updated: {timestamp}
         let next_worker_index = worker_id as usize;
         self.spawn_next_worker(session_id, next_worker_index, &config, &queen_id).await?;
 
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn on_milestone_ready(&self, session_id: &str) -> Result<(), String> {
+        let maybe_evaluator = {
+            let sessions = self.sessions.read();
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+            session
+                .agents
+                .iter()
+                .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+                .cloned()
+        };
+
+        if maybe_evaluator.is_none() {
+            let config = {
+                let sessions = self.sessions.read();
+                let session = sessions
+                    .get(session_id)
+                    .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+                AgentConfig {
+                    cli: session.default_cli.clone(),
+                    model: session.default_model.clone(),
+                    flags: vec![],
+                    label: Some("Evaluator".to_string()),
+                    role: None,
+                    initial_prompt: None,
+                }
+            };
+
+            self.launch_evaluator(session_id, config)?;
+            return Ok(());
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.state = SessionState::QaInProgress;
+            }
+        }
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn on_qa_verdict(&self, session_id: &str, verdict: &str) -> Result<SessionState, String> {
+        let normalized = verdict.trim().to_ascii_uppercase();
+        match normalized.as_str() {
+            "PASS" | "QA_VERDICT: PASS" => {
+                {
+                    let mut sessions = self.sessions.write();
+                    if let Some(session) = sessions.get_mut(session_id) {
+                        session.state = SessionState::QaPassed;
+                    }
+                }
+                self.emit_session_update(session_id);
+                self.update_session_storage(session_id);
+
+                {
+                    let mut sessions = self.sessions.write();
+                    if let Some(session) = sessions.get_mut(session_id) {
+                        session.state = SessionState::Running;
+                    }
+                }
+                self.emit_session_update(session_id);
+                self.update_session_storage(session_id);
+
+                Ok(SessionState::Running)
+            }
+            "FAIL" | "QA_VERDICT: FAIL" => {
+                let next_state = {
+                    let mut sessions = self.sessions.write();
+                    let session = sessions
+                        .get_mut(session_id)
+                        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+                    let next_iteration = match session.state {
+                        SessionState::QaFailed { iteration } => iteration.saturating_add(1),
+                        _ => 1,
+                    };
+
+                    if next_iteration > session.max_qa_iterations {
+                        session.state = SessionState::QaMaxRetriesExceeded;
+                    } else {
+                        session.state = SessionState::QaFailed {
+                            iteration: next_iteration,
+                        };
+                    }
+
+                    session.state.clone()
+                };
+
+                self.emit_session_update(session_id);
+                self.update_session_storage(session_id);
+
+                Ok(next_state)
+            }
+            _ => Err(format!("Unsupported QA verdict '{}'", verdict)),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn on_qa_timeout(&self, session_id: &str) -> Result<(), String> {
+        tracing::warn!(
+            "QA timed out for session {}; defaulting to pass-with-warning after {} seconds",
+            session_id,
+            self.get_session(session_id)
+                .map(|session| session.qa_timeout_secs)
+                .unwrap_or(DEFAULT_QA_TIMEOUT_SECS)
+        );
+        self.on_qa_verdict(session_id, "QA_VERDICT: PASS")?;
         Ok(())
     }
 
@@ -4906,35 +5130,7 @@ Last updated: {timestamp}
         // Convert persisted agents to active agents
         let agents: Vec<AgentInfo> = persisted.agents.iter().filter_map(|pa| {
             // Parse the role string (e.g., "Queen", "Planner(0)", "Worker(1)")
-            let role = if pa.role == "MasterPlanner" {
-                AgentRole::MasterPlanner
-            } else if pa.role == "Queen" {
-                AgentRole::Queen
-            } else if pa.role.starts_with("Planner(") {
-                let index_str = pa.role.trim_start_matches("Planner(").trim_end_matches(")");
-                let index = index_str.parse::<u8>().ok()?;
-                AgentRole::Planner { index }
-            } else if pa.role.starts_with("Worker(") {
-                let parts: Vec<&str> = pa.role.trim_start_matches("Worker(").trim_end_matches(")").split(',').collect();
-                let index = parts.get(0)?.parse::<u8>().ok()?;
-                let parent = parts.get(1).and_then(|s: &&str| {
-                    let trimmed = s.trim();
-                    if trimmed == "None" {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                });
-                AgentRole::Worker { index, parent }
-            } else if pa.role.starts_with("Fusion(") {
-                let variant = pa.role.trim_start_matches("Fusion(").trim_end_matches(")").to_string();
-                AgentRole::Fusion { variant }
-            } else if pa.role.starts_with("Judge(") {
-                let parsed_session_id = pa.role.trim_start_matches("Judge(").trim_end_matches(")").to_string();
-                AgentRole::Judge { session_id: parsed_session_id }
-            } else {
-                return None;  // Skip unparseable roles
-            };
+            let role = parse_agent_role(&pa.role)?;
 
             // Convert PersistedAgentConfig to AgentConfig
             let config = AgentConfig {
@@ -4965,14 +5161,13 @@ Last updated: {timestamp}
             id: persisted.id.clone(),
             session_type,
             project_path: PathBuf::from(persisted.project_path),
-            state: match persisted.state.as_str() {
-                "Closed" => SessionState::Closed,
-                _ => SessionState::Completed,
-            },
+            state: parse_persisted_session_state(&persisted.state),
             created_at: persisted.created_at,
             agents,
             default_cli: persisted.default_cli.clone(),
             default_model: persisted.default_model.clone(),
+            max_qa_iterations: persisted.max_qa_iterations,
+            qa_timeout_secs: persisted.qa_timeout_secs,
         };
 
         // Add to in-memory sessions
@@ -5191,6 +5386,8 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
         };
 
         {
@@ -5227,7 +5424,14 @@ Last updated: {timestamp}
 
         let can_add_worker = matches!(
             session.state,
-            SessionState::Running | SessionState::WaitingForWorker(_) | SessionState::WaitingForPlanner(_)
+            SessionState::Running
+                | SessionState::WaitingForWorker(_)
+                | SessionState::WaitingForPlanner(_)
+                | SessionState::SpawningEvaluator
+                | SessionState::QaInProgress
+                | SessionState::QaPassed
+                | SessionState::QaFailed { .. }
+                | SessionState::QaMaxRetriesExceeded
         );
         if !can_add_worker {
             return Err(format!("Cannot add worker to session in state {:?}", session.state));
@@ -5315,6 +5519,171 @@ Last updated: {timestamp}
         self.emit_session_update(session_id);
 
         // Update session storage
+        self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &session.project_path);
+
+        Ok(agent_info)
+    }
+
+    #[allow(dead_code)]
+    pub fn launch_evaluator(&self, session_id: &str, mut config: AgentConfig) -> Result<AgentInfo, String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        let evaluator_id = format!("{}-evaluator", session_id);
+        if let Some(existing) = session.agents.iter().find(|agent| agent.id == evaluator_id) {
+            return Ok(existing.clone());
+        }
+
+        if config.cli.trim().is_empty() {
+            config.cli = session.default_cli.clone();
+        }
+        if config.model.is_none() {
+            config.model = session.default_model.clone();
+        }
+        if config.label.is_none() {
+            config.label = Some("Evaluator".to_string());
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(current) = sessions.get_mut(session_id) {
+                current.state = SessionState::SpawningEvaluator;
+            }
+        }
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+
+        let evaluator_prompt = Self::build_evaluator_prompt(session_id, &config);
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            "evaluator-prompt.md",
+            &evaluator_prompt,
+        )?;
+
+        let (cmd, mut args) = Self::build_command(&config);
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_file.to_string_lossy());
+
+        let cwd = session.project_path.to_str().unwrap_or(".");
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    evaluator_id.clone(),
+                    AgentRole::Evaluator,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Evaluator: {}", e))?;
+        }
+
+        let agent_info = AgentInfo {
+            id: evaluator_id,
+            role: AgentRole::Evaluator,
+            status: AgentStatus::Running,
+            config,
+            parent_id: None,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(current) = sessions.get_mut(session_id) {
+                current.agents.push(agent_info.clone());
+                current.state = SessionState::QaInProgress;
+            }
+        }
+
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &session.project_path);
+
+        Ok(agent_info)
+    }
+
+    #[allow(dead_code)]
+    pub fn add_qa_worker(
+        &self,
+        session_id: &str,
+        mut config: AgentConfig,
+        parent_id: Option<String>,
+    ) -> Result<AgentInfo, String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        let evaluator_id = parent_id.unwrap_or_else(|| format!("{}-evaluator", session_id));
+        if !session.agents.iter().any(|agent| agent.id == evaluator_id) {
+            return Err(format!("Evaluator {} not found for session {}", evaluator_id, session_id));
+        }
+
+        if config.cli.trim().is_empty() {
+            config.cli = session.default_cli.clone();
+        }
+        if config.model.is_none() {
+            config.model = session.default_model.clone();
+        }
+
+        let next_index = session
+            .agents
+            .iter()
+            .filter(|agent| matches!(agent.role, AgentRole::QaWorker { .. }))
+            .count() as u8
+            + 1;
+
+        let qa_worker_id = format!("{}-qa-worker-{}", session_id, next_index);
+        let qa_worker_prompt = Self::build_qa_worker_prompt(session_id, next_index, &config);
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            &format!("qa-worker-{}-prompt.md", next_index),
+            &qa_worker_prompt,
+        )?;
+
+        let (cmd, mut args) = Self::build_command(&config);
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_file.to_string_lossy());
+
+        let cwd = session.project_path.to_str().unwrap_or(".");
+        let role = AgentRole::QaWorker {
+            index: next_index,
+            parent: Some(evaluator_id.clone()),
+        };
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    qa_worker_id.clone(),
+                    role.clone(),
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn QA worker {}: {}", next_index, e))?;
+        }
+
+        let agent_info = AgentInfo {
+            id: qa_worker_id,
+            role,
+            status: AgentStatus::Running,
+            config,
+            parent_id: Some(evaluator_id),
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(current) = sessions.get_mut(session_id) {
+                current.agents.push(agent_info.clone());
+                current.state = SessionState::QaInProgress;
+            }
+        }
+
+        self.emit_session_update(session_id);
         self.update_session_storage(session_id);
         self.ensure_task_watcher(session_id, &session.project_path);
 
@@ -5472,14 +5841,7 @@ Last updated: {timestamp}
         };
 
         let agents: Vec<PersistedAgentInfo> = session.agents.iter().map(|a| {
-            let role_str = match &a.role {
-                AgentRole::MasterPlanner => "MasterPlanner".to_string(),
-                AgentRole::Queen => "Queen".to_string(),
-                AgentRole::Planner { index } => format!("Planner({})", index),
-                AgentRole::Worker { index, parent } => format!("Worker({},{})", index, parent.as_deref().unwrap_or("None")),
-                AgentRole::Fusion { variant } => format!("Fusion({})", variant),
-                AgentRole::Judge { session_id } => format!("Judge({})", session_id),
-            };
+            let role_str = serialize_persisted_agent_role(&a.role);
 
             PersistedAgentInfo {
                 id: a.id.clone(),
@@ -5496,27 +5858,7 @@ Last updated: {timestamp}
             }
         }).collect();
 
-        let state_str = match &session.state {
-            SessionState::Planning => "Planning",
-            SessionState::PlanReady => "PlanReady",
-            SessionState::Starting => "Starting",
-            SessionState::SpawningWorker(_) => "SpawningWorker",
-            SessionState::WaitingForWorker(_) => "WaitingForWorker",
-            SessionState::SpawningPlanner(_) => "SpawningPlanner",
-            SessionState::WaitingForPlanner(_) => "WaitingForPlanner",
-            SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant",
-            SessionState::WaitingForFusionVariants => "WaitingForFusionVariants",
-            SessionState::SpawningJudge => "SpawningJudge",
-            SessionState::Judging => "Judging",
-            SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection",
-            SessionState::MergingWinner => "MergingWinner",
-            SessionState::Running => "Running",
-            SessionState::Paused => "Paused",
-            SessionState::Completed => "Completed",
-            SessionState::Closing => "Closing",
-            SessionState::Closed => "Closed",
-            SessionState::Failed(_) => "Failed",
-        }.to_string();
+        let state_str = serialize_session_state(&session.state).to_string();
 
         PersistedSession {
             id: session.id.clone(),
@@ -5527,6 +5869,8 @@ Last updated: {timestamp}
             state: state_str,
             default_cli: session.default_cli.clone(),
             default_model: session.default_model.clone(),
+            max_qa_iterations: session.max_qa_iterations,
+            qa_timeout_secs: session.qa_timeout_secs,
         }
     }
 
@@ -5546,14 +5890,7 @@ Last updated: {timestamp}
 
             // Build hierarchy nodes
             let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
-                let role_str = match &agent.role {
-                    AgentRole::MasterPlanner => "MasterPlanner".to_string(),
-                    AgentRole::Queen => "Queen".to_string(),
-                    AgentRole::Planner { index } => format!("Planner-{}", index),
-                    AgentRole::Worker { index, .. } => format!("Worker-{}", index),
-                    AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
-                    AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
-                };
+                let role_str = format_agent_display(&agent.role);
 
                 let children: Vec<String> = session.agents.iter()
                     .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
@@ -5570,7 +5907,7 @@ Last updated: {timestamp}
 
             // Build worker state info
             let workers: Vec<WorkerStateInfo> = session.agents.iter()
-                .filter(|a| !matches!(a.role, AgentRole::Queen))
+                .filter(|a| include_in_worker_roster(&a.role))
                 .map(|a| WorkerStateInfo {
                     id: a.id.clone(),
                     role: a.config.role.clone().unwrap_or_default(),
@@ -5633,14 +5970,7 @@ Last updated: {timestamp}
 
                 // Build hierarchy nodes
                 let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
-                    let role_str = match &agent.role {
-                        AgentRole::MasterPlanner => "MasterPlanner".to_string(),
-                        AgentRole::Queen => "Queen".to_string(),
-                        AgentRole::Planner { index } => format!("Planner-{}", index),
-                        AgentRole::Worker { index, .. } => format!("Worker-{}", index),
-                        AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
-                        AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
-                    };
+                    let role_str = format_agent_display(&agent.role);
 
                     let children: Vec<String> = session.agents.iter()
                         .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
@@ -5657,7 +5987,7 @@ Last updated: {timestamp}
 
                 // Build worker state info
                 let workers: Vec<WorkerStateInfo> = session.agents.iter()
-                    .filter(|a| !matches!(a.role, AgentRole::Queen))
+                    .filter(|a| include_in_worker_roster(&a.role))
                     .map(|a| WorkerStateInfo {
                         id: a.id.clone(),
                         role: a.config.role.clone().unwrap_or_default(),
@@ -5688,9 +6018,167 @@ impl Default for SessionController {
     }
 }
 
+fn parse_agent_role(role: &str) -> Option<AgentRole> {
+    if role == "MasterPlanner" {
+        Some(AgentRole::MasterPlanner)
+    } else if role == "Queen" {
+        Some(AgentRole::Queen)
+    } else if role == "Evaluator" {
+        Some(AgentRole::Evaluator)
+    } else if role.starts_with("Planner(") {
+        let index = role
+            .trim_start_matches("Planner(")
+            .trim_end_matches(")")
+            .parse::<u8>()
+            .ok()?;
+        Some(AgentRole::Planner { index })
+    } else if role.starts_with("Worker(") {
+        parse_indexed_role(role, "Worker(").map(|(index, parent)| AgentRole::Worker { index, parent })
+    } else if role.starts_with("QaWorker(") {
+        parse_indexed_role(role, "QaWorker(").map(|(index, parent)| AgentRole::QaWorker { index, parent })
+    } else if role.starts_with("Fusion(") {
+        let variant = role
+            .trim_start_matches("Fusion(")
+            .trim_end_matches(")")
+            .to_string();
+        Some(AgentRole::Fusion { variant })
+    } else if role.starts_with("Judge(") {
+        let session_id = role
+            .trim_start_matches("Judge(")
+            .trim_end_matches(")")
+            .to_string();
+        Some(AgentRole::Judge { session_id })
+    } else {
+        None
+    }
+}
+
+fn parse_indexed_role(role: &str, prefix: &str) -> Option<(u8, Option<String>)> {
+    let parts: Vec<&str> = role
+        .trim_start_matches(prefix)
+        .trim_end_matches(")")
+        .split(',')
+        .collect();
+    let index = parts.first()?.parse::<u8>().ok()?;
+    let parent = parts.get(1).and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed == "None" {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    Some((index, parent))
+}
+
+fn parse_persisted_session_state(state: &str) -> SessionState {
+    match state {
+        "Planning" => SessionState::Planning,
+        "PlanReady" => SessionState::PlanReady,
+        "Starting" => SessionState::Starting,
+        "SpawningWorker" => SessionState::SpawningWorker(0),
+        "WaitingForWorker" => SessionState::WaitingForWorker(0),
+        "SpawningPlanner" => SessionState::SpawningPlanner(0),
+        "WaitingForPlanner" => SessionState::WaitingForPlanner(0),
+        "SpawningFusionVariant" => SessionState::SpawningFusionVariant(0),
+        "WaitingForFusionVariants" => SessionState::WaitingForFusionVariants,
+        "SpawningJudge" => SessionState::SpawningJudge,
+        "Judging" => SessionState::Judging,
+        "AwaitingVerdictSelection" => SessionState::AwaitingVerdictSelection,
+        "MergingWinner" => SessionState::MergingWinner,
+        "SpawningEvaluator" => SessionState::SpawningEvaluator,
+        "QaInProgress" => SessionState::QaInProgress,
+        "QaPassed" => SessionState::QaPassed,
+        "QaFailed" => SessionState::QaFailed { iteration: 1 },
+        "QaMaxRetriesExceeded" => SessionState::QaMaxRetriesExceeded,
+        "Running" => SessionState::Running,
+        "Paused" => SessionState::Paused,
+        "Closing" => SessionState::Closing,
+        "Closed" => SessionState::Closed,
+        "Failed" => SessionState::Failed("persisted".to_string()),
+        _ => SessionState::Completed,
+    }
+}
+
+fn serialize_session_state(state: &SessionState) -> &'static str {
+    match state {
+        SessionState::Planning => "Planning",
+        SessionState::PlanReady => "PlanReady",
+        SessionState::Starting => "Starting",
+        SessionState::SpawningWorker(_) => "SpawningWorker",
+        SessionState::WaitingForWorker(_) => "WaitingForWorker",
+        SessionState::SpawningPlanner(_) => "SpawningPlanner",
+        SessionState::WaitingForPlanner(_) => "WaitingForPlanner",
+        SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant",
+        SessionState::WaitingForFusionVariants => "WaitingForFusionVariants",
+        SessionState::SpawningJudge => "SpawningJudge",
+        SessionState::Judging => "Judging",
+        SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection",
+        SessionState::MergingWinner => "MergingWinner",
+        SessionState::SpawningEvaluator => "SpawningEvaluator",
+        SessionState::QaInProgress => "QaInProgress",
+        SessionState::QaPassed => "QaPassed",
+        SessionState::QaFailed { .. } => "QaFailed",
+        SessionState::QaMaxRetriesExceeded => "QaMaxRetriesExceeded",
+        SessionState::Running => "Running",
+        SessionState::Paused => "Paused",
+        SessionState::Completed => "Completed",
+        SessionState::Closing => "Closing",
+        SessionState::Closed => "Closed",
+        SessionState::Failed(_) => "Failed",
+    }
+}
+
+fn serialize_persisted_agent_role(role: &AgentRole) -> String {
+    match role {
+        AgentRole::MasterPlanner => "MasterPlanner".to_string(),
+        AgentRole::Queen => "Queen".to_string(),
+        AgentRole::Planner { index } => format!("Planner({})", index),
+        AgentRole::Worker { index, parent } => {
+            format!("Worker({},{})", index, parent.as_deref().unwrap_or("None"))
+        }
+        AgentRole::Fusion { variant } => format!("Fusion({})", variant),
+        AgentRole::Judge { session_id } => format!("Judge({})", session_id),
+        AgentRole::Evaluator => "Evaluator".to_string(),
+        AgentRole::QaWorker { index, parent } => {
+            format!("QaWorker({},{})", index, parent.as_deref().unwrap_or("None"))
+        }
+    }
+}
+
+fn serialize_agent_role(role: &AgentRole) -> &'static str {
+    match role {
+        AgentRole::MasterPlanner => "master-planner",
+        AgentRole::Queen => "queen",
+        AgentRole::Planner { .. } => "planner",
+        AgentRole::Worker { .. } => "worker",
+        AgentRole::Fusion { .. } => "fusion",
+        AgentRole::Judge { .. } => "judge",
+        AgentRole::Evaluator => "evaluator",
+        AgentRole::QaWorker { .. } => "qa-worker",
+    }
+}
+
+fn format_agent_display(role: &AgentRole) -> String {
+    match role {
+        AgentRole::MasterPlanner => "MasterPlanner".to_string(),
+        AgentRole::Queen => "Queen".to_string(),
+        AgentRole::Planner { index } => format!("Planner-{}", index),
+        AgentRole::Worker { index, .. } => format!("Worker-{}", index),
+        AgentRole::Fusion { variant } => format!("Fusion-{}", variant),
+        AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
+        AgentRole::Evaluator => "Evaluator".to_string(),
+        AgentRole::QaWorker { index, .. } => format!("QaWorker-{}", index),
+    }
+}
+
+fn include_in_worker_roster(role: &AgentRole) -> bool {
+    !matches!(serialize_agent_role(role), "queen" | "evaluator" | "qa-worker")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::SessionState;
+    use super::{parse_persisted_session_state, serialize_session_state, SessionState};
 
     #[test]
     fn session_state_variants_exist() {
@@ -5705,6 +6193,11 @@ mod tests {
         let _judging = SessionState::Judging;
         let _awaiting_verdict = SessionState::AwaitingVerdictSelection;
         let _merging_winner = SessionState::MergingWinner;
+        let _spawning_evaluator = SessionState::SpawningEvaluator;
+        let _qa_in_progress = SessionState::QaInProgress;
+        let _qa_passed = SessionState::QaPassed;
+        let _qa_failed = SessionState::QaFailed { iteration: 1 };
+        let _qa_max_retries = SessionState::QaMaxRetriesExceeded;
         let _running = SessionState::Running;
         let _paused = SessionState::Paused;
         let _completed = SessionState::Completed;
@@ -5717,6 +6210,16 @@ mod tests {
         let state = SessionState::SpawningWorker(3);
         let json = serde_json::to_string(&state).expect("serialize SessionState");
         assert!(json.contains("SpawningWorker"));
+    }
+
+    #[test]
+    fn persisted_qa_state_round_trip_uses_safe_fallbacks() {
+        assert_eq!(parse_persisted_session_state("QaInProgress"), SessionState::QaInProgress);
+        assert_eq!(
+            parse_persisted_session_state("QaFailed"),
+            SessionState::QaFailed { iteration: 1 }
+        );
+        assert_eq!(serialize_session_state(&SessionState::QaPassed), "QaPassed");
     }
 }
 

@@ -5,7 +5,7 @@ use axum::{
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
-use crate::http::handlers::{health, sessions, inject, workers, planners, learnings, conversations, heartbeats};
+use crate::http::handlers::{health, sessions, inject, workers, evaluator, planners, learnings, conversations, heartbeats};
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -32,6 +32,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))
         .route("/api/sessions/{id}/workers", post(workers::add_worker))
+        // Evaluator routes
+        .route("/api/sessions/{id}/evaluators", get(evaluator::list_evaluators))
+        .route("/api/sessions/{id}/evaluators", post(evaluator::add_evaluator))
         // Planner routes (Swarm mode)
         .route("/api/sessions/{id}/planners", get(planners::list_planners))
         .route("/api/sessions/{id}/planners", post(planners::add_planner))
@@ -50,6 +53,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
         .route("/api/sessions/{id}/inject/queen", post(inject::queen_inject))
+        .route("/api/sessions/{id}/inject/evaluator", post(inject::evaluator_inject))
         .layer(cors)
         .with_state(state)
 }

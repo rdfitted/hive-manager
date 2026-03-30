@@ -5,8 +5,11 @@ import { listen } from '@tauri-apps/api/event';
 export type AgentRole =
   | 'MasterPlanner'
   | 'Queen'
+  | 'Evaluator'
+  | { Judge: { session_id: string } }
   | { Planner: { index: number } }
   | { Worker: { index: number; parent: string | null } }
+  | { QaWorker: { index: number; parent: string | null } }
   | { Fusion: { variant: string } };
 
 export type AgentStatus = 
@@ -94,10 +97,25 @@ export type SessionState =
   | 'PlanReady'
   | 'Starting'
   | 'Running'
+  | 'SpawningEvaluator'
+  | 'QaInProgress'
+  | 'QaPassed'
+  | { QaFailed: { iteration: number } }
+  | 'QaMaxRetriesExceeded'
   | 'Paused'
   | 'Completed'
   | 'Closed'
   | { Failed: string };
+
+/** Serde externally-tagged enums from Tauri: unit variants are often `{ Queen: null }`, not `"Queen"`. */
+export function serdeEnumVariantName(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    const keys = Object.keys(value as Record<string, unknown>);
+    if (keys.length === 1) return keys[0];
+  }
+  return undefined;
+}
 
 export interface Session {
   id: string;

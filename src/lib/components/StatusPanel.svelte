@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { activeSession, activeAgents, sessions, type AgentInfo, type Session } from '$lib/stores/sessions';
+  import { activeSession, activeAgents, sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import AgentTree from './AgentTree.svelte';
 
@@ -15,24 +15,44 @@
   }
 
   function getSessionStateClass(state: Session['state']): string {
-    if (typeof state === 'string') return state.toLowerCase();
-    if (typeof state === 'object' && 'Failed' in state) return 'failed';
+    if (typeof state === 'object' && state !== null) {
+      if ('Failed' in state) return 'failed';
+      if ('QaFailed' in state) return 'warning';
+    }
+    const v = serdeEnumVariantName(state);
+    if (v === 'SpawningEvaluator') return 'starting';
+    if (v === 'QaInProgress') return 'running';
+    if (v === 'QaPassed') return 'completed';
+    if (v === 'QaMaxRetriesExceeded') return 'failed';
+    if (v) return v.toLowerCase();
     return 'unknown';
   }
 
   function getSessionStateText(state: Session['state']): string {
-    if (typeof state === 'string') return state;
-    if (typeof state === 'object' && 'Failed' in state) return `Failed: ${state.Failed}`;
-    return 'Unknown';
+    if (typeof state === 'object' && state !== null) {
+      if ('Failed' in state) return `Failed: ${state.Failed}`;
+      if ('QaFailed' in state) return `QA Failed (iteration ${state.QaFailed.iteration})`;
+    }
+    const v = serdeEnumVariantName(state);
+    if (v === 'SpawningEvaluator') return 'Spawning Evaluator';
+    if (v === 'QaInProgress') return 'QA In Progress';
+    if (v === 'QaPassed') return 'QA Passed';
+    if (v === 'QaMaxRetriesExceeded') return 'QA Max Retries Exceeded';
+    return v ?? 'Unknown';
   }
 
   function getRoleName(role: AgentInfo['role']): string {
-    if (role === 'Queen') return 'Queen';
-    if (typeof role === 'object') {
+    if (typeof role === 'object' && role !== null) {
+      if ('Judge' in role) return 'Judge';
       if ('Planner' in role) return `Planner ${role.Planner.index}`;
       if ('Worker' in role) return `Worker ${role.Worker.index}`;
+      if ('QaWorker' in role) return `QA Worker ${role.QaWorker.index}`;
       if ('Fusion' in role) return role.Fusion.variant;
     }
+    const k = serdeEnumVariantName(role);
+    if (k === 'Queen') return 'Queen';
+    if (k === 'Evaluator') return 'Evaluator';
+    if (k === 'MasterPlanner') return 'Master Planner';
     return 'Agent';
   }
 
@@ -41,8 +61,9 @@
   }
 
   function isSessionActive(state: Session['state']): boolean {
-    if (state === 'Completed' || state === 'Closed') return false;
     if (typeof state === 'object' && state !== null && 'Failed' in state) return false;
+    const v = serdeEnumVariantName(state);
+    if (v === 'Completed' || v === 'Closed') return false;
     return true;
   }
 

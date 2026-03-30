@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::pty::WorkerRole;
@@ -52,6 +53,15 @@ pub struct TaskAssignment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PeerMessageRecord {
+    pub kind: String,
+    pub from: String,
+    pub to: String,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AssignmentStatus {
     Pending,
     InProgress,
@@ -75,9 +85,38 @@ impl StateManager {
         self.session_path.join("state")
     }
 
+    fn peer_dir(&self) -> PathBuf {
+        self.session_path.join("peer")
+    }
+
     /// Ensure state directory exists
     fn ensure_state_dir(&self) -> Result<(), StateError> {
         fs::create_dir_all(self.state_dir())?;
+        Ok(())
+    }
+
+    fn ensure_peer_dir(&self) -> Result<(), StateError> {
+        fs::create_dir_all(self.peer_dir())?;
+        Ok(())
+    }
+
+    fn write_peer_record(
+        &self,
+        file_name: &str,
+        record: &PeerMessageRecord,
+    ) -> Result<(), StateError> {
+        self.ensure_peer_dir()?;
+
+        let peer_dir = self.peer_dir();
+        let target = peer_dir.join(file_name);
+        let json = serde_json::to_string_pretty(record)?;
+
+        let mut temp = NamedTempFile::new_in(&peer_dir)?;
+        use std::io::Write;
+        temp.write_all(json.as_bytes())?;
+        temp.persist(target)
+            .map_err(|err| StateError::Io(err.error))?;
+
         Ok(())
     }
 
@@ -146,7 +185,7 @@ impl StateManager {
         // For now, we read from hierarchy.json instead since that's more reliable
         // workers.md is mainly for the Queen to read
         self.read_hierarchy().map(|nodes| {
-            nodes.into_iter().filter(|n| n.role != "Queen").map(|n| {
+            nodes.into_iter().filter(|n| n.role != "Queen" && n.role != "Evaluator" && !n.role.starts_with("QaWorker-")).map(|n| {
                 WorkerStateInfo {
                     id: n.id,
                     role: WorkerRole {
@@ -170,10 +209,74 @@ impl StateManager {
         self.ensure_state_dir()?;
 
         let hierarchy_path = self.state_dir().join("hierarchy.json");
-        let json = serde_json::to_string_pretty(hierarchy)?;
+        let normalized: Vec<HierarchyNode> = hierarchy
+            .iter()
+            .cloned()
+            .map(|mut node| {
+                if node.role == "Evaluator" {
+                    node.parent_id = None;
+                }
+                node
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&normalized)?;
         fs::write(hierarchy_path, json)?;
 
         Ok(())
+    }
+
+    pub fn write_milestone_ready(
+        &self,
+        from: &str,
+        to: &str,
+        content: &str,
+    ) -> Result<(), StateError> {
+        self.write_peer_record(
+            "milestone-ready.json",
+            &PeerMessageRecord {
+                kind: "milestone-ready".to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                content: content.to_string(),
+                timestamp: Utc::now(),
+            },
+        )
+    }
+
+    pub fn write_qa_verdict(
+        &self,
+        from: &str,
+        to: &str,
+        content: &str,
+    ) -> Result<(), StateError> {
+        self.write_peer_record(
+            "qa-verdict.json",
+            &PeerMessageRecord {
+                kind: "qa-verdict".to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                content: content.to_string(),
+                timestamp: Utc::now(),
+            },
+        )
+    }
+
+    pub fn write_evaluator_feedback(
+        &self,
+        from: &str,
+        to: &str,
+        content: &str,
+    ) -> Result<(), StateError> {
+        self.write_peer_record(
+            "evaluator-feedback.json",
+            &PeerMessageRecord {
+                kind: "evaluator-feedback".to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                content: content.to_string(),
+                timestamp: Utc::now(),
+            },
+        )
     }
 
     /// Read the hierarchy from file
@@ -268,4 +371,32 @@ impl StateManager {
         Ok(assignments.get(worker_id).cloned())
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn peer_writes_are_atomic_and_overwrite_latest_message() {
+        let temp = TempDir::new().unwrap();
+        let manager = StateManager::new(temp.path().to_path_buf());
+
+        manager
+            .write_milestone_ready("queen", "evaluator", "Milestone A is ready")
+            .unwrap();
+        manager
+            .write_milestone_ready("queen", "evaluator", "Milestone B is ready")
+            .unwrap();
+
+        let path = temp.path().join("peer").join("milestone-ready.json");
+        let record: PeerMessageRecord = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+
+        assert_eq!(record.kind, "milestone-ready");
+        assert_eq!(record.content, "Milestone B is ready");
+        assert!(temp.path().join("peer").read_dir().unwrap().all(|entry| {
+            !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")
+        }));
+    }
 }
