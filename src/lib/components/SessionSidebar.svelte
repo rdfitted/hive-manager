@@ -247,6 +247,8 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    if (e.isComposing) return;
+
     if (e.key === 'Enter') {
       saveMetadata();
     } else if (e.key === 'Escape') {
@@ -586,10 +588,20 @@
     opacity: 1;
   }
 
+  .session-path:focus-within .edit-btn,
+  .edit-btn:focus-visible {
+    opacity: 1;
+  }
+
   .edit-btn:hover {
     color: var(--color-accent);
     background: var(--color-bg-secondary);
     border-radius: 3px;
+  }
+
+  .edit-btn:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
   }
 
   .edit-container {

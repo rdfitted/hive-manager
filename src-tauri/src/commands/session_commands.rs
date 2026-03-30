@@ -33,7 +33,7 @@ fn validate_session_name(name: Option<&str>) -> Result<(), String> {
         return Err("Invalid session name: must not be empty or whitespace".to_string());
     }
 
-    if name.len() > 64 {
+    if name.chars().count() > 64 {
         return Err("Invalid session name: must be 64 characters or fewer".to_string());
     }
 
@@ -49,15 +49,21 @@ fn validate_session_color(color: Option<&str>) -> Result<(), String> {
         return Ok(());
     };
 
-    if !SESSION_COLOR_ALLOWLIST.contains(&color) {
+    if !SESSION_COLOR_ALLOWLIST.contains(&color) && !is_valid_hex_session_color(color) {
         return Err(format!(
-            "Invalid session color '{}'. Valid options: {}",
+            "Invalid session color '{}'. Valid options: {} or any #RRGGBB hex color",
             color,
             SESSION_COLOR_ALLOWLIST.join(", ")
         ));
     }
 
     Ok(())
+}
+
+fn is_valid_hex_session_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
 }
 
 #[tauri::command]

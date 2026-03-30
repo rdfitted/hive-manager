@@ -5859,6 +5859,8 @@ Last updated: {timestamp}
             sessions.insert(session.id.clone(), session.clone());
         }
 
+        self.ensure_task_watcher(&session.id, &session.project_path);
+
         // Emit session-update event to frontend
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
