@@ -185,6 +185,12 @@ pub struct HiveLaunchConfig {
     #[serde(default)]
     pub with_planning: bool,  // If true, spawn Master Planner first
     #[serde(default)]
+    pub with_evaluator: bool,
+    #[serde(default)]
+    pub evaluator_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub qa_workers: Option<Vec<QaWorkerConfig>>,
+    #[serde(default)]
     pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 }
 
@@ -199,11 +205,27 @@ pub struct SwarmLaunchConfig {
     #[serde(default)]
     pub with_planning: bool,  // If true, spawn Master Planner first
     #[serde(default)]
+    pub with_evaluator: bool,
+    #[serde(default)]
+    pub evaluator_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub qa_workers: Option<Vec<QaWorkerConfig>>,
+    #[serde(default)]
     pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 
     // Legacy support - if planners vec is provided, use it instead
     #[serde(default)]
     pub planners: Vec<PlannerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaWorkerConfig {
+    pub specialization: String,
+    pub cli: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3952,6 +3974,12 @@ Last updated: {timestamp}
         // Initialize session storage
         self.init_session_storage(&session);
         self.ensure_task_watcher(&session.id, &session.project_path);
+        self.spawn_launch_evaluator_agents(
+            &session.id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+        )?;
 
         Ok(session)
     }
@@ -5446,6 +5474,12 @@ Last updated: {timestamp}
         self.update_session_storage(session_id);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
+        self.spawn_launch_evaluator_agents(
+            session_id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+        )?;
 
         // Clean up pending config file
         let _ = std::fs::remove_file(&pending_config_path);
@@ -5678,6 +5712,12 @@ Last updated: {timestamp}
         // Update storage
         self.update_session_storage(session_id);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
+        self.spawn_launch_evaluator_agents(
+            session_id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+        )?;
 
         // Clean up pending config file (keep swarm-planners.json for Queen reference)
         let _ = std::fs::remove_file(&pending_config_path);
@@ -5789,8 +5829,54 @@ Last updated: {timestamp}
         // Initialize session storage if available
         self.init_session_storage(&session);
         self.ensure_task_watcher(&session.id, &session.project_path);
+        self.spawn_launch_evaluator_agents(
+            &session.id,
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.as_deref(),
+        )?;
 
         Ok(session)
+    }
+
+    fn spawn_launch_evaluator_agents(
+        &self,
+        session_id: &str,
+        with_evaluator: bool,
+        evaluator_config: Option<AgentConfig>,
+        qa_workers: Option<&[QaWorkerConfig]>,
+    ) -> Result<(), String> {
+        if !with_evaluator {
+            return Ok(());
+        }
+
+        let evaluator_config = evaluator_config.unwrap_or(AgentConfig {
+            cli: String::new(),
+            model: None,
+            flags: vec![],
+            label: Some("Evaluator".to_string()),
+            role: None,
+            initial_prompt: None,
+        });
+
+        let evaluator = self.launch_evaluator(session_id, evaluator_config)?;
+        for qa_worker in qa_workers.unwrap_or(&[]) {
+            self.add_qa_worker(
+                session_id,
+                AgentConfig {
+                    cli: qa_worker.cli.clone(),
+                    model: qa_worker.model.clone(),
+                    flags: vec![],
+                    label: qa_worker.label.clone(),
+                    role: None,
+                    initial_prompt: None,
+                },
+                qa_worker.specialization.clone(),
+                Some(evaluator.id.clone()),
+            )?;
+        }
+
+        Ok(())
     }
 
     /// Add a worker to an existing session

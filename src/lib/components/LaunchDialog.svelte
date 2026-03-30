@@ -2,7 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
 
   export let show: boolean = false;
 
@@ -269,6 +269,24 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     label: 'Evaluator',
   };
 
+  let qaWorkers: QaWorkerConfig[] = [
+    { specialization: 'ui', cli: 'claude', flags: [] },
+    { specialization: 'api', cli: 'claude', flags: [] },
+    { specialization: 'a11y', cli: 'claude', flags: [] },
+  ];
+
+  function addQaWorker() {
+    if (qaWorkers.length < 6) {
+      qaWorkers = [...qaWorkers, { specialization: 'ui', cli: 'claude', flags: [] }];
+    }
+  }
+
+  function removeQaWorker(index: number) {
+    if (qaWorkers.length > 0) {
+      qaWorkers = qaWorkers.filter((_, i) => i !== index);
+    }
+  }
+
   async function handleSubmit(smokeTest: boolean = false) {
     if (!projectPath.trim()) return;
 
@@ -292,9 +310,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           prompt: prompt || undefined,
           with_planning: withPlanning,
           smoke_test: smokeTest,
-          // Backend needs to support evaluator config in HiveLaunchConfig
-          // For now we assume backend handles with_evaluator flag or config
-          ...({ with_evaluator: withEvaluator, evaluator_config: withEvaluator ? evaluatorConfig : undefined } as any)
+          with_evaluator: withEvaluator,
+          evaluator_config: withEvaluator ? evaluatorConfig : undefined,
+          qa_workers: withEvaluator ? qaWorkers : undefined,
         };
         dispatch('launchHive', config);
       } else if (mode === 'swarm') {
@@ -315,6 +333,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           prompt: prompt || undefined,
           with_planning: true, // Planning is always enabled
           smoke_test: smokeTest,
+          with_evaluator: withEvaluator,
+          evaluator_config: withEvaluator ? evaluatorConfig : undefined,
+          qa_workers: withEvaluator ? qaWorkers : undefined,
         };
         dispatch('launchSwarm', config);
       } else if (mode === 'solo') {
@@ -455,6 +476,44 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               <div class="evaluator-config subsection">
                 <h4>Evaluator Configuration</h4>
                 <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />
+              </div>
+
+              <div class="qa-workers-config subsection">
+                <div class="section-header">
+                  <h4>QA Workers ({qaWorkers.length})</h4>
+                  <button type="button" class="add-button small" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>
+                    + Add
+                  </button>
+                </div>
+                <div class="workers-list">
+                  {#each qaWorkers as worker, i (i)}
+                    <div class="worker-card qa-worker-card">
+                      <div class="card-header">
+                        <span class="card-title">QA Worker {i + 1}</span>
+                        <button
+                          type="button"
+                          class="remove-button small"
+                          on:click={() => removeQaWorker(i)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      <div class="role-selector small">
+                        <label for="qa-spec-{i}">Specialization</label>
+                        <select
+                          id="qa-spec-{i}"
+                          bind:value={worker.specialization}
+                          class="role-select"
+                        >
+                          <option value="ui">UI Tester</option>
+                          <option value="api">API Tester</option>
+                          <option value="a11y">A11Y Tester</option>
+                        </select>
+                      </div>
+                      <AgentConfigEditor bind:config={worker} showLabel={false} />
+                    </div>
+                  {/each}
+                </div>
               </div>
             {/if}
           </div>
@@ -880,6 +939,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: 6px;
+  }
+
+  .qa-worker-card {
+    border-left: 3px solid #9333ea;
   }
 
   .worker-mini-card {
