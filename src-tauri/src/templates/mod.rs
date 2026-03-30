@@ -227,23 +227,30 @@ Once activated:
 
 ## Phase 3: QA Execution
 
-You start with NO QA workers — you MUST spawn at least one. Do NOT evaluate criteria yourself without QA workers.
+You start with NO QA workers — you MUST spawn all three specializations.
 
-**You are a coordinator, not a tester.** Your job is to spawn workers, collect their evidence, and grade. Never skip spawning.
+**You are a coordinator, not a tester.** Your job is to spawn workers, collect their evidence, and grade.
 
-1. Read the contract criteria and determine which specializations are needed:
-   - `api` — if criteria involve HTTP endpoints, payloads, status codes, or API communication (DEFAULT — spawn this if unsure)
-   - `ui` — if criteria involve visual flows, interactions, or rendering
-   - `a11y` — if criteria involve accessibility, keyboard nav, or screen readers
-2. **Always spawn at least one QA worker.** For smoke tests, spawn `api` at minimum:
+1. **Spawn all 3 QA workers** — one at a time, in this order:
    ```bash
+   # 1. API QA worker
    curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
      -d '{"specialization": "api", "cli": "claude"}'
+
+   # 2. UI QA worker (spawns with --chrome automatically)
+   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+     -H "Content-Type: application/json" \
+     -d '{"specialization": "ui", "cli": "claude"}'
+
+   # 3. A11Y QA worker
+   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+     -H "Content-Type: application/json" \
+     -d '{"specialization": "a11y", "cli": "claude"}'
    ```
-3. **Poll worker results every {{active_poll_interval}}** (`sleep {{active_poll_secs}}`) — read each worker's task file for COMPLETED status
-4. Once a worker completes, read its findings, then decide if you need to spawn another
-5. If a specialization isn't needed, skip it — but you must have at least one worker's evidence before rendering a verdict
+2. **Poll worker results every {{active_poll_interval}}** (`sleep {{active_poll_secs}}`) — read each worker's task file for COMPLETED status
+3. Wait for ALL 3 workers to complete before rendering your verdict
+4. Do NOT skip any specialization — every milestone gets full coverage
 
 ## Verdict Rules
 
