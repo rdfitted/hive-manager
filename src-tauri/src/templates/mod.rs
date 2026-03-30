@@ -225,6 +225,30 @@ REQUIRED_FIXES:
 - If the coordination runtime is active, send the same verdict through the peer channel so the JSON watcher mirror stays in sync.
 - Send remediation requests to QA workers only when you need missing evidence.
 
+## Coordination Tools
+
+### Spawn QA Worker
+
+```bash
+curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+  -H "Content-Type: application/json" \
+  -d '{"specialization": "ui", "cli": "claude"}'
+```
+
+- Available specializations: `ui`, `api`, `a11y`
+- QA workers default to parent `{{session_id}}-evaluator`
+- Each QA worker receives a task file at `.hive-manager/{{session_id}}/tasks/qa-worker-N-task.md`
+
+### Check Worker Status
+
+```bash
+curl "http://localhost:18800/api/sessions/{{session_id}}/workers"
+```
+
+Use the session tools directory for reference docs:
+- `.hive-manager/{{session_id}}/tools/spawn-qa-worker.md`
+- `.hive-manager/{{session_id}}/tools/list-workers.md`
+
 ## Additional Guidance
 
 {{custom_instructions}}

@@ -1240,19 +1240,29 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
     }
 
     #[allow(dead_code)]
-    fn build_qa_worker_prompt(session_id: &str, index: u8, config: &AgentConfig, auth: &AuthStrategy) -> String {
-        let (template_name, default_guidance) = match (index - 1) % 3 {
-            0 => (
+    fn build_qa_worker_prompt(
+        session_id: &str,
+        index: u8,
+        specialization: &str,
+        config: &AgentConfig,
+        auth: &AuthStrategy,
+    ) -> String {
+        let (template_name, default_guidance) = match specialization {
+            "ui" => (
                 "roles/qa-worker-ui",
                 "Validate the full UI flow, capture screenshot evidence, and report failures only with criterion-numbered proof.",
             ),
-            1 => (
+            "api" => (
                 "roles/qa-worker-api",
                 "Exercise the API surface directly, include concrete request and response evidence, and fail ambiguous behavior.",
             ),
-            _ => (
+            "a11y" => (
                 "roles/qa-worker-a11y",
                 "Audit accessibility rigorously with tooling and manual keyboard checks, then report criterion-numbered findings with exact defects.",
+            ),
+            _ => (
+                "roles/qa-worker-api",
+                "Exercise the API surface directly, include concrete request and response evidence, and fail ambiguous behavior.",
             ),
         };
 
@@ -1268,6 +1278,15 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         auth.apply_prompt_variables(session_id, &mut variables);
 
         Self::render_named_prompt(template_name, session_id, None, variables)
+    }
+
+    fn qa_worker_label(specialization: &str) -> &'static str {
+        match specialization {
+            "ui" => "UI QA",
+            "api" => "API QA",
+            "a11y" => "A11Y QA",
+            _ => "QA Worker",
+        }
     }
 
     fn render_named_prompt(
@@ -3176,6 +3195,66 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 
         Self::write_tool_file(project_path, session_id, "spawn-worker.md", &spawn_worker_tool)?;
 
+        let spawn_qa_worker_tool = format!(r#"# Spawn QA Worker Tool
+
+Spawn a QA worker for the Evaluator.
+
+## HTTP API
+
+**Endpoint:** `POST http://localhost:18800/api/sessions/{session_id}/qa-workers`
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{{
+  "specialization": "ui",
+  "cli": "{default_cli}",
+  "initial_task": "Optional QA assignment"
+}}
+```
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| specialization | string | Yes | QA specialization: `ui`, `api`, or `a11y` |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
+| model | string | No | Optional model override |
+| label | string | No | Custom label for the QA worker |
+| initial_task | string | No | Initial QA assignment |
+| parent_id | string | No | Parent evaluator ID (defaults to `{session_id}-evaluator`) |
+
+## Example Usage
+
+```bash
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/qa-workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"specialization": "ui", "cli": "{default_cli}"}}'
+
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/qa-workers" \
+  -H "Content-Type: application/json" \
+  -d '{{"specialization": "api", "cli": "{default_cli}", "initial_task": "Validate milestone criteria 1-3 via HTTP requests"}}'
+```
+
+## Response
+
+```json
+{{
+  "worker_id": "{session_id}-qa-worker-N",
+  "role": "UI QA",
+  "cli": "{default_cli}",
+  "status": "Running",
+  "task_file": ".hive-manager/{session_id}/tasks/qa-worker-N-task.md"
+}}
+```
+"#, session_id = session_id, default_cli = default_cli);
+
+        Self::write_tool_file(project_path, session_id, "spawn-qa-worker.md", &spawn_qa_worker_tool)?;
+
         // List Workers tool
         let list_workers_tool = format!(r#"# List Workers Tool
 
@@ -3562,6 +3641,66 @@ Last updated: {timestamp}
 
         std::fs::write(&file_path, content)
             .map_err(|e| format!("Failed to write task file: {}", e))?;
+
+        Ok(file_path)
+    }
+
+    fn write_qa_task_file(
+        project_path: &PathBuf,
+        session_id: &str,
+        worker_index: u8,
+        specialization: &str,
+        initial_task: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+        std::fs::create_dir_all(&tasks_dir)
+            .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
+
+        let filename = format!("qa-worker-{}-task.md", worker_index);
+        let file_path = tasks_dir.join(&filename);
+
+        let (status, task_content) = if let Some(task) = initial_task {
+            ("ACTIVE", task.to_string())
+        } else {
+            ("STANDBY", "Awaiting QA assignment from the Evaluator. Monitor this file for updates.".to_string())
+        };
+
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let content = format!(
+"# Task Assignment - QA Worker {worker_index} ({specialization})
+
+## Status: {status}
+
+## Role Constraints
+
+- **EXECUTOR**: You have full authority to test and verify behavior within your QA specialization.
+- **SCOPE**: Stay within the assigned QA specialization and report criterion-numbered evidence.
+- **GIT**: Do NOT push or commit. Provide evidence and findings for the Evaluator to act on.
+
+## Instructions
+
+{task_content}
+
+## Completion Protocol
+
+When task is complete, update this file:
+1. Change Status to: COMPLETED
+2. Add a summary under a new Result section
+
+If blocked, change Status to: BLOCKED and describe the issue.
+
+---
+Last updated: {timestamp}
+",
+            worker_index = worker_index,
+            specialization = specialization,
+            status = status,
+            task_content = task_content,
+            timestamp = timestamp
+        );
+
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write QA task file: {}", e))?;
 
         Ok(file_path)
     }
@@ -5758,6 +5897,8 @@ Last updated: {timestamp}
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
 
+        Self::write_tool_files(&session.project_path, session_id, &config.cli)?;
+
         let evaluator_prompt = Self::build_evaluator_prompt(session_id, &config);
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
@@ -5816,6 +5957,7 @@ Last updated: {timestamp}
         &self,
         session_id: &str,
         mut config: AgentConfig,
+        specialization: String,
         parent_id: Option<String>,
     ) -> Result<AgentInfo, String> {
         let session = self
@@ -5833,6 +5975,9 @@ Last updated: {timestamp}
         if config.model.is_none() {
             config.model = session.default_model.clone();
         }
+        if config.label.is_none() {
+            config.label = Some(Self::qa_worker_label(&specialization).to_string());
+        }
 
         let next_index = session
             .agents
@@ -5842,7 +5987,20 @@ Last updated: {timestamp}
             + 1;
 
         let qa_worker_id = format!("{}-qa-worker-{}", session_id, next_index);
-        let qa_worker_prompt = Self::build_qa_worker_prompt(session_id, next_index, &config, &session.auth_strategy);
+        Self::write_qa_task_file(
+            &session.project_path,
+            session_id,
+            next_index,
+            &specialization,
+            config.initial_prompt.as_deref(),
+        )?;
+        let qa_worker_prompt = Self::build_qa_worker_prompt(
+            session_id,
+            next_index,
+            &specialization,
+            &config,
+            &session.auth_strategy,
+        );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -6385,7 +6543,8 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_persisted_session_state, serialize_session_state, SessionState};
+    use super::{parse_persisted_session_state, serialize_session_state, AgentConfig, AuthStrategy, SessionController, SessionState};
+    use std::path::PathBuf;
 
     #[test]
     fn session_state_variants_exist() {
@@ -6427,6 +6586,43 @@ mod tests {
             SessionState::QaFailed { iteration: 1 }
         );
         assert_eq!(serialize_session_state(&SessionState::QaPassed), "QaPassed");
+    }
+
+    #[test]
+    fn qa_worker_prompt_uses_requested_specialization() {
+        let prompt = SessionController::build_qa_worker_prompt(
+            "session-123",
+            1,
+            "a11y",
+            &AgentConfig::default(),
+            &AuthStrategy::default(),
+        );
+
+        assert!(prompt.contains("Accessibility Tester"));
+        assert!(prompt.contains("axe-core"));
+        assert!(!prompt.contains("UI Tester"));
+    }
+
+    #[test]
+    fn write_tool_files_includes_spawn_qa_worker_doc() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        SessionController::write_tool_files(
+            &PathBuf::from(temp_dir.path()),
+            "session-123",
+            "claude",
+        )
+        .expect("write tool files");
+
+        let tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("spawn-qa-worker.md");
+        let content = std::fs::read_to_string(tool_path).expect("read QA tool doc");
+
+        assert!(content.contains("/api/sessions/session-123/qa-workers"));
+        assert!(content.contains("\"specialization\": \"ui\""));
     }
 }
 

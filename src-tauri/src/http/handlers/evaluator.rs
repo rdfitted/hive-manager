@@ -32,6 +32,45 @@ pub struct AddEvaluatorResponse {
     pub prompt_file: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddQaWorkerRequest {
+    pub specialization: String,
+    pub label: Option<String>,
+    pub cli: Option<String>,
+    pub model: Option<String>,
+    pub initial_task: Option<String>,
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddQaWorkerResponse {
+    pub worker_id: String,
+    pub role: String,
+    pub cli: String,
+    pub status: String,
+    pub task_file: String,
+}
+
+fn validate_qa_specialization(specialization: &str) -> Result<(), ApiError> {
+    if matches!(specialization, "ui" | "api" | "a11y") {
+        return Ok(());
+    }
+
+    Err(ApiError::bad_request(format!(
+        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
+        specialization
+    )))
+}
+
+fn qa_specialization_label(specialization: &str) -> &'static str {
+    match specialization {
+        "ui" => "UI QA",
+        "api" => "API QA",
+        "a11y" => "A11Y QA",
+        _ => "QA Worker",
+    }
+}
+
 pub async fn add_evaluator(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -107,6 +146,66 @@ pub async fn list_evaluators(
         "evaluators": evaluators,
         "count": evaluators.len()
     })))
+}
+
+pub async fn add_qa_worker(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(req): Json<AddQaWorkerRequest>,
+) -> Result<(StatusCode, Json<AddQaWorkerResponse>), ApiError> {
+    validate_session_id(&session_id)?;
+    validate_qa_specialization(&req.specialization)?;
+
+    let session_default_cli = {
+        let controller = state.session_controller.read();
+        controller
+            .get_session_default_cli(&session_id)
+            .unwrap_or_else(|| "claude".to_string())
+    };
+    let cli = req.cli.unwrap_or(session_default_cli);
+    validate_cli(&cli)?;
+
+    let config = AgentConfig {
+        cli: cli.clone(),
+        model: req.model,
+        flags: vec![],
+        label: req
+            .label
+            .clone()
+            .or_else(|| Some(qa_specialization_label(&req.specialization).to_string())),
+        role: None,
+        initial_prompt: req.initial_task,
+    };
+
+    let worker_id = {
+        let controller = state.session_controller.write();
+        controller
+            .add_qa_worker(
+                &session_id,
+                config,
+                req.specialization.clone(),
+                req.parent_id,
+            )
+            .map_err(ApiError::internal)?
+            .id
+    };
+
+    let index = worker_id
+        .rsplit('-')
+        .next()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(1);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AddQaWorkerResponse {
+            worker_id,
+            role: qa_specialization_label(&req.specialization).to_string(),
+            cli,
+            status: "Running".to_string(),
+            task_file: format!(".hive-manager/{}/tasks/qa-worker-{}-task.md", session_id, index),
+        }),
+    ))
 }
 
 // --- Dev Login Endpoint ---
