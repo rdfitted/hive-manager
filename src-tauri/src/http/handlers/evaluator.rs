@@ -189,10 +189,16 @@ pub async fn add_qa_worker(
     let cli = req.cli.unwrap_or(session_default_cli);
     validate_cli(&cli)?;
 
+    let mut flags = Vec::new();
+    // Auto-inject --chrome for UI QA workers using claude CLI
+    if req.specialization == "ui" && cli == "claude" {
+        flags.push("--chrome".to_string());
+    }
+
     let config = AgentConfig {
         cli: cli.clone(),
         model: req.model,
-        flags: vec![],
+        flags,
         label: req
             .label
             .clone()

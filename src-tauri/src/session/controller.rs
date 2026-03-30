@@ -226,6 +226,8 @@ pub struct QaWorkerConfig {
     pub model: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub flags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5984,12 +5986,17 @@ Last updated: {timestamp}
 
         let evaluator = self.launch_evaluator(session_id, evaluator_config)?;
         for qa_worker in qa_workers.unwrap_or(&[]) {
+            let mut flags = qa_worker.flags.clone().unwrap_or_default();
+            // Auto-inject --chrome for UI QA workers using claude CLI
+            if qa_worker.specialization == "ui" && qa_worker.cli == "claude" && !flags.iter().any(|f| f == "--chrome") {
+                flags.push("--chrome".to_string());
+            }
             self.add_qa_worker(
                 session_id,
                 AgentConfig {
                     cli: qa_worker.cli.clone(),
                     model: qa_worker.model.clone(),
-                    flags: vec![],
+                    flags,
                     label: qa_worker.label.clone(),
                     role: None,
                     initial_prompt: None,
