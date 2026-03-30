@@ -179,6 +179,10 @@ pub struct AgentInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HiveLaunchConfig {
     pub project_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub queen_config: AgentConfig,
     pub workers: Vec<AgentConfig>,
     pub prompt: Option<String>,
@@ -197,6 +201,10 @@ pub struct HiveLaunchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmLaunchConfig {
     pub project_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub queen_config: AgentConfig,
     pub planner_count: u8,                    // How many planners
     pub planner_config: AgentConfig,          // Config shared by all planners
@@ -240,6 +248,10 @@ pub struct PlannerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FusionLaunchConfig {
     pub project_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub variants: Vec<FusionVariantConfig>,
     pub task_description: String,
     pub judge_config: AgentConfig,
@@ -297,6 +309,8 @@ pub struct FusionVariantStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct Session {
     pub id: String,
+    pub name: Option<String>,
+    pub color: Option<String>,
     pub session_type: SessionType,
     pub project_path: PathBuf,
     pub state: SessionState,
@@ -557,6 +571,8 @@ impl SessionController {
 
         let session = Session {
             id: session_id.clone(),
+            name: None,
+            color: None,
             session_type: SessionType::Hive { worker_count },
             project_path,
             state: SessionState::Running,
@@ -586,6 +602,28 @@ impl SessionController {
     pub fn get_session(&self, id: &str) -> Option<Session> {
         let sessions = self.sessions.read();
         sessions.get(id).cloned()
+    }
+
+    pub fn update_session_metadata(
+        &self,
+        session_id: &str,
+        name: Option<String>,
+        color: Option<String>,
+    ) -> Result<Session, String> {
+        let updated = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            session.name = name;
+            session.color = color;
+            session.clone()
+        };
+
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+
+        Ok(updated)
     }
 
     /// Get the default CLI for a session
@@ -3995,6 +4033,8 @@ Last updated: {timestamp}
         &self,
         project_path: PathBuf,
         task_description: Option<String>,
+        name: Option<String>,
+        color: Option<String>,
         cli: String,
         model: Option<String>,
         flags: Vec<String>,
@@ -4029,6 +4069,8 @@ Last updated: {timestamp}
 
         let session = Session {
             id: session_id.clone(),
+            name,
+            color,
             session_type: SessionType::Solo {
                 cli: cli.clone(),
                 model: model.clone(),
@@ -4075,6 +4117,8 @@ Last updated: {timestamp}
         self.launch_solo_internal(
             project_path,
             task_description,
+            config.name.clone(),
+            config.color.clone(),
             config.queen_config.cli.clone(),
             config.queen_config.model.clone(),
             config.queen_config.flags.clone(),
@@ -4181,6 +4225,8 @@ Last updated: {timestamp}
 
         let session = Session {
             id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
             session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
             project_path,
             state: SessionState::Running,
@@ -4278,6 +4324,8 @@ Last updated: {timestamp}
 
         let session = Session {
             id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
             session_type: SessionType::Fusion {
                 variants: variants.iter().map(|v| v.name.clone()).collect(),
             },
@@ -4508,6 +4556,8 @@ Last updated: {timestamp}
 
         let session = Session {
             id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
             session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
             project_path,
             state: SessionState::Planning,
@@ -4595,6 +4645,8 @@ Last updated: {timestamp}
         let variant_names: Vec<String> = config.variants.iter().map(|v| v.name.clone()).collect();
         let session = Session {
             id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
             session_type: SessionType::Fusion { variants: variant_names },
             project_path: project_path.clone(),
             state: SessionState::Planning,
@@ -4942,6 +4994,8 @@ Last updated: {timestamp}
 
         let session = Session {
             id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
             session_type: SessionType::Swarm { planner_count: if config.planners.is_empty() { config.planner_count } else { config.planners.len() as u8 } },
             project_path,
             state: SessionState::Planning,
@@ -5811,6 +5865,8 @@ Last updated: {timestamp}
         // Create session object
         let session = Session {
             id: persisted.id.clone(),
+            name: persisted.name.clone(),
+            color: persisted.color.clone(),
             session_type,
             project_path: PathBuf::from(persisted.project_path),
             state,
@@ -6039,6 +6095,8 @@ Last updated: {timestamp}
 
         let session = Session {
             id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
             session_type: SessionType::Swarm { planner_count: planners.len() as u8 },
             project_path,
             state: SessionState::Running,  // Queen will spawn planners sequentially
@@ -6598,6 +6656,8 @@ Last updated: {timestamp}
 
         PersistedSession {
             id: session.id.clone(),
+            name: session.name.clone(),
+            color: session.color.clone(),
             session_type,
             project_path: session.project_path.to_string_lossy().to_string(),
             created_at: session.created_at,

@@ -73,6 +73,10 @@ pub enum StorageError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub session_type: String,
     pub project_path: String,
     pub created_at: DateTime<Utc>,
@@ -84,6 +88,10 @@ pub struct SessionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSession {
     pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub session_type: SessionTypeInfo,
     pub project_path: String,
     pub created_at: DateTime<Utc>,
@@ -295,6 +303,8 @@ impl SessionStorage {
 
                     summaries.push(SessionSummary {
                         id: session.id,
+                        name: session.name,
+                        color: session.color,
                         session_type,
                         project_path: session.project_path,
                         created_at: session.created_at,

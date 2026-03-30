@@ -111,6 +111,8 @@ pub async fn launch_solo(
 
     let config = HiveLaunchConfig {
         project_path,
+        name: None,
+        color: None,
         queen_config: agent_config,
         workers: vec![],
         prompt: task_description.filter(|t| !t.trim().is_empty()),

@@ -60,6 +60,8 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
 fn make_test_session(id: &str, project_path: &str) -> Session {
     Session {
         id: id.to_string(),
+        name: None,
+        color: None,
         session_type: SessionType::Hive { worker_count: 1 },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
@@ -90,6 +92,8 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         .collect();
     Session {
         id: id.to_string(),
+        name: None,
+        color: None,
         session_type: SessionType::Hive { worker_count: 1 },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
@@ -147,6 +151,114 @@ async fn test_get_nonexistent_session() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_patch_session_updates_name_and_color() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-patch-session");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-patch", temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({
+        "name": "Alpha Session",
+        "color": "#7aa2f7"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/sessions/session-patch")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(response_json.get("name").unwrap().as_str().unwrap(), "Alpha Session");
+    assert_eq!(response_json.get("color").unwrap().as_str().unwrap(), "#7aa2f7");
+
+    let session = controller.read().get_session("session-patch").unwrap();
+    assert_eq!(session.name.as_deref(), Some("Alpha Session"));
+    assert_eq!(session.color.as_deref(), Some("#7aa2f7"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_patch_session_rejects_invalid_color() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-patch-invalid-color");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-patch-color", temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({
+        "name": "Alpha Session",
+        "color": "#ffffff"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/sessions/session-patch-color")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_patch_session_rejects_invalid_name() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-patch-invalid-name");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-patch-name", temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({
+        "name": "../escape",
+        "color": "#7aa2f7"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/sessions/session-patch-name")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 // --- Session-scoped learnings endpoint tests ---
@@ -1916,6 +2028,8 @@ async fn test_add_qa_worker_valid_request_reaches_controller() {
 fn test_persisted_session_serializes_default_cli() {
     let session = PersistedSession {
         id: "test-session".to_string(),
+        name: Some("Test Session".to_string()),
+        color: Some("#7aa2f7".to_string()),
         session_type: SessionTypeInfo::Hive { worker_count: 2 },
         project_path: "/tmp/test".to_string(),
         created_at: chrono::Utc::now(),
@@ -1933,6 +2047,8 @@ fn test_persisted_session_serializes_default_cli() {
 
     assert_eq!(deserialized.default_cli, "gemini");
     assert_eq!(deserialized.default_model, Some("gemini-2.5-pro".to_string()));
+    assert_eq!(deserialized.name, Some("Test Session".to_string()));
+    assert_eq!(deserialized.color, Some("#7aa2f7".to_string()));
 }
 
 #[test]
@@ -1958,6 +2074,8 @@ fn test_persisted_session_legacy_json_defaults_to_claude() {
         session.default_model, None,
         "Legacy sessions without default_model should fallback to None"
     );
+    assert_eq!(session.name, None);
+    assert_eq!(session.color, None);
     assert_eq!(session.max_qa_iterations, 3);
     assert_eq!(session.qa_timeout_secs, 300);
 }
