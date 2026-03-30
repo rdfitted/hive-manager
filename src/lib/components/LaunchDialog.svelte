@@ -409,16 +409,22 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
 {#if show}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="dialog-overlay" onclick={handleOverlayClick} role="presentation">
+  <div class="dialog-overlay" on:click={handleOverlayClick} role="presentation">
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="dialog" onclick|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div
+      class="dialog"
+      on:click|stopPropagation
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+    >
       <h2>Launch New Session</h2>
 
       <div class="mode-tabs">
         <button
           class="mode-tab"
           class:active={mode === 'hive'}
-          onclick={() => (mode = 'hive')}
+          on:click={() => (mode = 'hive')}
           type="button"
         >
           Hive
@@ -426,7 +432,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         <button
           class="mode-tab"
           class:active={mode === 'swarm'}
-          onclick={() => (mode = 'swarm')}
+          on:click={() => (mode = 'swarm')}
           type="button"
         >
           Swarm
@@ -434,7 +440,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         <button
           class="mode-tab"
           class:active={mode === 'fusion'}
-          onclick={() => (mode = 'fusion')}
+          on:click={() => (mode = 'fusion')}
           type="button"
         >
           Fusion
@@ -442,14 +448,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         <button
           class="mode-tab"
           class:active={mode === 'solo'}
-          onclick={() => (mode = 'solo')}
+          on:click={() => (mode = 'solo')}
           type="button"
         >
           Solo
         </button>
       </div>
 
-      <form onsubmit={(e) => { e.preventDefault(); handleSubmit(false); }}>
+      <form on:submit={(e) => { e.preventDefault(); handleSubmit(false); }}>
         <div class="form-row">
           <div class="form-group flex-2">
             <label for="sessionName">Session Name (optional)</label>
@@ -469,7 +475,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   class="color-circle"
                   style:background={color.value}
                   class:selected={sessionColor === color.value}
-                  onclick={() => sessionColor = color.value}
+                  on:click={() => sessionColor = color.value}
                   title={color.name}
                 >
                 </button>
@@ -477,7 +483,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               <button
                 type="button"
                 class="color-circle clear"
-                onclick={() => sessionColor = ''}
+                on:click={() => sessionColor = ''}
                 title="Clear color"
               >×</button>
             </div>

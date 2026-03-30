@@ -115,6 +115,13 @@
     sessions.setActiveSession(sessionId);
   }
 
+  function handleSessionButtonKeydown(event: KeyboardEvent, sessionId: string) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      selectSession(sessionId);
+    }
+  }
+
   async function handleResumeSession(sessionId: string) {
     try {
       await sessions.resumeSession(sessionId);
@@ -264,7 +271,13 @@
             {#each $sessions.sessions.filter(s => isActiveState(s.state)) as session}
               <li class="session-item" class:active={$activeSession?.id === session.id} style:--session-color={session.color || 'transparent'}>
                 <div class="session-row">
-                  <button class="session-button" onclick={() => selectSession(session.id)}>
+                  <div
+                    class="session-button"
+                    role="button"
+                    tabindex="0"
+                    onclick={() => selectSession(session.id)}
+                    onkeydown={(event) => handleSessionButtonKeydown(event, session.id)}
+                  >
                     {#if editingSessionId === session.id}
                       <div class="edit-container" onclick={e => e.stopPropagation()}>
                         <input
@@ -276,7 +289,13 @@
                           autofocus
                         />
                         <div class="edit-actions">
-                          <button class="color-toggle" onclick={() => showColorPicker = !showColorPicker} title="Choose Color" style:background={editColor || 'var(--color-bg-secondary)'}>
+                          <button
+                            class="color-toggle"
+                            onclick={() => showColorPicker = !showColorPicker}
+                            title="Choose Color"
+                            style:background={editColor || 'var(--color-bg-secondary)'}
+                            type="button"
+                          >
                           </button>
                           {#if showColorPicker}
                             <div class="color-picker">
@@ -287,6 +306,7 @@
                                   class:selected={editColor === color.value}
                                   onclick={() => { editColor = color.value; showColorPicker = false; }}
                                   title={color.name}
+                                  type="button"
                                 >
                                 </button>
                               {/each}
@@ -294,17 +314,23 @@
                                 class="color-option clear"
                                 onclick={() => { editColor = undefined; showColorPicker = false; }}
                                 title="Clear Color"
+                                type="button"
                               >×</button>
                             </div>
                           {/if}
-                          <button class="save-btn" onclick={saveMetadata} title="Save">✓</button>
-                          <button class="cancel-btn-inline" onclick={cancelEdit} title="Cancel">×</button>
+                          <button class="save-btn" onclick={saveMetadata} title="Save" type="button">✓</button>
+                          <button class="cancel-btn-inline" onclick={cancelEdit} title="Cancel" type="button">×</button>
                         </div>
                       </div>
                     {:else}
                       <span class="session-path">
                         {session.name || session.project_path.split(/[/\\]/).pop()}
-                        <button class="edit-btn" onclick={(e) => { e.stopPropagation(); startEdit(session); }} title="Rename Session">✎</button>
+                        <button
+                          class="edit-btn"
+                          onclick={(e) => { e.stopPropagation(); startEdit(session); }}
+                          title="Rename Session"
+                          type="button"
+                        >✎</button>
                       </span>
                       <span class="session-meta">
                         {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
@@ -313,13 +339,14 @@
                         {formatTimestamp(session.created_at)}
                       </span>
                     {/if}
-                  </button>
+                  </div>
                   <button
                     class="close-session-button"
                     onclick={(e) => handleCloseSession(e, session.id)}
                     title="Close Session"
                     aria-label="Close Session"
                     disabled={closingSessionId === session.id}
+                    type="button"
                   >
                     {closingSessionId === session.id ? '…' : '×'}
                   </button>

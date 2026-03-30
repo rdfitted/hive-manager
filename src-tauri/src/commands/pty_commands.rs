@@ -55,7 +55,24 @@ pub async fn write_to_pty(
 
     let pty_manager = state.0.read();
 
-    // Wrap in bracketed paste mode for proper terminal handling
+    pty_manager.write(&id, data.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn paste_to_pty(
+    state: State<'_, PtyManagerState>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
+    if data.len() > MAX_PASTE_SIZE {
+        return Err(format!(
+            "Paste size {} bytes exceeds maximum allowed {} bytes",
+            data.len(),
+            MAX_PASTE_SIZE
+        ));
+    }
+
+    let pty_manager = state.0.read();
     pty_manager.write_bracketed(&id, data.as_bytes()).map_err(|e| e.to_string())
 }
 

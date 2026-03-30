@@ -36,6 +36,7 @@
   let contextMenuY = $state(0);
   let hasSelection = $state(false);
   let isDragActive = $state(false);
+  let isWindows = $state(false);
 
   // Track agent status from store
   let agent = $derived($activeAgents.find(a => a.id === agentId));
@@ -85,7 +86,19 @@
     }
   }
 
+  async function pasteToPty(data: string) {
+    try {
+      await invoke('paste_to_pty', { id: agentId, data });
+    } catch (err) {
+      console.error('[Terminal] Failed to paste to PTY:', err);
+    }
+  }
+
   function shellEscapePath(path: string): string {
+    if (isWindows) {
+      return `"${path.replace(/"/g, '`"')}"`;
+    }
+
     if (!path.includes("'")) {
       return `'${path}'`;
     }
@@ -142,7 +155,7 @@
     if (paths.length === 0) return;
 
     const payload = paths.map(shellEscapePath).join('\n');
-    await sendToPty(payload);
+    await pasteToPty(payload);
     term?.focus();
   }
 
@@ -198,7 +211,7 @@
     }
 
     if (text) {
-      sendToPty(text);
+      await pasteToPty(text);
     }
 
     closeContextMenu();
@@ -241,11 +254,13 @@
     const text = event.clipboardData?.getData('text');
     if (text) {
       event.preventDefault();
-      sendToPty(text);
+      pasteToPty(text);
     }
   }
 
   onMount(async () => {
+    isWindows = navigator.platform.toLowerCase().startsWith('win');
+
     // Add global click listener
     document.addEventListener('click', handleGlobalClick);
     // Add global paste listener for tools like Wispr Flow
@@ -366,7 +381,7 @@
             }
           }
           if (text && term) {
-            sendToPty(text);
+            pasteToPty(text);
           }
         })();
         return false;
