@@ -466,6 +466,8 @@ impl SessionController {
         worker_count: u8,
         command: &str,
         prompt: Option<String>,
+        name: Option<String>,
+        color: Option<String>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
@@ -571,8 +573,8 @@ impl SessionController {
 
         let session = Session {
             id: session_id.clone(),
-            name: None,
-            color: None,
+            name,
+            color,
             session_type: SessionType::Hive { worker_count },
             project_path,
             state: SessionState::Running,
@@ -596,6 +598,7 @@ impl SessionController {
             });
         }
 
+        self.init_session_storage(&session);
         Ok(session)
     }
 
@@ -624,7 +627,7 @@ impl SessionController {
         };
 
         let updated = if let Some(updated) = updated {
-            self.update_session_storage(session_id);
+            self.update_session_storage_checked(session_id)?;
             updated
         } else {
             let storage = self
@@ -6805,14 +6808,20 @@ Last updated: {timestamp}
 
     /// Update session storage after changes
     fn update_session_storage(&self, session_id: &str) {
+        if let Err(e) = self.update_session_storage_checked(session_id) {
+            tracing::warn!("Failed to update session metadata: {}", e);
+        }
+    }
+
+    fn update_session_storage_checked(&self, session_id: &str) -> Result<(), String> {
         if let Some(ref storage) = self.storage {
             let sessions = self.sessions.read();
             if let Some(session) = sessions.get(session_id) {
                 // Update session.json with latest state
                 let persisted = self.session_to_persisted(session);
-                if let Err(e) = storage.save_session(&persisted) {
-                    tracing::warn!("Failed to update session metadata: {}", e);
-                }
+                storage
+                    .save_session(&persisted)
+                    .map_err(|e| format!("Failed to update session metadata: {}", e))?;
 
                 // Build hierarchy nodes
                 let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
@@ -6855,6 +6864,8 @@ Last updated: {timestamp}
                 }
             }
         }
+
+        Ok(())
     }
 }
 

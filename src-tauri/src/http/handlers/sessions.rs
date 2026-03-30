@@ -260,13 +260,9 @@ pub async fn launch_hive(
         req.worker_count.unwrap_or(3),
         &command,
         req.task_description,
-    ).map_err(|e| ApiError::internal(e.to_string()))?;
-
-    if req.name.is_some() || req.color.is_some() {
-        controller
-            .update_session_metadata(&session.id, Some(req.name.clone()), Some(req.color.clone()))
-            .map_err(ApiError::internal)?;
-    }
+        req.name,
+        req.color,
+    ).map_err(ApiError::internal)?;
 
     Ok((
         StatusCode::CREATED,
