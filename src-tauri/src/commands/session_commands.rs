@@ -9,9 +9,52 @@ use crate::session::{Session, SessionController, HiveLaunchConfig, SwarmLaunchCo
 
 pub struct SessionControllerState(pub Arc<RwLock<SessionController>>);
 
+const SESSION_COLOR_ALLOWLIST: &[&str] = &[
+    "#7aa2f7",
+    "#bb9af7",
+    "#9ece6a",
+    "#e0af68",
+    "#7dcfff",
+    "#f7768e",
+    "#ff9e64",
+    "#f7b1d1",
+];
+
 // SessionControllerState is Send + Sync because Arc<RwLock<T>> is Send + Sync when T is Send
 unsafe impl Send for SessionControllerState {}
 unsafe impl Sync for SessionControllerState {}
+
+fn validate_session_name(name: Option<&str>) -> Result<(), String> {
+    let Some(name) = name else {
+        return Ok(());
+    };
+
+    if name.len() > 64 {
+        return Err("Invalid session name: must be 64 characters or fewer".to_string());
+    }
+
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err("Invalid session name: must not contain '..', '/', or '\\'".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_session_color(color: Option<&str>) -> Result<(), String> {
+    let Some(color) = color else {
+        return Ok(());
+    };
+
+    if !SESSION_COLOR_ALLOWLIST.contains(&color) {
+        return Err(format!(
+            "Invalid session color '{}'. Valid options: {}",
+            color,
+            SESSION_COLOR_ALLOWLIST.join(", ")
+        ));
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn launch_hive(
@@ -161,4 +204,18 @@ pub async fn resume_session(
 ) -> Result<Session, String> {
     let controller = state.0.read();
     controller.resume_session(&session_id)
+}
+
+#[tauri::command]
+pub async fn update_session_metadata(
+    state: State<'_, SessionControllerState>,
+    id: String,
+    name: Option<String>,
+    color: Option<String>,
+) -> Result<Session, String> {
+    validate_session_name(name.as_deref())?;
+    validate_session_color(color.as_deref())?;
+
+    let controller = state.0.read();
+    controller.update_session_metadata(&id, name, color)
 }

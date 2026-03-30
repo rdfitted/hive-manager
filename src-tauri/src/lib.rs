@@ -18,7 +18,7 @@ use tauri::Emitter;
 
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, paste_to_pty, resize_pty, write_to_pty, inject_to_pty,
-    launch_hive, launch_hive_v2, launch_swarm, launch_solo, launch_fusion, get_session, list_sessions, stop_session, close_session, stop_agent,
+    launch_hive, launch_hive_v2, launch_swarm, launch_solo, launch_fusion, get_session, list_sessions, stop_session, close_session, stop_agent, update_session_metadata,
     continue_after_planning, mark_plan_ready, resume_session,
     queen_inject, queen_switch_branch, operator_inject, add_worker_to_session, get_coordination_log, log_coordination_message,
     get_workers_state, assign_task, get_session_storage_path, list_stored_sessions, get_current_directory,
@@ -260,6 +260,7 @@ pub fn run() {
             stop_session,
             close_session,
             stop_agent,
+            update_session_metadata,
             // Coordination commands
             queen_inject,
             queen_switch_branch,

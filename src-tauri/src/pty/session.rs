@@ -107,6 +107,10 @@ pub(crate) struct MasterPtyHandle(Box<dyn portable_pty::MasterPty + Send>);
 unsafe impl Send for MasterPtyHandle {}
 unsafe impl Sync for MasterPtyHandle {}
 
+fn into_io_error<E: std::fmt::Display>(error: E) -> PtyError {
+    PtyError::IoError(std::io::Error::other(error.to_string()))
+}
+
 impl MasterPtyHandle {
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         use portable_pty::PtySize;
@@ -117,7 +121,7 @@ impl MasterPtyHandle {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+            .map_err(into_io_error)
     }
 }
 
@@ -196,12 +200,12 @@ impl PtySession {
         let writer = pty_pair
             .master
             .take_writer()
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
 
         let reader = pty_pair
             .master
             .try_clone_reader()
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
 
         // Keep the master alive - dropping it closes the PTY!
         let master = pty_pair.master;
@@ -225,12 +229,12 @@ impl PtySession {
             let result = writer.0.write_all(chunk);
             if let Err(ref e) = result {
                 tracing::error!("PTY write_all failed: {}", e);
-                return Err(PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return Err(into_io_error(e));
             }
             let flush_result = writer.0.flush();
             if let Err(ref e) = flush_result {
                 tracing::error!("PTY flush failed: {}", e);
-                return Err(PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return Err(into_io_error(e));
             }
         }
 
@@ -245,23 +249,23 @@ impl PtySession {
 
         // Send bracketed paste start sequence
         writer.0.write_all(BRACKETED_PASTE_START)
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
         writer.0.flush()
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
 
         // Write data in chunks with flush between each
         for chunk in data.chunks(CHUNK_SIZE) {
             writer.0.write_all(chunk)
-                .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                .map_err(into_io_error)?;
             writer.0.flush()
-                .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                .map_err(into_io_error)?;
         }
 
         // Send bracketed paste end sequence
         writer.0.write_all(BRACKETED_PASTE_END)
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
         writer.0.flush()
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
 
         tracing::debug!("PTY write_bracketed complete");
         Ok(())
@@ -270,7 +274,7 @@ impl PtySession {
     pub fn kill(&self) -> Result<(), PtyError> {
         let mut child = self.child.lock();
         if let Some(ref mut c) = *child {
-            c.kill().map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            c.kill().map_err(into_io_error)?;
         }
         Ok(())
     }
