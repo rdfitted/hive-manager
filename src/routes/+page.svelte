@@ -247,7 +247,7 @@
                typeof agent.role === 'object' && 'QaWorker' in agent.role ? `QA Worker ${agent.role.QaWorker.index}` :
                'Agent')}
             <div class="focused-terminal" class:hidden={!isVisible}>
-              <div class="terminal-header">
+              <div class="terminal-header" style:border-top-color={$activeSession?.color || 'transparent'} style:border-top-width={$activeSession?.color ? '3px' : '0'}>
                 <span class="terminal-title">{roleName}</span>
                 <div class="terminal-meta">
                   <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>

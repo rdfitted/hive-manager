@@ -44,6 +44,8 @@ export interface AgentInfo {
 }
 
 export interface HiveLaunchConfig {
+  name?: string;
+  color?: string;
   project_path: string;
   queen_config: AgentConfig;
   workers: AgentConfig[];
@@ -71,6 +73,8 @@ export interface FusionVariantConfig {
 }
 
 export interface FusionLaunchConfig {
+  name?: string;
+  color?: string;
   project_path: string;
   variants: FusionVariantConfig[];
   task_description: string;
@@ -86,6 +90,8 @@ export interface PlannerConfig {
 }
 
 export interface SwarmLaunchConfig {
+  name?: string;
+  color?: string;
   project_path: string;
   queen_config: AgentConfig;
   planner_count: number;                  // How many planners
@@ -100,6 +106,8 @@ export interface SwarmLaunchConfig {
 }
 
 export interface SoloLaunchConfig {
+  name?: string;
+  color?: string;
   projectPath: string;
   taskDescription?: string;
   cli: string;
@@ -133,6 +141,8 @@ export function serdeEnumVariantName(value: unknown): string | undefined {
 
 export interface Session {
   id: string;
+  name?: string;
+  color?: string;
   session_type: 
     | { Hive: { worker_count: number } } 
     | { Swarm: { planner_count: number } } 
@@ -405,6 +415,23 @@ function createSessionsStore() {
     async applyFusionWinner(sessionId: string, variantName: string) {
       try {
         await invoke('apply_fusion_winner', { sessionId, variantName });
+      } catch (err) {
+        update((state) => ({ ...state, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async updateSessionMetadata(id: string, name?: string | null, color?: string | null) {
+      try {
+        const session = await invoke<Session>('update_session_metadata', { id, name, color });
+        update((state) => {
+          const idx = state.sessions.findIndex((s) => s.id === session.id);
+          if (idx >= 0) {
+            state.sessions[idx] = session;
+          }
+          return { ...state };
+        });
+        return session;
       } catch (err) {
         update((state) => ({ ...state, error: String(err) }));
         throw err;

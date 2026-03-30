@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::borrow::Cow;
 use std::sync::Arc;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -107,6 +108,10 @@ pub(crate) struct MasterPtyHandle(Box<dyn portable_pty::MasterPty + Send>);
 unsafe impl Send for MasterPtyHandle {}
 unsafe impl Sync for MasterPtyHandle {}
 
+fn into_io_error<E: std::fmt::Display>(error: E) -> PtyError {
+    PtyError::IoError(std::io::Error::other(error.to_string()))
+}
+
 impl MasterPtyHandle {
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         use portable_pty::PtySize;
@@ -117,8 +122,49 @@ impl MasterPtyHandle {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+            .map_err(into_io_error)
     }
+}
+
+/// Maximum chunk size for PTY writes (16KB) - respects Windows pipe buffer limits
+const CHUNK_SIZE: usize = 16 * 1024;
+
+/// Bracketed paste mode escape sequences
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
+fn find_subslice(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() || start >= haystack.len() {
+        return None;
+    }
+
+    haystack[start..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| start + offset)
+}
+
+fn sanitize_bracketed_paste(data: &[u8]) -> Cow<'_, [u8]> {
+    let Some(mut next_match) = find_subslice(data, BRACKETED_PASTE_END, 0) else {
+        return Cow::Borrowed(data);
+    };
+
+    let mut sanitized = Vec::with_capacity(data.len());
+    let mut cursor = 0;
+    loop {
+        sanitized.extend_from_slice(&data[cursor..next_match]);
+        cursor = next_match + BRACKETED_PASTE_END.len();
+
+        match find_subslice(data, BRACKETED_PASTE_END, cursor) {
+            Some(found) => next_match = found,
+            None => {
+                sanitized.extend_from_slice(&data[cursor..]);
+                break;
+            }
+        }
+    }
+
+    Cow::Owned(sanitized)
 }
 
 pub struct PtySession {
@@ -189,12 +235,12 @@ impl PtySession {
         let writer = pty_pair
             .master
             .take_writer()
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
 
         let reader = pty_pair
             .master
             .try_clone_reader()
-            .map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(into_io_error)?;
 
         // Keep the master alive - dropping it closes the PTY!
         let master = pty_pair.master;
@@ -212,24 +258,59 @@ impl PtySession {
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
         tracing::debug!("PTY write: {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
         let mut writer = self.writer.lock();
-        let result = writer.0.write_all(data);
-        if let Err(ref e) = result {
-            tracing::error!("PTY write_all failed: {}", e);
+
+        // Write in chunks to respect Windows pipe buffer limits
+        for chunk in data.chunks(CHUNK_SIZE) {
+            let result = writer.0.write_all(chunk);
+            if let Err(ref e) = result {
+                tracing::error!("PTY write_all failed: {}", e);
+                return Err(into_io_error(e));
+            }
+            let flush_result = writer.0.flush();
+            if let Err(ref e) = flush_result {
+                tracing::error!("PTY flush failed: {}", e);
+                return Err(into_io_error(e));
+            }
         }
-        result?;
-        let flush_result = writer.0.flush();
-        if let Err(ref e) = flush_result {
-            tracing::error!("PTY flush failed: {}", e);
-        }
-        flush_result?;
+
         tracing::debug!("PTY write complete");
+        Ok(())
+    }
+
+    /// Write with bracketed paste mode wrapping - used for paste operations
+    pub fn write_bracketed(&self, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PTY write_bracketed: {} bytes", data.len());
+        let mut writer = self.writer.lock();
+        let sanitized = sanitize_bracketed_paste(data);
+
+        // Send bracketed paste start sequence
+        writer.0.write_all(BRACKETED_PASTE_START)
+            .map_err(into_io_error)?;
+        writer.0.flush()
+            .map_err(into_io_error)?;
+
+        // Write data in chunks with flush between each
+        for chunk in sanitized.as_ref().chunks(CHUNK_SIZE) {
+            writer.0.write_all(chunk)
+                .map_err(into_io_error)?;
+            writer.0.flush()
+                .map_err(into_io_error)?;
+        }
+
+        // Send bracketed paste end sequence
+        writer.0.write_all(BRACKETED_PASTE_END)
+            .map_err(into_io_error)?;
+        writer.0.flush()
+            .map_err(into_io_error)?;
+
+        tracing::debug!("PTY write_bracketed complete");
         Ok(())
     }
 
     pub fn kill(&self) -> Result<(), PtyError> {
         let mut child = self.child.lock();
         if let Some(ref mut c) = *child {
-            c.kill().map_err(|e| PtyError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            c.kill().map_err(into_io_error)?;
         }
         Ok(())
     }
@@ -342,4 +423,18 @@ impl Drop for PtySession {
 pub fn read_from_reader(reader: &Arc<Mutex<SendReader>>, buf: &mut [u8]) -> Result<usize, std::io::Error> {
     let mut r = reader.lock();
     r.0.read(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_bracketed_paste, BRACKETED_PASTE_END};
+
+    #[test]
+    fn sanitize_bracketed_paste_removes_end_sequence_from_payload() {
+        let payload = b"hello\x1b[201~world\x1b[201~!";
+        let sanitized = sanitize_bracketed_paste(payload);
+
+        assert_eq!(sanitized.as_ref(), b"helloworld!");
+        assert!(!sanitized.as_ref().windows(BRACKETED_PASTE_END.len()).any(|w| w == BRACKETED_PASTE_END));
+    }
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
+  import { activeSession, serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
   import Terminal from './Terminal.svelte';
 
   interface Props {
@@ -53,7 +53,7 @@
       class:focused={agent.id === focusedAgentId}
       onclick={() => onSelect(agent.id)}
     >
-      <div class="terminal-header">
+      <div class="terminal-header" style:border-top-color={$activeSession?.color || 'transparent'} style:border-top-width={$activeSession?.color ? '3px' : '0'}>
         <span class="role-label">{getRoleLabel(agent)}</span>
         <div class="terminal-meta">
           <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>

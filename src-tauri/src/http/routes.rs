@@ -19,7 +19,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Heartbeat routes (active must be before {id} to match)
         .route("/api/sessions/active", get(heartbeats::get_active_sessions))
         .route("/api/sessions/{id}/heartbeat", post(heartbeats::post_heartbeat))
-        .route("/api/sessions/{id}", get(sessions::get_session))
+        .route("/api/sessions/{id}", get(sessions::get_session).patch(sessions::update_session))
         .route("/api/sessions/hive", post(sessions::launch_hive))
         .route("/api/sessions/swarm", post(sessions::launch_swarm))
         .route("/api/sessions/solo", post(sessions::launch_solo))

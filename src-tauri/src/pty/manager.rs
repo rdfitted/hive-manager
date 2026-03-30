@@ -136,6 +136,14 @@ impl PtyManager {
         session.write(data)
     }
 
+    /// Write with bracketed paste mode wrapping for large pastes
+    pub fn write_bracketed(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PtyManager::write_bracketed called for session: {} ({} bytes)", id, data.len());
+        let sessions = self.sessions.read();
+        let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        session.write_bracketed(data)
+    }
+
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
         let sessions = self.sessions.read();
         let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;

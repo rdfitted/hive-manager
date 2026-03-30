@@ -12,9 +12,69 @@ use crate::session::{FusionLaunchConfig, FusionVariantConfig, FusionVariantStatu
 use crate::storage::SessionTypeInfo;
 use super::{validate_session_id, validate_cli, validate_project_path};
 
+const SESSION_COLOR_ALLOWLIST: &[&str] = &[
+    "#7aa2f7",
+    "#bb9af7",
+    "#9ece6a",
+    "#e0af68",
+    "#7dcfff",
+    "#f7768e",
+    "#ff9e64",
+    "#f7b1d1",
+];
+
+fn validate_session_name(name: Option<&str>) -> Result<(), ApiError> {
+    let Some(name) = name else {
+        return Ok(());
+    };
+
+    if name.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "Invalid session name: must not be empty or whitespace",
+        ));
+    }
+
+    if name.chars().count() > 64 {
+        return Err(ApiError::bad_request(
+            "Invalid session name: must be 64 characters or fewer",
+        ));
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err(ApiError::bad_request(
+            "Invalid session name: must not contain '..', '/', or '\\'",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_session_color(color: Option<&str>) -> Result<(), ApiError> {
+    let Some(color) = color else {
+        return Ok(());
+    };
+
+    if !SESSION_COLOR_ALLOWLIST.contains(&color) && !is_valid_hex_session_color(color) {
+        return Err(ApiError::bad_request(format!(
+            "Invalid session color '{}'. Valid options: {} or any #RRGGBB hex color",
+            color,
+            SESSION_COLOR_ALLOWLIST.join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_valid_hex_session_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
+}
+
 #[derive(Serialize)]
 pub struct SessionInfo {
     pub id: String,
+    pub name: Option<String>,
+    pub color: Option<String>,
     pub session_type: String,
     pub status: String,
     pub project_path: String,
@@ -34,6 +94,8 @@ pub struct LaunchHiveRequest {
     pub worker_count: Option<u8>,
     pub project_path: String,
     pub command: Option<String>,
+    pub name: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +105,8 @@ pub struct LaunchSwarmRequest {
     pub task_description: Option<String>,
     pub planner_count: Option<u8>,
     pub project_path: String,
+    pub name: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +127,8 @@ pub struct LaunchFusionRequest {
     pub with_planning: Option<bool>,
     pub default_cli: Option<String>,
     pub default_model: Option<String>,
+    pub name: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +138,16 @@ pub struct LaunchSoloRequest {
     pub cli: String,
     pub model: Option<String>,
     pub flags: Option<Vec<String>>,
+    pub name: Option<String>,
+    pub color: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSessionRequest {
+    #[serde(default)]
+    pub name: Option<Option<String>>,
+    #[serde(default)]
+    pub color: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +185,8 @@ pub async fn list_sessions(
     
     let sessions = summaries.into_iter().map(|s| SessionInfo {
         id: s.id,
+        name: s.name,
+        color: s.color,
         session_type: s.session_type,
         status: s.state,
         project_path: s.project_path,
@@ -129,6 +207,8 @@ pub async fn get_session(
     if let Some(session) = controller.get_session(&id) {
         return Ok(Json(SessionInfo {
             id: session.id.clone(),
+            name: session.name.clone(),
+            color: session.color.clone(),
             session_type: match &session.session_type {
                 crate::session::SessionType::Hive { worker_count } => format!("Hive ({})", worker_count),
                 crate::session::SessionType::Swarm { planner_count } => format!("Swarm ({})", planner_count),
@@ -147,6 +227,8 @@ pub async fn get_session(
 
     Ok(Json(SessionInfo {
         id: persisted.id,
+        name: persisted.name,
+        color: persisted.color,
         session_type: match &persisted.session_type {
             SessionTypeInfo::Hive { worker_count } => format!("Hive ({})", worker_count),
             SessionTypeInfo::Swarm { planner_count } => format!("Swarm ({})", planner_count),
@@ -164,6 +246,9 @@ pub async fn launch_hive(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchHiveRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
+    validate_session_name(req.name.as_deref())?;
+    validate_session_color(req.color.as_deref())?;
+
     let controller = state.session_controller.write();
     let project_path = std::path::PathBuf::from(req.project_path);
 
@@ -175,7 +260,9 @@ pub async fn launch_hive(
         req.worker_count.unwrap_or(3),
         &command,
         req.task_description,
-    ).map_err(|e| ApiError::internal(e.to_string()))?;
+        req.name,
+        req.color,
+    ).map_err(ApiError::internal)?;
 
     Ok((
         StatusCode::CREATED,
@@ -191,6 +278,9 @@ pub async fn launch_swarm(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchSwarmRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
+    validate_session_name(req.name.as_deref())?;
+    validate_session_color(req.color.as_deref())?;
+
     let controller = state.session_controller.write();
 
     let default_cli = "claude".to_string();
@@ -205,6 +295,8 @@ pub async fn launch_swarm(
 
     let config = crate::session::SwarmLaunchConfig {
         project_path: req.project_path,
+        name: req.name,
+        color: req.color,
         queen_config: default_config.clone(),
         planner_count: req.planner_count.unwrap_or(2),
         planner_config: default_config.clone(),
@@ -237,6 +329,8 @@ pub async fn launch_solo(
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
     validate_project_path(&req.project_path)?;
     validate_cli(&req.cli)?;
+    validate_session_name(req.name.as_deref())?;
+    validate_session_color(req.color.as_deref())?;
 
     let agent_config = AgentConfig {
         cli: req.cli,
@@ -249,6 +343,8 @@ pub async fn launch_solo(
 
     let config = HiveLaunchConfig {
         project_path: req.project_path,
+        name: req.name,
+        color: req.color,
         queen_config: agent_config,
         workers: vec![],
         prompt: req.task_description.filter(|t| !t.trim().is_empty()),
@@ -287,6 +383,8 @@ pub async fn launch_fusion(
 
     // Validate project path for security (prevent path traversal)
     validate_project_path(&req.project_path)?;
+    validate_session_name(req.name.as_deref())?;
+    validate_session_color(req.color.as_deref())?;
 
     let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;
@@ -320,6 +418,8 @@ pub async fn launch_fusion(
 
     let config = FusionLaunchConfig {
         project_path: req.project_path,
+        name: req.name,
+        color: req.color,
         variants,
         task_description: req.task_description,
         judge_config,
@@ -341,6 +441,43 @@ pub async fn launch_fusion(
             message: "Fusion session launched".to_string(),
         }),
     ))
+}
+
+/// PATCH /api/sessions/{id} - Update session metadata
+pub async fn update_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateSessionRequest>,
+) -> Result<Json<SessionInfo>, ApiError> {
+    validate_session_id(&id)?;
+    validate_session_name(req.name.as_ref().and_then(|name| name.as_deref()))?;
+    validate_session_color(req.color.as_ref().and_then(|color| color.as_deref()))?;
+
+    let controller = state.session_controller.write();
+    let session = controller
+        .update_session_metadata(&id, req.name, req.color)
+        .map_err(|e| {
+            if e.starts_with("Session not found") {
+                ApiError::not_found(e)
+            } else {
+                ApiError::internal(e)
+            }
+        })?;
+
+    Ok(Json(SessionInfo {
+        id: session.id,
+        name: session.name,
+        color: session.color,
+        session_type: match &session.session_type {
+            crate::session::SessionType::Hive { worker_count } => format!("Hive ({})", worker_count),
+            crate::session::SessionType::Swarm { planner_count } => format!("Swarm ({})", planner_count),
+            crate::session::SessionType::Fusion { variants } => format!("Fusion ({})", variants.len()),
+            crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
+        },
+        status: format!("{:?}", session.state),
+        project_path: session.project_path.to_string_lossy().to_string(),
+        created_at: session.created_at.to_rfc3339(),
+    }))
 }
 
 /// POST /api/sessions/{id}/fusion/select-winner - Select and squash-merge winner
