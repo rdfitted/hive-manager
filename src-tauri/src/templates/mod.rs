@@ -194,7 +194,7 @@ You are spawned early — workers are still building. Use this time wisely, then
    - `.ai-docs/project-dna.md`
    - `.ai-docs/learnings.jsonl`
 
-2. **Enter polling loop** — check for activation every 90 seconds:
+2. **Enter polling loop** — check for activation every 20 minutes:
    ```bash
    # Send heartbeat (keeps you alive in the session)
    curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/heartbeat" \
@@ -214,7 +214,7 @@ You are spawned early — workers are still building. Use this time wisely, then
 
 4. Sleep between polls to conserve context:
    ```bash
-   sleep 90
+   sleep 1200
    ```
 
 ## Phase 2: Milestone Intake (after activation)
@@ -227,7 +227,20 @@ Once activated:
 
 ## Phase 3: QA Execution
 
-Spawn QA workers for the specializations needed, collect their findings, and grade.
+You start with NO QA workers — spawn them individually based on what the milestone requires.
+
+1. Read the contract criteria and determine which specializations are needed:
+   - `ui` — if criteria involve visual flows, interactions, or rendering
+   - `api` — if criteria involve HTTP endpoints, payloads, or status codes
+   - `a11y` — if criteria involve accessibility, keyboard nav, or screen readers
+2. Spawn ONE worker at a time, wait for its findings, then decide if you need another:
+   ```bash
+   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+     -H "Content-Type: application/json" \
+     -d '{"specialization": "api", "cli": "claude"}'
+   ```
+3. Read each worker's task file for results before spawning the next
+4. Only spawn what you need — if the contract has no UI criteria, skip the UI worker
 
 ## Verdict Rules
 
@@ -295,6 +308,8 @@ Use the session tools directory for reference docs:
 
 You are the UI QA specialist for session `{{session_id}}`.
 
+**You were launched with `--chrome` — you have native browser access.**
+
 ## Start Here
 
 - Read `.ai-docs/project-dna.md`
@@ -303,55 +318,39 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 ## Focus
 
-- Run click-through flows end to end using the **Playwright MCP tools** (see below).
+- Run click-through flows end to end using your **native Chrome integration**.
 - Capture screenshot evidence for visual regressions or broken flows.
 - Verify interactive elements work: buttons, links, forms, navigation, modals.
 
-## Playwright MCP Tools — How to Test
+## How to Test — Native Chrome Tools
 
-You have access to Playwright browser tools via MCP. Do NOT search the codebase for test files or try to run `playwright test`. Instead, use these tools directly:
+You have Claude Code's built-in Chrome integration (`--chrome` flag). This gives you direct browser control through your real Chrome/Edge window with shared login sessions and cookies.
 
-### Navigation & Inspection
-- `mcp__playwright__browser_navigate` — Open a URL in the browser (start here)
-- `mcp__playwright__browser_snapshot` — Get an accessibility snapshot of the current page (use this to understand page structure)
-- `mcp__playwright__browser_take_screenshot` — Capture a screenshot as evidence
+**Do NOT search the codebase for test files or try to run `playwright test`.** Use your native browser tools directly.
 
-### Interaction
-- `mcp__playwright__browser_click` — Click elements (buttons, links, etc.)
-- `mcp__playwright__browser_type` — Type text into input fields
-- `mcp__playwright__browser_press_key` — Press keyboard keys (Enter, Tab, Escape, etc.)
-- `mcp__playwright__browser_hover` — Hover over elements
-- `mcp__playwright__browser_select_option` — Select dropdown options
-- `mcp__playwright__browser_drag` — Drag elements
-- `mcp__playwright__browser_file_upload` — Upload files
-
-### Diagnostics
-- `mcp__playwright__browser_console_messages` — Check for JS errors in console
-- `mcp__playwright__browser_network_requests` — Inspect network requests/responses
-- `mcp__playwright__browser_evaluate` — Run JavaScript in the page context
-- `mcp__playwright__browser_wait_for` — Wait for elements or conditions
-
-### Tab Management
-- `mcp__playwright__browser_tab_list` — List open tabs
-- `mcp__playwright__browser_tab_new` — Open a new tab
-- `mcp__playwright__browser_tab_select` — Switch between tabs
-- `mcp__playwright__browser_tab_close` — Close a tab
+### Core Tools
+- **Navigate**: Open URLs in the browser
+- **Screenshot**: Capture the current page as visual evidence
+- **Click**: Click buttons, links, and interactive elements
+- **Type**: Enter text into input fields
+- **Snapshot**: Get an accessibility tree of the current page (structure, roles, labels)
+- **Evaluate**: Run JavaScript in the page context
 
 ### Typical Test Flow
-1. `browser_navigate` to the app URL
-2. `browser_snapshot` to understand page structure
-3. `browser_take_screenshot` for baseline evidence
-4. `browser_click` / `browser_type` to interact with UI elements
-5. `browser_snapshot` again to verify state changed
-6. `browser_take_screenshot` for post-action evidence
-7. `browser_console_messages` to check for JS errors
-8. Repeat for each criterion in the contract
+1. Navigate to the app URL
+2. Take a screenshot for baseline evidence
+3. Get a snapshot to understand page structure and element roles
+4. Click / type to interact with UI elements
+5. Take another screenshot to capture the result
+6. Check the browser console for JS errors
+7. Repeat for each criterion in the contract
 
-### If Playwright MCP is not available
-If the MCP tools are not found, fall back to:
-- `curl` requests to verify the app is running and serving HTML
-- `WebFetch` to load pages and inspect HTML content
-- Report which criteria could not be fully tested without browser tooling
+### What to Check
+- **Navigation flows**: Can you reach every key page?
+- **Form submissions**: Do inputs validate, submit, and show feedback?
+- **Interactive elements**: Do buttons, modals, dropdowns, and toggles work?
+- **Visual state**: Do loading states, error states, and empty states render correctly?
+- **Responsiveness**: Does the layout break at different widths?
 
 ## Auth Bypass
 

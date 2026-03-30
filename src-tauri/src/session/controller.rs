@@ -6000,7 +6000,7 @@ Last updated: {timestamp}
         session_id: &str,
         with_evaluator: bool,
         evaluator_config: Option<AgentConfig>,
-        qa_workers: Option<&[QaWorkerConfig]>,
+        _qa_workers: Option<&[QaWorkerConfig]>,
     ) -> Result<(), String> {
         if !with_evaluator {
             return Ok(());
@@ -6015,27 +6015,9 @@ Last updated: {timestamp}
             initial_prompt: None,
         });
 
-        let evaluator = self.launch_evaluator(session_id, evaluator_config)?;
-        for qa_worker in qa_workers.unwrap_or(&[]) {
-            let mut flags = qa_worker.flags.clone().unwrap_or_default();
-            // Auto-inject --chrome for UI QA workers using claude CLI
-            if qa_worker.specialization == "ui" && qa_worker.cli == "claude" && !flags.iter().any(|f| f == "--chrome") {
-                flags.push("--chrome".to_string());
-            }
-            self.add_qa_worker(
-                session_id,
-                AgentConfig {
-                    cli: qa_worker.cli.clone(),
-                    model: qa_worker.model.clone(),
-                    flags,
-                    label: qa_worker.label.clone(),
-                    role: None,
-                    initial_prompt: None,
-                },
-                qa_worker.specialization.clone(),
-                Some(evaluator.id.clone()),
-            )?;
-        }
+        // Launch evaluator only — QA workers are spawned by the Evaluator
+        // itself after activation, based on milestone contract criteria
+        let _evaluator = self.launch_evaluator(session_id, evaluator_config)?;
 
         Ok(())
     }
