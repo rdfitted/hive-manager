@@ -421,7 +421,7 @@ function createSessionsStore() {
       }
     },
 
-    async updateSessionMetadata(id: string, name?: string, color?: string) {
+    async updateSessionMetadata(id: string, name?: string | null, color?: string | null) {
       try {
         const session = await invoke<Session>('update_session_metadata', { id, name, color });
         update((state) => {

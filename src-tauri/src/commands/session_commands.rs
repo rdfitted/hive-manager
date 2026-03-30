@@ -29,6 +29,10 @@ fn validate_session_name(name: Option<&str>) -> Result<(), String> {
         return Ok(());
     };
 
+    if name.trim().is_empty() {
+        return Err("Invalid session name: must not be empty or whitespace".to_string());
+    }
+
     if name.len() > 64 {
         return Err("Invalid session name: must be 64 characters or fewer".to_string());
     }
@@ -210,11 +214,11 @@ pub async fn resume_session(
 pub async fn update_session_metadata(
     state: State<'_, SessionControllerState>,
     id: String,
-    name: Option<String>,
-    color: Option<String>,
+    name: Option<Option<String>>,
+    color: Option<Option<String>>,
 ) -> Result<Session, String> {
-    validate_session_name(name.as_deref())?;
-    validate_session_color(color.as_deref())?;
+    validate_session_name(name.as_ref().and_then(|value| value.as_deref()))?;
+    validate_session_color(color.as_ref().and_then(|value| value.as_deref()))?;
 
     let controller = state.0.read();
     controller.update_session_metadata(&id, name, color)

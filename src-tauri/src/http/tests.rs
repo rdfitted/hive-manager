@@ -19,6 +19,7 @@ async fn setup_test_app() -> axum::Router {
     let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
     let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         pty_manager.clone(),
         SessionStorage::new().unwrap(),
@@ -41,6 +42,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
     let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
     let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         pty_manager.clone(),
         SessionStorage::new().unwrap(),
@@ -196,6 +198,102 @@ async fn test_patch_session_updates_name_and_color() {
 }
 
 #[tokio::test]
+async fn test_patch_session_omitted_field_preserves_existing_value() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-patch-preserve-color");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(Session {
+        id: "session-preserve".to_string(),
+        name: Some("Original".to_string()),
+        color: Some("#7aa2f7".to_string()),
+        session_type: SessionType::Hive { worker_count: 1 },
+        project_path: temp_dir.clone(),
+        state: SessionState::Running,
+        created_at: chrono::Utc::now(),
+        agents: vec![],
+        default_cli: "claude".to_string(),
+        default_model: Some("opus-4-6".to_string()),
+        max_qa_iterations: 3,
+        qa_timeout_secs: 300,
+        auth_strategy: AuthStrategy::default(),
+    });
+
+    let body = serde_json::json!({
+        "name": "Renamed"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/sessions/session-preserve")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let session = controller.read().get_session("session-preserve").unwrap();
+    assert_eq!(session.name.as_deref(), Some("Renamed"));
+    assert_eq!(session.color.as_deref(), Some("#7aa2f7"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_patch_session_null_clears_field() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-patch-clear-color");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(Session {
+        id: "session-clear".to_string(),
+        name: Some("Original".to_string()),
+        color: Some("#7aa2f7".to_string()),
+        session_type: SessionType::Hive { worker_count: 1 },
+        project_path: temp_dir.clone(),
+        state: SessionState::Running,
+        created_at: chrono::Utc::now(),
+        agents: vec![],
+        default_cli: "claude".to_string(),
+        default_model: Some("opus-4-6".to_string()),
+        max_qa_iterations: 3,
+        qa_timeout_secs: 300,
+        auth_strategy: AuthStrategy::default(),
+    });
+
+    let body = serde_json::json!({
+        "color": null
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/sessions/session-clear")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let session = controller.read().get_session("session-clear").unwrap();
+    assert_eq!(session.name.as_deref(), Some("Original"));
+    assert_eq!(session.color, None);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_patch_session_rejects_invalid_color() {
     let (app, controller) = setup_test_app_with_controller().await;
 
@@ -216,6 +314,39 @@ async fn test_patch_session_rejects_invalid_color() {
             Request::builder()
                 .method("PATCH")
                 .uri("/api/sessions/session-patch-color")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_patch_session_rejects_whitespace_name() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-patch-whitespace-name");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-patch-whitespace", temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({
+        "name": "   ",
+        "color": "#7aa2f7"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/sessions/session-patch-whitespace")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -259,6 +390,56 @@ async fn test_patch_session_rejects_invalid_name() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
+    let (app, _controller) = setup_test_app_with_controller().await;
+    let storage = SessionStorage::new().unwrap();
+    let session_id = format!("persisted-patch-{}", uuid::Uuid::new_v4());
+    let session_dir = storage.session_dir(&session_id);
+    let _ = std::fs::remove_dir_all(&session_dir);
+
+    let persisted = PersistedSession {
+        id: session_id.clone(),
+        name: Some("Stored".to_string()),
+        color: Some("#7aa2f7".to_string()),
+        session_type: SessionTypeInfo::Hive { worker_count: 1 },
+        project_path: std::env::temp_dir().join("hive-test-persisted-update").to_string_lossy().to_string(),
+        created_at: chrono::Utc::now(),
+        agents: vec![],
+        state: "Completed".to_string(),
+        default_cli: "claude".to_string(),
+        default_model: Some("opus-4-6".to_string()),
+        max_qa_iterations: 3,
+        qa_timeout_secs: 300,
+        auth_strategy: String::new(),
+    };
+    storage.save_session(&persisted).unwrap();
+
+    let body = serde_json::json!({
+        "name": "Persisted Rename"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/sessions/{}", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let updated = storage.load_session(&session_id).unwrap();
+    assert_eq!(updated.name.as_deref(), Some("Persisted Rename"));
+    assert_eq!(updated.color.as_deref(), Some("#7aa2f7"));
+
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
 }
 
 // --- Session-scoped learnings endpoint tests ---

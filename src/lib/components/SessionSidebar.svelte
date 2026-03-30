@@ -116,6 +116,13 @@
   }
 
   function handleSessionButtonKeydown(event: KeyboardEvent, sessionId: string) {
+    const target = event.target;
+    if (target instanceof HTMLElement) {
+      if (target.tagName === 'INPUT' || target.tagName === 'BUTTON' || target.isContentEditable || target.closest('[contenteditable]')) {
+        return;
+      }
+    }
+
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
       selectSession(sessionId);
@@ -215,7 +222,7 @@
 
   let editingSessionId = $state<string | null>(null);
   let editName = $state('');
-  let editColor = $state<string | undefined>(undefined);
+  let editColor = $state<string | null | undefined>(undefined);
   let showColorPicker = $state(false);
 
   function startEdit(session: Session) {
@@ -312,7 +319,7 @@
                               {/each}
                               <button
                                 class="color-option clear"
-                                onclick={() => { editColor = undefined; showColorPicker = false; }}
+                                onclick={() => { editColor = null; showColorPicker = false; }}
                                 title="Clear Color"
                                 type="button"
                               >×</button>

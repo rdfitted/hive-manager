@@ -28,6 +28,12 @@ fn validate_session_name(name: Option<&str>) -> Result<(), ApiError> {
         return Ok(());
     };
 
+    if name.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "Invalid session name: must not be empty or whitespace",
+        ));
+    }
+
     if name.len() > 64 {
         return Err(ApiError::bad_request(
             "Invalid session name: must be 64 characters or fewer",
@@ -132,8 +138,10 @@ pub struct LaunchSoloRequest {
 
 #[derive(Deserialize)]
 pub struct UpdateSessionRequest {
-    pub name: Option<String>,
-    pub color: Option<String>,
+    #[serde(default)]
+    pub name: Option<Option<String>>,
+    #[serde(default)]
+    pub color: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -250,7 +258,7 @@ pub async fn launch_hive(
 
     if req.name.is_some() || req.color.is_some() {
         controller
-            .update_session_metadata(&session.id, req.name.clone(), req.color.clone())
+            .update_session_metadata(&session.id, Some(req.name.clone()), Some(req.color.clone()))
             .map_err(ApiError::internal)?;
     }
 
@@ -440,8 +448,8 @@ pub async fn update_session(
     Json(req): Json<UpdateSessionRequest>,
 ) -> Result<Json<SessionInfo>, ApiError> {
     validate_session_id(&id)?;
-    validate_session_name(req.name.as_deref())?;
-    validate_session_color(req.color.as_deref())?;
+    validate_session_name(req.name.as_ref().and_then(|name| name.as_deref()))?;
+    validate_session_color(req.color.as_ref().and_then(|color| color.as_deref()))?;
 
     let controller = state.session_controller.write();
     let session = controller

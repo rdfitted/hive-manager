@@ -607,22 +607,54 @@ impl SessionController {
     pub fn update_session_metadata(
         &self,
         session_id: &str,
-        name: Option<String>,
-        color: Option<String>,
+        name: Option<Option<String>>,
+        color: Option<Option<String>>,
     ) -> Result<Session, String> {
         let updated = {
             let mut sessions = self.sessions.write();
-            let session = sessions
-                .get_mut(session_id)
+            sessions.get_mut(session_id).map(|session| {
+                if let Some(name) = name.clone() {
+                    session.name = name;
+                }
+                if let Some(color) = color.clone() {
+                    session.color = color;
+                }
+                session.clone()
+            })
+        };
+
+        let updated = if let Some(updated) = updated {
+            self.update_session_storage(session_id);
+            updated
+        } else {
+            let storage = self
+                .storage
+                .as_ref()
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            session.name = name;
-            session.color = color;
-            session.clone()
+            let mut persisted = storage
+                .load_session(session_id)
+                .map_err(|_| format!("Session not found: {}", session_id))?;
+
+            if let Some(name) = name {
+                persisted.name = name;
+            }
+            if let Some(color) = color {
+                persisted.color = color;
+            }
+
+            storage
+                .save_session(&persisted)
+                .map_err(|e| format!("Failed to save session metadata: {}", e))?;
+
+            let session = self.session_from_persisted(&persisted)?;
+            {
+                let mut sessions = self.sessions.write();
+                sessions.insert(session.id.clone(), session.clone());
+            }
+            session
         };
 
         self.emit_session_update(session_id);
-        self.update_session_storage(session_id);
-
         Ok(updated)
     }
 
@@ -5819,65 +5851,7 @@ Last updated: {timestamp}
             .map_err(|e| format!("Failed to load session from storage: {}", e))?;
 
         // Convert persisted session to active session
-        let session_type = match persisted.session_type {
-            crate::storage::SessionTypeInfo::Hive { worker_count } => SessionType::Hive { worker_count },
-            crate::storage::SessionTypeInfo::Swarm { planner_count } => SessionType::Swarm { planner_count },
-            crate::storage::SessionTypeInfo::Fusion { variants } => SessionType::Fusion { variants },
-            crate::storage::SessionTypeInfo::Solo { cli, model } => SessionType::Solo { cli, model },
-        };
-
-        // Convert persisted agents to active agents
-        let agents: Vec<AgentInfo> = persisted.agents.iter().filter_map(|pa| {
-            // Parse the role string (e.g., "Queen", "Planner(0)", "Worker(1)")
-            let role = parse_agent_role(&pa.role)?;
-
-            // Convert PersistedAgentConfig to AgentConfig
-            let config = AgentConfig {
-                cli: pa.config.cli.clone(),
-                model: pa.config.model.clone(),
-                flags: pa.config.flags.clone(),
-                label: pa.config.label.clone(),
-                role: pa.config.role_type.as_ref().map(|rt: &String| WorkerRole {
-                    role_type: rt.clone(),
-                    label: pa.config.label.clone().unwrap_or_default(),
-                    default_cli: pa.config.cli.clone(),
-                    prompt_template: pa.config.initial_prompt.clone(),
-                }),
-                initial_prompt: pa.config.initial_prompt.clone(),
-            };
-
-            Some(AgentInfo {
-                id: pa.id.clone(),
-                role,
-                status: AgentStatus::Completed,  // All persisted sessions are completed
-                config,
-                parent_id: pa.parent_id.clone(),
-            })
-        }).collect();
-
-        let state = parse_persisted_session_state(&persisted.state);
-        let auth_strategy = if is_terminal_session_state(&state) {
-            AuthStrategy::None
-        } else {
-            AuthStrategy::from_persisted(&persisted.auth_strategy)
-        };
-
-        // Create session object
-        let session = Session {
-            id: persisted.id.clone(),
-            name: persisted.name.clone(),
-            color: persisted.color.clone(),
-            session_type,
-            project_path: PathBuf::from(persisted.project_path),
-            state,
-            created_at: persisted.created_at,
-            agents,
-            default_cli: persisted.default_cli.clone(),
-            default_model: persisted.default_model.clone(),
-            max_qa_iterations: persisted.max_qa_iterations,
-            qa_timeout_secs: persisted.qa_timeout_secs,
-            auth_strategy,
-        };
+        let session = self.session_from_persisted(&persisted)?;
 
         // Add to in-memory sessions
         {
@@ -5893,6 +5867,79 @@ Last updated: {timestamp}
         }
 
         Ok(session)
+    }
+
+    fn session_from_persisted(
+        &self,
+        persisted: &crate::storage::PersistedSession,
+    ) -> Result<Session, String> {
+        let session_type = match &persisted.session_type {
+            crate::storage::SessionTypeInfo::Hive { worker_count } => SessionType::Hive {
+                worker_count: *worker_count,
+            },
+            crate::storage::SessionTypeInfo::Swarm { planner_count } => SessionType::Swarm {
+                planner_count: *planner_count,
+            },
+            crate::storage::SessionTypeInfo::Fusion { variants } => SessionType::Fusion {
+                variants: variants.clone(),
+            },
+            crate::storage::SessionTypeInfo::Solo { cli, model } => SessionType::Solo {
+                cli: cli.clone(),
+                model: model.clone(),
+            },
+        };
+
+        let agents: Vec<AgentInfo> = persisted
+            .agents
+            .iter()
+            .filter_map(|pa| {
+                let role = parse_agent_role(&pa.role)?;
+                let config = AgentConfig {
+                    cli: pa.config.cli.clone(),
+                    model: pa.config.model.clone(),
+                    flags: pa.config.flags.clone(),
+                    label: pa.config.label.clone(),
+                    role: pa.config.role_type.as_ref().map(|rt: &String| WorkerRole {
+                        role_type: rt.clone(),
+                        label: pa.config.label.clone().unwrap_or_default(),
+                        default_cli: pa.config.cli.clone(),
+                        prompt_template: pa.config.initial_prompt.clone(),
+                    }),
+                    initial_prompt: pa.config.initial_prompt.clone(),
+                };
+
+                Some(AgentInfo {
+                    id: pa.id.clone(),
+                    role,
+                    status: AgentStatus::Completed,
+                    config,
+                    parent_id: pa.parent_id.clone(),
+                })
+            })
+            .collect();
+
+        let state = parse_persisted_session_state(&persisted.state);
+        let auth_strategy = if is_terminal_session_state(&state) {
+            AuthStrategy::None
+        } else {
+            AuthStrategy::from_persisted(&persisted.auth_strategy)
+        };
+
+        Ok(Session {
+            id: persisted.id.clone(),
+            name: persisted.name.clone(),
+            color: persisted.color.clone(),
+            session_type,
+            project_path: PathBuf::from(&persisted.project_path),
+            state,
+            created_at: persisted.created_at,
+            agents,
+            default_cli: persisted.default_cli.clone(),
+            default_model: persisted.default_model.clone(),
+            max_qa_iterations: persisted.max_qa_iterations,
+            qa_timeout_secs: persisted.qa_timeout_secs,
+            auth_strategy,
+        })
     }
 
     /// Continue a Swarm session after planning phase
