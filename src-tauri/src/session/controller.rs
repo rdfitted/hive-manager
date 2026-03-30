@@ -2066,7 +2066,12 @@ Write to `.hive-manager/{session_id}/plan.md`:
     }
 
     /// Build a minimal smoke test prompt that creates a simple plan without real investigation
-    fn build_smoke_test_prompt(session_id: &str, workers: &[AgentConfig]) -> String {
+    fn build_smoke_test_prompt(
+        session_id: &str,
+        workers: &[AgentConfig],
+        with_evaluator: bool,
+        qa_workers: Option<&[QaWorkerConfig]>,
+    ) -> String {
         // Build worker table and task list based on configured workers
         let mut worker_table = String::new();
         let mut task_list = String::new();
@@ -2103,6 +2108,70 @@ Write to `.hive-manager/{session_id}/plan.md`:
         if dependencies.is_empty() {
             dependencies = "None - single worker smoke test.".to_string();
         }
+
+        // Build evaluator/QA section if configured
+        let evaluator_section = if with_evaluator {
+            let qa_list = qa_workers.unwrap_or(&[]);
+            let mut qa_table = String::new();
+            let mut qa_tasks = String::new();
+            for (i, qw) in qa_list.iter().enumerate() {
+                let idx = i + 1;
+                let label = qw.label.as_deref().unwrap_or(Self::qa_worker_label(&qw.specialization));
+                qa_table.push_str(&format!("| QA Worker {} | {} | {} | {} |\n", idx, label, qw.specialization, qw.cli));
+                qa_tasks.push_str(&format!(
+                    "### QA Worker {} ({} - {}):\n\
+                     1. Read the evaluator prompt: `curl -s \"http://localhost:18800/api/sessions/{}/evaluators\"`\n\
+                     2. Exercise the {} endpoint smoke test\n\
+                     3. Post QA findings to shared conversation\n\
+                     4. Mark task file as COMPLETED\n\n",
+                    idx, label, qw.specialization, session_id, qw.specialization
+                ));
+            }
+            if qa_table.is_empty() {
+                qa_table = "| (no QA workers configured) | - | - | - |\n".to_string();
+                qa_tasks = "No QA workers configured. Evaluator will self-assess.\n".to_string();
+            }
+            format!(
+r#"
+
+## Evaluator & QA Configuration
+
+An **Evaluator** agent will be spawned after workers complete. It reviews the milestone handoff
+and coordinates QA workers to validate the work.
+
+| QA Worker | Label | Specialization | CLI |
+|-----------|-------|----------------|-----|
+{qa_table}
+## Evaluator Smoke Test Tasks
+
+After all worker tasks complete, the Evaluator will:
+1. List evaluators: `curl -s "http://localhost:18800/api/sessions/{session_id}/evaluators"`
+2. Review worker task files for COMPLETED status
+3. Coordinate QA workers (if any) to validate
+
+{qa_tasks}### Evaluator Verdict:
+1. Collect QA worker results
+2. Post verdict to queen conversation: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"evaluator","content":"QA_VERDICT: PASS - smoke test validated"}}'`
+"#,
+                qa_table = qa_table.trim_end(),
+                qa_tasks = qa_tasks,
+                session_id = session_id,
+            )
+        } else {
+            String::new()
+        };
+
+        let evaluator_test_items = if with_evaluator {
+            let qa_count = qa_workers.map(|q| q.len()).unwrap_or(0);
+            format!(
+                "\n4. Evaluator spawns and reviews worker output\n\
+                 5. {} QA worker(s) exercise their specialization\n\
+                 6. Evaluator posts QA_VERDICT to queen",
+                qa_count
+            )
+        } else {
+            String::new()
+        };
 
         format!(
 r#"# Smoke Test - Quick Flow Validation
@@ -2162,7 +2231,7 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
 
 ### Task N (additional workers):
 1. Send heartbeat, read shared, post completion message to queen, send completed heartbeat
-
+{evaluator_section}
 ## Files to Modify
 | File | Priority | Changes Needed |
 |------|----------|----------------|
@@ -2183,17 +2252,25 @@ After writing the plan, say: **"PLAN READY FOR REVIEW"**
 This tests that:
 1. Master Planner can write to the plan file
 2. User can see and approve the plan
-3. Flow continues to spawn Queen and all {worker_count} Workers"#,
+3. Flow continues to spawn Queen and all {worker_count} Workers{evaluator_test_items}"#,
             session_id = session_id,
             worker_count = workers.len(),
             worker_table = worker_table.trim_end(),
             task_list = task_list.trim_end(),
-            dependencies = dependencies.trim_end()
+            dependencies = dependencies.trim_end(),
+            evaluator_section = evaluator_section,
+            evaluator_test_items = evaluator_test_items,
         )
     }
 
     /// Build a smoke test prompt for Swarm mode that accounts for planners AND workers
-    fn build_swarm_smoke_test_prompt(session_id: &str, planner_count: u8, workers_per_planner: &[AgentConfig]) -> String {
+    fn build_swarm_smoke_test_prompt(
+        session_id: &str,
+        planner_count: u8,
+        workers_per_planner: &[AgentConfig],
+        with_evaluator: bool,
+        qa_workers: Option<&[QaWorkerConfig]>,
+    ) -> String {
         let workers_per = workers_per_planner.len();
         let total_workers = planner_count as usize * workers_per;
 
@@ -2236,6 +2313,50 @@ This tests that:
                 ));
             }
         }
+
+        // Build evaluator/QA section if configured
+        let evaluator_section = if with_evaluator {
+            let qa_list = qa_workers.unwrap_or(&[]);
+            let mut qa_info = String::new();
+            for (i, qw) in qa_list.iter().enumerate() {
+                let label = qw.label.as_deref().unwrap_or(Self::qa_worker_label(&qw.specialization));
+                qa_info.push_str(&format!("| QA Worker {} | {} | {} | {} |\n", i + 1, label, qw.specialization, qw.cli));
+            }
+            if qa_info.is_empty() {
+                qa_info = "| (no QA workers configured) | - | - | - |\n".to_string();
+            }
+            format!(
+r#"
+
+## Evaluator & QA Configuration
+
+An **Evaluator** agent validates work after all planners complete.
+
+| QA Worker | Label | Specialization | CLI |
+|-----------|-------|----------------|-----|
+{qa_info}
+After all planner domains complete, the Evaluator will:
+1. Review all worker outputs across all domains
+2. Coordinate QA workers to validate each domain
+3. Post QA_VERDICT to queen conversation
+"#,
+                qa_info = qa_info.trim_end(),
+            )
+        } else {
+            String::new()
+        };
+
+        let evaluator_test_items = if with_evaluator {
+            let qa_count = qa_workers.map(|q| q.len()).unwrap_or(0);
+            format!(
+                "\n6. Evaluator reviews all planner outputs\n\
+                 7. {} QA worker(s) validate domain results\n\
+                 8. Evaluator posts QA_VERDICT to queen",
+                qa_count
+            )
+        } else {
+            String::new()
+        };
 
         format!(
 r#"# Swarm Smoke Test - Quick Flow Validation
@@ -2287,7 +2408,7 @@ Testing {planner_count} planners, each with {workers_per} workers ({total_worker
 
 Each Planner spawns their workers sequentially and assigns subtasks:
 {worker_breakdown}
-
+{evaluator_section}
 ## Files to Modify
 | File | Priority | Changes Needed |
 |------|----------|----------------|
@@ -2313,14 +2434,16 @@ This tests that:
 2. User can see and approve the plan
 3. Flow continues to spawn Queen who spawns {planner_count} Planners sequentially
 4. Each Planner spawns {workers_per} Workers sequentially
-5. Queen commits between each Planner completion"#,
+5. Queen commits between each Planner completion{evaluator_test_items}"#,
             session_id = session_id,
             planner_count = planner_count,
             workers_per = workers_per,
             total_workers = total_workers,
             planner_table = planner_table.trim_end(),
             domain_tasks = domain_tasks.trim_end(),
-            worker_breakdown = worker_breakdown.trim_end()
+            worker_breakdown = worker_breakdown.trim_end(),
+            evaluator_section = evaluator_section,
+            evaluator_test_items = evaluator_test_items,
         )
     }
 
@@ -4221,7 +4344,7 @@ Last updated: {timestamp}
         // Build the appropriate prompt based on mode
         let planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
-            Self::build_smoke_test_prompt(&session_id, &config.workers)
+            Self::build_smoke_test_prompt(&session_id, &config.workers, config.with_evaluator, config.qa_workers.as_deref())
         } else {
             // Pass workers info to Master Planner so it knows how many tasks to create
             let prompt = config.prompt.as_deref().unwrap_or("");
@@ -4655,7 +4778,7 @@ Last updated: {timestamp}
         let planner_count = if config.planners.is_empty() { config.planner_count } else { config.planners.len() as u8 };
         let planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode (swarm) - {} planners, {} workers each", planner_count, config.workers_per_planner.len());
-            Self::build_swarm_smoke_test_prompt(&session_id, planner_count, &config.workers_per_planner)
+            Self::build_swarm_smoke_test_prompt(&session_id, planner_count, &config.workers_per_planner, config.with_evaluator, config.qa_workers.as_deref())
         } else {
             // Pass planners and workers info to Master Planner so it knows the full scope
             let prompt = config.prompt.as_deref().unwrap_or("");
