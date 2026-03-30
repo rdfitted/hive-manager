@@ -83,7 +83,10 @@ pub fn parse_sprint_contract(markdown: &str) -> Result<SprintContract, ContractP
 
         if in_threshold {
             if let Some(item) = line.strip_prefix("- ") {
-                pass_threshold.push(item.trim().to_string());
+                let trimmed = item.trim();
+                if !trimmed.is_empty() {
+                    pass_threshold.push(trimmed.to_string());
+                }
             }
         }
     }
@@ -214,5 +217,23 @@ mod tests {
         let criterion = contract.criterion(1).unwrap();
         assert_eq!(criterion.category, None);
         assert_eq!(criterion.description, "Description stays valid");
+    }
+
+    #[test]
+    fn rejects_contract_with_only_empty_threshold_bullets() {
+        let err = parse_sprint_contract(
+            r#"# Sprint Contract: Empty Thresholds
+
+## Acceptance Criteria
+1. [FUNC] Something works
+
+## Pass Threshold
+- 
+-    
+"#,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ContractParseError::NoThresholds));
     }
 }

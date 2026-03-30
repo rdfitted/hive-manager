@@ -71,6 +71,26 @@ fn qa_specialization_label(specialization: &str) -> &'static str {
     }
 }
 
+fn map_add_qa_worker_error(error: String) -> ApiError {
+    if error.contains("Session not found") {
+        return ApiError::not_found(error);
+    }
+
+    if error.contains("Evaluator") && error.contains("not found for session") {
+        return ApiError::bad_request(error);
+    }
+
+    if error.starts_with("Cannot add")
+        || error.starts_with("Invalid")
+        || error.contains("expected")
+        || error.contains("precondition")
+    {
+        return ApiError::bad_request(error);
+    }
+
+    ApiError::internal(error)
+}
+
 pub async fn add_evaluator(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -186,7 +206,7 @@ pub async fn add_qa_worker(
                 req.specialization.clone(),
                 req.parent_id,
             )
-            .map_err(ApiError::internal)?
+            .map_err(map_add_qa_worker_error)?
             .id
     };
 
@@ -315,4 +335,30 @@ pub async fn force_fail(
         "action": "force-fail",
         "new_state": format!("{:?}", new_state)
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_add_qa_worker_error;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn maps_missing_session_to_not_found() {
+        let error = map_add_qa_worker_error("Session not found: demo-session".to_string());
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn maps_missing_evaluator_to_bad_request() {
+        let error = map_add_qa_worker_error(
+            "Evaluator demo-evaluator not found for session demo-session".to_string(),
+        );
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn maps_spawn_failures_to_internal() {
+        let error = map_add_qa_worker_error("Failed to spawn QA worker 1: boom".to_string());
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
