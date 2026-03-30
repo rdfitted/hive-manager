@@ -86,7 +86,7 @@ pub async fn inject_to_pty(
 
     let pty_manager = state.0.read();
 
-    tracing::info!("inject_to_pty: id={}, message={:?}, send_enter={}", id, message, send_enter);
+    tracing::info!("inject_to_pty: id={}, message_len={}, send_enter={}", id, message.len(), send_enter);
 
     if send_enter {
         // For messages with Enter, we send message with bracketed paste + CR
