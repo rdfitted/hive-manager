@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -19,6 +17,7 @@ pub struct ContractCriterion {
 }
 
 impl SprintContract {
+    #[cfg(test)]
     pub fn criterion(&self, number: u16) -> Option<&ContractCriterion> {
         self.acceptance_criteria
             .iter()
@@ -91,14 +90,14 @@ pub fn parse_sprint_contract(markdown: &str) -> Result<SprintContract, ContractP
 
     let milestone_name = milestone_name.ok_or(ContractParseError::MissingTitle)?;
     if criteria.is_empty() {
-        return Err(if markdown.contains("## Acceptance Criteria") {
+        return Err(if markdown.to_lowercase().contains("## acceptance criteria") {
             ContractParseError::NoCriteria
         } else {
             ContractParseError::MissingAcceptanceCriteria
         });
     }
     if pass_threshold.is_empty() {
-        return Err(if markdown.contains("## Pass Threshold") {
+        return Err(if markdown.to_lowercase().contains("## pass threshold") {
             ContractParseError::NoThresholds
         } else {
             ContractParseError::MissingPassThreshold

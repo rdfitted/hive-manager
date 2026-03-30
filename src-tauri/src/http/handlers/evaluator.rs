@@ -180,18 +180,12 @@ pub async fn force_pass(
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
-    {
-        let controller = state.session_controller.read();
-        require_qa_in_progress(&controller, &session_id, "force-pass")?;
-    }
-
-    // on_qa_verdict uses internal write locks on sessions, so use read() on controller
-    {
-        let controller = state.session_controller.read();
-        controller
-            .on_qa_verdict(&session_id, "QA_VERDICT: PASS")
-            .map_err(ApiError::internal)?;
-    }
+    let controller = state.session_controller.read();
+    require_qa_in_progress(&controller, &session_id, "force-pass")?;
+    controller
+        .on_qa_verdict(&session_id, "QA_VERDICT: PASS")
+        .map_err(ApiError::internal)?;
+    drop(controller);
 
     append_operator_log(&state, &session_id, "FORCE-PASS", "QA pass");
 
@@ -208,17 +202,12 @@ pub async fn force_fail(
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
-    {
-        let controller = state.session_controller.read();
-        require_qa_in_progress(&controller, &session_id, "force-fail")?;
-    }
-
-    let new_state = {
-        let controller = state.session_controller.read();
-        controller
-            .on_qa_verdict(&session_id, "QA_VERDICT: FAIL")
-            .map_err(ApiError::internal)?
-    };
+    let controller = state.session_controller.read();
+    require_qa_in_progress(&controller, &session_id, "force-fail")?;
+    let new_state = controller
+        .on_qa_verdict(&session_id, "QA_VERDICT: FAIL")
+        .map_err(ApiError::internal)?;
+    drop(controller);
 
     append_operator_log(&state, &session_id, "FORCE-FAIL", "QA fail");
 

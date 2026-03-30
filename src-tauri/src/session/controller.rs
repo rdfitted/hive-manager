@@ -4683,12 +4683,11 @@ Last updated: {timestamp}
 
         let timeout_secs = {
             let mut sessions = self.sessions.write();
-            if let Some(session) = sessions.get_mut(session_id) {
-                session.state = SessionState::QaInProgress;
-                session.qa_timeout_secs
-            } else {
-                DEFAULT_QA_TIMEOUT_SECS
-            }
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            session.state = SessionState::QaInProgress;
+            session.qa_timeout_secs
         };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
@@ -5796,13 +5795,12 @@ Last updated: {timestamp}
 
         let timeout_secs = {
             let mut sessions = self.sessions.write();
-            if let Some(current) = sessions.get_mut(session_id) {
-                current.agents.push(agent_info.clone());
-                current.state = SessionState::QaInProgress;
-                current.qa_timeout_secs
-            } else {
-                DEFAULT_QA_TIMEOUT_SECS
-            }
+            let current = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            current.agents.push(agent_info.clone());
+            current.state = SessionState::QaInProgress;
+            current.qa_timeout_secs
         };
 
         self.emit_session_update(session_id);
