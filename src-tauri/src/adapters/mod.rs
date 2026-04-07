@@ -5,9 +5,11 @@
 
 mod claude_code;
 mod codex;
+mod cursor;
 mod droid;
 mod gemini;
 mod opencode;
+mod qwen;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,9 +18,11 @@ use serde::{Deserialize, Serialize};
 
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
+pub use cursor::CursorAdapter;
 pub use droid::DroidAdapter;
 pub use gemini::GeminiAdapter;
 pub use opencode::OpenCodeAdapter;
+pub use qwen::QwenAdapter;
 
 /// Valid CLI names allowed in the system.
 pub const VALID_CLIS: &[&str] = &["claude", "gemini", "codex", "opencode", "cursor", "droid", "qwen"];
@@ -175,9 +179,11 @@ pub fn get_adapter(cli: &str) -> Box<dyn CliAdapter> {
     match cli {
         "claude" => Box::new(ClaudeCodeAdapter),
         "codex" => Box::new(CodexAdapter),
+        "cursor" => Box::new(CursorAdapter),
         "gemini" => Box::new(GeminiAdapter),
         "droid" => Box::new(DroidAdapter),
         "opencode" => Box::new(OpenCodeAdapter),
+        "qwen" => Box::new(QwenAdapter),
         _ => Box::new(ClaudeCodeAdapter), // Default to Claude
     }
 }
@@ -192,7 +198,9 @@ mod tests {
         assert!(is_valid_cli("gemini"));
         assert!(is_valid_cli("codex"));
         assert!(is_valid_cli("opencode"));
+        assert!(is_valid_cli("cursor"));
         assert!(is_valid_cli("droid"));
+        assert!(is_valid_cli("qwen"));
         assert!(!is_valid_cli("unknown"));
     }
 
@@ -216,5 +224,11 @@ mod tests {
 
         let gemini = get_adapter("gemini");
         assert_eq!(gemini.cli_name(), "gemini");
+
+        let cursor = get_adapter("cursor");
+        assert_eq!(cursor.cli_name(), "cursor");
+
+        let qwen = get_adapter("qwen");
+        assert_eq!(qwen.cli_name(), "qwen");
     }
 }

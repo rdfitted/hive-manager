@@ -50,6 +50,32 @@ impl EventEmitter {
         })).await
     }
 
+    pub async fn emit_cell_status_changed(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<(), String> {
+        self.emit(session_id, Some(cell_id), None, EventType::CellStatusChanged, Severity::Info, json!({
+            "from": from,
+            "to": to,
+        })).await
+    }
+
+    pub async fn emit_workspace_created(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        branch: &str,
+        worktree_path: Option<&str>,
+    ) -> Result<(), String> {
+        self.emit(session_id, Some(cell_id), None, EventType::WorkspaceCreated, Severity::Info, json!({
+            "branch": branch,
+            "worktree_path": worktree_path,
+        })).await
+    }
+
     pub async fn emit_agent_launched(
         &self,
         session_id: &str,
@@ -69,6 +95,18 @@ impl EventEmitter {
         agent_id: &str,
     ) -> Result<(), String> {
         self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentCompleted, Severity::Info, json!({})).await
+    }
+
+    pub async fn emit_agent_waiting_input(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        agent_id: &str,
+        prompt: &str,
+    ) -> Result<(), String> {
+        self.emit(session_id, Some(cell_id), Some(agent_id), EventType::AgentWaitingInput, Severity::Warning, json!({
+            "prompt": prompt,
+        })).await
     }
 
     pub async fn emit_agent_failed(
@@ -165,5 +203,41 @@ mod tests {
         let event = rx.recv().await.unwrap();
         assert_eq!(event.severity, Severity::Error);
         assert_eq!(event.payload["error"], "timeout");
+    }
+
+    #[tokio::test]
+    async fn test_emit_workspace_created() {
+        let tmp = TempDir::new().unwrap();
+        let bus = EventBus::new(tmp.path().to_path_buf());
+        let emitter = EventEmitter::new(bus.clone());
+
+        let mut rx = bus.subscribe();
+        emitter
+            .emit_workspace_created("s1", "c1", "hive/s1/main", Some("/tmp/worktree"))
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.event_type, EventType::WorkspaceCreated);
+        assert_eq!(event.payload["branch"], "hive/s1/main");
+        assert_eq!(event.payload["worktree_path"], "/tmp/worktree");
+    }
+
+    #[tokio::test]
+    async fn test_emit_agent_waiting_input() {
+        let tmp = TempDir::new().unwrap();
+        let bus = EventBus::new(tmp.path().to_path_buf());
+        let emitter = EventEmitter::new(bus.clone());
+
+        let mut rx = bus.subscribe();
+        emitter
+            .emit_agent_waiting_input("s1", "c1", "a1", "Continue? [Y/n]")
+            .await
+            .unwrap();
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.event_type, EventType::AgentWaitingInput);
+        assert_eq!(event.severity, Severity::Warning);
+        assert_eq!(event.payload["prompt"], "Continue? [Y/n]");
     }
 }
