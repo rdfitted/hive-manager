@@ -572,6 +572,13 @@ To send a message to a worker, use this format:
 
 The system will route your message to the correct worker.
 
+## Version Control
+
+When the session's work is complete and ready to commit:
+- **New features**: Bump the minor version (e.g., 0.17.1 → 0.18.0) in `src-tauri/Cargo.toml`
+- **Feature extensions or bug fixes**: Bump the patch version (e.g., 0.17.1 → 0.17.2) in `src-tauri/Cargo.toml`
+- Include a `chore: bump version to x.y.z` commit alongside or after the feature commits
+
 ## Current Task
 
 {{task}}
