@@ -1,6 +1,7 @@
 mod commands;
 pub mod domain;
 pub mod adapters;
+pub mod runtime;
 mod pty;
 mod session;
 mod storage;
@@ -9,6 +10,7 @@ mod templates;
 pub mod cli;
 mod http;
 mod watcher;
+pub mod events;
 
 use std::collections::HashSet;
 use std::sync::Arc;
