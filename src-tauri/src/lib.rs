@@ -1,4 +1,5 @@
 mod commands;
+pub mod domain;
 mod pty;
 mod session;
 mod storage;
