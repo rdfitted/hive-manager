@@ -2,6 +2,7 @@ mod commands;
 pub mod domain;
 pub mod adapters;
 pub mod runtime;
+pub mod orchestrator;
 mod pty;
 mod session;
 mod storage;
