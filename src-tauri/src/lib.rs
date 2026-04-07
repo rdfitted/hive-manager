@@ -1,5 +1,6 @@
 mod commands;
 pub mod domain;
+pub mod adapters;
 mod pty;
 mod session;
 mod storage;
