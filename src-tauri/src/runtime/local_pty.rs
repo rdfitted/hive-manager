@@ -18,20 +18,11 @@ const CHUNK_SIZE: usize = 16 * 1024;
 /// Wrapper to make the writer Send.
 struct SendWriter(Box<dyn io::Write + Send>);
 
-unsafe impl Send for SendWriter {}
-unsafe impl Sync for SendWriter {}
-
 /// Wrapper to make the reader Send.
 struct SendReader(Box<dyn io::Read + Send>);
 
-unsafe impl Send for SendReader {}
-unsafe impl Sync for SendReader {}
-
 /// Wrapper to hold the master PTY handle.
 struct MasterPtyHandle(Box<dyn portable_pty::MasterPty + Send>);
-
-unsafe impl Send for MasterPtyHandle {}
-unsafe impl Sync for MasterPtyHandle {}
 
 /// A single PTY session for an agent.
 struct PtySession {
@@ -39,6 +30,7 @@ struct PtySession {
     writer: Arc<Mutex<SendWriter>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
     master: Arc<Mutex<MasterPtyHandle>>,
+    temp_batch_path: Option<PathBuf>,
 }
 
 impl PtySession {
@@ -51,6 +43,8 @@ impl PtySession {
         env: &HashMap<String, String>,
         cols: u16,
         rows: u16,
+        wsl_distro: Option<&str>,
+        wsl_binary_path: Option<&str>,
     ) -> Result<Self, RuntimeError> {
         tracing::info!(
             "Creating PTY session: command={} args={:?} cwd={:?}",
@@ -70,23 +64,21 @@ impl PtySession {
             })
             .map_err(|e| RuntimeError::launch(format!("Failed to open PTY: {}", e)))?;
 
+        let resolved_args = Self::apply_wsl_overrides(command, args, wsl_distro, wsl_binary_path);
+
+        let temp_batch_path = Self::resolve_temp_batch_path(command, &resolved_args, env)?;
+
         // On Windows, create a batch file to avoid shell quoting issues
         let mut cmd = if cfg!(windows) {
-            let batch_content = Self::create_batch_content(command, args, env);
-            let batch_path = Self::write_temp_batch(&batch_content)?;
-
-            tracing::info!(
-                "Created batch file: {} with content:\n{}",
-                batch_path.display(),
-                batch_content
-            );
-
             let mut cmd = CommandBuilder::new("cmd.exe");
+            let batch_path = temp_batch_path
+                .as_ref()
+                .ok_or_else(|| RuntimeError::launch("Failed to prepare Windows batch file"))?;
             cmd.args(&["/c", &batch_path.to_string_lossy()]);
             cmd
         } else {
             let mut cmd = CommandBuilder::new(command);
-            cmd.args(args);
+            cmd.args(&resolved_args);
             // Set environment variables
             for (key, value) in env {
                 cmd.env(key, value);
@@ -116,7 +108,54 @@ impl PtySession {
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             child: Arc::new(Mutex::new(Some(child))),
             master: Arc::new(Mutex::new(MasterPtyHandle(master))),
+            temp_batch_path,
         })
+    }
+
+    /// Apply configurable WSL overrides while preserving existing command shape.
+    fn apply_wsl_overrides(
+        command: &str,
+        args: &[String],
+        wsl_distro: Option<&str>,
+        wsl_binary_path: Option<&str>,
+    ) -> Vec<String> {
+        if !command.eq_ignore_ascii_case("wsl") {
+            return args.to_vec();
+        }
+
+        let mut resolved = args.to_vec();
+
+        let distro_override = wsl_distro
+            .map(str::to_string)
+            .or_else(|| std::env::var("HIVE_WSL_DISTRO").ok());
+        if let Some(distro) = distro_override {
+            if let Some(index) = resolved.iter().position(|arg| arg == "-d") {
+                if index + 1 < resolved.len() {
+                    resolved[index + 1] = distro;
+                } else {
+                    resolved.push(distro);
+                }
+            } else {
+                resolved.insert(0, distro);
+                resolved.insert(0, "-d".to_string());
+            }
+        }
+
+        let binary_override = wsl_binary_path
+            .map(str::to_string)
+            .or_else(|| std::env::var("HIVE_WSL_BINARY_PATH").ok());
+        if let Some(binary_path) = binary_override {
+            if let Some(index) = resolved
+                .iter()
+                .position(|arg| arg == "/root/.local/bin/agent")
+            {
+                resolved[index] = binary_path;
+            } else if resolved.len() >= 3 && resolved.first().map(|arg| arg.as_str()) == Some("-d") {
+                resolved[2] = binary_path;
+            }
+        }
+
+        resolved
     }
 
     /// Create batch file content for Windows.
@@ -163,6 +202,27 @@ impl PtySession {
             .map_err(|e| RuntimeError::launch(format!("Failed to write batch file: {}", e)))?;
 
         Ok(batch_path)
+    }
+
+    fn resolve_temp_batch_path(
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<Option<PathBuf>, RuntimeError> {
+        if !cfg!(windows) {
+            return Ok(None);
+        }
+
+        let batch_content = Self::create_batch_content(command, args, env);
+        let batch_path = Self::write_temp_batch(&batch_content)?;
+
+        tracing::info!(
+            "Created batch file: {} with content:\n{}",
+            batch_path.display(),
+            batch_content
+        );
+
+        Ok(Some(batch_path))
     }
 
     /// Write data to the PTY.
@@ -239,6 +299,22 @@ impl PtySession {
     }
 }
 
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        if let Some(batch_path) = &self.temp_batch_path {
+            if let Err(error) = std::fs::remove_file(batch_path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        "Failed to remove temp batch file {}: {}",
+                        batch_path.display(),
+                        error
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Local PTY-based runtime adapter.
 ///
 /// This adapter spawns agent processes with a PTY (pseudo-terminal),
@@ -294,6 +370,8 @@ impl RuntimeAdapter for LocalPtyRuntime {
             &spec.env,
             spec.cols,
             spec.rows,
+            spec.wsl_distro.as_deref(),
+            spec.wsl_binary_path.as_deref(),
         )?;
 
         // Store session
@@ -314,14 +392,15 @@ impl RuntimeAdapter for LocalPtyRuntime {
     }
 
     fn stop(&self, process_id: &str) -> Result<(), RuntimeError> {
-        let sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| RuntimeError::stop("Failed to lock sessions"))?;
-
-        let session = sessions
-            .get(process_id)
-            .ok_or_else(|| RuntimeError::not_found(process_id))?;
+        let session = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| RuntimeError::stop("Failed to lock sessions"))?;
+            sessions
+                .remove(process_id)
+                .ok_or_else(|| RuntimeError::not_found(process_id))?
+        };
 
         session.kill()?;
 
@@ -400,5 +479,25 @@ mod tests {
         assert!(id1.starts_with("pty-"));
         assert!(id2.starts_with("pty-"));
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_apply_wsl_overrides() {
+        let args = vec![
+            "-d".to_string(),
+            "Ubuntu".to_string(),
+            "/root/.local/bin/agent".to_string(),
+            "--force".to_string(),
+        ];
+
+        let resolved = PtySession::apply_wsl_overrides(
+            "wsl",
+            &args,
+            Some("Ubuntu-24.04"),
+            Some("/opt/cursor-agent"),
+        );
+
+        assert_eq!(resolved[1], "Ubuntu-24.04");
+        assert_eq!(resolved[2], "/opt/cursor-agent");
     }
 }

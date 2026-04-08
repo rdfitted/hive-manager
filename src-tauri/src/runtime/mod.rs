@@ -6,7 +6,7 @@
 //! # Available Runtimes
 //!
 //! - `LocalPtyRuntime`: PTY-based execution with terminal emulation (via portable_pty)
-//! - `LocalProcessRuntime`: Headless process execution (via tokio::process::Command)
+//! - `LocalProcessRuntime`: Headless process execution (via `std::process::Command`)
 
 mod local_process;
 mod local_pty;
@@ -38,6 +38,12 @@ pub struct LaunchSpec {
     pub rows: u16,
     /// Agent role for context
     pub role: String,
+    /// Optional WSL distribution override for Windows-backed launches.
+    #[serde(default)]
+    pub wsl_distro: Option<String>,
+    /// Optional WSL binary path override for Windows-backed launches.
+    #[serde(default)]
+    pub wsl_binary_path: Option<String>,
 }
 
 impl LaunchSpec {
@@ -51,6 +57,8 @@ impl LaunchSpec {
             cols: 80,
             rows: 24,
             role: "worker".to_string(),
+            wsl_distro: None,
+            wsl_binary_path: None,
         }
     }
 
@@ -94,6 +102,18 @@ impl LaunchSpec {
     /// Set the agent role.
     pub fn role(mut self, role: impl Into<String>) -> Self {
         self.role = role.into();
+        self
+    }
+
+    /// Override the WSL distribution used for Windows-backed launches.
+    pub fn wsl_distro(mut self, distro: impl Into<String>) -> Self {
+        self.wsl_distro = Some(distro.into());
+        self
+    }
+
+    /// Override the WSL binary path used for Windows-backed launches.
+    pub fn wsl_binary_path(mut self, binary_path: impl Into<String>) -> Self {
+        self.wsl_binary_path = Some(binary_path.into());
         self
     }
 }
@@ -238,7 +258,9 @@ mod tests {
             .cwd("/project")
             .env("KEY", "value")
             .terminal_size(120, 40)
-            .role("worker");
+            .role("worker")
+            .wsl_distro("Ubuntu-24.04")
+            .wsl_binary_path("/custom/agent");
 
         assert_eq!(spec.command, "claude");
         assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "--model", "opus-4-6"]);
@@ -247,6 +269,8 @@ mod tests {
         assert_eq!(spec.cols, 120);
         assert_eq!(spec.rows, 40);
         assert_eq!(spec.role, "worker");
+        assert_eq!(spec.wsl_distro.as_deref(), Some("Ubuntu-24.04"));
+        assert_eq!(spec.wsl_binary_path.as_deref(), Some("/custom/agent"));
     }
 
     #[test]

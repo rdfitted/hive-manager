@@ -1,24 +1,21 @@
-//! Local Process Runtime - headless process execution via tokio::process::Command.
+//! Local Process Runtime - headless process execution via `std::process::Command`.
 //!
 //! This runtime provides simple process spawning for agents that don't require
 //! terminal emulation (e.g., batch processing, CI/CD pipelines).
 
 use std::collections::HashMap;
-use std::process::Stdio;
+use std::io::Write;
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
-
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tokio::sync::RwLock;
 
 use super::{AgentProcessStatus, LaunchedAgent, LaunchSpec, RuntimeError, RuntimeAdapter};
 
 /// A running process handle.
 struct ProcessHandle {
-    /// The child process
-    child: RwLock<Option<tokio::process::Child>>,
-    /// Stdin for writing
-    stdin: Mutex<Option<tokio::process::ChildStdin>>,
+    /// The child process.
+    child: Mutex<Child>,
+    /// Stdin for writing.
+    stdin: Mutex<Option<ChildStdin>>,
 }
 
 /// Local headless process runtime adapter.
@@ -31,8 +28,7 @@ struct ProcessHandle {
 /// ```ignore
 /// use hive_manager::runtime::{LocalProcessRuntime, LaunchSpec, RuntimeAdapter};
 ///
-/// #[tokio::main]
-/// async fn main() {
+/// fn main() {
 ///     let runtime = LocalProcessRuntime::new();
 ///     let spec = LaunchSpec::new("echo")
 ///         .arg("Hello, World!");
@@ -63,9 +59,10 @@ impl LocalProcessRuntime {
     fn generate_process_id() -> String {
         format!("proc-{}", uuid::Uuid::new_v4())
     }
+}
 
-    /// Launch a process asynchronously (internal helper).
-    async fn launch_async(&self, spec: &LaunchSpec) -> Result<LaunchedAgent, RuntimeError> {
+impl RuntimeAdapter for LocalProcessRuntime {
+    fn launch(&self, spec: &LaunchSpec) -> Result<LaunchedAgent, RuntimeError> {
         let process_id = Self::generate_process_id();
 
         let mut cmd = Command::new(&spec.command);
@@ -74,37 +71,30 @@ impl LocalProcessRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // Set environment variables
         for (key, value) in &spec.env {
             cmd.env(key, value);
         }
 
-        // Set working directory
         if let Some(ref cwd) = spec.cwd {
             cmd.current_dir(cwd);
         }
 
-        // Spawn the process
         let mut child = cmd
             .spawn()
             .map_err(|e| RuntimeError::launch(format!("Failed to spawn {}: {}", spec.command, e)))?;
 
-        // Take stdin handle
         let stdin = child.stdin.take();
 
-        // Store the process handle
         let handle = ProcessHandle {
-            child: RwLock::new(Some(child)),
+            child: Mutex::new(child),
             stdin: Mutex::new(stdin),
         };
 
-        {
-            let mut processes = self
-                .processes
-                .lock()
-                .map_err(|_| RuntimeError::launch("Failed to lock processes"))?;
-            processes.insert(process_id.clone(), handle);
-        }
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|_| RuntimeError::launch("Failed to lock processes"))?;
+        processes.insert(process_id.clone(), handle);
 
         tracing::info!("Launched process: {} ({})", process_id, spec.command);
 
@@ -114,8 +104,33 @@ impl LocalProcessRuntime {
         })
     }
 
-    /// Write to a process asynchronously (internal helper).
-    async fn write_async(&self, process_id: &str, input: &str) -> Result<(), RuntimeError> {
+    fn stop(&self, process_id: &str) -> Result<(), RuntimeError> {
+        let handle = {
+            let mut processes = self
+                .processes
+                .lock()
+                .map_err(|_| RuntimeError::stop("Failed to lock processes"))?;
+            processes
+                .remove(process_id)
+                .ok_or_else(|| RuntimeError::not_found(process_id))?
+        };
+
+        let mut child = handle
+            .child
+            .lock()
+            .map_err(|_| RuntimeError::stop("Failed to lock child"))?;
+
+        child
+            .kill()
+            .map_err(|e| RuntimeError::stop(format!("Kill failed: {}", e)))?;
+        let _ = child.wait();
+
+        tracing::info!("Stopped process: {}", process_id);
+
+        Ok(())
+    }
+
+    fn write(&self, process_id: &str, input: &str) -> Result<(), RuntimeError> {
         let processes = self
             .processes
             .lock()
@@ -133,73 +148,16 @@ impl LocalProcessRuntime {
         if let Some(ref mut stdin) = *stdin {
             stdin
                 .write_all(input.as_bytes())
-                .await
                 .map_err(|e| RuntimeError::write(format!("Write failed: {}", e)))?;
             stdin
                 .flush()
-                .await
                 .map_err(|e| RuntimeError::write(format!("Flush failed: {}", e)))?;
         }
 
         Ok(())
     }
 
-    /// Stop a process asynchronously (internal helper).
-    async fn stop_async(&self, process_id: &str) -> Result<(), RuntimeError> {
-        let processes = self
-            .processes
-            .lock()
-            .map_err(|_| RuntimeError::stop("Failed to lock processes"))?;
-
-        let handle = processes
-            .get(process_id)
-            .ok_or_else(|| RuntimeError::not_found(process_id))?;
-
-        let mut child_guard = handle
-            .child
-            .write()
-            .await;
-
-        if let Some(ref mut child) = *child_guard {
-            child
-                .kill()
-                .await
-                .map_err(|e| RuntimeError::stop(format!("Kill failed: {}", e)))?;
-        }
-
-        tracing::info!("Stopped process: {}", process_id);
-
-        Ok(())
-    }
-}
-
-impl RuntimeAdapter for LocalProcessRuntime {
-    fn launch(&self, spec: &LaunchSpec) -> Result<LaunchedAgent, RuntimeError> {
-        // Since RuntimeAdapter is synchronous, we use tokio::runtime::Handle
-        // if available, otherwise block_on
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| RuntimeError::launch(format!("Failed to create runtime: {}", e)))?;
-
-        rt.block_on(self.launch_async(spec))
-    }
-
-    fn stop(&self, process_id: &str) -> Result<(), RuntimeError> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| RuntimeError::stop(format!("Failed to create runtime: {}", e)))?;
-
-        rt.block_on(self.stop_async(process_id))
-    }
-
-    fn write(&self, process_id: &str, input: &str) -> Result<(), RuntimeError> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| RuntimeError::write(format!("Failed to create runtime: {}", e)))?;
-
-        rt.block_on(self.write_async(process_id, input))
-    }
-
     fn resize(&self, _process_id: &str, _cols: u16, _rows: u16) -> Result<(), RuntimeError> {
-        // Headless processes don't support terminal resize
-        // Return Ok to allow callers to safely call this method
         Ok(())
     }
 }
@@ -212,7 +170,6 @@ mod tests {
     #[test]
     fn test_local_process_runtime_creation() {
         let runtime = LocalProcessRuntime::new();
-        // Just verify it can be created
         assert!(Arc::strong_count(&runtime.processes) >= 1);
     }
 
@@ -229,7 +186,6 @@ mod tests {
     #[test]
     fn test_resize_is_noop() {
         let runtime = LocalProcessRuntime::new();
-        // Resize should succeed as a no-op
         let result = runtime.resize("nonexistent", 80, 24);
         assert!(result.is_ok());
     }
@@ -238,13 +194,10 @@ mod tests {
     fn test_launch_simple_command() {
         let runtime = LocalProcessRuntime::new();
 
-        // On Windows, use cmd.exe; on Unix, use echo
         let spec = if cfg!(windows) {
-            LaunchSpec::new("cmd")
-                .args(["/c", "echo", "test"])
+            LaunchSpec::new("cmd").args(["/c", "echo", "test"])
         } else {
-            LaunchSpec::new("echo")
-                .arg("test")
+            LaunchSpec::new("echo").arg("test")
         };
 
         let result = runtime.launch(&spec);

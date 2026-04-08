@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::fs::{File, OpenOptions};
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 
 use crate::domain::event::Event;
 
@@ -11,6 +13,7 @@ const CHANNEL_CAPACITY: usize = 1024;
 pub struct EventBus {
     sender: broadcast::Sender<Event>,
     data_dir: PathBuf,
+    writers: Arc<Mutex<Vec<(String, File)>>>,
 }
 
 impl EventBus {
@@ -18,7 +21,11 @@ impl EventBus {
     /// where per-session `events.jsonl` files will be written.
     pub fn new(data_dir: PathBuf) -> Arc<Self> {
         let (sender, _) = broadcast::channel(CHANNEL_CAPACITY);
-        Arc::new(Self { sender, data_dir })
+        Arc::new(Self {
+            sender,
+            data_dir,
+            writers: Arc::new(Mutex::new(Vec::new())),
+        })
     }
 
     /// Publish an event to all subscribers and persist to JSONL.
@@ -60,23 +67,32 @@ impl EventBus {
     }
 
     async fn persist_jsonl(&self, event: &Event) -> Result<(), String> {
-        let session_dir = self.data_dir.join(&event.session_id);
-        tokio::fs::create_dir_all(&session_dir)
-            .await
-            .map_err(|e| format!("Failed to create session dir: {e}"))?;
-
-        let path = session_dir.join("events.jsonl");
         let mut line =
             serde_json::to_string(event).map_err(|e| format!("Failed to serialize event: {e}"))?;
         line.push('\n');
 
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|e| format!("Failed to open events.jsonl: {e}"))?
-            .write_all(line.as_bytes())
+        let mut writers = self.writers.lock().await;
+        if !writers.iter().any(|(session_id, _)| session_id == &event.session_id) {
+            let session_dir = self.data_dir.join(&event.session_id);
+            tokio::fs::create_dir_all(&session_dir)
+                .await
+                .map_err(|e| format!("Failed to create session dir: {e}"))?;
+
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(session_dir.join("events.jsonl"))
+                .await
+                .map_err(|e| format!("Failed to open events.jsonl: {e}"))?;
+            writers.push((event.session_id.clone(), file));
+        }
+
+        let (_, file) = writers
+            .iter_mut()
+            .find(|(session_id, _)| session_id == &event.session_id)
+            .ok_or_else(|| "Failed to cache events.jsonl writer".to_string())?;
+
+        file.write_all(line.as_bytes())
             .await
             .map_err(|e| format!("Failed to write event: {e}"))?;
 

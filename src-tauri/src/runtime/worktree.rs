@@ -85,13 +85,26 @@ pub struct WorktreeInfo {
 pub struct WorktreeManager {
     /// Root project path (main repository)
     project_path: PathBuf,
+    /// Base directory for generated agent worktrees.
+    worktree_base: PathBuf,
 }
 
 impl WorktreeManager {
     /// Create a new WorktreeManager for the given project.
     pub fn new(project_path: impl Into<PathBuf>) -> Self {
+        let project_path = project_path.into();
+        let worktree_base = project_path.join(".hive-manager").join("worktrees");
+        Self::with_worktree_base(project_path, worktree_base)
+    }
+
+    /// Create a new WorktreeManager with an explicit worktree base path.
+    pub fn with_worktree_base(
+        project_path: impl Into<PathBuf>,
+        worktree_base: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             project_path: project_path.into(),
+            worktree_base: worktree_base.into(),
         }
     }
 
@@ -173,12 +186,15 @@ impl WorktreeManager {
         agent_id: &str,
         branch_prefix: &str,
     ) -> Result<WorktreeInfo, WorktreeError> {
-        // Generate worktree path relative to project
-        let parent = self.project_path.parent().ok_or_else(|| {
-            WorktreeError::new("Cannot determine parent directory for worktree")
-        })?;
         let worktree_name = format!("worktree-{}", agent_id);
-        let worktree_path = parent.join(&worktree_name);
+        std::fs::create_dir_all(&self.worktree_base).map_err(|e| {
+            WorktreeError::new(format!(
+                "Failed to create worktree base directory '{}': {}",
+                self.worktree_base.display(),
+                e
+            ))
+        })?;
+        let worktree_path = self.worktree_base.join(&worktree_name);
 
         // Generate branch name
         let branch = format!("{}/{}", branch_prefix, agent_id);
@@ -263,6 +279,11 @@ impl WorktreeManager {
     /// Get the project path.
     pub fn project_path(&self) -> &Path {
         &self.project_path
+    }
+
+    /// Get the configured worktree base path.
+    pub fn worktree_base(&self) -> &Path {
+        &self.worktree_base
     }
 }
 
@@ -437,5 +458,9 @@ bare
     fn test_worktree_manager_creation() {
         let manager = WorktreeManager::new("/project");
         assert_eq!(manager.project_path(), Path::new("/project"));
+        assert_eq!(
+            manager.worktree_base(),
+            Path::new("/project/.hive-manager/worktrees")
+        );
     }
 }
