@@ -34,6 +34,25 @@ struct PtySession {
 }
 
 impl PtySession {
+    fn escape_batch_value(value: &str) -> String {
+        let mut escaped = String::with_capacity(value.len());
+        for ch in value.chars() {
+            match ch {
+                '%' => escaped.push_str("%%"),
+                '"' | '^' | '&' | '|' | '<' | '>' | '(' | ')' => {
+                    escaped.push('^');
+                    escaped.push(ch);
+                }
+                _ => escaped.push(ch),
+            }
+        }
+        escaped
+    }
+
+    fn quote_batch_argument(value: &str) -> String {
+        format!("\"{}\"", Self::escape_batch_value(value))
+    }
+
     /// Create a new PTY session.
     fn new(
         role: &str,
@@ -164,26 +183,26 @@ impl PtySession {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> String {
-        let mut content = String::new();
+        let mut lines = vec!["@echo off".to_string()];
 
         // Add environment variables
         for (key, value) in env {
-            content.push_str(&format!("set {}={}\n", key, value));
+            lines.push(format!(
+                "set \"{}={}\"",
+                key,
+                Self::escape_batch_value(value)
+            ));
         }
 
         // Build the command
-        content.push_str(command);
+        let mut command_line = Self::quote_batch_argument(command);
         for arg in args {
-            // Quote arguments that contain spaces
-            if arg.contains(' ') || arg.contains('"') {
-                content.push_str(&format!(" \"{}\"", arg.replace('"', "\"\"\"")));
-            } else {
-                content.push_str(&format!(" {}", arg));
-            }
+            command_line.push(' ');
+            command_line.push_str(&Self::quote_batch_argument(arg));
         }
-        content.push('\n');
+        lines.push(command_line);
 
-        content
+        lines.join("\r\n")
     }
 
     /// Write a temporary batch file for Windows execution.
@@ -465,10 +484,29 @@ mod tests {
             &env,
         );
 
-        assert!(content.contains("set API_KEY=secret123"));
-        assert!(content.contains("claude"));
-        assert!(content.contains("--model"));
-        assert!(content.contains("opus"));
+        assert!(content.contains("@echo off"));
+        assert!(content.contains("set \"API_KEY=secret123\""));
+        assert!(content.contains("\"claude\""));
+        assert!(content.contains("\"--model\""));
+        assert!(content.contains("\"opus\""));
+    }
+
+    #[test]
+    fn test_pty_session_batch_content_escapes_windows_metacharacters() {
+        let env: HashMap<String, String> = [("API_KEY".to_string(), "se%cr&et^\"".to_string())]
+            .into_iter()
+            .collect();
+
+        let content = PtySession::create_batch_content(
+            "C:\\Program Files\\Agent\\agent.exe",
+            &["hello & goodbye".to_string(), "%TEMP%".to_string()],
+            &env,
+        );
+
+        assert!(content.contains("set \"API_KEY=se%%cr^&et^^^\"\""));
+        assert!(content.contains("\"C:\\Program Files\\Agent\\agent.exe\""));
+        assert!(content.contains("\"hello ^& goodbye\""));
+        assert!(content.contains("\"%%TEMP%%\""));
     }
 
     #[test]

@@ -117,10 +117,11 @@ impl CliAdapter for ClaudeCodeAdapter {
 fn extract_tool_name(line: &str) -> Option<String> {
     // Common patterns: "Using tool: tool_name" or "tool_call: tool_name"
     let patterns = ["using tool:", "calling tool:", "tool_call:", "tool:"];
+    let line_lower = line.to_lowercase();
 
     for pattern in patterns.iter() {
-        if let Some(pos) = line.to_lowercase().find(pattern) {
-            let rest = &line[pos + pattern.len()..];
+        if let Some(pos) = line_lower.find(pattern) {
+            let rest = &line_lower[pos + pattern.len()..];
             let tool = rest.split_whitespace().next()?.trim_matches(':').to_string();
             if !tool.is_empty() {
                 return Some(tool);
@@ -210,5 +211,13 @@ mod tests {
         assert_eq!(extract_tool_name("Using tool: read_file"), Some("read_file".to_string()));
         assert_eq!(extract_tool_name("Calling tool: write_file"), Some("write_file".to_string()));
         assert_eq!(extract_tool_name("No tool here"), None);
+    }
+
+    #[test]
+    fn test_extract_tool_name_handles_unicode_before_marker() {
+        assert_eq!(
+            extract_tool_name("İ Using tool: read_file"),
+            Some("read_file".to_string())
+        );
     }
 }

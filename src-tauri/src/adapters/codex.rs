@@ -45,6 +45,7 @@ impl CliAdapter for CodexAdapter {
 
     fn detect_status_signal(&self, line: &str) -> Option<AgentSignal> {
         let line_lower = line.to_lowercase();
+        let trimmed = line.trim_end();
 
         // Codex completion patterns
         if line_lower.contains("task completed") || line_lower.contains("finished") || line_lower.contains("done.") {
@@ -59,8 +60,7 @@ impl CliAdapter for CodexAdapter {
         }
 
         // Waiting for input patterns
-        if line.contains("?") && line.matches('?').count() <= 2 {
-            // Simple heuristic for prompt questions
+        if is_explicit_prompt_marker(&line_lower, trimmed) {
             return Some(AgentSignal::WaitingInput);
         }
 
@@ -110,6 +110,13 @@ impl CliAdapter for CodexAdapter {
     fn model_flag(&self) -> Option<&'static str> {
         Some("-m")
     }
+}
+
+fn is_explicit_prompt_marker(line_lower: &str, trimmed: &str) -> bool {
+    line_lower.starts_with("input:")
+        || line_lower.starts_with("prompt:")
+        || trimmed == ">"
+        || trimmed == ">>>"
 }
 
 #[cfg(test)]
@@ -175,5 +182,19 @@ mod tests {
     fn test_cli_name() {
         let adapter = CodexAdapter;
         assert_eq!(adapter.cli_name(), "codex");
+    }
+
+    #[test]
+    fn test_detect_waiting_input_requires_explicit_prompt_marker() {
+        let adapter = CodexAdapter;
+
+        assert_eq!(
+            adapter.detect_status_signal("Should we continue with the refactor?"),
+            None
+        );
+        assert_eq!(
+            adapter.detect_status_signal("Prompt:"),
+            Some(AgentSignal::WaitingInput)
+        );
     }
 }

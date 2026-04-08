@@ -45,6 +45,7 @@ impl CliAdapter for GeminiAdapter {
 
     fn detect_status_signal(&self, line: &str) -> Option<AgentSignal> {
         let line_lower = line.to_lowercase();
+        let trimmed = line.trim_end();
 
         // Gemini completion patterns
         if line_lower.contains("task completed") || line_lower.contains("finished") || line_lower.contains("done!") {
@@ -59,7 +60,7 @@ impl CliAdapter for GeminiAdapter {
         }
 
         // Waiting for input patterns
-        if line.contains("?") || line_lower.contains("please provide") {
+        if is_explicit_prompt_marker(&line_lower, trimmed) {
             return Some(AgentSignal::WaitingInput);
         }
 
@@ -118,10 +119,11 @@ impl CliAdapter for GeminiAdapter {
 /// Extract tool/function name from Gemini output.
 fn extract_gemini_tool(line: &str) -> Option<String> {
     let patterns = ["calling function:", "using tool:", "function:"];
+    let line_lower = line.to_lowercase();
 
     for pattern in patterns.iter() {
-        if let Some(pos) = line.to_lowercase().find(pattern) {
-            let rest = &line[pos + pattern.len()..];
+        if let Some(pos) = line_lower.find(pattern) {
+            let rest = &line_lower[pos + pattern.len()..];
             let tool = rest.split_whitespace().next()?.trim_matches(':').to_string();
             if !tool.is_empty() {
                 return Some(tool);
@@ -129,6 +131,13 @@ fn extract_gemini_tool(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn is_explicit_prompt_marker(line_lower: &str, trimmed: &str) -> bool {
+    line_lower.starts_with("input:")
+        || line_lower.starts_with("prompt:")
+        || trimmed == ">"
+        || trimmed == ">>>"
 }
 
 #[cfg(test)]
@@ -194,5 +203,27 @@ mod tests {
     fn test_cli_name() {
         let adapter = GeminiAdapter;
         assert_eq!(adapter.cli_name(), "gemini");
+    }
+
+    #[test]
+    fn test_detect_waiting_input_requires_explicit_prompt_marker() {
+        let adapter = GeminiAdapter;
+
+        assert_eq!(
+            adapter.detect_status_signal("What changed in this file?"),
+            None
+        );
+        assert_eq!(
+            adapter.detect_status_signal("Input:"),
+            Some(AgentSignal::WaitingInput)
+        );
+    }
+
+    #[test]
+    fn test_extract_gemini_tool_handles_unicode_before_marker() {
+        assert_eq!(
+            extract_gemini_tool("İ calling function: read_file"),
+            Some("read_file".to_string())
+        );
     }
 }

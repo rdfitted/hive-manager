@@ -175,16 +175,16 @@ pub trait CliAdapter: Send + Sync {
 }
 
 /// Get the appropriate adapter for a CLI name.
-pub fn get_adapter(cli: &str) -> Box<dyn CliAdapter> {
+pub fn get_adapter(cli: &str) -> Result<Box<dyn CliAdapter>, String> {
     match cli {
-        "claude" => Box::new(ClaudeCodeAdapter),
-        "codex" => Box::new(CodexAdapter),
-        "cursor" => Box::new(CursorAdapter),
-        "gemini" => Box::new(GeminiAdapter),
-        "droid" => Box::new(DroidAdapter),
-        "opencode" => Box::new(OpenCodeAdapter),
-        "qwen" => Box::new(QwenAdapter),
-        _ => Box::new(ClaudeCodeAdapter), // Default to Claude
+        "claude" => Ok(Box::new(ClaudeCodeAdapter)),
+        "codex" => Ok(Box::new(CodexAdapter)),
+        "cursor" => Ok(Box::new(CursorAdapter)),
+        "gemini" => Ok(Box::new(GeminiAdapter)),
+        "droid" => Ok(Box::new(DroidAdapter)),
+        "opencode" => Ok(Box::new(OpenCodeAdapter)),
+        "qwen" => Ok(Box::new(QwenAdapter)),
+        _ => Err(format!("Unknown CLI adapter: {}", cli)),
     }
 }
 
@@ -219,16 +219,24 @@ mod tests {
 
     #[test]
     fn test_get_adapter() {
-        let claude = get_adapter("claude");
+        let claude = get_adapter("claude").unwrap();
         assert_eq!(claude.cli_name(), "claude");
 
-        let gemini = get_adapter("gemini");
+        let gemini = get_adapter("gemini").unwrap();
         assert_eq!(gemini.cli_name(), "gemini");
 
-        let cursor = get_adapter("cursor");
+        let cursor = get_adapter("cursor").unwrap();
         assert_eq!(cursor.cli_name(), "cursor");
 
-        let qwen = get_adapter("qwen");
+        let qwen = get_adapter("qwen").unwrap();
         assert_eq!(qwen.cli_name(), "qwen");
+    }
+
+    #[test]
+    fn test_get_adapter_rejects_unknown_cli() {
+        match get_adapter("unknown") {
+            Ok(adapter) => panic!("Expected error, got adapter {}", adapter.cli_name()),
+            Err(error) => assert_eq!(error, "Unknown CLI adapter: unknown"),
+        }
     }
 }

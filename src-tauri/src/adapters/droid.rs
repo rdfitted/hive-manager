@@ -113,10 +113,11 @@ impl CliAdapter for DroidAdapter {
 /// Extract tool name from Droid output.
 fn extract_droid_tool(line: &str) -> Option<String> {
     let patterns = ["using tool:", "calling:"];
+    let line_lower = line.to_lowercase();
 
     for pattern in patterns.iter() {
-        if let Some(pos) = line.to_lowercase().find(pattern) {
-            let rest = &line[pos + pattern.len()..];
+        if let Some(pos) = line_lower.find(pattern) {
+            let rest = &line_lower[pos + pattern.len()..];
             let tool = rest.split_whitespace().next()?.trim_matches(':').to_string();
             if !tool.is_empty() {
                 return Some(tool);
@@ -195,5 +196,13 @@ mod tests {
     fn test_cli_name() {
         let adapter = DroidAdapter;
         assert_eq!(adapter.cli_name(), "droid");
+    }
+
+    #[test]
+    fn test_extract_droid_tool_handles_unicode_before_marker() {
+        assert_eq!(
+            extract_droid_tool("İ calling: list_files"),
+            Some("list_files".to_string())
+        );
     }
 }

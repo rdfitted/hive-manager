@@ -90,6 +90,21 @@ pub struct WorktreeManager {
 }
 
 impl WorktreeManager {
+    fn normalize_worktree_path(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| {
+            path.components().fold(PathBuf::new(), |mut normalized, component| {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        normalized.pop();
+                    }
+                    _ => normalized.push(component.as_os_str()),
+                }
+                normalized
+            })
+        })
+    }
+
     /// Create a new WorktreeManager for the given project.
     pub fn new(project_path: impl Into<PathBuf>) -> Self {
         let project_path = project_path.into();
@@ -153,6 +168,7 @@ impl WorktreeManager {
         branch: &str,
     ) -> Result<WorktreeInfo, WorktreeError> {
         let worktree_path = worktree_path.as_ref();
+        let target_path = Self::normalize_worktree_path(worktree_path);
 
         // Create the worktree
         self.run_git(&[
@@ -167,7 +183,7 @@ impl WorktreeManager {
         let worktrees = self.list_worktrees()?;
         worktrees
             .into_iter()
-            .find(|w| w.path == worktree_path)
+            .find(|w| Self::normalize_worktree_path(&w.path) == target_path)
             .ok_or_else(|| WorktreeError::new("Worktree was created but not found in list"))
     }
 
@@ -461,6 +477,18 @@ bare
         assert_eq!(
             manager.worktree_base(),
             Path::new("/project/.hive-manager/worktrees")
+        );
+    }
+
+    #[test]
+    fn test_normalize_worktree_path_collapses_dot_segments() {
+        let normalized = WorktreeManager::normalize_worktree_path(Path::new(
+            "/project/.hive-manager/worktrees/../worktrees/agent-1",
+        ));
+
+        assert_eq!(
+            normalized,
+            PathBuf::from("/project/.hive-manager/worktrees/agent-1")
         );
     }
 }
