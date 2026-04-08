@@ -144,6 +144,37 @@ export interface ArtifactBundle {
     recommended_next_step?: string;
 }
 
+export interface ResolverOutput {
+    selected_candidate: string;
+    rationale: string;
+    tradeoffs: string[];
+    hybrid_integration_plan?: string;
+    final_recommendation?: string;
+}
+
+export interface SessionTemplate {
+    id: string;
+    name: string;
+    description: string;
+    mode: SessionMode;
+    cells: CellTemplate[];
+    workspace_strategy: WorkspaceStrategy;
+    is_builtin: boolean;
+}
+
+export interface CellTemplate {
+    role: string; // references AgentRole or custom role
+    cli: string;
+    model?: string;
+    prompt_template: string; // references role template key
+}
+
+export interface RolePack {
+    id: string;
+    name: string;
+    roles: CellTemplate[];
+}
+
 /**
  * Helper to extract the variant name from a Serde-serialized enum with data.
  * If input is a string, returns the string.

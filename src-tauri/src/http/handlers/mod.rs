@@ -11,6 +11,8 @@ pub mod cells;
 pub mod agents;
 pub mod artifacts;
 pub mod events;
+pub mod resolver;
+pub mod templates;
 
 use crate::http::error::ApiError;
 
@@ -64,6 +66,28 @@ pub fn validate_agent_id(agent_id: &str) -> Result<(), ApiError> {
     if !agent_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(ApiError::bad_request(
             "Invalid agent ID: only alphanumeric characters and hyphens are allowed",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_template_id(template_id: &str) -> Result<(), ApiError> {
+    if template_id.is_empty() || template_id.len() > 64 {
+        return Err(ApiError::bad_request(
+            "Invalid template ID: must be 1-64 characters",
+        ));
+    }
+    if template_id.contains("..") || template_id.contains('/') || template_id.contains('\\') {
+        return Err(ApiError::bad_request(
+            "Invalid template ID: must not contain '..', '/', or '\\'",
+        ));
+    }
+    if !template_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ApiError::bad_request(
+            "Invalid template ID: only alphanumeric characters, hyphens, and underscores are allowed",
         ));
     }
     Ok(())

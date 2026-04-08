@@ -5,8 +5,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::domain::SessionMode;
 use crate::pty::WorkerRole;
 use crate::session::SessionType;
 
@@ -49,6 +51,178 @@ pub struct WorkerInfo {
     pub cli: String,
     pub status: String,
     pub current_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionTemplate {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub mode: SessionMode,
+    pub cells: Vec<CellTemplate>,
+    pub workspace_strategy: String,
+    pub is_builtin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CellTemplate {
+    pub role: String,
+    pub cli: String,
+    pub model: Option<String>,
+    pub prompt_template: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RolePack {
+    pub id: String,
+    pub name: String,
+    pub roles: Vec<CellTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TemplateCatalog {
+    pub templates: Vec<SessionTemplate>,
+    pub role_packs: Vec<RolePack>,
+}
+
+pub fn builtin_session_templates() -> Vec<SessionTemplate> {
+    vec![
+        SessionTemplate {
+            id: "bug-fix-hive".to_string(),
+            name: "Bug-fix Hive".to_string(),
+            description: "Queen-led bug fix session with backend and frontend implementers.".to_string(),
+            mode: SessionMode::Hive,
+            cells: vec![
+                CellTemplate {
+                    role: "queen".to_string(),
+                    cli: "claude".to_string(),
+                    model: Some("opus-4-6".to_string()),
+                    prompt_template: "queen-hive".to_string(),
+                },
+                CellTemplate {
+                    role: "backend".to_string(),
+                    cli: "codex".to_string(),
+                    model: Some("gpt-5.4".to_string()),
+                    prompt_template: "roles/backend".to_string(),
+                },
+                CellTemplate {
+                    role: "frontend".to_string(),
+                    cli: "gemini".to_string(),
+                    model: Some("gemini-2.5-pro".to_string()),
+                    prompt_template: "roles/frontend".to_string(),
+                },
+            ],
+            workspace_strategy: "shared".to_string(),
+            is_builtin: true,
+        },
+        SessionTemplate {
+            id: "feature-build-hive".to_string(),
+            name: "Feature-build Hive".to_string(),
+            description: "Queen plus backend, frontend, and coherence workers for feature delivery.".to_string(),
+            mode: SessionMode::Hive,
+            cells: vec![
+                CellTemplate {
+                    role: "queen".to_string(),
+                    cli: "claude".to_string(),
+                    model: Some("opus-4-6".to_string()),
+                    prompt_template: "queen-hive".to_string(),
+                },
+                CellTemplate {
+                    role: "backend".to_string(),
+                    cli: "codex".to_string(),
+                    model: Some("gpt-5.4".to_string()),
+                    prompt_template: "roles/backend".to_string(),
+                },
+                CellTemplate {
+                    role: "frontend".to_string(),
+                    cli: "gemini".to_string(),
+                    model: Some("gemini-2.5-pro".to_string()),
+                    prompt_template: "roles/frontend".to_string(),
+                },
+                CellTemplate {
+                    role: "coherence".to_string(),
+                    cli: "droid".to_string(),
+                    model: Some("glm-4.7".to_string()),
+                    prompt_template: "roles/coherence".to_string(),
+                },
+            ],
+            workspace_strategy: "shared".to_string(),
+            is_builtin: true,
+        },
+        SessionTemplate {
+            id: "fusion-compare".to_string(),
+            name: "Fusion Compare".to_string(),
+            description: "Two candidate implementation cells plus a resolver recommendation pass.".to_string(),
+            mode: SessionMode::Fusion,
+            cells: vec![
+                CellTemplate {
+                    role: "candidate-a".to_string(),
+                    cli: "codex".to_string(),
+                    model: Some("gpt-5.4".to_string()),
+                    prompt_template: "fusion-worker".to_string(),
+                },
+                CellTemplate {
+                    role: "candidate-b".to_string(),
+                    cli: "gemini".to_string(),
+                    model: Some("gemini-2.5-pro".to_string()),
+                    prompt_template: "fusion-worker".to_string(),
+                },
+                CellTemplate {
+                    role: "resolver".to_string(),
+                    cli: "claude".to_string(),
+                    model: Some("opus-4-6".to_string()),
+                    prompt_template: "resolver".to_string(),
+                },
+            ],
+            workspace_strategy: "isolated".to_string(),
+            is_builtin: true,
+        },
+    ]
+}
+
+pub fn builtin_role_packs() -> Vec<RolePack> {
+    vec![
+        RolePack {
+            id: "queen".to_string(),
+            name: "Queen".to_string(),
+            roles: vec![CellTemplate {
+                role: "queen".to_string(),
+                cli: "claude".to_string(),
+                model: Some("opus-4-6".to_string()),
+                prompt_template: "queen-hive".to_string(),
+            }],
+        },
+        RolePack {
+            id: "implementer".to_string(),
+            name: "Implementer".to_string(),
+            roles: vec![CellTemplate {
+                role: "backend".to_string(),
+                cli: "codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                prompt_template: "roles/backend".to_string(),
+            }],
+        },
+        RolePack {
+            id: "reviewer".to_string(),
+            name: "Reviewer".to_string(),
+            roles: vec![CellTemplate {
+                role: "coherence".to_string(),
+                cli: "droid".to_string(),
+                model: Some("glm-4.7".to_string()),
+                prompt_template: "roles/coherence".to_string(),
+            }],
+        },
+        RolePack {
+            id: "resolver".to_string(),
+            name: "Resolver".to_string(),
+            roles: vec![CellTemplate {
+                role: "resolver".to_string(),
+                cli: "claude".to_string(),
+                model: Some("opus-4-6".to_string()),
+                prompt_template: "resolver".to_string(),
+            }],
+        },
+    ]
 }
 
 /// Template engine for rendering role and queen prompts
@@ -486,6 +660,26 @@ Winner: [variant name]
 Rationale: [explanation]
 "#.to_string());
 
+        self.builtin_templates.insert("resolver".to_string(), r#"# Resolver Recommendation Pass
+
+You are evaluating candidate implementation artifacts for session `{{session_id}}`.
+
+## Objective
+Recommend the strongest candidate or describe a safe hybrid plan.
+
+## Queen Summary
+{{queen_summary}}
+
+## Candidate Artifacts
+{{candidates_json}}
+
+## Output Requirements
+- Select one `selected_candidate`
+- Provide concise rationale grounded in artifact evidence
+- List explicit tradeoffs
+- Include a hybrid integration plan only if combining candidates is materially better
+"#.to_string());
+
         // Queen prompt for Hive sessions
         self.builtin_templates.insert("queen-hive".to_string(), r#"# Queen - Hive Session Orchestrator
 
@@ -811,6 +1005,13 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         Ok(rendered)
     }
 
+    pub fn render_resolver_prompt(
+        &self,
+        context: &PromptContext,
+    ) -> Result<String, TemplateError> {
+        self.render_template("resolver", context)
+    }
+
     fn render_prompt_text(
         &self,
         template: &str,
@@ -903,5 +1104,30 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
 impl Default for TemplateEngine {
     fn default() -> Self {
         Self::new(PathBuf::from("."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{builtin_role_packs, builtin_session_templates, SessionTemplate, TemplateCatalog};
+
+    #[test]
+    fn session_template_roundtrip() {
+        let template = builtin_session_templates().remove(0);
+        let json = serde_json::to_string(&template).unwrap();
+        let decoded: SessionTemplate = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, template);
+    }
+
+    #[test]
+    fn builtin_catalog_has_expected_presets() {
+        let catalog = TemplateCatalog {
+            templates: builtin_session_templates(),
+            role_packs: builtin_role_packs(),
+        };
+
+        assert!(catalog.templates.len() >= 3);
+        assert!(catalog.role_packs.len() >= 4);
+        assert!(catalog.templates.iter().all(|template| template.is_builtin));
     }
 }

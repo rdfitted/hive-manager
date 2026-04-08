@@ -37,7 +37,7 @@ pub async fn list_agents_in_cell(
         .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
     let heartbeats = controller.get_heartbeat_info(&session_id);
 
-    if find_cell(&session, &cell_id).is_none() {
+    if find_cell(&session, &state.storage, &cell_id).is_none() {
         return Err(ApiError::not_found(format!("Cell {} not found", cell_id)));
     }
 

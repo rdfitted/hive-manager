@@ -2929,6 +2929,248 @@ async fn test_list_artifacts_rejects_invalid_cell_id() {
 }
 
 #[tokio::test]
+async fn test_post_artifact_round_trip_and_cell_projection() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("artifact-roundtrip-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+
+    let artifact = serde_json::json!({
+        "artifact": {
+            "summary": "Primary cell summary",
+            "changed_files": ["src/main.rs"],
+            "commits": ["abc123 add resolver endpoint"],
+            "branch": "feature/artifacts",
+            "test_results": { "passed": 3, "failed": 0 },
+            "diff_summary": "1 file changed",
+            "unresolved_issues": [],
+            "confidence": 0.82,
+            "recommended_next_step": "Open comparison view"
+        }
+    });
+
+    let post_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&artifact).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(post_response.status(), StatusCode::CREATED);
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let artifacts = response_json.as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].get("branch").unwrap().as_str().unwrap(), "feature/artifacts");
+
+    let cell_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/cells/primary", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(cell_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(cell_response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json
+            .get("artifacts")
+            .unwrap()
+            .get("summary")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "Primary cell summary"
+    );
+
+    let storage = SessionStorage::new().unwrap();
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_get_resolver_output_endpoint_returns_persisted_output() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("resolver-output-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+
+    let storage = SessionStorage::new().unwrap();
+    storage
+        .save_resolver_output(
+            &session_id,
+            &crate::domain::ResolverOutput {
+                selected_candidate: "variant-b".to_string(),
+                rationale: "Better test coverage".to_string(),
+                tradeoffs: vec!["More files changed".to_string()],
+                hybrid_integration_plan: None,
+                final_recommendation: Some("Merge variant-b".to_string()),
+            },
+        )
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/resolver", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json
+            .get("selected_candidate")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "variant-b"
+    );
+
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_template_crud_endpoints() {
+    let app = setup_test_app().await;
+    let template_id = format!("user-template-{}", uuid::Uuid::new_v4().simple());
+
+    let template = serde_json::json!({
+        "id": template_id,
+        "name": "Custom Fusion",
+        "description": "User-defined template",
+        "mode": "fusion",
+        "cells": [
+            {
+                "role": "candidate-a",
+                "cli": "codex",
+                "model": "gpt-5.4",
+                "prompt_template": "fusion-worker"
+            }
+        ],
+        "workspace_strategy": "isolated",
+        "is_builtin": false
+    });
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/templates")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&template).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/templates/{}", template_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/templates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(response_json
+        .get("templates")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.get("id").unwrap().as_str().unwrap() == template_id));
+    assert!(response_json
+        .get("role_packs")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len()
+        >= 4);
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/templates/{}", template_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+    let get_deleted_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/templates/{}", template_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_deleted_response.status(), StatusCode::NOT_FOUND);
+
+    let storage = SessionStorage::new().unwrap();
+    let _ = storage.delete_user_template(&template_id);
+}
+
+#[tokio::test]
 async fn test_send_agent_input_rejects_empty_input() {
     let (app, controller) = setup_test_app_with_controller().await;
 

@@ -30,7 +30,7 @@ pub async fn list_artifacts(
     let session = controller
         .get_session(&session_id)
         .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
-    let cell = find_cell(&session, &cell_id)
+    let cell = find_cell(&session, &state.storage, &cell_id)
         .ok_or_else(|| ApiError::not_found(format!("Cell {} not found", cell_id)))?;
 
     let artifacts = cell.artifacts.into_iter().collect();
@@ -50,13 +50,31 @@ pub async fn post_artifact(
         .get_session(&session_id)
         .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
 
-    if find_cell(&session, &cell_id).is_none() {
+    if find_cell(&session, &state.storage, &cell_id).is_none() {
         return Err(ApiError::not_found(format!("Cell {} not found", cell_id)));
     }
 
-    let _ = req.artifact;
+    if req.artifact.branch.trim().is_empty() {
+        return Err(ApiError::bad_request("artifact.branch must not be empty"));
+    }
+    if req.artifact.commits.is_empty() {
+        return Err(ApiError::bad_request("artifact.commits must not be empty"));
+    }
+    if req.artifact.changed_files.is_empty() {
+        return Err(ApiError::bad_request("artifact.changed_files must not be empty"));
+    }
 
-    Err(ApiError::internal(
-        "Artifact persistence is not yet implemented for HTTP sessions",
+    state
+        .storage
+        .save_artifact(&session_id, &cell_id, &req.artifact)
+        .map_err(|err| ApiError::internal(err.to_string()))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "cell_id": cell_id,
+            "message": "Artifact persisted"
+        })),
     ))
 }

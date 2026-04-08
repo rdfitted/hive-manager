@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
+  import TemplatePicker from './templates/TemplatePicker.svelte';
   import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
+  import { templates, selectedTemplate } from '$lib/stores/templates';
 
   export let show: boolean = false;
 
@@ -14,9 +16,9 @@
     launchSolo: SoloLaunchConfig;
   }>();
 
-  type SessionMode = 'hive' | 'swarm' | 'fusion' | 'solo';
+  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'swarm';
 
-  // Predefined roles with default CLIs, descriptions, and prompt templates
+  // ... (predefinedRoles same)
   // CLI defaults match backend default_roles in storage/mod.rs
   const predefinedRoles = [
     {
@@ -126,6 +128,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let prompt = '';
   let launching = false;
   let error = '';
+  let showPreview = false;
 
   const COLORS = [
     { name: 'Blue', value: '#7aa2f7' },
@@ -192,6 +195,40 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     cli: v.cli, model: v.model, flags: [], label: v.name,
   }));
   let judgeAgentConfig: AgentConfig = { cli: judgeConfig.cli, model: judgeConfig.model, flags: [], label: 'Fusion Judge' };
+
+  function applyTemplate(template: any) {
+    if (!template) return;
+    
+    sessionName = template.name;
+    mode = template.mode as SessionMode;
+    
+    if (template.mode === 'hive') {
+      hiveWorkers = template.cells.map((c: any) => ({
+        ...createDefaultConfig(c.role),
+        cli: c.cli,
+        model: c.model,
+      }));
+    } else if (template.mode === 'fusion') {
+      variantCount = template.cells.length;
+      fusionVariants = template.cells.map((c: any, i: number) => ({
+        name: `Variant ${String.fromCharCode(65 + i)}`,
+        cli: c.cli,
+        model: c.model,
+        flags: [],
+      }));
+      variantAgentConfigs = fusionVariants.map(v => ({
+        cli: v.cli, model: v.model, flags: [], label: v.name,
+      }));
+    }
+    
+    // Switch to the actual mode after applying
+    // mode = template.mode as SessionMode; // already set above
+  }
+
+  $: if ($selectedTemplate) {
+    applyTemplate($selectedTemplate);
+    selectedTemplate.set(null); // Clear after applying
+  }
 
   function handleVariantConfigChange(index: number, detail: AgentConfig) {
     variantAgentConfigs[index] = detail;
@@ -423,19 +460,19 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
       <div class="mode-tabs">
         <button
           class="mode-tab"
+          class:active={mode === 'templates'}
+          on:click={() => (mode = 'templates')}
+          type="button"
+        >
+          Templates
+        </button>
+        <button
+          class="mode-tab"
           class:active={mode === 'hive'}
           on:click={() => (mode = 'hive')}
           type="button"
         >
           Hive
-        </button>
-        <button
-          class="mode-tab"
-          class:active={mode === 'swarm'}
-          on:click={() => (mode = 'swarm')}
-          type="button"
-        >
-          Swarm
         </button>
         <button
           class="mode-tab"
@@ -453,9 +490,23 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         >
           Solo
         </button>
+        <button
+          class="mode-tab legacy"
+          class:active={mode === 'swarm'}
+          on:click={() => (mode = 'swarm')}
+          type="button"
+        >
+          Swarm (Legacy)
+        </button>
       </div>
 
       <form on:submit={(e) => { e.preventDefault(); handleSubmit(false); }}>
+        {#if mode === 'templates'}
+          <div class="form-section">
+            <TemplatePicker />
+          </div>
+        {/if}
+
         <div class="form-row">
           <div class="form-group flex-2">
             <label for="sessionName">Session Name (optional)</label>
@@ -767,6 +818,50 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <div class="error-message">{error}</div>
         {/if}
 
+        <div class="launch-preview-section">
+          <button type="button" class="preview-toggle" on:click={() => showPreview = !showPreview}>
+            <span class="icon">{showPreview ? '▼' : '▶'}</span>
+            {showPreview ? 'Hide' : 'Show'} Launch Preview & Topology
+          </button>
+          
+          {#if showPreview}
+            <div class="preview-content">
+              <div class="topology-viz">
+                <div class="node queen">
+                  <span class="node-icon">♕</span>
+                  <span class="node-label">Queen</span>
+                  <span class="node-cli">{queenConfig.cli}</span>
+                </div>
+                
+                <div class="connector"></div>
+                
+                <div class="worker-nodes">
+                  {#if mode === 'hive'}
+                    {#each hiveWorkers as worker}
+                      <div class="node worker">
+                        <span class="node-label">{worker.selectedRole}</span>
+                        <span class="node-cli">{worker.cli}</span>
+                      </div>
+                    {/each}
+                  {:else if mode === 'fusion'}
+                    {#each activeFusionVariants as variant}
+                      <div class="node fusion">
+                        <span class="node-label">{variant.name}</span>
+                        <span class="node-cli">{variant.cli}</span>
+                      </div>
+                    {/each}
+                  {:else if mode === 'solo'}
+                    <div class="node solo">
+                      <span class="node-label">Solo</span>
+                      <span class="node-cli">{soloConfig.cli}</span>
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          {/if}
+        </div>
+
         <div class="dialog-actions">
           <button type="button" class="cancel-button" on:click={handleClose} disabled={launching}>
             Cancel
@@ -847,6 +942,15 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     background: var(--color-surface);
     color: var(--color-text);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  .mode-tab.legacy {
+    opacity: 0.6;
+    font-style: italic;
+  }
+
+  .mode-tab.legacy.active {
+    opacity: 1;
   }
 
   .form-group {
@@ -1303,4 +1407,87 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     color: var(--color-text-muted);
     line-height: 1.4;
   }
+
+  .launch-preview-section {
+    margin-top: 20px;
+    border-top: 1px solid var(--color-border);
+    padding-top: 16px;
+  }
+
+  .preview-toggle {
+    background: transparent;
+    border: none;
+    color: var(--color-accent);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+  }
+
+  .preview-content {
+    margin-top: 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+    padding: 16px;
+  }
+
+  .topology-viz {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .node {
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 100px;
+  }
+
+  .node.queen {
+    border-color: var(--color-accent);
+    background: rgba(139, 92, 246, 0.1);
+  }
+
+  .node-icon {
+    font-size: 16px;
+    margin-bottom: 2px;
+  }
+
+  .node-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  .node-cli {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .connector {
+    width: 2px;
+    height: 16px;
+    background: var(--color-border);
+  }
+
+  .worker-nodes {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .node.worker { border-color: #3b82f6; }
+  .node.fusion { border-color: #10b981; }
+  .node.solo { border-color: #f59e0b; }
 </style>
