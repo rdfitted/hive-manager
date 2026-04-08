@@ -79,12 +79,13 @@ pub fn current_head(worktree_path: &Path) -> Result<String, String> {
 
 /// Check if a branch exists locally.
 pub fn branch_exists(worktree_path: &Path, branch_name: &str) -> Result<bool, String> {
-    let output = run_git(
+    match run_git(
         worktree_path,
         &["rev-parse", "--verify", &format!("refs/heads/{}", branch_name)],
-    )?;
-
-    Ok(!output.trim().is_empty())
+    ) {
+        Ok(output) => Ok(!output.trim().is_empty()),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Run a git command in the specified directory.

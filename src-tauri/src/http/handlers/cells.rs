@@ -7,10 +7,11 @@ use axum::{
 };
 
 use crate::{
-    domain::{Cell, CellStatus, CellType, Workspace, WorkspaceStrategy},
+    domain::{Cell, CellStatus, CellType, SessionMode, Workspace, WorkspaceStrategy},
     http::{error::ApiError, state::AppState},
     pty::{AgentRole as PtyAgentRole, AgentStatus as PtyAgentStatus},
     session::{AgentInfo, Session, SessionState, SessionType},
+    workspace::git,
 };
 
 use super::{validate_cell_id, validate_session_id};
@@ -55,7 +56,12 @@ fn build_primary_cell(session: &Session) -> Cell {
             .name
             .clone()
             .unwrap_or_else(|| "Primary session cell".to_string()),
-        workspace: synthetic_workspace(session, WorkspaceStrategy::SharedCell, PRIMARY_CELL_ID),
+        workspace: synthetic_workspace(
+            session,
+            WorkspaceStrategy::SharedCell,
+            CellType::Hive,
+            PRIMARY_CELL_ID,
+        ),
         agents: session.agents.iter().map(|agent| agent.id.clone()).collect(),
         artifacts: None,
         events: vec![],
@@ -87,7 +93,12 @@ fn build_fusion_cell(session: &Session, variant: &str) -> Cell {
         name: variant.to_string(),
         status,
         objective: format!("Fusion variant {}", variant),
-        workspace: synthetic_workspace(session, WorkspaceStrategy::IsolatedCell, &cell_id),
+        workspace: synthetic_workspace(
+            session,
+            WorkspaceStrategy::IsolatedCell,
+            CellType::Hive,
+            variant,
+        ),
         agents,
         artifacts: None,
         events: vec![],
@@ -95,14 +106,33 @@ fn build_fusion_cell(session: &Session, variant: &str) -> Cell {
     }
 }
 
-fn synthetic_workspace(session: &Session, strategy: WorkspaceStrategy, cell_id: &str) -> Workspace {
+fn synthetic_workspace(
+    session: &Session,
+    strategy: WorkspaceStrategy,
+    cell_type: CellType,
+    cell_name: &str,
+) -> Workspace {
     Workspace {
         strategy,
         repo_path: session.project_path.clone(),
         base_branch: "unknown".to_string(),
-        branch_name: format!("session/{}/{}", session.id, cell_id),
+        branch_name: git::generate_branch_name(
+            &session.id,
+            cell_name,
+            session_mode(session),
+            cell_type,
+        ),
         worktree_path: None,
         is_dirty: false,
+    }
+}
+
+fn session_mode(session: &Session) -> SessionMode {
+    match session.session_type {
+        SessionType::Fusion { .. } => SessionMode::Fusion,
+        SessionType::Hive { .. } | SessionType::Swarm { .. } | SessionType::Solo { .. } => {
+            SessionMode::Hive
+        }
     }
 }
 
@@ -205,10 +235,7 @@ pub async fn stop_cell(
         }
     }
 
-    let controller = state.session_controller.write();
-    controller
-        .stop_session(&session_id)
-        .map_err(ApiError::internal)?;
-
-    Ok(StatusCode::NO_CONTENT)
+    Err(ApiError::bad_request(
+        "Stopping individual cells is not yet supported",
+    ))
 }

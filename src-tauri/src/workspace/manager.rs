@@ -163,6 +163,16 @@ impl WorkspaceManager {
 
                 // Check if worktree already exists for this cell
                 if worktree_path.exists() {
+                    let current_branch = git::current_branch(&worktree_path)?;
+                    if current_branch != branch_name {
+                        return Err(WorkspaceError::new(format!(
+                            "Existing shared worktree '{}' is on branch '{}' instead of '{}'",
+                            worktree_path.display(),
+                            current_branch,
+                            branch_name
+                        )));
+                    }
+
                     // Reuse existing worktree
                     let is_dirty = git::is_dirty(&worktree_path)?;
                     return Ok(Workspace {

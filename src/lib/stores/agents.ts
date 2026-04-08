@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import type { Agent } from '../types/domain';
+import { apiUrl } from '$lib/config';
 
 interface AgentsState {
     agents: Record<string, Agent>; // agent_id -> Agent
@@ -20,7 +21,7 @@ function createAgentsStore() {
         async fetchAgents(sessionId: string, cellId: string) {
             update(state => ({ ...state, loading: true, error: null }));
             try {
-                const response = await fetch(`http://localhost:18800/api/sessions/${sessionId}/cells/${cellId}/agents`);
+                const response = await fetch(apiUrl(`/api/sessions/${sessionId}/cells/${cellId}/agents`));
                 if (!response.ok) throw new Error(`Failed to fetch agents: ${response.statusText}`);
                 const agents: Agent[] = await response.json();
                 

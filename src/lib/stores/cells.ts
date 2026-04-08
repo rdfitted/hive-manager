@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import type { Cell } from '../types/domain';
+import { apiUrl } from '$lib/config';
 import { sessions } from './sessions';
 
 interface CellsState {
@@ -21,7 +22,7 @@ function createCellsStore() {
         async fetchCells(sessionId: string) {
             update(state => ({ ...state, loading: true, error: null }));
             try {
-                const response = await fetch(`http://localhost:18800/api/sessions/${sessionId}/cells`);
+                const response = await fetch(apiUrl(`/api/sessions/${sessionId}/cells`));
                 if (!response.ok) throw new Error(`Failed to fetch cells: ${response.statusText}`);
                 const cells: Cell[] = await response.json();
                 
@@ -39,7 +40,7 @@ function createCellsStore() {
 
         async fetchCell(sessionId: string, cellId: string) {
             try {
-                const response = await fetch(`http://localhost:18800/api/sessions/${sessionId}/cells/${cellId}`);
+                const response = await fetch(apiUrl(`/api/sessions/${sessionId}/cells/${cellId}`));
                 if (!response.ok) throw new Error(`Failed to fetch cell: ${response.statusText}`);
                 const cell: Cell = await response.json();
                 

@@ -2801,7 +2801,7 @@ async fn test_get_cell_rejects_invalid_cell_id() {
 }
 
 #[tokio::test]
-async fn test_stop_cell_stops_session() {
+async fn test_stop_cell_returns_bad_request() {
     let (app, controller) = setup_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-stop-cell");
@@ -2823,10 +2823,10 @@ async fn test_stop_cell_stops_session() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let session = controller.read().get_session("session-stop-cell").unwrap();
-    assert!(matches!(session.state, SessionState::Completed));
+    assert!(matches!(session.state, SessionState::Running));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

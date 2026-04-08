@@ -1,6 +1,7 @@
 <script lang="ts">
   import { activeSession, activeAgents, sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
+  import { apiUrl } from '$lib/config';
   import AgentTree from './AgentTree.svelte';
   import QaFeedbackPanel from './QaFeedbackPanel.svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -132,7 +133,7 @@
     const sessionId = $activeSession?.id;
     if (!sessionId) return false;
     try {
-      const res = await fetch(`http://localhost:18800/api/sessions/${sessionId}${path}`, { method: 'POST' });
+      const res = await fetch(apiUrl(`/api/sessions/${sessionId}${path}`), { method: 'POST' });
       if (!res.ok) {
         const body = await res.text();
         console.error(errorMessage, body);

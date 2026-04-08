@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import type { Event } from '../types/domain';
+import { apiUrl } from '$lib/config';
 
 const EVENT_TYPES = [
     'session_created',
@@ -52,7 +53,7 @@ function createEventsStore() {
 
             update(state => ({ ...state, loading: true, error: null }));
 
-            eventSource = new EventSource(`http://localhost:18800/api/sessions/${sessionId}/stream`);
+            eventSource = new EventSource(apiUrl(`/api/sessions/${sessionId}/stream`));
 
             eventSource.onopen = () => {
                 update(state => ({ ...state, loading: false }));
@@ -83,7 +84,7 @@ function createEventsStore() {
         async fetchEvents(sessionId: string) {
             update(state => ({ ...state, loading: true, error: null }));
             try {
-                const response = await fetch(`http://localhost:18800/api/sessions/${sessionId}/events`);
+                const response = await fetch(apiUrl(`/api/sessions/${sessionId}/events`));
                 if (!response.ok) throw new Error(`Failed to fetch events: ${response.statusText}`);
                 const events: Event[] = await response.json();
                 
