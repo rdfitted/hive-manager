@@ -2865,6 +2865,23 @@ async fn test_list_agents_in_cell_returns_session_agents() {
 }
 
 #[tokio::test]
+async fn test_list_agents_in_cell_rejects_invalid_cell_id() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-safe/cells/../bad/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
     let (app, controller) = setup_test_app_with_controller().await;
 
@@ -2895,6 +2912,23 @@ async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
 }
 
 #[tokio::test]
+async fn test_list_artifacts_rejects_invalid_cell_id() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-safe/cells/../bad/artifacts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_send_agent_input_rejects_empty_input() {
     let (app, controller) = setup_test_app_with_controller().await;
 
@@ -2920,6 +2954,25 @@ async fn test_send_agent_input_rejects_empty_input() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_send_agent_input_rejects_invalid_agent_id() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-safe/agents/../bad/input")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

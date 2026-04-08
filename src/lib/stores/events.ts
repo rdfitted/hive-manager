@@ -1,6 +1,20 @@
 import { writable } from 'svelte/store';
 import type { Event } from '../types/domain';
 
+const EVENT_TYPES = [
+    'session_created',
+    'session_status_changed',
+    'cell_created',
+    'cell_status_changed',
+    'workspace_created',
+    'agent_launched',
+    'agent_completed',
+    'agent_waiting_input',
+    'agent_failed',
+    'artifact_updated',
+    'resolver_selected_candidate',
+] as const;
+
 interface EventsState {
     events: Event[];
     loading: boolean;
@@ -16,6 +30,18 @@ function createEventsStore() {
 
     let eventSource: EventSource | null = null;
 
+    function prependEvent(raw: MessageEvent<string>) {
+        try {
+            const event: Event = JSON.parse(raw.data);
+            update(state => ({
+                ...state,
+                events: [event, ...state.events].slice(0, 1000),
+            }));
+        } catch (err) {
+            console.error('Failed to parse event:', err);
+        }
+    }
+
     return {
         subscribe,
 
@@ -25,29 +51,25 @@ function createEventsStore() {
             }
 
             update(state => ({ ...state, loading: true, error: null }));
-            
-            eventSource = new EventSource(`http://localhost:18800/api/sessions/${sessionId}/events/stream`);
+
+            eventSource = new EventSource(`http://localhost:18800/api/sessions/${sessionId}/stream`);
 
             eventSource.onopen = () => {
                 update(state => ({ ...state, loading: false }));
             };
 
-            eventSource.onmessage = (msg) => {
-                try {
-                    const event: Event = JSON.parse(msg.data);
-                    update(state => ({
-                        ...state,
-                        events: [event, ...state.events].slice(0, 1000) // Keep last 1000 events
-                    }));
-                } catch (err) {
-                    console.error('Failed to parse event:', err);
-                }
-            };
+            eventSource.onmessage = prependEvent;
+            EVENT_TYPES.forEach((eventType) => {
+                eventSource?.addEventListener(eventType, prependEvent as EventListener);
+            });
 
             eventSource.onerror = (err) => {
                 console.error('EventSource failed:', err);
-                update(state => ({ ...state, error: 'Connection lost' }));
-                if (eventSource) eventSource.close();
+                update(state => ({ ...state, loading: false, error: 'Connection lost' }));
+                if (eventSource) {
+                    eventSource.close();
+                    eventSource = null;
+                }
             };
         },
 

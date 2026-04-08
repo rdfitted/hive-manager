@@ -2,7 +2,7 @@ import { writable } from 'svelte/store';
 import type { ArtifactBundle } from '../types/domain';
 
 interface ArtifactsState {
-    artifacts: Record<string, ArtifactBundle>; // cell_id -> ArtifactBundle
+    artifacts: Record<string, ArtifactBundle[]>; // cell_id -> artifacts
     loading: boolean;
     error: string | null;
 }
@@ -22,7 +22,7 @@ function createArtifactsStore() {
             try {
                 const response = await fetch(`http://localhost:18800/api/sessions/${sessionId}/cells/${cellId}/artifacts`);
                 if (!response.ok) throw new Error(`Failed to fetch artifacts: ${response.statusText}`);
-                const artifacts: ArtifactBundle = await response.json();
+                const artifacts: ArtifactBundle[] = await response.json();
                 
                 update(state => ({
                     ...state,
@@ -34,7 +34,7 @@ function createArtifactsStore() {
             }
         },
 
-        updateArtifact(cellId: string, artifact: ArtifactBundle) {
+        updateArtifact(cellId: string, artifact: ArtifactBundle[]) {
             update(state => ({
                 ...state,
                 artifacts: { ...state.artifacts, [cellId]: artifact }

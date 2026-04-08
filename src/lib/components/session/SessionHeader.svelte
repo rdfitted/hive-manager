@@ -1,18 +1,20 @@
 <script lang="ts">
-    import { activeSession } from '../../stores/sessions';
+    import { activeSession, serdeEnumVariantName } from '../../stores/sessions';
 
     $: session = $activeSession;
+    $: mode = session ? serdeEnumVariantName(session.session_type)?.toLowerCase() ?? 'session' : 'session';
+    $: status = session ? serdeEnumVariantName(session.state)?.toLowerCase() ?? 'unknown' : 'unknown';
 </script>
 
 <div class="session-header">
     {#if session}
         <div class="main-info">
             <div class="top-row">
-                <span class="mode-badge {session.mode}">{session.mode}</span>
-                <h1 class="session-name">{session.name}</h1>
-                <span class="status-badge {session.status}">{session.status.replace('_', ' ')}</span>
+                <span class="mode-badge {mode}">{mode}</span>
+                <h1 class="session-name">{session.name || session.id}</h1>
+                <span class="status-badge {status}">{status.replace('_', ' ')}</span>
             </div>
-            <p class="objective">{session.objective}</p>
+            <p class="objective">Session ID: {session.id}</p>
         </div>
         
         <div class="stats">

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount, onDestroy } from 'svelte';
+    import { onDestroy } from 'svelte';
     import { ui } from '../../stores/ui';
     import { cells } from '../../stores/cells';
     import { events } from '../../stores/events';
@@ -10,17 +10,19 @@
 
     $: sessionId = $activeSession?.id;
     $: terminalMaximized = $ui.terminalMaximized;
+    $: terminalAgentId = $ui.selectedAgentId || $ui.focusedAgentId;
+    let connectedSessionId: string | null = null;
 
-    onMount(() => {
-        if (sessionId) {
-            cells.fetchCells(sessionId);
-            events.connect(sessionId);
-        }
-    });
-
-    $: if (sessionId) {
+    $: if (sessionId && sessionId !== connectedSessionId) {
+        connectedSessionId = sessionId;
         cells.fetchCells(sessionId);
+        events.disconnect();
         events.connect(sessionId);
+    }
+
+    $: if (!sessionId && connectedSessionId) {
+        connectedSessionId = null;
+        events.disconnect();
     }
 
     onDestroy(() => {
@@ -50,7 +52,9 @@
                 </button>
             </div>
             <div class="terminal-wrapper">
-                <Terminal agentId={$ui.selectedAgentId || $ui.focusedAgentId} />
+                {#if terminalAgentId}
+                    <Terminal agentId={terminalAgentId} />
+                {/if}
             </div>
         </div>
     </main>
