@@ -7,6 +7,10 @@ pub mod planners;
 pub mod learnings;
 pub mod conversations;
 pub mod heartbeats;
+pub mod cells;
+pub mod agents;
+pub mod artifacts;
+pub mod events;
 
 use crate::http::error::ApiError;
 
@@ -17,6 +21,29 @@ pub fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
     if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
         return Err(ApiError::bad_request(
             "Invalid session ID: must not contain '..', '/', or '\\'",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate cell_id to prevent path traversal and malformed names.
+pub fn validate_cell_id(cell_id: &str) -> Result<(), ApiError> {
+    if cell_id.is_empty() || cell_id.len() > 64 {
+        return Err(ApiError::bad_request(
+            "Invalid cell ID: must be 1-64 characters",
+        ));
+    }
+    if cell_id.contains("..") || cell_id.contains('/') || cell_id.contains('\\') {
+        return Err(ApiError::bad_request(
+            "Invalid cell ID: must not contain '..', '/', or '\\'",
+        ));
+    }
+    if !cell_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ApiError::bad_request(
+            "Invalid cell ID: only alphanumeric characters, hyphens, and underscores are allowed",
         ));
     }
     Ok(())

@@ -1,7 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
-
-const API_BASE = 'http://localhost:18800';
+import { apiUrl } from '$lib/config';
 
 export interface ConversationMessage {
   timestamp: string;
@@ -65,7 +64,7 @@ function createConversationStore() {
     async loadConversation(sessionId: string, agentId: string, since?: string) {
       update((state) => ({ ...state, loading: true, error: null }));
       try {
-        let url = `${API_BASE}/api/sessions/${sessionId}/conversations/${agentId}`;
+        let url = apiUrl(`/api/sessions/${sessionId}/conversations/${agentId}`);
         if (since) url += `?since=${encodeURIComponent(since)}`;
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -86,7 +85,7 @@ function createConversationStore() {
     async sendMessage(sessionId: string, agentId: string, from: string, content: string) {
       try {
         const resp = await fetch(
-          `${API_BASE}/api/sessions/${sessionId}/conversations/${agentId}/append`,
+          apiUrl(`/api/sessions/${sessionId}/conversations/${agentId}/append`),
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -150,7 +149,7 @@ function createHeartbeatStore() {
 
     async loadHeartbeats(sessionId: string) {
       try {
-        const resp = await fetch(`${API_BASE}/api/sessions/active`);
+        const resp = await fetch(apiUrl('/api/sessions/active'));
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         // Extract agent heartbeats for this session

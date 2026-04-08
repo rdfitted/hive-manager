@@ -184,18 +184,37 @@ impl WorktreeManager {
         worktree_path: impl AsRef<Path>,
         branch: &str,
     ) -> Result<WorktreeInfo, WorktreeError> {
+        self.add_worktree(worktree_path, branch, true)
+    }
+
+    /// Attach a worktree to an existing branch.
+    pub fn attach_worktree(
+        &self,
+        worktree_path: impl AsRef<Path>,
+        branch: &str,
+    ) -> Result<WorktreeInfo, WorktreeError> {
+        self.add_worktree(worktree_path, branch, false)
+    }
+
+    fn add_worktree(
+        &self,
+        worktree_path: impl AsRef<Path>,
+        branch: &str,
+        create_branch: bool,
+    ) -> Result<WorktreeInfo, WorktreeError> {
         let worktree_path = worktree_path.as_ref();
         let target_path = Self::normalize_worktree_path(worktree_path);
 
-        // Create the worktree
-        self.run_git(&[
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            "--",
-            &worktree_path.to_string_lossy(),
-        ])?;
+        let path_str = worktree_path.to_string_lossy();
+        let mut args = vec!["worktree", "add"];
+        if create_branch {
+            args.push("-b");
+        }
+        args.push(branch);
+        args.push("--");
+        args.push(path_str.as_ref());
+
+        self.run_git(&args)?;
 
         // Get info about the created worktree
         let worktrees = self.list_worktrees()?;
