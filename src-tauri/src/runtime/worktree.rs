@@ -105,6 +105,23 @@ impl WorktreeManager {
         })
     }
 
+    fn validate_agent_id(agent_id: &str) -> Result<(), WorktreeError> {
+        if agent_id.is_empty() {
+            return Err(WorktreeError::new("Agent ID cannot be empty"));
+        }
+
+        if !agent_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Err(WorktreeError::new(
+                "Agent ID may only contain ASCII letters, numbers, underscores, and hyphens",
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Create a new WorktreeManager for the given project.
     pub fn new(project_path: impl Into<PathBuf>) -> Self {
         let project_path = project_path.into();
@@ -174,9 +191,10 @@ impl WorktreeManager {
         self.run_git(&[
             "worktree",
             "add",
-            &worktree_path.to_string_lossy(),
             "-b",
             branch,
+            "--",
+            &worktree_path.to_string_lossy(),
         ])?;
 
         // Get info about the created worktree
@@ -202,6 +220,8 @@ impl WorktreeManager {
         agent_id: &str,
         branch_prefix: &str,
     ) -> Result<WorktreeInfo, WorktreeError> {
+        Self::validate_agent_id(agent_id)?;
+
         let worktree_name = format!("worktree-{}", agent_id);
         std::fs::create_dir_all(&self.worktree_base).map_err(|e| {
             WorktreeError::new(format!(
@@ -490,5 +510,18 @@ bare
             normalized,
             PathBuf::from("/project/.hive-manager/worktrees/agent-1")
         );
+    }
+
+    #[test]
+    fn test_validate_agent_id_accepts_safe_characters() {
+        assert!(WorktreeManager::validate_agent_id("agent_1-worker").is_ok());
+    }
+
+    #[test]
+    fn test_validate_agent_id_rejects_empty_or_unsafe_values() {
+        assert!(WorktreeManager::validate_agent_id("").is_err());
+        assert!(WorktreeManager::validate_agent_id("../agent").is_err());
+        assert!(WorktreeManager::validate_agent_id("agent/name").is_err());
+        assert!(WorktreeManager::validate_agent_id("agent space").is_err());
     }
 }

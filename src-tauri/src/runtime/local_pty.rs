@@ -65,12 +65,8 @@ impl PtySession {
         wsl_distro: Option<&str>,
         wsl_binary_path: Option<&str>,
     ) -> Result<Self, RuntimeError> {
-        tracing::info!(
-            "Creating PTY session: command={} args={:?} cwd={:?}",
-            command,
-            args,
-            cwd
-        );
+        tracing::info!("Creating PTY session: command={} cwd={:?}", command, cwd);
+        tracing::debug!("PTY session args: {:?}", args);
 
         let pty_system = NativePtySystem::default();
 

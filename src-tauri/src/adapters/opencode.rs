@@ -46,11 +46,6 @@ impl CliAdapter for OpenCodeAdapter {
     fn detect_status_signal(&self, line: &str) -> Option<AgentSignal> {
         let line_lower = line.to_lowercase();
 
-        // OpenCode completion patterns
-        if line_lower.contains("task completed") || line_lower.contains("finished") || line_lower.contains("done") {
-            return Some(AgentSignal::Completed);
-        }
-
         // Error patterns
         if line_lower.contains("error:") || line_lower.contains("failed") || line_lower.contains("exception") {
             return Some(AgentSignal::Failed {
@@ -172,15 +167,8 @@ mod tests {
     fn test_detect_completed() {
         let adapter = OpenCodeAdapter;
 
-        assert_eq!(
-            adapter.detect_status_signal("Task completed"),
-            Some(AgentSignal::Completed)
-        );
-
-        assert_eq!(
-            adapter.detect_status_signal("Done"),
-            Some(AgentSignal::Completed)
-        );
+        assert_eq!(adapter.detect_status_signal("Task completed"), None);
+        assert_eq!(adapter.detect_status_signal("Done"), None);
     }
 
     #[test]
