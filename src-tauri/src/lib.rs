@@ -3,6 +3,7 @@ pub mod domain;
 pub mod adapters;
 pub mod runtime;
 pub mod orchestrator;
+pub mod workspace;
 mod pty;
 mod session;
 mod storage;
