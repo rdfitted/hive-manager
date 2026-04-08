@@ -159,7 +159,11 @@ impl WorkspaceManager {
             }
             Some(WorkspaceStrategy::SharedCell) => {
                 // Shared worktree - multiple agents share the same directory
-                let worktree_path = self.worktree_manager.worktree_base().join(&cell.id);
+                let worktree_path = self
+                    .worktree_manager
+                    .worktree_base()
+                    .join(&session.id)
+                    .join(&cell.id);
 
                 // Check if worktree already exists for this cell
                 if worktree_path.exists() {
@@ -206,6 +210,7 @@ impl WorkspaceManager {
                     .worktree_manager
                     .worktree_base()
                     .join("isolated")
+                    .join(&session.id)
                     .join(&cell.id);
 
                 // Create the worktree

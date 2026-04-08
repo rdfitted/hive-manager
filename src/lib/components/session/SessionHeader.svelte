@@ -12,7 +12,7 @@
             <div class="top-row">
                 <span class="mode-badge {mode}">{mode}</span>
                 <h1 class="session-name">{session.name || session.id}</h1>
-                <span class="status-badge {status}">{status.replace('_', ' ')}</span>
+                <span class="status-badge {status}">{status.replaceAll('_', ' ')}</span>
             </div>
             <p class="objective">Session ID: {session.id}</p>
         </div>

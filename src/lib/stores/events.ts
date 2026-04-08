@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { Event } from '../types/domain';
+import type { Event as SessionEvent } from '../types/domain';
 import { apiUrl } from '$lib/config';
 
 const EVENT_TYPES = [
@@ -17,7 +17,7 @@ const EVENT_TYPES = [
 ] as const;
 
 interface EventsState {
-    events: Event[];
+    events: SessionEvent[];
     loading: boolean;
     error: string | null;
 }
@@ -31,9 +31,13 @@ function createEventsStore() {
 
     let eventSource: EventSource | null = null;
 
-    function prependEvent(raw: MessageEvent<string>) {
+    function prependEvent(raw: MessageEvent<string>, source: EventSource) {
+        if (eventSource !== source) {
+            return;
+        }
+
         try {
-            const event: Event = JSON.parse(raw.data);
+            const event: SessionEvent = JSON.parse(raw.data);
             update(state => ({
                 ...state,
                 events: [event, ...state.events].slice(0, 1000),
@@ -53,24 +57,32 @@ function createEventsStore() {
 
             update(state => ({ ...state, loading: true, error: null }));
 
-            eventSource = new EventSource(apiUrl(`/api/sessions/${sessionId}/stream`));
+            const source = new EventSource(apiUrl(`/api/sessions/${sessionId}/stream`));
+            eventSource = source;
 
-            eventSource.onopen = () => {
+            source.onopen = () => {
+                if (eventSource !== source) {
+                    return;
+                }
+
                 update(state => ({ ...state, loading: false }));
             };
 
-            eventSource.onmessage = prependEvent;
+            source.onmessage = (event) => {
+                prependEvent(event, source);
+            };
             EVENT_TYPES.forEach((eventType) => {
-                eventSource?.addEventListener(eventType, prependEvent as EventListener);
+                source.addEventListener(eventType, (event) => {
+                    prependEvent(event as MessageEvent<string>, source);
+                });
             });
 
-            eventSource.onerror = (err) => {
+            source.onerror = (err) => {
                 console.error('EventSource failed:', err);
-                update(state => ({ ...state, loading: false, error: 'Connection lost' }));
-                if (eventSource) {
-                    eventSource.close();
-                    eventSource = null;
+                if (eventSource !== source) {
+                    return;
                 }
+                update(state => ({ ...state, loading: false, error: 'Connection lost' }));
             };
         },
 
@@ -86,11 +98,11 @@ function createEventsStore() {
             try {
                 const response = await fetch(apiUrl(`/api/sessions/${sessionId}/events`));
                 if (!response.ok) throw new Error(`Failed to fetch events: ${response.statusText}`);
-                const events: Event[] = await response.json();
+                const events: SessionEvent[] = await response.json();
                 
                 update(state => ({
                     ...state,
-                    events: events.reverse(), // Show newest first
+                    events: [...events].reverse(), // Show newest first
                     loading: false
                 }));
             } catch (err) {

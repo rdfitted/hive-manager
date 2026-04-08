@@ -130,7 +130,7 @@ export interface Workspace {
     is_dirty: boolean;
 }
 
-export type WorkspaceStrategy = 'shared_cell' | 'isolated_cell';
+export type WorkspaceStrategy = 'none' | 'shared_cell' | 'isolated_cell';
 
 export interface ArtifactBundle {
     summary?: string;

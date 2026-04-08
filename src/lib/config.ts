@@ -16,5 +16,6 @@ function resolveApiBase(): string {
 export const API_BASE = resolveApiBase();
 
 export function apiUrl(path: string): string {
-  return new URL(path, API_BASE).toString();
+  const base = API_BASE.endsWith('/') ? API_BASE : `${API_BASE}/`;
+  return new URL(path.replace(/^\/+/, ''), base).toString();
 }

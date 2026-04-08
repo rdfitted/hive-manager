@@ -17,6 +17,15 @@
         }
     }
 
+    function handleKeyDown(event: KeyboardEvent) {
+        if (event.key !== 'Enter' && event.key !== ' ') {
+            return;
+        }
+
+        event.preventDefault();
+        toggleSelection();
+    }
+
     $: statusIcon = {
         'queued': '⏳',
         'preparing': '🛠️',
@@ -34,7 +43,11 @@
     class="cell-card" 
     class:selected={isSelected} 
     class:collapsed={isCollapsed}
+    role="button"
+    aria-pressed={isSelected}
+    tabindex="0"
     on:click={toggleSelection}
+    on:keydown={handleKeyDown}
 >
     <div class="header">
         <div class="status-icon" title={cell.status}>{statusIcon}</div>
