@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::domain::SessionMode;
+use crate::domain::{SessionMode, WorkspaceStrategy};
 use crate::pty::WorkerRole;
 use crate::session::SessionType;
 
@@ -60,7 +60,7 @@ pub struct SessionTemplate {
     pub description: String,
     pub mode: SessionMode,
     pub cells: Vec<CellTemplate>,
-    pub workspace_strategy: String,
+    pub workspace_strategy: WorkspaceStrategy,
     pub is_builtin: bool,
 }
 
@@ -112,7 +112,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                     prompt_template: "roles/frontend".to_string(),
                 },
             ],
-            workspace_strategy: "shared".to_string(),
+            workspace_strategy: WorkspaceStrategy::SharedCell,
             is_builtin: true,
         },
         SessionTemplate {
@@ -146,7 +146,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                     prompt_template: "roles/coherence".to_string(),
                 },
             ],
-            workspace_strategy: "shared".to_string(),
+            workspace_strategy: WorkspaceStrategy::SharedCell,
             is_builtin: true,
         },
         SessionTemplate {
@@ -174,7 +174,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                     prompt_template: "resolver".to_string(),
                 },
             ],
-            workspace_strategy: "isolated".to_string(),
+            workspace_strategy: WorkspaceStrategy::IsolatedCell,
             is_builtin: true,
         },
     ]

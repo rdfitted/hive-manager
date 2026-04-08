@@ -27,11 +27,7 @@ impl ArtifactCollector {
 
         let branch = run_git(worktree_path, &["branch", "--show-current"]).unwrap_or_default();
         let commits = run_git_lines(worktree_path, &["log", "--oneline", "-10"]);
-        let changed_files = parse_changed_files(&run_git(
-            worktree_path,
-            &["diff", "--stat", "--", "."],
-        )
-        .unwrap_or_default());
+        let changed_files = run_git_lines(worktree_path, &["diff", "--name-only", "--", "."]);
         let diff_summary = run_git(worktree_path, &["diff", "--stat", "--", "."]);
         let test_results = detect_test_results(worktree_path)?;
         let summary = Some(build_summary(&branch, &changed_files, &commits));
@@ -104,17 +100,6 @@ fn run_git_lines(worktree_path: &Path, args: &[&str]) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn parse_changed_files(diff_stat: &str) -> Vec<String> {
-    diff_stat
-        .lines()
-        .filter_map(|line| line.split('|').next())
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.contains("file changed") && !line.contains("files changed"))
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn detect_test_results(worktree_path: &Path) -> Result<Option<serde_json::Value>, StorageError> {

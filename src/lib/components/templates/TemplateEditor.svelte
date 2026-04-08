@@ -8,13 +8,14 @@
 
     const dispatch = createEventDispatcher();
 
-    let id = template?.id || '';
+    let id = template?.is_builtin ? '' : (template?.id || '');
     let name = template?.name || '';
     let description = template?.description || '';
-    let mode: 'hive' | 'fusion' = (template?.mode as any) || 'hive';
+    let mode: 'hive' | 'fusion' = template?.mode || 'hive';
     let cells: CellTemplate[] = template?.cells ? JSON.parse(JSON.stringify(template.cells)) : [];
-    let workspace_strategy = template?.workspace_strategy || 'shared_cell';
+    let workspace_strategy: SessionTemplate['workspace_strategy'] = template?.workspace_strategy || 'shared_cell';
     let is_builtin = template?.is_builtin || false;
+    let error = '';
 
     function addCell() {
         cells = [...cells, {
@@ -29,13 +30,19 @@
     }
 
     async function handleSave() {
+        if (cells.length === 0) {
+            error = 'Add at least one cell before saving a template.';
+            return;
+        }
+
+        error = '';
         const newTemplate: SessionTemplate = {
             id: id || crypto.randomUUID(),
             name,
             description,
-            mode: mode as any,
+            mode,
             cells,
-            workspace_strategy: workspace_strategy as any,
+            workspace_strategy,
             is_builtin: false // User saved templates are never builtin
         };
 
@@ -43,7 +50,7 @@
             await templates.saveTemplate(newTemplate);
             dispatch('save', newTemplate);
         } catch (err) {
-            console.error('Failed to save template:', err);
+            error = err instanceof Error ? err.message : 'Failed to save template.';
         }
     }
 
@@ -59,6 +66,10 @@
             <div class="info-badge">Built-in templates cannot be modified. Saving will create a new custom template.</div>
         {/if}
     </div>
+
+    {#if error}
+        <div class="error-banner" role="alert">{error}</div>
+    {/if}
 
     <div class="form-section">
         <div class="form-group">
@@ -157,6 +168,15 @@
         padding: 6px 10px;
         border-radius: 4px;
         border: 1px solid rgba(139, 92, 246, 0.2);
+    }
+
+    .error-banner {
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid rgba(239, 68, 68, 0.35);
+        color: #fca5a5;
+        font-size: 12px;
     }
 
     .form-section {

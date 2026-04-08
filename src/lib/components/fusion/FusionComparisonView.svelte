@@ -1,8 +1,6 @@
 <script lang="ts">
     import { cells } from '../../stores/cells';
     import ArtifactSummary from '../artifacts/ArtifactSummary.svelte';
-    import type { Cell } from '../../types/domain';
-
     export let sessionId: string;
 
     $: sessionCells = Object.values($cells.cells).filter(c => c.session_id === sessionId);

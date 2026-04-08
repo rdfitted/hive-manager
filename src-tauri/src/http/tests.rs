@@ -4,6 +4,7 @@ use axum::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::TempDir;
 use tower::ServiceExt;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
@@ -2749,6 +2750,24 @@ async fn test_conversation_concurrent_appends() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+struct TestPathCleanup {
+    paths: Vec<PathBuf>,
+}
+
+impl TestPathCleanup {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
+    }
+}
+
+impl Drop for TestPathCleanup {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_list_cells_returns_primary_cell_for_hive_session() {
     let (app, controller) = setup_test_app_with_controller().await;
@@ -2912,6 +2931,70 @@ async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
 }
 
 #[tokio::test]
+async fn test_list_artifacts_uses_persisted_session_fallback() {
+    let app = setup_test_app().await;
+    let session_id = format!("persisted-artifacts-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
+
+    storage
+        .save_session(&PersistedSession {
+            id: session_id.clone(),
+            name: Some("Persisted Session".to_string()),
+            color: None,
+            session_type: SessionTypeInfo::Hive { worker_count: 1 },
+            project_path: temp_dir.path().to_string_lossy().to_string(),
+            created_at: chrono::Utc::now(),
+            agents: vec![],
+            state: "Completed".to_string(),
+            default_cli: "claude".to_string(),
+            default_model: Some("opus-4-6".to_string()),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: String::new(),
+        })
+        .unwrap();
+    storage
+        .save_artifact(
+            &session_id,
+            "primary",
+            &crate::domain::ArtifactBundle {
+                summary: Some("Persisted artifact".to_string()),
+                changed_files: vec!["src/main.rs".to_string()],
+                commits: vec!["abc123 persisted".to_string()],
+                branch: "feature/persisted".to_string(),
+                test_results: None,
+                diff_summary: None,
+                unresolved_issues: vec![],
+                confidence: None,
+                recommended_next_step: None,
+            },
+        )
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let artifacts = response_json.as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(
+        artifacts[0].get("branch").unwrap().as_str().unwrap(),
+        "feature/persisted"
+    );
+}
+
+#[tokio::test]
 async fn test_list_artifacts_rejects_invalid_cell_id() {
     let app = setup_test_app().await;
 
@@ -2932,12 +3015,16 @@ async fn test_list_artifacts_rejects_invalid_cell_id() {
 async fn test_post_artifact_round_trip_and_cell_projection() {
     let (app, controller) = setup_test_app_with_controller().await;
     let session_id = format!("artifact-roundtrip-{}", uuid::Uuid::new_v4());
-    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
-    let _ = std::fs::create_dir_all(&temp_dir);
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
     controller
         .read()
-        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+        .insert_test_session(make_test_session(
+            &session_id,
+            temp_dir.path().to_str().unwrap(),
+        ));
 
     let artifact = serde_json::json!({
         "artifact": {
@@ -3009,24 +3096,23 @@ async fn test_post_artifact_round_trip_and_cell_projection() {
             .unwrap(),
         "Primary cell summary"
     );
-
-    let storage = SessionStorage::new().unwrap();
-    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
-    let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[tokio::test]
 async fn test_get_resolver_output_endpoint_returns_persisted_output() {
     let (app, controller) = setup_test_app_with_controller().await;
     let session_id = format!("resolver-output-{}", uuid::Uuid::new_v4());
-    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
-    let _ = std::fs::create_dir_all(&temp_dir);
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
     controller
         .read()
-        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+        .insert_test_session(make_test_session(
+            &session_id,
+            temp_dir.path().to_str().unwrap(),
+        ));
 
-    let storage = SessionStorage::new().unwrap();
     storage
         .save_resolver_output(
             &session_id,
@@ -3061,9 +3147,33 @@ async fn test_get_resolver_output_endpoint_returns_persisted_output() {
             .unwrap(),
         "variant-b"
     );
+}
 
-    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
-    let _ = std::fs::remove_dir_all(&temp_dir);
+#[tokio::test]
+async fn test_get_resolver_output_returns_internal_error_for_invalid_persisted_session() {
+    let app = setup_test_app().await;
+    let session_id = format!("resolver-invalid-session-{}", uuid::Uuid::new_v4());
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
+
+    std::fs::create_dir_all(storage.session_dir(&session_id)).unwrap();
+    std::fs::write(
+        storage.session_dir(&session_id).join("session.json"),
+        "{ invalid json",
+    )
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/resolver", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
@@ -3084,7 +3194,7 @@ async fn test_template_crud_endpoints() {
                 "prompt_template": "fusion-worker"
             }
         ],
-        "workspace_strategy": "isolated",
+        "workspace_strategy": "isolated_cell",
         "is_builtin": false
     });
 

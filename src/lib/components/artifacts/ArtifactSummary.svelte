@@ -4,16 +4,17 @@
     import TestResultsPanel from './TestResultsPanel.svelte';
     import DiffSummaryPanel from './DiffSummaryPanel.svelte';
 
-    export let artifact: ArtifactBundle;
+    export let artifact: ArtifactBundle | undefined;
     export let compact = false;
     export let showDetails = false;
 
-    $: changedFilesCount = artifact.changed_files?.length || 0;
-    $: commitsCount = artifact.commits?.length || 0;
-    $: unresolvedCount = artifact.unresolved_issues?.length || 0;
-    $: confidence = artifact.confidence !== undefined ? Math.round(artifact.confidence * 100) : null;
+    $: changedFilesCount = artifact?.changed_files?.length || 0;
+    $: commitsCount = artifact?.commits?.length || 0;
+    $: unresolvedCount = artifact?.unresolved_issues?.length || 0;
+    $: confidence = artifact?.confidence !== undefined ? Math.round(artifact.confidence * 100) : null;
 </script>
 
+{#if artifact}
 <div class="artifact-summary" class:compact class:show-details={showDetails}>
     <div class="header">
         <div class="main-stats">
@@ -38,7 +39,7 @@
         {/if}
 
         {#if confidence !== null}
-            <div class="confidence-box" title="Confidence: {confidence}%">
+            <div class="confidence-box" title="Confidence: {confidence}%" aria-label="Confidence {confidence}%">
                 <div class="confidence-bar">
                     <div class="fill" style="width: {confidence}%" class:high={confidence >= 80} class:mid={confidence >= 50 && confidence < 80} class:low={confidence < 50}></div>
                 </div>
@@ -82,6 +83,7 @@
         </div>
     {/if}
 </div>
+{/if}
 
 <style>
     .artifact-summary {

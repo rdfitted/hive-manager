@@ -5,7 +5,8 @@
     export let sessionId: string;
 
     $: output = $artifacts.resolverOutputs[sessionId];
-    $: loading = $artifacts.loading;
+    $: loading = $artifacts.resolverLoading[sessionId] ?? false;
+    $: error = $artifacts.resolverError[sessionId];
 
     onMount(() => {
         if (!output) {
@@ -61,9 +62,11 @@
             <div class="spinner"></div>
             <span>Waiting for resolver output...</span>
         </div>
+    {:else if error}
+        <div class="error-state" role="alert">{error}</div>
     {:else}
         <div class="empty-state">
-            <div class="icon">🔍</div>
+            <div class="icon" aria-hidden="true">Resolver</div>
             <span>Resolver has not run yet. Once all candidates complete, the Resolver will analyze and recommend the best variant.</span>
         </div>
     {/if}
@@ -190,8 +193,22 @@
         margin: 0 auto;
     }
 
+    .error-state {
+        margin: 0 auto;
+        max-width: 480px;
+        padding: 14px 16px;
+        border-radius: 8px;
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        color: #fca5a5;
+        text-align: center;
+    }
+
     .icon {
-        font-size: 48px;
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
         opacity: 0.3;
     }
 

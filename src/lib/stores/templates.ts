@@ -1,16 +1,23 @@
 import { writable } from 'svelte/store';
-import type { SessionTemplate } from '../types/domain';
+import type { RolePack, SessionTemplate } from '../types/domain';
 import { apiUrl } from '../config';
 
 interface TemplatesState {
     templates: SessionTemplate[];
+    rolePacks: RolePack[];
     loading: boolean;
     error: string | null;
+}
+
+interface TemplateCatalog {
+    templates: SessionTemplate[];
+    role_packs: RolePack[];
 }
 
 function createTemplatesStore() {
     const { subscribe, set, update } = writable<TemplatesState>({
         templates: [],
+        rolePacks: [],
         loading: false,
         error: null,
     });
@@ -23,11 +30,12 @@ function createTemplatesStore() {
             try {
                 const response = await fetch(apiUrl('/api/templates'));
                 if (!response.ok) throw new Error(`Failed to fetch templates: ${response.statusText}`);
-                const templates: SessionTemplate[] = await response.json();
+                const catalog: TemplateCatalog = await response.json();
                 
                 update(state => ({
                     ...state,
-                    templates,
+                    templates: catalog.templates,
+                    rolePacks: catalog.role_packs,
                     loading: false
                 }));
             } catch (err) {

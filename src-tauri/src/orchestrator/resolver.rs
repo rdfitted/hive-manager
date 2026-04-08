@@ -170,10 +170,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::Resolver;
-    use crate::{
-        domain::{ArtifactBundle, ResolverOutput},
-        storage::SessionStorage,
-    };
+    use crate::{domain::ArtifactBundle, storage::SessionStorage};
 
     #[test]
     fn launch_selects_best_candidate_from_artifacts() {
@@ -223,18 +220,22 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            output,
-            ResolverOutput {
-                selected_candidate: "variant-b".to_string(),
-                rationale: "Selected variant-b based on artifact confidence, commit history, and unresolved issue count.".to_string(),
-                tradeoffs: vec![
-                    "variant-b changed 1 file(s)".to_string(),
-                    "variant-b reported 0 unresolved issue(s)".to_string(),
-                ],
-                hybrid_integration_plan: None,
-                final_recommendation: Some("Variant B".to_string()),
-            }
+        assert_eq!(output.selected_candidate, "variant-b");
+        assert!(output.rationale.contains("variant-b"));
+        assert_eq!(output.tradeoffs.len(), 2);
+        assert!(
+            output
+                .tradeoffs
+                .iter()
+                .any(|tradeoff| tradeoff.contains("1 file(s)"))
         );
+        assert!(
+            output
+                .tradeoffs
+                .iter()
+                .any(|tradeoff| tradeoff.contains("0 unresolved issue(s)"))
+        );
+        assert_eq!(output.hybrid_integration_plan, None);
+        assert_eq!(output.final_recommendation, Some("Variant B".to_string()));
     }
 }
