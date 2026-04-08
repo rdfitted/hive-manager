@@ -74,6 +74,8 @@
 
     .mode-badge.hive { background: #facc15; color: #000; }
     .mode-badge.fusion { background: #818cf8; color: #fff; }
+    .mode-badge.swarm { background: #34d399; color: #000; }
+    .mode-badge.solo { background: #f472b6; color: #000; }
 
     .status-badge {
         font-size: 11px;
@@ -85,7 +87,7 @@
         text-transform: capitalize;
     }
 
-    .status-badge.active { color: #10b981; border-color: rgba(16, 185, 129, 0.3); background: rgba(16, 185, 129, 0.05); }
+    .status-badge.running { color: #10b981; border-color: rgba(16, 185, 129, 0.3); background: rgba(16, 185, 129, 0.05); }
 
     .objective {
         margin: 0;

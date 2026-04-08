@@ -189,19 +189,35 @@ impl WorkspaceManager {
                     });
                 }
 
-                // Create the worktree
-                let info = self
+                // Create the worktree, tolerating concurrent creation by another caller.
+                match self
                     .worktree_manager
                     .create_worktree(&worktree_path, &branch_name)
-                    .map_err(|e| WorkspaceError::new(e.message))?;
+                {
+                    Ok(_) => {}
+                    Err(_) if worktree_path.exists() => {
+                        let current_branch = git::current_branch(&worktree_path)?;
+                        if current_branch != branch_name {
+                            return Err(WorkspaceError::new(format!(
+                                "Existing shared worktree '{}' is on branch '{}' instead of '{}'",
+                                worktree_path.display(),
+                                current_branch,
+                                branch_name
+                            )));
+                        }
+                    }
+                    Err(e) => return Err(WorkspaceError::new(e.message)),
+                }
+
+                let is_dirty = git::is_dirty(&worktree_path)?;
 
                 Ok(Workspace {
                     strategy: WorkspaceStrategy::SharedCell,
                     repo_path: self.worktree_manager.project_path().to_path_buf(),
                     base_branch,
-                    branch_name: info.branch,
-                    worktree_path: Some(info.path),
-                    is_dirty: false,
+                    branch_name,
+                    worktree_path: Some(worktree_path),
+                    is_dirty,
                 })
             }
             Some(WorkspaceStrategy::IsolatedCell) => {
@@ -273,19 +289,17 @@ impl WorkspaceManager {
 
         let worktree_base = self.worktree_manager.worktree_base();
 
-        // Remove worktrees that are in our base path and match the session
+        let shared_session_prefix = worktree_base.join(session_id);
+        let isolated_session_prefix = worktree_base.join("isolated").join(session_id);
+
+        // Remove worktrees that belong to this session based on their path.
         for wt in worktrees {
-            // Check if this worktree is under our worktree base
-            if wt.path.starts_with(worktree_base) {
-                // Check if the branch name contains the session ID
-                // Branch format: hive/<session-id>/... or fusion/<session-id>/...
-                if wt.branch.contains(&format!("/{}/", session_id))
-                    || wt.branch.starts_with(&format!("resolver/{}", session_id))
-                {
-                    self.worktree_manager
-                        .remove_worktree(&wt.path, true)
-                        .map_err(|e| WorkspaceError::new(e.message))?;
-                }
+            if wt.path.starts_with(&shared_session_prefix)
+                || wt.path.starts_with(&isolated_session_prefix)
+            {
+                self.worktree_manager
+                    .remove_worktree(&wt.path, true)
+                    .map_err(|e| WorkspaceError::new(e.message))?;
             }
         }
 

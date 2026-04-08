@@ -44,13 +44,14 @@
     class:selected={isSelected} 
     class:collapsed={isCollapsed}
     role="button"
+    aria-label={`${cell.name}, ${cell.cell_type}, ${cell.status}`}
     aria-pressed={isSelected}
     tabindex="0"
     on:click={toggleSelection}
     on:keydown={handleKeyDown}
 >
     <div class="header">
-        <div class="status-icon" title={cell.status}>{statusIcon}</div>
+        <div class="status-icon" title={cell.status} aria-hidden="true">{statusIcon}</div>
         <div class="name-box">
             <span class="type-tag">{cell.cell_type}</span>
             <span class="name">{cell.name}</span>
