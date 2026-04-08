@@ -114,6 +114,11 @@
         border-color: rgba(255, 255, 255, 0.2);
     }
 
+    .cell-card:focus-visible {
+        outline: 2px solid rgba(59, 130, 246, 0.9);
+        outline-offset: 2px;
+    }
+
     .cell-card.selected {
         background: rgba(59, 130, 246, 0.08);
         border-color: rgba(59, 130, 246, 0.5);

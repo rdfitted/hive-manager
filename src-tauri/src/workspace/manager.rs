@@ -190,10 +190,7 @@ impl WorkspaceManager {
                 }
 
                 // Create the worktree, tolerating concurrent creation by another caller.
-                match self
-                    .worktree_manager
-                    .create_worktree(&worktree_path, &branch_name)
-                {
+                match self.create_or_attach_worktree(&worktree_path, &branch_name) {
                     Ok(_) => {}
                     Err(_) if worktree_path.exists() => {
                         let current_branch = git::current_branch(&worktree_path)?;
@@ -231,9 +228,7 @@ impl WorkspaceManager {
 
                 // Create the worktree
                 let info = self
-                    .worktree_manager
-                    .create_worktree(&worktree_path, &branch_name)
-                    .map_err(|e| WorkspaceError::new(e.message))?;
+                    .create_or_attach_worktree(&worktree_path, &branch_name)?;
 
                 Ok(Workspace {
                     strategy: WorkspaceStrategy::IsolatedCell,
@@ -297,9 +292,18 @@ impl WorkspaceManager {
             if wt.path.starts_with(&shared_session_prefix)
                 || wt.path.starts_with(&isolated_session_prefix)
             {
-                self.worktree_manager
-                    .remove_worktree(&wt.path, true)
-                    .map_err(|e| WorkspaceError::new(e.message))?;
+                if let Err(e) = self.worktree_manager.remove_worktree(&wt.path, true) {
+                    if Self::is_missing_worktree_error(&e.message) {
+                        tracing::warn!(
+                            "Ignoring missing worktree during session cleanup: {} ({})",
+                            wt.path.display(),
+                            e.message
+                        );
+                        continue;
+                    }
+
+                    return Err(WorkspaceError::new(e.message));
+                }
             }
         }
 
@@ -309,6 +313,29 @@ impl WorkspaceManager {
             .map_err(|e| WorkspaceError::new(e.message))?;
 
         Ok(())
+    }
+
+    fn create_or_attach_worktree(
+        &self,
+        worktree_path: &std::path::Path,
+        branch_name: &str,
+    ) -> Result<crate::runtime::WorktreeInfo, WorkspaceError> {
+        let branch_exists = git::branch_exists(self.worktree_manager.project_path(), branch_name)?;
+
+        if branch_exists {
+            self.worktree_manager
+                .attach_worktree(worktree_path, branch_name)
+                .map_err(|e| WorkspaceError::new(e.message))
+        } else {
+            self.worktree_manager
+                .create_worktree(worktree_path, branch_name)
+                .map_err(|e| WorkspaceError::new(e.message))
+        }
+    }
+
+    fn is_missing_worktree_error(message: &str) -> bool {
+        let lower = message.to_lowercase();
+        lower.contains("is not a working tree") || lower.contains("not a working tree")
     }
 
     /// Inspect a workspace and return its current status.
@@ -447,5 +474,15 @@ mod tests {
         let err = WorkspaceError::new("Test error");
         assert_eq!(err.message, "Test error");
         assert_eq!(format!("{}", err), "Test error");
+    }
+
+    #[test]
+    fn test_missing_worktree_error_detection() {
+        assert!(WorkspaceManager::is_missing_worktree_error(
+            "fatal: '.hive-manager/worktrees/missing' is not a working tree",
+        ));
+        assert!(!WorkspaceManager::is_missing_worktree_error(
+            "fatal: permission denied",
+        ));
     }
 }

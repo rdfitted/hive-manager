@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub use local_process::LocalProcessRuntime;
 pub use local_pty::LocalPtyRuntime;
-pub use worktree::{WorktreeError, WorktreeManager};
+pub use worktree::{WorktreeError, WorktreeInfo, WorktreeManager};
 
 /// Specification for launching an agent process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
