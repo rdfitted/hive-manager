@@ -17,13 +17,19 @@ use crate::{
 use super::{validate_cell_id, validate_session_id};
 
 const PRIMARY_CELL_ID: &str = "primary";
+const RESOLVER_CELL_ID: &str = "resolver";
 
 pub(crate) fn build_cells(session: &Session) -> Vec<Cell> {
     match &session.session_type {
-        SessionType::Fusion { variants } if !variants.is_empty() => variants
-            .iter()
-            .map(|variant| build_fusion_cell(session, variant))
-            .collect(),
+        SessionType::Fusion { variants } if !variants.is_empty() => {
+            let mut cells: Vec<Cell> = variants
+                .iter()
+                .map(|variant| build_fusion_cell(session, variant))
+                .collect();
+            // Add resolver cell for non-variant agents (judge, planner, evaluator, QA workers)
+            cells.push(build_resolver_cell(session));
+            cells
+        }
         _ => vec![build_primary_cell(session)],
     }
 }
@@ -34,6 +40,10 @@ pub(crate) fn find_cell(session: &Session, cell_id: &str) -> Option<Cell> {
 
 pub(crate) fn agent_in_cell(session: &Session, cell_id: &str, agent: &AgentInfo) -> bool {
     match &session.session_type {
+        SessionType::Fusion { .. } if cell_id == RESOLVER_CELL_ID => {
+            // Resolver cell contains non-variant agents
+            !matches!(&agent.role, PtyAgentRole::Fusion { .. })
+        }
         SessionType::Fusion { .. } if cell_id != PRIMARY_CELL_ID => matches!(
             &agent.role,
             PtyAgentRole::Fusion { variant } if variant_to_cell_id(variant) == cell_id
@@ -98,6 +108,42 @@ fn build_fusion_cell(session: &Session, variant: &str) -> Cell {
             WorkspaceStrategy::IsolatedCell,
             CellType::Hive,
             variant,
+        ),
+        agents,
+        artifacts: None,
+        events: vec![],
+        depends_on: vec![],
+    }
+}
+
+fn build_resolver_cell(session: &Session) -> Cell {
+    let agents: Vec<String> = session
+        .agents
+        .iter()
+        .filter(|agent| agent_in_cell(session, RESOLVER_CELL_ID, agent))
+        .map(|agent| agent.id.clone())
+        .collect();
+
+    let status = session
+        .agents
+        .iter()
+        .filter(|agent| agent_in_cell(session, RESOLVER_CELL_ID, agent))
+        .map(|agent| agent_status_to_cell_status(&agent.status))
+        .next()
+        .unwrap_or_else(|| session_state_to_cell_status(&session.state));
+
+    Cell {
+        id: RESOLVER_CELL_ID.to_string(),
+        session_id: session.id.clone(),
+        cell_type: CellType::Resolver,
+        name: "Resolver".to_string(),
+        status,
+        objective: "System agents (judge, planner, evaluator, QA workers)".to_string(),
+        workspace: synthetic_workspace(
+            session,
+            WorkspaceStrategy::SharedCell,
+            CellType::Resolver,
+            RESOLVER_CELL_ID,
         ),
         agents,
         artifacts: None,

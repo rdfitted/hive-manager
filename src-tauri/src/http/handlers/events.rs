@@ -74,7 +74,10 @@ pub async fn stream_events(
                             .data(json)))
                     }
                     Ok(_) => None, // Filtered out (different session)
-                    Err(_) => None, // Skip broadcast errors
+                    Err(e) => {
+                        tracing::warn!("SSE client lagged, events may have been dropped: {e:?}");
+                        None
+                    }
                 }
             }
         });

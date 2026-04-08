@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
+    coordination::InjectionError,
     domain::{Agent, AgentRole, AgentStatus},
     http::{error::ApiError, state::AppState},
     pty::{AgentRole as PtyAgentRole, AgentStatus as PtyAgentStatus},
@@ -118,7 +119,18 @@ pub async fn send_agent_input(
         .injection_manager
         .read()
         .operator_inject(&session_id, &agent_id, &req.input)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| match error {
+            InjectionError::SessionNotFound(id) => {
+                ApiError::not_found(format!("Session {} not found", id))
+            }
+            InjectionError::AgentNotFound(id) => {
+                ApiError::not_found(format!("Agent {} not found", id))
+            }
+            InjectionError::NotAuthorized(msg) => ApiError::bad_request(msg),
+            InjectionError::PtyError(msg) | InjectionError::StorageError(msg) => {
+                ApiError::internal(msg)
+            }
+        })?;
 
     Ok((
         StatusCode::CREATED,
