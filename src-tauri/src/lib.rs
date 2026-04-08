@@ -36,6 +36,7 @@ use pty::PtyManager;
 use session::SessionController;
 use storage::SessionStorage;
 use coordination::InjectionManager;
+use events::EventBus;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -138,6 +139,7 @@ pub fn run() {
             // Start HTTP server if enabled
             let http_config = shared_config.clone();
             let http_session_controller = session_controller.clone();
+            let http_event_bus = EventBus::new(storage.base_dir().clone());
             tauri::async_runtime::spawn(async move {
                 let (enabled, port) = {
                     let cfg = http_config.read().await;
@@ -152,6 +154,7 @@ pub fn run() {
                         http_session_controller.clone(),
                         injection_manager.clone(),
                         storage.clone(),
+                        http_event_bus,
                     ));
                     if let Err(e) = http::serve(state, port).await {
                         tracing::error!("HTTP server error: {}", e);

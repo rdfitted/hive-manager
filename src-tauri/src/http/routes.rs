@@ -5,7 +5,10 @@ use axum::{
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
-use crate::http::handlers::{health, sessions, inject, workers, evaluator, planners, learnings, conversations, heartbeats};
+use crate::http::handlers::{
+    agents, artifacts, cells, conversations, evaluator, events, health, heartbeats, inject,
+    learnings, planners, sessions, workers,
+};
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -15,11 +18,17 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health::health_check))
-        .route("/api/sessions", get(sessions::list_sessions))
+        .route("/api/sessions", get(sessions::list_sessions).post(sessions::create_session))
         // Heartbeat routes (active must be before {id} to match)
         .route("/api/sessions/active", get(heartbeats::get_active_sessions))
         .route("/api/sessions/{id}/heartbeat", post(heartbeats::post_heartbeat))
-        .route("/api/sessions/{id}", get(sessions::get_session).patch(sessions::update_session))
+        .route(
+            "/api/sessions/{id}",
+            get(sessions::get_session)
+                .patch(sessions::update_session)
+                .delete(sessions::stop_session),
+        )
+        .route("/api/sessions/{id}/launch", post(sessions::launch_session))
         .route("/api/sessions/hive", post(sessions::launch_hive))
         .route("/api/sessions/swarm", post(sessions::launch_swarm))
         .route("/api/sessions/solo", post(sessions::launch_solo))
@@ -42,6 +51,25 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Planner routes (Swarm mode)
         .route("/api/sessions/{id}/planners", get(planners::list_planners))
         .route("/api/sessions/{id}/planners", post(planners::add_planner))
+        // Cell / agent / artifact routes
+        .route("/api/sessions/{id}/cells", get(cells::list_cells))
+        .route(
+            "/api/sessions/{id}/cells/{cid}",
+            get(cells::get_cell).delete(cells::stop_cell),
+        )
+        .route(
+            "/api/sessions/{id}/cells/{cid}/agents",
+            get(agents::list_agents_in_cell),
+        )
+        .route("/api/sessions/{id}/agents/{aid}", delete(agents::stop_agent))
+        .route(
+            "/api/sessions/{id}/agents/{aid}/input",
+            post(agents::send_agent_input),
+        )
+        .route(
+            "/api/sessions/{id}/cells/{cid}/artifacts",
+            get(artifacts::list_artifacts).post(artifacts::post_artifact),
+        )
         // Learning routes (legacy - work when single project active)
         .route("/api/learnings", get(learnings::list_learnings))
         .route("/api/learnings", post(learnings::submit_learning))
@@ -54,6 +82,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Conversation routes
         .route("/api/sessions/{id}/conversations/{agent}", get(conversations::read_conversation))
         .route("/api/sessions/{id}/conversations/{agent}/append", post(conversations::append_conversation))
+        // Event routes
+        .route("/api/sessions/{id}/events", get(events::get_events))
+        .route("/api/sessions/{id}/stream", get(events::stream_events))
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
         .route("/api/sessions/{id}/inject/queen", post(inject::queen_inject))

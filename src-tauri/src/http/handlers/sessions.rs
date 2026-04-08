@@ -143,6 +143,29 @@ pub struct LaunchSoloRequest {
 }
 
 #[derive(Deserialize)]
+pub struct CreateSessionRequest {
+    pub project_path: String,
+    pub mode: String,
+    pub objective: Option<String>,
+    pub default_cli: Option<String>,
+    pub default_model: Option<String>,
+    pub worker_count: Option<u8>,
+    pub variants: Option<Vec<LaunchFusionVariantRequest>>,
+    pub judge_cli: Option<String>,
+    pub judge_model: Option<String>,
+    pub with_planning: Option<bool>,
+    pub with_evaluator: Option<bool>,
+    pub smoke_test: Option<bool>,
+    pub name: Option<String>,
+    pub color: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LaunchSessionRequest {
+    pub mode: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct UpdateSessionRequest {
     #[serde(default)]
     pub name: Option<Option<String>>,
@@ -174,6 +197,147 @@ pub struct FusionEvaluationResponse {
     pub state: String,
     pub report_path: String,
     pub report: Option<String>,
+}
+
+/// POST /api/sessions - Create a session via the vNext API surface.
+///
+/// For now this immediately launches Hive/Fusion sessions using the existing controller
+/// rather than creating a persisted draft session.
+pub async fn create_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
+    validate_project_path(&req.project_path)?;
+    validate_session_name(req.name.as_deref())?;
+    validate_session_color(req.color.as_deref())?;
+
+    let mode = req.mode.trim().to_ascii_lowercase();
+    let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
+    validate_cli(&default_cli)?;
+
+    match mode.as_str() {
+        "hive" => {
+            let queen_config = AgentConfig {
+                cli: default_cli.clone(),
+                model: req.default_model.clone(),
+                flags: vec![],
+                label: Some("Queen".to_string()),
+                role: None,
+                initial_prompt: None,
+            };
+
+            let worker_count = req.worker_count.unwrap_or(3);
+            let worker_config = AgentConfig {
+                cli: default_cli,
+                model: req.default_model,
+                flags: vec![],
+                label: None,
+                role: None,
+                initial_prompt: None,
+            };
+
+            let config = HiveLaunchConfig {
+                project_path: req.project_path,
+                name: req.name,
+                color: req.color,
+                queen_config,
+                workers: vec![worker_config; worker_count as usize],
+                prompt: req.objective.filter(|value| !value.trim().is_empty()),
+                with_planning: req.with_planning.unwrap_or(false),
+                with_evaluator: req.with_evaluator.unwrap_or(false),
+                evaluator_config: None,
+                qa_workers: None,
+                smoke_test: req.smoke_test.unwrap_or(false),
+            };
+
+            let controller = state.session_controller.write();
+            let session = controller
+                .launch_hive_v2(config)
+                .map_err(ApiError::internal)?;
+
+            Ok((
+                StatusCode::CREATED,
+                Json(LaunchResponse {
+                    session_id: session.id,
+                    message: "Session created".to_string(),
+                }),
+            ))
+        }
+        "fusion" => {
+            let variants = req
+                .variants
+                .filter(|variants| !variants.is_empty())
+                .ok_or_else(|| ApiError::bad_request("Fusion sessions require at least one variant"))?
+                .into_iter()
+                .map(|variant| {
+                    let cli = variant.cli.unwrap_or_else(|| default_cli.clone());
+                    validate_cli(&cli)?;
+                    Ok(FusionVariantConfig {
+                        name: variant.name,
+                        cli,
+                        model: variant.model,
+                        flags: variant.flags.unwrap_or_default(),
+                    })
+                })
+                .collect::<Result<Vec<_>, ApiError>>()?;
+
+            let task_description = req
+                .objective
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| ApiError::bad_request("Fusion sessions require a non-empty objective"))?;
+
+            let judge_cli = req.judge_cli.unwrap_or_else(|| default_cli.clone());
+            validate_cli(&judge_cli)?;
+
+            let config = FusionLaunchConfig {
+                project_path: req.project_path,
+                name: req.name,
+                color: req.color,
+                variants,
+                task_description,
+                judge_config: AgentConfig {
+                    cli: judge_cli,
+                    model: req.judge_model.or(req.default_model.clone()),
+                    flags: vec![],
+                    label: Some("Fusion Judge".to_string()),
+                    role: None,
+                    initial_prompt: None,
+                },
+                queen_config: None,
+                with_planning: req.with_planning.unwrap_or(false),
+                default_cli,
+                default_model: req.default_model,
+            };
+
+            let controller = state.session_controller.write();
+            let session = controller
+                .launch_fusion(config)
+                .map_err(ApiError::internal)?;
+
+            Ok((
+                StatusCode::CREATED,
+                Json(LaunchResponse {
+                    session_id: session.id,
+                    message: "Session created".to_string(),
+                }),
+            ))
+        }
+        _ => Err(ApiError::bad_request(
+            "Unsupported mode. Valid options: hive, fusion",
+        )),
+    }
+}
+
+/// POST /api/sessions/{id}/launch - Launch a previously created draft session.
+pub async fn launch_session(
+    Path(id): Path<String>,
+    Json(_req): Json<LaunchSessionRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    validate_session_id(&id)?;
+
+    Err(ApiError::internal(
+        "Session draft launch is not yet implemented",
+    ))
 }
 
 /// GET /api/sessions - List all sessions

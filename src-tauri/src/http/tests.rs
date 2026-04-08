@@ -12,6 +12,7 @@ use crate::pty::PtyManager;
 use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig};
 use crate::coordination::InjectionManager;
+use crate::events::EventBus;
 use parking_lot::RwLock;
 
 async fn setup_test_app() -> axum::Router {
@@ -24,6 +25,7 @@ async fn setup_test_app() -> axum::Router {
         pty_manager.clone(),
         SessionStorage::new().unwrap(),
     )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
 
     let state = Arc::new(AppState::new(
         config,
@@ -31,6 +33,7 @@ async fn setup_test_app() -> axum::Router {
         session_controller,
         injection_manager,
         storage,
+        event_bus,
     ));
 
     create_router(state)
@@ -47,6 +50,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         pty_manager.clone(),
         SessionStorage::new().unwrap(),
     )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
 
     let state = Arc::new(AppState::new(
         config,
@@ -54,6 +58,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         session_controller.clone(),
         injection_manager,
         storage,
+        event_bus,
     ));
 
     (create_router(state), session_controller)
@@ -2744,6 +2749,227 @@ async fn test_conversation_concurrent_appends() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_list_cells_returns_primary_cell_for_hive_session() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-cells-primary");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session_with_agents("session-cells", temp_dir.to_str().unwrap(), &["session-cells-queen", "session-cells-worker-1"]),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-cells/cells")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cells = response_json.as_array().unwrap();
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].get("id").unwrap().as_str().unwrap(), "primary");
+    assert_eq!(cells[0].get("session_id").unwrap().as_str().unwrap(), "session-cells");
+    assert_eq!(cells[0].get("status").unwrap().as_str().unwrap(), "running");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_get_cell_rejects_invalid_cell_id() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-safe/cells/../bad")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_stop_cell_stops_session() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-stop-cell");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-stop-cell", temp_dir.to_str().unwrap()));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/sessions/session-stop-cell/cells/primary")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let session = controller.read().get_session("session-stop-cell").unwrap();
+    assert!(matches!(session.state, SessionState::Completed));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_list_agents_in_cell_returns_session_agents() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-cell-agents");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session_with_agents("session-cell-agents", temp_dir.to_str().unwrap(), &["worker-1", "worker-2"]),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-cell-agents/cells/primary/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let agents = response_json.as_array().unwrap();
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0].get("cell_id").unwrap().as_str().unwrap(), "primary");
+    assert_eq!(agents[0].get("status").unwrap().as_str().unwrap(), "running");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-cell-artifacts");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-cell-artifacts", temp_dir.to_str().unwrap()));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-cell-artifacts/cells/primary/artifacts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json.as_array().unwrap().len(), 0);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_send_agent_input_rejects_empty_input() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-agent-input");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(
+        make_test_session_with_agents("session-agent-input", temp_dir.to_str().unwrap(), &["worker-1"]),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-agent-input/agents/worker-1/input")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":"   "}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_create_session_rejects_invalid_mode() {
+    let app = setup_test_app().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-create-session-invalid-mode");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.to_str().unwrap(),
+        "mode": "solo",
+        "objective": "test objective"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_launch_session_returns_not_implemented() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-launch/launch")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
 // --- Heartbeat endpoint tests ---
 
 #[tokio::test]
@@ -2888,4 +3114,91 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
     assert_eq!(agents[0].get("summary").unwrap().as_str().unwrap(), "2/3 done");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+// --- SSE Event Endpoint Tests ---
+
+#[tokio::test]
+async fn test_get_events_returns_empty_for_new_session() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/new-session/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should return OK with empty array for non-existent session
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let events = response_json.as_array().unwrap();
+    assert_eq!(events.len(), 0);
+}
+
+#[tokio::test]
+async fn test_get_events_rejects_path_traversal_session_id() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/../../../etc/passwd/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_stream_events_endpoint_exists() {
+    let app = setup_test_app().await;
+
+    // Just verify the endpoint exists and returns SSE content type
+    // Note: Testing actual SSE streaming in unit tests is complex
+    // This test verifies the endpoint is accessible
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/test-session/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // SSE endpoint should return OK (it will keep connection open)
+    // The response should have content-type: text/event-stream
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let content_type = response.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(content_type.contains("text/event-stream") || content_type.contains("event-stream"));
+}
+
+#[tokio::test]
+async fn test_stream_events_rejects_path_traversal_session_id() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/../../etc/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

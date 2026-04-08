@@ -5,6 +5,7 @@ use crate::storage::{AppConfig, SessionStorage};
 use crate::pty::PtyManager;
 use crate::session::SessionController;
 use crate::coordination::InjectionManager;
+use crate::events::EventBus;
 
 #[allow(dead_code)]
 pub struct AppState {
@@ -13,6 +14,7 @@ pub struct AppState {
     pub session_controller: Arc<PLRwLock<SessionController>>,
     pub injection_manager: Arc<PLRwLock<InjectionManager>>,
     pub storage: Arc<SessionStorage>,
+    pub event_bus: Arc<EventBus>,
 }
 
 impl AppState {
@@ -22,6 +24,7 @@ impl AppState {
         session_controller: Arc<PLRwLock<SessionController>>,
         injection_manager: Arc<PLRwLock<InjectionManager>>,
         storage: Arc<SessionStorage>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self {
             config,
@@ -29,6 +32,7 @@ impl AppState {
             session_controller,
             injection_manager,
             storage,
+            event_bus,
         }
     }
 }
