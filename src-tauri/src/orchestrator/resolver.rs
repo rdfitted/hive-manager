@@ -17,6 +17,8 @@ pub enum ResolverError {
     Template(#[from] crate::templates::TemplateError),
     #[error("No candidate artifacts available for resolver launch")]
     NoCandidates,
+    #[error("Resolver launch omitted candidate artifacts: requested {requested}, assembled {assembled}")]
+    IncompleteCandidates { requested: usize, assembled: usize },
     #[error("Timed out waiting for candidate artifacts")]
     Timeout,
 }
@@ -78,7 +80,12 @@ impl Resolver {
                 return Err(ResolverError::Timeout);
             }
 
-            std::thread::sleep(Duration::from_millis(250));
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(ResolverError::Timeout);
+            }
+
+            std::thread::sleep(Duration::from_millis(250).min(remaining));
         }
     }
 
@@ -87,7 +94,16 @@ impl Resolver {
         session_id: &str,
         candidates: Vec<String>,
     ) -> Result<ResolverOutput, ResolverError> {
+        let requested_candidates = candidates.len();
         let resolver_input = assemble_resolver_input(&self.storage, session_id, candidates)?;
+
+        if resolver_input.candidates.len() != requested_candidates {
+            return Err(ResolverError::IncompleteCandidates {
+                requested: requested_candidates,
+                assembled: resolver_input.candidates.len(),
+            });
+        }
+
         if resolver_input.candidates.is_empty() {
             return Err(ResolverError::NoCandidates);
         }
@@ -281,6 +297,64 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, super::ResolverError::Timeout));
+    }
+
+    #[test]
+    fn wait_for_candidates_with_zero_timeout_returns_immediately() {
+        let temp = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+        storage.create_session_dir("resolver-session").unwrap();
+
+        let resolver = Resolver::new(storage);
+        let err = resolver
+            .wait_for_candidates(
+                "resolver-session",
+                &["variant-a".to_string()],
+                Duration::ZERO,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, super::ResolverError::Timeout));
+    }
+
+    #[test]
+    fn launch_rejects_partial_candidate_set() {
+        let temp = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+        storage.create_session_dir("resolver-session").unwrap();
+        storage
+            .save_artifact(
+                "resolver-session",
+                "variant-a",
+                &ArtifactBundle {
+                    summary: Some("Variant A".to_string()),
+                    changed_files: vec!["src/a.rs".to_string()],
+                    commits: vec!["a1".to_string()],
+                    branch: "fusion/a".to_string(),
+                    test_results: None,
+                    diff_summary: None,
+                    unresolved_issues: vec![],
+                    confidence: Some(0.5),
+                    recommended_next_step: None,
+                },
+            )
+            .unwrap();
+
+        let resolver = Resolver::new(storage);
+        let err = resolver
+            .launch(
+                "resolver-session",
+                vec!["variant-a".to_string(), "variant-b".to_string()],
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            super::ResolverError::IncompleteCandidates {
+                requested: 2,
+                assembled: 1,
+            }
+        ));
     }
 
     #[test]

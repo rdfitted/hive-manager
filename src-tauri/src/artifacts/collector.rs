@@ -27,7 +27,7 @@ impl ArtifactCollector {
 
         let branch = run_git(worktree_path, &["branch", "--show-current"])?.unwrap_or_default();
         let commits = run_git_lines(worktree_path, &["log", "--oneline", "-10"])?;
-        let changed_files = run_git_lines(worktree_path, &["diff", "--name-only", "--", "."])?;
+        let changed_files = collect_changed_files(worktree_path)?;
         let diff_summary = run_git(worktree_path, &["diff", "--stat", "--", "."])?;
         let test_results = detect_test_results(worktree_path)?;
         let summary = Some(build_summary(&branch, &changed_files, &commits));
@@ -115,6 +115,21 @@ fn run_git_lines(worktree_path: &Path, args: &[&str]) -> Result<Vec<String>, Sto
             .collect()),
         None => Ok(vec![]),
     }
+}
+
+fn collect_changed_files(worktree_path: &Path) -> Result<Vec<String>, StorageError> {
+    let mut changed_files = run_git_lines(worktree_path, &["diff", "--name-only", "--", "."])?;
+
+    for path in run_git_lines(
+        worktree_path,
+        &["ls-files", "--others", "--exclude-standard"],
+    )? {
+        if !changed_files.iter().any(|existing| existing == &path) {
+            changed_files.push(path);
+        }
+    }
+
+    Ok(changed_files)
 }
 
 fn detect_test_results(worktree_path: &Path) -> Result<Option<serde_json::Value>, StorageError> {
@@ -224,6 +239,16 @@ mod tests {
         assert!(bundle.changed_files.iter().any(|file| file == "README.md"));
         assert!(bundle.test_results.is_some());
         assert!(bundle.confidence.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn collects_untracked_files_in_changed_files() {
+        let repo = init_repo();
+        fs::write(repo.path().join("notes.md"), "draft\n").unwrap();
+
+        let bundle = ArtifactCollector::collect_from_worktree(repo.path()).unwrap();
+
+        assert!(bundle.changed_files.iter().any(|file| file == "notes.md"));
     }
 
     #[test]
