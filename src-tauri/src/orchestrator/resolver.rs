@@ -52,18 +52,25 @@ impl Resolver {
         let started = Instant::now();
 
         loop {
-            let available = candidate_ids
-                .iter()
-                .filter_map(|cell_id| {
-                    self.storage
-                        .load_artifact(session_id, cell_id)
-                        .ok()
-                        .flatten()
-                        .map(|_| cell_id.clone())
-                })
-                .collect::<Vec<_>>();
+            let mut available = Vec::new();
+            let mut errors = Vec::new();
 
-            if !available.is_empty() {
+            for cell_id in candidate_ids {
+                match self.storage.load_artifact(session_id, cell_id) {
+                    Ok(Some(_)) => available.push(cell_id.clone()),
+                    Ok(None) => {}
+                    Err(error) => errors.push(format!("{cell_id}: {error}")),
+                }
+            }
+
+            if !errors.is_empty() {
+                return Err(ResolverError::Storage(StorageError::InvalidPath(format!(
+                    "Failed to load candidate artifacts: {}",
+                    errors.join("; ")
+                ))));
+            }
+
+            if available.len() == candidate_ids.len() {
                 return Ok(available);
             }
 
@@ -167,6 +174,8 @@ fn score_candidate(candidate: &crate::artifacts::resolver_input::CandidateInput)
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use tempfile::TempDir;
 
     use super::Resolver;
@@ -237,5 +246,65 @@ mod tests {
         );
         assert_eq!(output.hybrid_integration_plan, None);
         assert_eq!(output.final_recommendation, Some("Variant B".to_string()));
+    }
+
+    #[test]
+    fn wait_for_candidates_requires_all_candidates() {
+        let temp = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+        storage.create_session_dir("resolver-session").unwrap();
+        storage
+            .save_artifact(
+                "resolver-session",
+                "variant-a",
+                &ArtifactBundle {
+                    summary: Some("Variant A".to_string()),
+                    changed_files: vec![],
+                    commits: vec![],
+                    branch: "fusion/a".to_string(),
+                    test_results: None,
+                    diff_summary: None,
+                    unresolved_issues: vec![],
+                    confidence: Some(0.5),
+                    recommended_next_step: None,
+                },
+            )
+            .unwrap();
+
+        let resolver = Resolver::new(storage);
+        let err = resolver
+            .wait_for_candidates(
+                "resolver-session",
+                &["variant-a".to_string(), "variant-b".to_string()],
+                Duration::from_millis(10),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, super::ResolverError::Timeout));
+    }
+
+    #[test]
+    fn wait_for_candidates_returns_storage_errors() {
+        let temp = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+        storage.create_session_dir("resolver-session").unwrap();
+        let artifacts_dir = temp
+            .path()
+            .join("sessions")
+            .join("resolver-session")
+            .join("artifacts");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+        std::fs::write(artifacts_dir.join("variant-a.json"), "{not-json}").unwrap();
+
+        let resolver = Resolver::new(storage);
+        let err = resolver
+            .wait_for_candidates(
+                "resolver-session",
+                &["variant-a".to_string()],
+                Duration::from_millis(10),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, super::ResolverError::Storage(_)));
     }
 }

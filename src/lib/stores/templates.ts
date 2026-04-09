@@ -14,8 +14,18 @@ interface TemplateCatalog {
     role_packs: RolePack[];
 }
 
+function reconcileSelectedTemplate(nextTemplates: SessionTemplate[]) {
+    selectedTemplate.update(current => {
+        if (!current) {
+            return current;
+        }
+
+        return nextTemplates.find(template => template.id === current.id) ?? null;
+    });
+}
+
 function createTemplatesStore() {
-    const { subscribe, set, update } = writable<TemplatesState>({
+    const { subscribe, update } = writable<TemplatesState>({
         templates: [],
         rolePacks: [],
         loading: false,
@@ -32,12 +42,15 @@ function createTemplatesStore() {
                 if (!response.ok) throw new Error(`Failed to fetch templates: ${response.statusText}`);
                 const catalog: TemplateCatalog = await response.json();
                 
-                update(state => ({
-                    ...state,
-                    templates: catalog.templates,
-                    rolePacks: catalog.role_packs,
-                    loading: false
-                }));
+                update(state => {
+                    reconcileSelectedTemplate(catalog.templates);
+                    return {
+                        ...state,
+                        templates: catalog.templates,
+                        rolePacks: catalog.role_packs,
+                        loading: false
+                    };
+                });
             } catch (err) {
                 update(state => ({ ...state, loading: false, error: (err as Error).message }));
             }
@@ -74,11 +87,15 @@ function createTemplatesStore() {
                 });
                 if (!response.ok) throw new Error(`Failed to delete template: ${response.statusText}`);
 
-                update(state => ({
-                    ...state,
-                    templates: state.templates.filter(t => t.id !== id),
-                    loading: false
-                }));
+                update(state => {
+                    const nextTemplates = state.templates.filter(t => t.id !== id);
+                    reconcileSelectedTemplate(nextTemplates);
+                    return {
+                        ...state,
+                        templates: nextTemplates,
+                        loading: false
+                    };
+                });
             } catch (err) {
                 update(state => ({ ...state, loading: false, error: (err as Error).message }));
                 throw err;

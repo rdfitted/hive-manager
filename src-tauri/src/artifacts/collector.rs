@@ -25,10 +25,10 @@ impl ArtifactCollector {
             )));
         }
 
-        let branch = run_git(worktree_path, &["branch", "--show-current"]).unwrap_or_default();
-        let commits = run_git_lines(worktree_path, &["log", "--oneline", "-10"]);
-        let changed_files = run_git_lines(worktree_path, &["diff", "--name-only", "--", "."]);
-        let diff_summary = run_git(worktree_path, &["diff", "--stat", "--", "."]);
+        let branch = run_git(worktree_path, &["branch", "--show-current"])?.unwrap_or_default();
+        let commits = run_git_lines(worktree_path, &["log", "--oneline", "-10"])?;
+        let changed_files = run_git_lines(worktree_path, &["diff", "--name-only", "--", "."])?;
+        let diff_summary = run_git(worktree_path, &["diff", "--stat", "--", "."])?;
         let test_results = detect_test_results(worktree_path)?;
         let summary = Some(build_summary(&branch, &changed_files, &commits));
         let confidence = Some(estimate_confidence(&changed_files, &test_results));
@@ -70,36 +70,51 @@ impl Default for ArtifactCollector {
     }
 }
 
-fn run_git(worktree_path: &Path, args: &[&str]) -> Option<String> {
+fn run_git(worktree_path: &Path, args: &[&str]) -> Result<Option<String>, StorageError> {
     let output = Command::new("git")
         .args(args)
         .current_dir(worktree_path)
-        .output()
-        .ok()?;
+        .output()?;
 
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let command = format!("git {}", args.join(" "));
+        let message = if stderr.is_empty() {
+            format!(
+                "{} failed in {} with status {}",
+                command,
+                worktree_path.display(),
+                output.status
+            )
+        } else {
+            format!(
+                "{} failed in {}: {}",
+                command,
+                worktree_path.display(),
+                stderr
+            )
+        };
+        return Err(StorageError::InvalidPath(message));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if stdout.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(stdout)
+        Ok(Some(stdout))
     }
 }
 
-fn run_git_lines(worktree_path: &Path, args: &[&str]) -> Vec<String> {
-    run_git(worktree_path, args)
-        .map(|output| {
-            output
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+fn run_git_lines(worktree_path: &Path, args: &[&str]) -> Result<Vec<String>, StorageError> {
+    match run_git(worktree_path, args)? {
+        Some(output) => Ok(output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()),
+        None => Ok(vec![]),
+    }
 }
 
 fn detect_test_results(worktree_path: &Path) -> Result<Option<serde_json::Value>, StorageError> {
@@ -226,5 +241,14 @@ mod tests {
 
         let loaded = collector.load_artifact("session-a", "cell-a").unwrap();
         assert_eq!(loaded, Some(bundle));
+    }
+
+    #[test]
+    fn returns_error_for_non_repo_worktree() {
+        let dir = TempDir::new().unwrap();
+
+        let err = ArtifactCollector::collect_from_worktree(dir.path()).unwrap_err();
+
+        assert!(matches!(err, crate::storage::StorageError::InvalidPath(_)));
     }
 }
