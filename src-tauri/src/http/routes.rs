@@ -7,7 +7,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
 use crate::http::handlers::{
     agents, artifacts, cells, conversations, evaluator, events, health, heartbeats, inject,
-    learnings, planners, sessions, workers,
+    learnings, planners, resolver, sessions, templates, workers,
 };
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -36,6 +36,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/fusion/select-winner", post(sessions::select_fusion_winner))
         .route("/api/sessions/{id}/fusion/status", get(sessions::get_fusion_status))
         .route("/api/sessions/{id}/fusion/evaluation", get(sessions::get_fusion_evaluation))
+        .route("/api/sessions/{id}/resolver", get(resolver::get_resolver_output))
         .route("/api/sessions/{id}/stop", post(sessions::stop_session))
         .route("/api/sessions/{id}/close", post(sessions::close_session))
         // Worker routes
@@ -70,6 +71,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{id}/cells/{cid}/artifacts",
             get(artifacts::list_artifacts).post(artifacts::post_artifact),
         )
+        .route("/api/templates", get(templates::list_templates).post(templates::create_template))
+        .route("/api/templates/{id}", get(templates::get_template).delete(templates::delete_template))
         // Learning routes (legacy - work when single project active)
         .route("/api/learnings", get(learnings::list_learnings))
         .route("/api/learnings", post(learnings::submit_learning))

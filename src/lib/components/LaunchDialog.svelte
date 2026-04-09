@@ -1,8 +1,11 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
+  import TemplatePicker from './templates/TemplatePicker.svelte';
   import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
+  import type { SessionTemplate } from '$lib/types/domain';
+  import { templates, selectedTemplate } from '$lib/stores/templates';
 
   export let show: boolean = false;
 
@@ -14,9 +17,10 @@
     launchSolo: SoloLaunchConfig;
   }>();
 
-  type SessionMode = 'hive' | 'swarm' | 'fusion' | 'solo';
+  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'swarm';
+  type LaunchWorkerConfig = AgentConfig & { selectedRole: string; promptTemplateOverride?: string | null };
 
-  // Predefined roles with default CLIs, descriptions, and prompt templates
+  // ... (predefinedRoles same)
   // CLI defaults match backend default_roles in storage/mod.rs
   const predefinedRoles = [
     {
@@ -126,6 +130,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let prompt = '';
   let launching = false;
   let error = '';
+  let showPreview = false;
 
   const COLORS = [
     { name: 'Blue', value: '#7aa2f7' },
@@ -149,14 +154,20 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     label: undefined,
   };
 
-  function createDefaultConfig(roleType: string = 'general'): AgentConfig & { selectedRole: string } {
+  function createDefaultConfig(roleType: string = 'general'): LaunchWorkerConfig {
     const generalRole = predefinedRoles.find((r) => r.type === 'general')!;
     const role = predefinedRoles.find((r) => r.type === roleType) ?? generalRole;
-    return { cli: role.cli, flags: [], label: undefined, selectedRole: roleType };
+    return {
+      cli: role.cli,
+      flags: [],
+      label: undefined,
+      selectedRole: roleType,
+      promptTemplateOverride: role.promptTemplate || null,
+    };
   }
 
   // Hive workers with roles - preset team of 6
-  let hiveWorkers: (AgentConfig & { selectedRole: string })[] = [
+  let hiveWorkers: LaunchWorkerConfig[] = [
     createDefaultConfig('backend'),
     createDefaultConfig('frontend'),
     createDefaultConfig('coherence'),
@@ -168,7 +179,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   // Simplified Swarm config - same config for all planners
   let plannerCount = 2;
   let plannerConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
-  let workersPerPlanner: (AgentConfig & { selectedRole: string })[] = [
+  let workersPerPlanner: LaunchWorkerConfig[] = [
     createDefaultConfig('backend'),
     createDefaultConfig('frontend'),
     createDefaultConfig('coherence'),
@@ -192,6 +203,41 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     cli: v.cli, model: v.model, flags: [], label: v.name,
   }));
   let judgeAgentConfig: AgentConfig = { cli: judgeConfig.cli, model: judgeConfig.model, flags: [], label: 'Fusion Judge' };
+
+  function applyTemplate(template: SessionTemplate | null) {
+    if (!template) return;
+    
+    sessionName = template.name;
+    mode = template.mode as SessionMode;
+    
+    if (template.mode === 'hive') {
+      hiveWorkers = template.cells.map((c) => ({
+        ...createDefaultConfig(c.role),
+        cli: c.cli,
+        model: c.model,
+        promptTemplateOverride: c.prompt_template,
+      }));
+    } else if (template.mode === 'fusion') {
+      variantCount = template.cells.length;
+      fusionVariants = template.cells.map((c, i: number) => ({
+        name: `Variant ${String.fromCharCode(65 + i)}`,
+        cli: c.cli,
+        model: c.model,
+        flags: [],
+      }));
+      variantAgentConfigs = fusionVariants.map(v => ({
+        cli: v.cli, model: v.model, flags: [], label: v.name,
+      }));
+    }
+    
+    // Switch to the actual mode after applying
+    // mode = template.mode as SessionMode; // already set above
+  }
+
+  $: if ($selectedTemplate) {
+    applyTemplate($selectedTemplate);
+    selectedTemplate.set(null); // Clear after applying
+  }
 
   function handleVariantConfigChange(index: number, detail: AgentConfig) {
     variantAgentConfigs[index] = detail;
@@ -229,13 +275,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     }
   }
 
-  function buildWorkerRole(roleType: string): WorkerRole {
+  function buildWorkerRole(roleType: string, promptTemplateOverride?: string | null): WorkerRole {
     const role = predefinedRoles.find(r => r.type === roleType) || predefinedRoles.find(r => r.type === 'general')!;
     return {
       role_type: role.type,
       label: role.label,
       default_cli: role.cli,
-      prompt_template: role.promptTemplate || null,
+      prompt_template: promptTemplateOverride ?? role.promptTemplate ?? null,
     };
   }
 
@@ -313,7 +359,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           cli: w.cli,
           flags: w.flags,
           label: w.label,
-          role: buildWorkerRole(w.selectedRole),
+          role: buildWorkerRole(w.selectedRole, w.promptTemplateOverride),
         }));
 
         const config: HiveLaunchConfig = {
@@ -336,7 +382,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           cli: w.cli,
           flags: w.flags,
           label: w.label,
-          role: buildWorkerRole(w.selectedRole),
+          role: buildWorkerRole(w.selectedRole, w.promptTemplateOverride),
         }));
 
         const config: SwarmLaunchConfig = {
@@ -423,19 +469,19 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
       <div class="mode-tabs">
         <button
           class="mode-tab"
+          class:active={mode === 'templates'}
+          on:click={() => (mode = 'templates')}
+          type="button"
+        >
+          Templates
+        </button>
+        <button
+          class="mode-tab"
           class:active={mode === 'hive'}
           on:click={() => (mode = 'hive')}
           type="button"
         >
           Hive
-        </button>
-        <button
-          class="mode-tab"
-          class:active={mode === 'swarm'}
-          on:click={() => (mode = 'swarm')}
-          type="button"
-        >
-          Swarm
         </button>
         <button
           class="mode-tab"
@@ -453,9 +499,23 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         >
           Solo
         </button>
+        <button
+          class="mode-tab legacy"
+          class:active={mode === 'swarm'}
+          on:click={() => (mode = 'swarm')}
+          type="button"
+        >
+          Swarm (Legacy)
+        </button>
       </div>
 
       <form on:submit={(e) => { e.preventDefault(); handleSubmit(false); }}>
+        {#if mode === 'templates'}
+          <div class="form-section">
+            <TemplatePicker />
+          </div>
+        {/if}
+
         <div class="form-row">
           <div class="form-group flex-2">
             <label for="sessionName">Session Name (optional)</label>
@@ -767,6 +827,50 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <div class="error-message">{error}</div>
         {/if}
 
+        <div class="launch-preview-section">
+          <button type="button" class="preview-toggle" on:click={() => showPreview = !showPreview}>
+            <span class="icon">{showPreview ? '▼' : '▶'}</span>
+            {showPreview ? 'Hide' : 'Show'} Launch Preview & Topology
+          </button>
+          
+          {#if showPreview}
+            <div class="preview-content">
+              <div class="topology-viz">
+                <div class="node queen">
+                  <span class="node-icon">♕</span>
+                  <span class="node-label">Queen</span>
+                  <span class="node-cli">{queenConfig.cli}</span>
+                </div>
+                
+                <div class="connector"></div>
+                
+                <div class="worker-nodes">
+                  {#if mode === 'hive'}
+                    {#each hiveWorkers as worker}
+                      <div class="node worker">
+                        <span class="node-label">{worker.selectedRole}</span>
+                        <span class="node-cli">{worker.cli}</span>
+                      </div>
+                    {/each}
+                  {:else if mode === 'fusion'}
+                    {#each activeFusionVariants as variant}
+                      <div class="node fusion">
+                        <span class="node-label">{variant.name}</span>
+                        <span class="node-cli">{variant.cli}</span>
+                      </div>
+                    {/each}
+                  {:else if mode === 'solo'}
+                    <div class="node solo">
+                      <span class="node-label">Solo</span>
+                      <span class="node-cli">{soloConfig.cli}</span>
+                    </div>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          {/if}
+        </div>
+
         <div class="dialog-actions">
           <button type="button" class="cancel-button" on:click={handleClose} disabled={launching}>
             Cancel
@@ -847,6 +951,15 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     background: var(--color-surface);
     color: var(--color-text);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+
+  .mode-tab.legacy {
+    opacity: 0.6;
+    font-style: italic;
+  }
+
+  .mode-tab.legacy.active {
+    opacity: 1;
   }
 
   .form-group {
@@ -1303,4 +1416,87 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     color: var(--color-text-muted);
     line-height: 1.4;
   }
+
+  .launch-preview-section {
+    margin-top: 20px;
+    border-top: 1px solid var(--color-border);
+    padding-top: 16px;
+  }
+
+  .preview-toggle {
+    background: transparent;
+    border: none;
+    color: var(--color-accent);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+  }
+
+  .preview-content {
+    margin-top: 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+    padding: 16px;
+  }
+
+  .topology-viz {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .node {
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 100px;
+  }
+
+  .node.queen {
+    border-color: var(--color-accent);
+    background: rgba(139, 92, 246, 0.1);
+  }
+
+  .node-icon {
+    font-size: 16px;
+    margin-bottom: 2px;
+  }
+
+  .node-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  .node-cli {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .connector {
+    width: 2px;
+    height: 16px;
+    background: var(--color-border);
+  }
+
+  .worker-nodes {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .node.worker { border-color: #3b82f6; }
+  .node.fusion { border-color: #10b981; }
+  .node.solo { border-color: #f59e0b; }
 </style>

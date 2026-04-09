@@ -2,6 +2,8 @@
   import { activeAgents, activeSession, sessions, serdeEnumVariantName } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import Terminal from './Terminal.svelte';
+  import FusionComparisonView from './fusion/FusionComparisonView.svelte';
+  import ResolverPanel from './fusion/ResolverPanel.svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   let fusionAgents = $derived($activeAgents.filter(a => typeof a.role === 'object' && 'Fusion' in a.role));
@@ -11,9 +13,13 @@
   let judgeReport = $derived($coordination.fusionState.judgeReport);
   let evaluationReady = $derived($coordination.fusionState.evaluationReady);
 
+  let viewMode = $state<'terminals' | 'comparison'>('terminals');
   let applyingWinner = $state<string | null>(null);
   let showCleanupConfirm = $state(false);
   let error = $state<string | null>(null);
+
+  let isResolvingOrCompleted = $derived($activeSession?.state === 'Completed' || $activeSession?.state === 'Running' && evaluationReady);
+  // Note: The new SessionStatus in domain.ts includes 'resolving', but existing SessionState uses 'Running' + coordination state.
 
   async function handleApplyWinner(variantName: string) {
     if (!$activeSession) return;
@@ -49,58 +55,89 @@
 </script>
 
 <div class="fusion-panel">
-  {#if queenAgent}
-    <div class="orchestrator-section">
-      <div class="orchestrator-header">
-        <span class="icon">♕</span>
-        <h3>Fusion Queen</h3>
-        <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
+  <div class="panel-controls">
+    <div class="view-tabs">
+      <button class="tab-button" class:active={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
+        <span class="icon">⌨️</span> Terminals
+      </button>
+      <button class="tab-button" class:active={viewMode === 'comparison'} onclick={() => viewMode = 'comparison'}>
+        <span class="icon">📊</span> Comparison
+      </button>
+    </div>
+  </div>
+
+  {#if viewMode === 'terminals'}
+    {#if queenAgent}
+      <div class="orchestrator-section">
+        <div class="orchestrator-header">
+          <span class="icon">♕</span>
+          <h3>Fusion Queen</h3>
+          <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
+        </div>
+        <div class="orchestrator-terminal">
+          <Terminal agentId={queenAgent.id} isFocused={true} />
+        </div>
       </div>
-      <div class="orchestrator-terminal">
-        <Terminal agentId={queenAgent.id} isFocused={true} />
+    {/if}
+
+    <div class="variants-grid" class:has-report={evaluationReady}>
+      {#each fusionAgents as agent (agent.id)}
+        {@const variantName = typeof agent.role === 'object' && 'Fusion' in agent.role ? agent.role.Fusion.variant : ''}
+        {@const status = getVariantStatus(variantName)}
+        <div class="variant-card">
+          <div class="variant-header">
+            <span class="variant-name">{variantName}</span>
+            <span class="status-badge" class:running={status === 'Running'} class:completed={status === 'Completed'} class:failed={status === 'Failed'}>
+              {status}
+            </span>
+          </div>
+          <div class="terminal-container">
+            <Terminal agentId={agent.id} isFocused={true} />
+          </div>
+          {#if evaluationReady}
+            <div class="variant-actions">
+              <button 
+                class="apply-button" 
+                onclick={() => handleApplyWinner(variantName)}
+                disabled={applyingWinner !== null}
+              >
+                {applyingWinner === variantName ? 'Applying...' : 'Apply as Winner'}
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+
+    {#if judgeAgent}
+      <div class="orchestrator-section">
+        <div class="orchestrator-header">
+          <span class="icon">⚖️</span>
+          <h3>Judge</h3>
+          <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
+        </div>
+        <div class="orchestrator-terminal">
+          <Terminal agentId={judgeAgent.id} isFocused={true} />
+        </div>
       </div>
+    {/if}
+  {:else}
+    <div class="comparison-container">
+      {#if $activeSession}
+        <FusionComparisonView sessionId={$activeSession.id} />
+      {/if}
     </div>
   {/if}
 
-  <div class="variants-grid" class:has-report={evaluationReady}>
-    {#each fusionAgents as agent (agent.id)}
-      {@const variantName = typeof agent.role === 'object' && 'Fusion' in agent.role ? agent.role.Fusion.variant : ''}
-      {@const status = getVariantStatus(variantName)}
-      <div class="variant-card">
-        <div class="variant-header">
-          <span class="variant-name">{variantName}</span>
-          <span class="status-badge" class:running={status === 'Running'} class:completed={status === 'Completed'} class:failed={status === 'Failed'}>
-            {status}
-          </span>
-        </div>
-        <div class="terminal-container">
-          <Terminal agentId={agent.id} isFocused={true} />
-        </div>
-        {#if evaluationReady}
-          <div class="variant-actions">
-            <button 
-              class="apply-button" 
-              onclick={() => handleApplyWinner(variantName)}
-              disabled={applyingWinner !== null}
-            >
-              {applyingWinner === variantName ? 'Applying...' : 'Apply as Winner'}
-            </button>
-          </div>
-        {/if}
+  {#if isResolvingOrCompleted}
+    <div class="resolver-section">
+      <div class="section-header">
+        <span class="icon">🔍</span>
+        <h3>Resolver Analysis</h3>
       </div>
-    {/each}
-  </div>
-
-  {#if judgeAgent}
-    <div class="orchestrator-section">
-      <div class="orchestrator-header">
-        <span class="icon">⚖️</span>
-        <h3>Judge</h3>
-        <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
-      </div>
-      <div class="orchestrator-terminal">
-        <Terminal agentId={judgeAgent.id} isFocused={true} />
-      </div>
+      {#if $activeSession}
+        <ResolverPanel sessionId={$activeSession.id} />
+      {/if}
     </div>
   {/if}
 
@@ -142,6 +179,60 @@
     height: 100%;
     padding: 16px;
     overflow-y: auto;
+  }
+
+  .panel-controls {
+    display: flex;
+    justify-content: flex-start;
+    margin-bottom: 4px;
+  }
+
+  .view-tabs {
+    display: flex;
+    background: var(--color-bg);
+    padding: 4px;
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    gap: 4px;
+  }
+
+  .tab-button {
+    padding: 6px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+  }
+
+  .tab-button:hover {
+    color: var(--color-text);
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .tab-button.active {
+    background: var(--color-surface);
+    color: var(--color-accent);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  }
+
+  .comparison-container {
+    flex: 1;
+    min-height: 500px;
+  }
+
+  .resolver-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-primary-muted);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
   }
 
   .orchestrator-section {

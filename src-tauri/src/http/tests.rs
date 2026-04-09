@@ -4,6 +4,7 @@ use axum::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::TempDir;
 use tower::ServiceExt;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
@@ -2749,6 +2750,24 @@ async fn test_conversation_concurrent_appends() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+struct TestPathCleanup {
+    paths: Vec<PathBuf>,
+}
+
+impl TestPathCleanup {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
+    }
+}
+
+impl Drop for TestPathCleanup {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_list_cells_returns_primary_cell_for_hive_session() {
     let (app, controller) = setup_test_app_with_controller().await;
@@ -2912,6 +2931,70 @@ async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
 }
 
 #[tokio::test]
+async fn test_list_artifacts_uses_persisted_session_fallback() {
+    let app = setup_test_app().await;
+    let session_id = format!("persisted-artifacts-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
+
+    storage
+        .save_session(&PersistedSession {
+            id: session_id.clone(),
+            name: Some("Persisted Session".to_string()),
+            color: None,
+            session_type: SessionTypeInfo::Hive { worker_count: 1 },
+            project_path: temp_dir.path().to_string_lossy().to_string(),
+            created_at: chrono::Utc::now(),
+            agents: vec![],
+            state: "Completed".to_string(),
+            default_cli: "claude".to_string(),
+            default_model: Some("opus-4-6".to_string()),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: String::new(),
+        })
+        .unwrap();
+    storage
+        .save_artifact(
+            &session_id,
+            "primary",
+            &crate::domain::ArtifactBundle {
+                summary: Some("Persisted artifact".to_string()),
+                changed_files: vec!["src/main.rs".to_string()],
+                commits: vec!["abc123 persisted".to_string()],
+                branch: "feature/persisted".to_string(),
+                test_results: None,
+                diff_summary: None,
+                unresolved_issues: vec![],
+                confidence: None,
+                recommended_next_step: None,
+            },
+        )
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let artifacts = response_json.as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(
+        artifacts[0].get("branch").unwrap().as_str().unwrap(),
+        "feature/persisted"
+    );
+}
+
+#[tokio::test]
 async fn test_list_artifacts_rejects_invalid_cell_id() {
     let app = setup_test_app().await;
 
@@ -2926,6 +3009,275 @@ async fn test_list_artifacts_rejects_invalid_cell_id() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_post_artifact_round_trip_and_cell_projection() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("artifact-roundtrip-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session(
+            &session_id,
+            temp_dir.path().to_str().unwrap(),
+        ));
+
+    let artifact = serde_json::json!({
+        "artifact": {
+            "summary": "Primary cell summary",
+            "changed_files": ["src/main.rs"],
+            "commits": ["abc123 add resolver endpoint"],
+            "branch": "feature/artifacts",
+            "test_results": { "passed": 3, "failed": 0 },
+            "diff_summary": "1 file changed",
+            "unresolved_issues": [],
+            "confidence": 0.82,
+            "recommended_next_step": "Open comparison view"
+        }
+    });
+
+    let post_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&artifact).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(post_response.status(), StatusCode::CREATED);
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let artifacts = response_json.as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].get("branch").unwrap().as_str().unwrap(), "feature/artifacts");
+
+    let cell_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/cells/primary", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(cell_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(cell_response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json
+            .get("artifacts")
+            .unwrap()
+            .get("summary")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "Primary cell summary"
+    );
+}
+
+#[tokio::test]
+async fn test_get_resolver_output_endpoint_returns_persisted_output() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("resolver-output-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session(
+            &session_id,
+            temp_dir.path().to_str().unwrap(),
+        ));
+
+    storage
+        .save_resolver_output(
+            &session_id,
+            &crate::domain::ResolverOutput {
+                selected_candidate: "variant-b".to_string(),
+                rationale: "Better test coverage".to_string(),
+                tradeoffs: vec!["More files changed".to_string()],
+                hybrid_integration_plan: None,
+                final_recommendation: Some("Merge variant-b".to_string()),
+            },
+        )
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/resolver", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json
+            .get("selected_candidate")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "variant-b"
+    );
+}
+
+#[tokio::test]
+async fn test_get_resolver_output_returns_internal_error_for_invalid_persisted_session() {
+    let app = setup_test_app().await;
+    let session_id = format!("resolver-invalid-session-{}", uuid::Uuid::new_v4());
+    let storage = SessionStorage::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
+
+    std::fs::create_dir_all(storage.session_dir(&session_id)).unwrap();
+    std::fs::write(
+        storage.session_dir(&session_id).join("session.json"),
+        "{ invalid json",
+    )
+    .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/resolver", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_template_crud_endpoints() {
+    let app = setup_test_app().await;
+    let template_id = format!("user-template-{}", uuid::Uuid::new_v4().simple());
+
+    let template = serde_json::json!({
+        "id": template_id,
+        "name": "Custom Fusion",
+        "description": "User-defined template",
+        "mode": "fusion",
+        "cells": [
+            {
+                "role": "candidate-a",
+                "cli": "codex",
+                "model": "gpt-5.4",
+                "prompt_template": "fusion-worker"
+            }
+        ],
+        "workspace_strategy": "isolated_cell",
+        "is_builtin": false
+    });
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/templates")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&template).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/templates/{}", template_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/templates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(response_json
+        .get("templates")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.get("id").unwrap().as_str().unwrap() == template_id));
+    assert!(response_json
+        .get("role_packs")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len()
+        >= 4);
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/templates/{}", template_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+    let get_deleted_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/templates/{}", template_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_deleted_response.status(), StatusCode::NOT_FOUND);
+
+    let storage = SessionStorage::new().unwrap();
+    let _ = storage.delete_user_template(&template_id);
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 mod commands;
+pub mod artifacts;
 pub mod domain;
 pub mod adapters;
 pub mod runtime;

@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::coordination::CoordinationMessage;
+use crate::domain::{ArtifactBundle, ResolverOutput};
+use crate::templates::SessionTemplate;
 
 /// Generate a deterministic ID for legacy learnings that lack one.
 /// Uses UUID v5 (SHA-1 namespace hash) from concatenated fields so the same
@@ -201,6 +203,10 @@ impl SessionStorage {
     #[allow(dead_code)]
     pub fn templates_dir(&self) -> PathBuf {
         self.base_dir.join("templates")
+    }
+
+    pub fn user_templates_dir(&self) -> PathBuf {
+        self.templates_dir().join("sessions")
     }
 
     /// Get path to sessions directory
@@ -603,6 +609,22 @@ impl SessionStorage {
             .join(format!("{}.md", agent_id))
     }
 
+    fn artifact_dir(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("artifacts")
+    }
+
+    fn artifact_file_path(&self, session_id: &str, cell_id: &str) -> PathBuf {
+        self.artifact_dir(session_id).join(format!("{}.json", cell_id))
+    }
+
+    fn resolver_output_path(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("resolver_output.json")
+    }
+
+    fn user_template_path(&self, template_id: &str) -> PathBuf {
+        self.user_templates_dir().join(format!("{}.json", template_id))
+    }
+
     fn ai_docs_dir(project_path: &Path) -> PathBuf {
         project_path.join(".ai-docs")
     }
@@ -823,6 +845,132 @@ impl SessionStorage {
         let project_dna_file = lessons_dir.join("project-dna.md");
         fs::write(project_dna_file, content)?;
         Ok(())
+    }
+
+    pub fn save_artifact(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        artifact: &ArtifactBundle,
+    ) -> Result<(), StorageError> {
+        let artifact_dir = self.artifact_dir(session_id);
+        fs::create_dir_all(&artifact_dir)?;
+        self.atomic_write_json(&self.artifact_file_path(session_id, cell_id), artifact)
+    }
+
+    pub fn load_artifact(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+    ) -> Result<Option<ArtifactBundle>, StorageError> {
+        let path = self.artifact_file_path(session_id, cell_id);
+        self.read_optional_json(&path)
+    }
+
+    pub fn save_resolver_output(
+        &self,
+        session_id: &str,
+        output: &ResolverOutput,
+    ) -> Result<(), StorageError> {
+        let session_dir = self.session_dir(session_id);
+        fs::create_dir_all(&session_dir)?;
+        self.atomic_write_json(&self.resolver_output_path(session_id), output)
+    }
+
+    pub fn load_resolver_output(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ResolverOutput>, StorageError> {
+        self.read_optional_json(&self.resolver_output_path(session_id))
+    }
+
+    pub fn save_user_template(&self, template: &SessionTemplate) -> Result<(), StorageError> {
+        let templates_dir = self.user_templates_dir();
+        fs::create_dir_all(&templates_dir)?;
+        self.atomic_write_json(&self.user_template_path(&template.id), template)
+    }
+
+    pub fn load_user_template(
+        &self,
+        template_id: &str,
+    ) -> Result<Option<SessionTemplate>, StorageError> {
+        self.read_optional_json(&self.user_template_path(template_id))
+    }
+
+    pub fn list_user_templates(&self) -> Result<Vec<SessionTemplate>, StorageError> {
+        let templates_dir = self.user_templates_dir();
+        if !templates_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut templates = Vec::new();
+        for entry in fs::read_dir(templates_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+
+            let template: SessionTemplate = serde_json::from_str(&fs::read_to_string(entry.path())?)?;
+            templates.push(template);
+        }
+
+        templates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        Ok(templates)
+    }
+
+    pub fn delete_user_template(&self, template_id: &str) -> Result<bool, StorageError> {
+        let path = self.user_template_path(template_id);
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        fs::remove_file(path)?;
+        Ok(true)
+    }
+
+    pub fn read_latest_conversation_message(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let path = self.conversation_file_path(session_id, agent_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(path)?;
+        Ok(parse_conversation_messages(&content)
+            .into_iter()
+            .last()
+            .map(|message| message.content))
+    }
+
+    fn atomic_write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), StorageError> {
+        let parent = path.parent().ok_or_else(|| {
+            StorageError::InvalidPath(format!("No parent directory for {}", path.display()))
+        })?;
+        fs::create_dir_all(parent)?;
+
+        let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(StorageError::Io)?;
+        serde_json::to_writer_pretty(&mut temp, value)?;
+        temp.persist(path).map_err(|e| StorageError::Io(e.error))?;
+        Ok(())
+    }
+
+    fn read_optional_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &Path,
+    ) -> Result<Option<T>, StorageError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let value = serde_json::from_str(&fs::read_to_string(path)?)?;
+        Ok(Some(value))
     }
 }
 
