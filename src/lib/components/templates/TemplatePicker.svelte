@@ -93,6 +93,14 @@
         align-items: center;
     }
 
+    :global(.search-icon) {
+        position: absolute;
+        left: 12px;
+        color: var(--text-secondary);
+        opacity: 0.7;
+        pointer-events: none;
+    }
+
     .search-box input {
         width: 100%;
         padding: 8px 12px 8px 36px;

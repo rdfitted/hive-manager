@@ -41,10 +41,13 @@
     function schedulePoll() {
         clearPollTimeout();
         if (!sessionId) return;
-        pollTimeout = setTimeout(() => {
+        pollTimeout = setTimeout(async () => {
             if (sessionId) {
-                cells.fetchCells(sessionId);
-                schedulePoll();
+                try {
+                    await cells.fetchCells(sessionId);
+                } finally {
+                    schedulePoll();
+                }
             }
         }, 10000);
     }

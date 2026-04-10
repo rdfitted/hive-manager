@@ -552,10 +552,6 @@
     transition: transform 0.2s ease;
   }
 
-  .chevron.collapsed {
-    transform: rotate(-90deg);
-  }
-
   .empty-state {
     font-size: 12px;
     color: var(--text-secondary);

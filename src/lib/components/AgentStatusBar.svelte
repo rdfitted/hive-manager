@@ -67,7 +67,7 @@
         <span
           class="status-dot"
           class:pulse-error={$heartbeatStore.stalledAgents.has(agent.id)}
-          style="background-color: {getStatusColor(agent.id, statusStr)}"
+          style="background-color: {getStatusColor(agent.id, statusStr)}; color: {getStatusColor(agent.id, statusStr)}"
         ></span>
         <span class="agent-name">
           {agent.config?.label || getRoleName(agent.role)}

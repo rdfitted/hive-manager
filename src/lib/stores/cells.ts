@@ -27,7 +27,18 @@ function createCellsStore() {
         const current = get(sessions).activeSessionId;
         if (event.payload.session_id === current) {
             onExternalRefresh?.(event.payload.session_id);
-            void cells.fetchCells(event.payload.session_id);
+            if (event.payload.cells) {
+                update(state => ({
+                    ...state,
+                    cells: {
+                        ...state.cells,
+                        ...Object.fromEntries(event.payload.cells!.map(cell => [cell.id, cell])),
+                    },
+                    error: null,
+                }));
+            } else {
+                void cells.fetchCells(event.payload.session_id);
+            }
         }
     });
 
