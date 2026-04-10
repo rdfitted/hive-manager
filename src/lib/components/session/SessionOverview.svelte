@@ -29,24 +29,55 @@
                'Agent')) : '');
 
     let connectedSessionId: string | null = null;
+    let pollTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    function clearPollTimeout() {
+        if (pollTimeout) {
+            clearTimeout(pollTimeout);
+            pollTimeout = null;
+        }
+    }
+
+    function schedulePoll() {
+        clearPollTimeout();
+        if (!sessionId) return;
+        pollTimeout = setTimeout(() => {
+            if (sessionId) {
+                cells.fetchCells(sessionId);
+                schedulePoll();
+            }
+        }, 10000);
+    }
 
     $effect(() => {
         if (sessionId && sessionId !== connectedSessionId) {
             connectedSessionId = sessionId;
             cells.fetchCells(sessionId);
+            cells.setExternalRefreshHandler(() => {
+                schedulePoll();
+            });
+            schedulePoll();
             events.disconnect();
             events.connect(sessionId);
+        } else if (sessionId) {
+            cells.setExternalRefreshHandler(() => {
+                schedulePoll();
+            });
         }
     });
 
     $effect(() => {
         if (!sessionId && connectedSessionId) {
             connectedSessionId = null;
+            clearPollTimeout();
+            cells.setExternalRefreshHandler(null);
             events.disconnect();
         }
     });
 
     onDestroy(() => {
+        clearPollTimeout();
+        cells.setExternalRefreshHandler(null);
         events.disconnect();
     });
 
