@@ -49,23 +49,23 @@
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.1em;
-        color: #666;
+        color: var(--text-secondary);
         font-weight: 700;
     }
 
     .collapse-btn {
         background: transparent;
         border: 1px solid rgba(255, 255, 255, 0.1);
-        color: #888;
+        color: var(--text-secondary);
         font-size: 10px;
         padding: 2px 8px;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         cursor: pointer;
     }
 
     .collapse-btn:hover {
         background: rgba(255, 255, 255, 0.05);
-        color: #fff;
+        color: var(--text-primary);
     }
 
     .grid {
@@ -85,7 +85,7 @@
         grid-column: 1 / -1;
         text-align: center;
         padding: 40px;
-        color: #555;
+        color: var(--text-disabled);
         font-style: italic;
     }
 </style>

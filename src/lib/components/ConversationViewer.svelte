@@ -101,11 +101,11 @@
   }
 
   function getSenderColor(from: string): string {
-    if (from === 'queen') return '#c084fc';
-    if (from === 'system' || from === 'SYSTEM') return '#9ca3af';
-    if (from === 'operator') return '#7aa2f7';
-    if (from.startsWith('worker')) return '#22d3ee';
-    return '#c0caf5';
+    if (from === 'queen') return 'var(--accent-cyan)';
+    if (from === 'system' || from === 'SYSTEM') return 'var(--text-secondary)';
+    if (from === 'operator') return 'var(--accent-cyan)';
+    if (from.startsWith('worker')) return 'var(--accent-cyan)';
+    return 'var(--text-primary)';
   }
 
   function formatTimestamp(ts: string): string {
@@ -306,7 +306,7 @@
   }
 
   .msg-time {
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     flex-shrink: 0;
   }

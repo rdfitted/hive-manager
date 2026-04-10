@@ -26,7 +26,7 @@
         align-items: center;
         gap: 6px;
         padding: 2px 8px;
-        border-radius: 12px;
+        border-radius: var(--radius-sm);
         font-size: 10px;
         font-weight: 700;
         text-transform: uppercase;
@@ -35,19 +35,19 @@
 
     .test-badge.pass {
         background: rgba(16, 185, 129, 0.1);
-        color: #10b981;
+        color: var(--status-success);
         border: 1px solid rgba(16, 185, 129, 0.2);
     }
 
     .test-badge.fail {
         background: rgba(239, 68, 68, 0.1);
-        color: #ef4444;
+        color: var(--status-error);
         border: 1px solid rgba(239, 68, 68, 0.2);
     }
 
     .test-badge.unknown {
         background: rgba(255, 255, 255, 0.05);
-        color: #666;
+        color: var(--text-secondary);
         border: 1px solid rgba(255, 255, 255, 0.1);
     }
 

@@ -109,9 +109,9 @@
 
 <style>
   .qa-feedback-panel {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     margin-bottom: 12px;
     overflow: hidden;
   }
@@ -122,7 +122,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 10px 14px;
-    background: var(--color-bg);
+    background: var(--bg-void);
     border: none;
     cursor: pointer;
     text-align: left;
@@ -140,31 +140,31 @@
   }
 
   .status-icon.passed {
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .status-icon.failed {
-    color: var(--color-error);
+    color: var(--status-error);
   }
 
   h3 {
     margin: 0;
     font-size: 13px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .iteration-badge {
     font-size: 10px;
     padding: 2px 6px;
-    background: var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text-muted);
+    background: var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
   }
 
   .chevron {
     font-size: 10px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   .panel-content {
@@ -194,7 +194,7 @@
 
   .criterion-item {
     padding: 10px;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     background: rgba(247, 118, 142, 0.05);
     border: 1px solid rgba(247, 118, 142, 0.1);
   }

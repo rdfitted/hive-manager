@@ -82,7 +82,7 @@
     .output-card {
         background: rgba(59, 130, 246, 0.05);
         border: 1px solid rgba(59, 130, 246, 0.2);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         padding: 20px;
         display: flex;
         flex-direction: column;
@@ -101,21 +101,21 @@
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.1em;
-        color: #3b82f6;
+        color: var(--accent-cyan);
         font-weight: 700;
     }
 
     .selected-badge {
         font-size: 13px;
-        color: #888;
+        color: var(--text-secondary);
     }
 
     .candidate-name {
         font-weight: 700;
-        color: #fff;
+        color: var(--text-primary);
         background: rgba(16, 185, 129, 0.2);
         padding: 2px 8px;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         margin-left: 4px;
     }
 
@@ -124,20 +124,20 @@
         font-size: 12px;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: #555;
+        color: var(--text-secondary);
     }
 
     .rationale {
         margin: 0;
         font-size: 14px;
-        color: #ccc;
+        color: var(--text-primary);
         line-height: 1.6;
     }
 
     .tradeoffs {
         margin: 0;
         padding-left: 20px;
-        color: #bbb;
+        color: var(--text-secondary);
         font-size: 13px;
         display: flex;
         flex-direction: column;
@@ -147,23 +147,23 @@
     .hybrid {
         background: rgba(0, 0, 0, 0.2);
         padding: 12px;
-        border-radius: 6px;
-        border-left: 3px solid #f59e0b;
+        border-radius: var(--radius-sm);
+        border-left: 3px solid var(--status-warning);
     }
 
     .plan-content {
         font-size: 13px;
-        color: #aaa;
+        color: var(--text-secondary);
         line-height: 1.5;
         white-space: pre-wrap;
     }
 
     .recommendation {
         margin-top: 12px;
-        background: #3b82f6;
-        color: #fff;
+        background: var(--accent-cyan);
+        color: var(--text-primary);
         padding: 16px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
     }
 
@@ -186,7 +186,7 @@
         align-items: center;
         justify-content: center;
         padding: 60px 20px;
-        color: #666;
+        color: var(--text-secondary);
         text-align: center;
         gap: 16px;
         max-width: 400px;
@@ -197,10 +197,10 @@
         margin: 0 auto;
         max-width: 480px;
         padding: 14px 16px;
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         background: rgba(239, 68, 68, 0.12);
         border: 1px solid rgba(239, 68, 68, 0.3);
-        color: #fca5a5;
+        color: var(--status-error);
         text-align: center;
     }
 
@@ -216,7 +216,7 @@
         width: 32px;
         height: 32px;
         border: 2px solid rgba(255, 255, 255, 0.1);
-        border-top-color: #3b82f6;
+        border-top-color: var(--accent-cyan);
         border-radius: 50%;
         animation: spin 1s linear infinite;
     }

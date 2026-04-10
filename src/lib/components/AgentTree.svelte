@@ -55,7 +55,7 @@
     margin: 0;
     padding: 12px;
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     text-align: center;
   }
 </style>

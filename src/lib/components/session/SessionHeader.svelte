@@ -34,8 +34,8 @@
 
 <style>
     .session-header {
-        background: var(--color-bg);
-        border-bottom: 1px solid var(--color-border);
+        background: var(--bg-void);
+        border-bottom: 1px solid var(--border-structural);
         padding: 12px 20px;
         display: flex;
         justify-content: space-between;
@@ -60,7 +60,7 @@
         margin: 0;
         font-size: 18px;
         font-weight: 600;
-        color: var(--color-text);
+        color: var(--text-primary);
     }
 
     .mode-badge {
@@ -68,31 +68,31 @@
         font-weight: 800;
         text-transform: uppercase;
         padding: 2px 6px;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         letter-spacing: 0.1em;
     }
 
-    .mode-badge.hive { background: var(--color-warning); color: #000; }
-    .mode-badge.fusion { background: #818cf8; color: #fff; }
-    .mode-badge.swarm { background: var(--color-success); color: #000; }
-    .mode-badge.solo { background: #f472b6; color: #000; }
+    .mode-badge.hive { background: var(--status-warning); color: var(--bg-void); }
+    .mode-badge.fusion { background: var(--accent-cyan); color: var(--bg-void); }
+    .mode-badge.swarm { background: var(--status-success); color: var(--bg-void); }
+    .mode-badge.solo { background: var(--status-error); color: var(--bg-void); }
 
     .status-badge {
         font-size: 10px;
         padding: 2px 8px;
         border-radius: 999px;
-        background: var(--color-surface);
-        color: var(--color-text-muted);
-        border: 1px solid var(--color-border);
+        background: var(--bg-surface);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-structural);
         text-transform: capitalize;
     }
 
-    .status-badge.running { color: var(--color-success); border-color: var(--color-success); background: rgba(16, 185, 129, 0.05); }
+    .status-badge.running { color: var(--status-success); border-color: var(--status-success); background: rgba(16, 185, 129, 0.05); }
 
     .objective {
         margin: 0;
         font-size: 12px;
-        color: var(--color-text-muted);
+        color: var(--text-secondary);
         max-width: 800px;
         line-height: 1.4;
     }
@@ -112,19 +112,19 @@
     .stat .label {
         font-size: 9px;
         text-transform: uppercase;
-        color: var(--color-text-muted);
+        color: var(--text-secondary);
         font-weight: 700;
         letter-spacing: 0.05em;
     }
 
     .stat .value {
         font-size: 11px;
-        color: var(--color-text);
-        font-family: var(--font-mono, monospace);
+        color: var(--text-primary);
+        font-family: var(--font-mono);
     }
 
     .placeholder {
-        color: #444;
+        color: var(--text-disabled);
         font-style: italic;
         padding: 8px 0;
     }

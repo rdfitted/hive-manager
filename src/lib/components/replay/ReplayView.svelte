@@ -84,7 +84,7 @@
         background: var(--color-bg);
         height: 100%;
         overflow-y: auto;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: var(--font-mono);
     }
 
     .state-header {
@@ -122,7 +122,7 @@
         padding: 6px 12px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         font-size: 0.85rem;
     }
 

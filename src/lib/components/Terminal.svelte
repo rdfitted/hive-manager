@@ -622,7 +622,7 @@
   }
 
   .drop-title {
-    color: #7dcfff;
+    color: var(--accent-cyan);
     font-size: 13px;
     font-weight: 700;
     letter-spacing: 0.04em;

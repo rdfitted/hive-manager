@@ -74,7 +74,7 @@
     .candidate-card {
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
         min-width: 320px;
@@ -111,17 +111,17 @@
         text-transform: uppercase;
         letter-spacing: 0.05em;
         font-weight: 700;
-        color: #888;
+        color: var(--text-secondary);
         background: rgba(0, 0, 0, 0.3);
         padding: 2px 8px;
-        border-radius: 10px;
+        border-radius: var(--radius-sm);
     }
 
     .type-tag {
         font-size: 9px;
         text-transform: uppercase;
         letter-spacing: 0.1em;
-        color: #555;
+        color: var(--text-disabled);
         font-weight: 800;
     }
 
@@ -129,7 +129,7 @@
         margin: 0;
         font-size: 18px;
         font-weight: 600;
-        color: #fff;
+        color: var(--text-primary);
     }
 
     .branch-info {
@@ -137,7 +137,7 @@
         align-items: center;
         gap: 6px;
         font-size: 11px;
-        color: #666;
+        color: var(--text-secondary);
         font-family: var(--font-mono);
     }
 
@@ -155,7 +155,7 @@
         align-items: center;
         justify-content: center;
         padding: 40px 20px;
-        color: #555;
+        color: var(--text-disabled);
         font-size: 13px;
         text-align: center;
         gap: 12px;
@@ -165,7 +165,7 @@
         width: 24px;
         height: 24px;
         border: 2px solid rgba(255, 255, 255, 0.1);
-        border-top-color: #3b82f6;
+        border-top-color: var(--accent-cyan);
         border-radius: 50%;
         animation: spin 1s linear infinite;
     }

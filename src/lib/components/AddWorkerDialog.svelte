@@ -243,9 +243,9 @@
   }
 
   .dialog {
-    background: var(--bg-secondary, #1a1b26);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 12px;
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     width: 480px;
     max-width: 90vw;
     max-height: 90vh;
@@ -257,20 +257,20 @@
     justify-content: space-between;
     align-items: center;
     padding: 16px 20px;
-    border-bottom: 1px solid var(--border-color, #414868);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .dialog-header h2 {
     margin: 0;
     font-size: 18px;
     font-weight: 600;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .close-btn {
     background: none;
     border: none;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     font-size: 24px;
     cursor: pointer;
     padding: 0;
@@ -278,7 +278,7 @@
   }
 
   .close-btn:hover {
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   form {
@@ -294,7 +294,7 @@
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     margin-bottom: 8px;
   }
 
@@ -310,7 +310,7 @@
     display: block;
     font-size: 11px;
     font-weight: 500;
-    color: var(--text-tertiary, #444b6a);
+    color: var(--text-disabled);
     margin-bottom: 8px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -327,33 +327,33 @@
     flex-direction: column;
     align-items: flex-start;
     padding: 12px;
-    background: var(--bg-tertiary, #24283b);
+    background: var(--bg-surface);
     border: 2px solid transparent;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     text-align: left;
     transition: border-color 0.15s;
   }
 
   .role-option:hover {
-    border-color: var(--border-color, #414868);
+    border-color: var(--border-structural);
   }
 
   .role-option.selected {
-    border-color: var(--accent-color, #7aa2f7);
-    background: rgba(122, 162, 247, 0.1);
+    border-color: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
 
   .role-name {
     font-size: 14px;
     font-weight: 600;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
     margin-bottom: 4px;
   }
 
   .role-desc {
     font-size: 11px;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
   }
 
   .custom-role-input,
@@ -361,10 +361,10 @@
   .textarea-input {
     width: 100%;
     padding: 10px 12px;
-    background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 6px;
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     font-size: 14px;
   }
 
@@ -372,7 +372,7 @@
   .select-input:focus,
   .textarea-input:focus {
     outline: none;
-    border-color: var(--accent-color, #7aa2f7);
+    border-color: var(--accent-cyan);
   }
 
   .custom-role-input {
@@ -387,16 +387,16 @@
 
   .cli-description {
     font-size: 11px;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     margin-top: 4px;
     display: block;
   }
 
   .error-message {
     padding: 10px 12px;
-    background: var(--error-bg, #3b2030);
-    color: var(--error-text, #f7768e);
-    border-radius: 6px;
+    background: var(--bg-elevated);
+    color: var(--status-error);
+    border-radius: var(--radius-sm);
     font-size: 13px;
     margin-bottom: 16px;
   }
@@ -411,7 +411,7 @@
   .btn-primary,
   .btn-secondary {
     padding: 10px 20px;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     font-size: 14px;
     font-weight: 500;
     cursor: pointer;
@@ -420,7 +420,7 @@
   }
 
   .btn-primary {
-    background: var(--accent-color, #7aa2f7);
+    background: var(--accent-cyan);
     color: white;
   }
 
@@ -434,12 +434,12 @@
   }
 
   .btn-secondary {
-    background: var(--bg-tertiary, #24283b);
-    color: var(--text-primary, #c0caf5);
-    border: 1px solid var(--border-color, #414868);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-structural);
   }
 
   .btn-secondary:hover {
-    background: var(--bg-hover, #292e42);
+    background: var(--bg-elevated);
   }
 </style>

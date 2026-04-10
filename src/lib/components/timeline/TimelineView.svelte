@@ -68,7 +68,7 @@
         padding: 8px 12px;
         background: var(--color-surface-hover);
         border-bottom: 1px solid var(--color-border);
-        font-family: 'JetBrains Mono', monospace;
+        font-family: var(--font-mono);
         font-size: 0.7rem;
         font-weight: bold;
         color: var(--color-text-muted);
@@ -100,7 +100,7 @@
         background: var(--color-accent);
         color: var(--color-bg);
         border: none;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         cursor: pointer;
         font-weight: 600;
         transition: opacity 0.2s;

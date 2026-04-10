@@ -157,25 +157,25 @@
     .header h3 {
         margin: 0;
         font-size: 16px;
-        color: #fff;
+        color: var(--text-primary);
     }
 
     .info-badge {
         margin-top: 8px;
         font-size: 11px;
-        color: #a78bfa;
+        color: var(--accent-cyan);
         background: rgba(139, 92, 246, 0.1);
         padding: 6px 10px;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         border: 1px solid rgba(139, 92, 246, 0.2);
     }
 
     .error-banner {
         padding: 10px 12px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         background: rgba(239, 68, 68, 0.12);
         border: 1px solid rgba(239, 68, 68, 0.35);
-        color: #fca5a5;
+        color: var(--status-error);
         font-size: 12px;
     }
 
@@ -200,22 +200,22 @@
     label {
         font-size: 12px;
         font-weight: 600;
-        color: #888;
+        color: var(--text-secondary);
     }
 
     input, textarea, select {
         background: rgba(0, 0, 0, 0.3);
         border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         padding: 8px 12px;
-        color: #fff;
+        color: var(--text-primary);
         font-size: 14px;
         font-family: inherit;
     }
 
     input:focus, textarea:focus, select:focus {
         outline: none;
-        border-color: var(--color-accent);
+        border-color: var(--accent-cyan);
     }
 
     .cells-section {
@@ -233,15 +233,15 @@
     .section-header h4 {
         margin: 0;
         font-size: 14px;
-        color: #ccc;
+        color: var(--text-primary);
     }
 
     .add-btn {
         padding: 4px 12px;
         background: rgba(139, 92, 246, 0.1);
         border: 1px solid rgba(139, 92, 246, 0.3);
-        border-radius: 4px;
-        color: #a78bfa;
+        border-radius: var(--radius-sm);
+        color: var(--accent-cyan);
         font-size: 12px;
         cursor: pointer;
     }
@@ -258,7 +258,7 @@
     .cell-editor-card {
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         padding: 12px;
         display: flex;
         flex-direction: column;
@@ -275,12 +275,12 @@
         font-size: 11px;
         font-weight: 800;
         text-transform: uppercase;
-        color: #555;
+        color: var(--text-disabled);
     }
 
     .remove-btn {
         font-size: 11px;
-        color: #ef4444;
+        color: var(--status-error);
         background: transparent;
         border: none;
         cursor: pointer;
@@ -289,7 +289,7 @@
 
     .remove-btn:hover {
         background: rgba(239, 68, 68, 0.1);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
     }
 
     .actions {
@@ -303,7 +303,7 @@
 
     .cancel-btn, .save-btn {
         padding: 8px 20px;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         font-size: 14px;
         font-weight: 600;
         cursor: pointer;
@@ -312,12 +312,12 @@
 
     .cancel-btn {
         background: rgba(255, 255, 255, 0.05);
-        color: #ccc;
+        color: var(--text-primary);
     }
 
     .save-btn {
-        background: var(--color-accent);
-        color: #000;
+        background: var(--accent-cyan);
+        color: var(--bg-void);
     }
 
     .save-btn:disabled {

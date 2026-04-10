@@ -189,22 +189,22 @@
 
   .view-tabs {
     display: flex;
-    background: var(--color-bg);
+    background: var(--bg-void);
     padding: 4px;
-    border-radius: 8px;
-    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-structural);
     gap: 4px;
   }
 
   .tab-button {
     padding: 6px 16px;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     border: none;
     background: transparent;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     display: flex;
     align-items: center;
     gap: 8px;
@@ -212,13 +212,13 @@
   }
 
   .tab-button:hover {
-    color: var(--color-text);
+    color: var(--text-primary);
     background: rgba(255, 255, 255, 0.05);
   }
 
   .tab-button.active {
-    background: var(--color-surface);
-    color: var(--color-accent);
+    background: var(--bg-surface);
+    color: var(--accent-cyan);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
   }
 
@@ -228,17 +228,17 @@
   }
 
   .resolver-section {
-    background: var(--color-surface);
-    border: 1px solid var(--color-primary-muted);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--accent-cyan);
+    border-radius: var(--radius-sm);
     overflow: hidden;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
   }
 
   .orchestrator-section {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -247,8 +247,8 @@
     align-items: center;
     gap: 10px;
     padding: 10px 14px;
-    background: var(--color-bg);
-    border-bottom: 1px solid var(--color-border);
+    background: var(--bg-void);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .orchestrator-header h3 {
@@ -260,15 +260,15 @@
 
   .orchestrator-terminal {
     height: 300px;
-    background: #000;
+    background: var(--bg-void);
   }
 
   .cli-badge {
     font-size: 11px;
     padding: 2px 8px;
     border-radius: 10px;
-    background: var(--color-primary-muted);
-    color: var(--color-accent);
+    background: var(--accent-cyan);
+    color: var(--accent-cyan);
     font-weight: 500;
   }
 
@@ -286,9 +286,9 @@
   .variant-card {
     display: flex;
     flex-direction: column;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -297,14 +297,14 @@
     justify-content: space-between;
     align-items: center;
     padding: 10px 14px;
-    background: var(--color-bg);
-    border-bottom: 1px solid var(--color-border);
+    background: var(--bg-void);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .variant-name {
     font-size: 13px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .status-badge {
@@ -315,40 +315,40 @@
   }
 
   .status-badge.running {
-    background: var(--color-primary-muted);
-    color: var(--color-accent);
+    background: var(--accent-cyan);
+    color: var(--accent-cyan);
   }
 
   .status-badge.completed {
     background: rgba(158, 206, 106, 0.15);
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .status-badge.failed {
     background: rgba(247, 118, 142, 0.15);
-    color: var(--color-error);
+    color: var(--status-error);
   }
 
   .terminal-container {
     flex: 1;
     min-height: 250px;
-    background: #000;
+    background: var(--bg-void);
   }
 
   .variant-actions {
     padding: 12px;
-    background: var(--color-bg);
-    border-top: 1px solid var(--color-border);
+    background: var(--bg-void);
+    border-top: 1px solid var(--border-structural);
     display: flex;
     justify-content: center;
   }
 
   .apply-button {
     padding: 8px 16px;
-    background: var(--color-success);
-    color: var(--color-bg);
+    background: var(--status-success);
+    color: var(--bg-void);
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
@@ -365,9 +365,9 @@
   }
 
   .judge-section {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -376,8 +376,8 @@
     align-items: center;
     gap: 10px;
     padding: 12px 16px;
-    background: var(--color-bg);
-    border-bottom: 1px solid var(--color-border);
+    background: var(--bg-void);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .section-header h3 {
@@ -395,18 +395,18 @@
   .report-content pre {
     margin: 0;
     white-space: pre-wrap;
-    font-family: 'Fira Code', monospace;
+    font-family: var(--font-mono);
     font-size: 13px;
-    color: var(--color-text);
+    color: var(--text-primary);
     line-height: 1.5;
   }
 
   .error-banner {
     padding: 12px;
     background: rgba(247, 118, 142, 0.15);
-    color: var(--color-error);
-    border: 1px solid var(--color-error);
-    border-radius: 4px;
+    color: var(--status-error);
+    border: 1px solid var(--status-error);
+    border-radius: var(--radius-sm);
     font-size: 13px;
   }
 
@@ -421,9 +421,9 @@
   }
 
   .modal {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     padding: 24px;
     max-width: 400px;
     text-align: center;
@@ -431,11 +431,11 @@
 
   .modal h3 {
     margin-top: 0;
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .modal p {
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     line-height: 1.5;
     margin-bottom: 24px;
   }
@@ -448,19 +448,19 @@
 
   .modal-actions button {
     padding: 8px 16px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-weight: 600;
     cursor: pointer;
     border: none;
   }
 
   .modal-actions button.primary {
-    background: var(--color-accent);
-    color: var(--color-bg);
+    background: var(--accent-cyan);
+    color: var(--bg-void);
   }
 
   .modal-actions button.secondary {
-    background: var(--color-border);
-    color: var(--color-text);
+    background: var(--border-structural);
+    color: var(--text-primary);
   }
 </style>

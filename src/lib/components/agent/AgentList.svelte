@@ -57,7 +57,7 @@
         padding: 6px 8px;
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid transparent;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         text-align: left;
         cursor: pointer;
         transition: all 0.2s;
@@ -97,7 +97,7 @@
 
     .empty {
         font-size: 11px;
-        color: #666;
+        color: var(--text-secondary);
         padding: 4px;
         font-style: italic;
     }

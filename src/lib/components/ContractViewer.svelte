@@ -91,9 +91,9 @@
 
 <style>
   .contract-viewer {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -104,28 +104,28 @@
     justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
-    background: var(--color-bg);
-    border-bottom: 1px solid var(--color-border);
+    background: var(--bg-void);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .header-info h3 {
     margin: 0;
     font-size: 14px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .milestone-id {
     font-size: 11px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   .threshold-badge {
     font-size: 11px;
     padding: 3px 8px;
-    background: var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text-muted);
+    background: var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
   }
 
   .contract-content-wrapper {
@@ -159,11 +159,11 @@
   }
 
   .status-overlay:not(.passed) .overlay-icon {
-    color: var(--color-error);
+    color: var(--status-error);
   }
 
   .status-overlay.passed .overlay-icon {
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .overlay-text {
@@ -175,11 +175,11 @@
   }
 
   .status-overlay:not(.passed) .overlay-text {
-    color: var(--color-error);
+    color: var(--status-error);
   }
 
   .status-overlay.passed .overlay-text {
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .content {
@@ -192,21 +192,21 @@
     word-break: break-word;
     font-family: inherit;
     font-size: 13px;
-    color: var(--color-text);
+    color: var(--text-primary);
     line-height: 1.5;
   }
 
   .weights-section {
     padding: 12px 16px;
-    background: var(--color-bg);
-    border-top: 1px solid var(--color-border);
+    background: var(--bg-void);
+    border-top: 1px solid var(--border-structural);
   }
 
   h4 {
     margin: 0 0 8px 0;
     font-size: 12px;
     font-weight: 600;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
@@ -220,20 +220,20 @@
   .weight-item {
     display: flex;
     justify-content: space-between;
-    background: var(--color-surface);
+    background: var(--bg-surface);
     padding: 4px 8px;
-    border-radius: 4px;
-    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-structural);
   }
 
   .weight-key {
     font-size: 11px;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .weight-value {
     font-size: 11px;
     font-weight: 600;
-    color: var(--color-accent);
+    color: var(--accent-cyan);
   }
 </style>

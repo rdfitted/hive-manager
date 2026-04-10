@@ -280,7 +280,7 @@
     .terminal-container {
         flex: 1;
         min-height: 0;
-        background: #000;
+        background: var(--bg-void);
     }
 
     .no-agent-selected {

@@ -416,7 +416,7 @@
   label {
     font-size: 12px;
     font-weight: 500;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   input,
@@ -424,10 +424,10 @@
     width: 100%;
     padding: 8px 10px;
     font-size: 13px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text);
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
   }
 
   .cli-select {
@@ -441,18 +441,18 @@
 
   .cli-description {
     font-size: 11px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     opacity: 0.7;
   }
 
   input::placeholder {
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     opacity: 0.6;
   }
 
   input:focus,
   .cli-select:focus {
     outline: none;
-    border-color: var(--color-primary, #8b5cf6);
+    border-color: var(--accent-cyan);
   }
 </style>

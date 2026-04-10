@@ -101,7 +101,7 @@
     .cell-card {
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         cursor: pointer;
         overflow: hidden;
@@ -145,7 +145,7 @@
         align-items: center;
         justify-content: center;
         background: rgba(0, 0, 0, 0.3);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
     }
 
     .name-box {
@@ -157,14 +157,14 @@
         font-size: 9px;
         text-transform: uppercase;
         letter-spacing: 0.1em;
-        color: #888;
+        color: var(--text-secondary);
         font-weight: 700;
     }
 
     .name {
         font-weight: 600;
         font-size: 14px;
-        color: #fff;
+        color: var(--text-primary);
     }
 
     .collapsed-info {
@@ -178,13 +178,13 @@
 
     .agent-count {
         font-size: 11px;
-        color: #888;
+        color: var(--text-secondary);
         white-space: nowrap;
     }
 
     .objective-preview {
         font-size: 12px;
-        color: #666;
+        color: var(--text-secondary);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -199,7 +199,7 @@
 
     .objective {
         font-size: 13px;
-        color: #bbb;
+        color: var(--text-primary);
         line-height: 1.4;
     }
 
@@ -207,7 +207,7 @@
         font-size: 10px;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: #555;
+        color: var(--text-disabled);
         font-weight: 700;
         margin-bottom: 8px;
     }
@@ -223,19 +223,19 @@
         align-items: center;
         gap: 6px;
         font-size: 11px;
-        color: #888;
+        color: var(--text-secondary);
         font-family: var(--font-mono);
     }
 
     .more-files {
         font-size: 10px;
-        color: #555;
+        color: var(--text-disabled);
         padding-left: 18px;
     }
 
     /* Collapsed state adjustments */
     .cell-card.collapsed {
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
     }
 
     .cell-card.collapsed .header {

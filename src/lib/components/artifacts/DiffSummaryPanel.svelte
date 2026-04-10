@@ -24,7 +24,7 @@
 <style>
     .diff-summary-panel {
         background: rgba(0, 0, 0, 0.2);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         padding: 12px;
         border: 1px solid rgba(255, 255, 255, 0.05);
         overflow-x: auto;
@@ -34,7 +34,7 @@
         margin: 0;
         font-family: var(--font-mono);
         font-size: 11px;
-        color: #888;
+        color: var(--text-secondary);
         line-height: 1.4;
     }
 
@@ -48,7 +48,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        color: #aaa;
+        color: var(--text-primary);
     }
 
     .file-path {

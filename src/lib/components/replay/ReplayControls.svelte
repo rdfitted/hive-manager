@@ -78,7 +78,7 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: var(--font-mono);
     }
 
     .main-row {
@@ -92,7 +92,7 @@
         padding: 6px 12px;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text);
         cursor: pointer;
         font-size: 0.8rem;
@@ -121,7 +121,7 @@
         padding: 4px;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text);
         font-family: inherit;
         font-size: 0.7rem;

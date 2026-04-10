@@ -364,8 +364,8 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--color-surface);
-    border-left: 1px solid var(--color-border);
+    background: var(--bg-surface);
+    border-left: 1px solid var(--border-structural);
     transition: width 0.2s ease, min-width 0.2s ease;
   }
 
@@ -379,7 +379,7 @@
     align-items: center;
     gap: 10px;
     padding: 16px;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--border-structural);
     background: none;
     border-left: none;
     border-right: none;
@@ -390,7 +390,7 @@
   }
 
   .panel-header:hover {
-    background: var(--color-surface-hover);
+    background: var(--bg-elevated);
   }
 
   .panel-icon {
@@ -402,7 +402,7 @@
     margin: 0;
     font-size: 14px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
     white-space: nowrap;
@@ -426,7 +426,7 @@
 
   .empty-state p {
     margin: 0;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     font-size: 13px;
   }
 
@@ -454,21 +454,21 @@
   }
 
   .section-header:hover h3 {
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .section-header h3 {
     margin: 0;
     font-size: 11px;
     font-weight: 600;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
 
   .chevron {
     font-size: 8px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     transition: transform 0.2s ease;
   }
 
@@ -492,13 +492,13 @@
     flex-direction: column;
     gap: 4px;
     padding: 10px 12px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
   }
 
   .alert.warning {
-    background: rgba(224, 175, 104, 0.15);
-    color: var(--color-warning);
+    background: color-mix(in srgb, var(--status-warning) 15%, transparent);
+    color: var(--status-warning);
   }
 
   .alert.clickable {
@@ -510,8 +510,8 @@
   }
 
   .alert.clickable:hover {
-    background: rgba(224, 175, 104, 0.25);
-    border-color: var(--color-warning);
+    background: color-mix(in srgb, var(--status-warning) 25%, transparent);
+    border-color: var(--status-warning);
   }
 
   .alert-header {
@@ -532,12 +532,12 @@
   .last-line {
     margin: 0;
     font-size: 11px;
-    font-family: 'Cascadia Code', Consolas, monospace;
+    font-family: var(--font-mono);
     opacity: 0.8;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .alert-icon {
@@ -547,7 +547,7 @@
   .no-alerts {
     margin: 0;
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     text-align: center;
     padding: 8px;
   }
@@ -567,44 +567,44 @@
 
   .info-label {
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   .info-value {
     font-size: 13px;
     font-weight: 500;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .info-value.state-running {
-    color: var(--color-running);
+    color: var(--accent-cyan);
   }
 
   .info-value.state-completed {
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .info-value.state-failed {
-    color: var(--color-error);
+    color: var(--status-error);
   }
 
   .info-value.state-closed {
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   .actions-section {
     margin-top: auto;
     padding-top: 12px;
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid var(--border-structural);
   }
 
   .close-button {
     width: 100%;
     padding: 10px 12px;
-    border: 1px solid var(--color-error);
-    border-radius: 6px;
+    border: 1px solid var(--status-error);
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--color-error);
+    color: var(--status-error);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
@@ -612,14 +612,14 @@
   }
 
   .close-button:hover {
-    background: var(--color-error);
-    color: var(--color-bg);
+    background: var(--status-error);
+    color: var(--bg-void);
   }
 
   .confirm-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -627,9 +627,9 @@
   }
 
   .confirm-dialog {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     padding: 20px;
     width: 220px;
     max-width: 90%;
@@ -638,13 +638,13 @@
   .confirm-dialog h3 {
     margin: 0 0 12px 0;
     font-size: 15px;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .confirm-dialog p {
     margin: 0 0 16px 0;
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     line-height: 1.4;
   }
 
@@ -658,7 +658,7 @@
   .confirm-btn {
     padding: 8px 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
@@ -666,17 +666,17 @@
   }
 
   .cancel-btn {
-    background: var(--color-surface-hover);
-    color: var(--color-text);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
   }
 
   .cancel-btn:hover:not(:disabled) {
-    background: var(--color-border);
+    background: var(--border-structural);
   }
 
   .confirm-btn {
-    background: var(--color-error);
-    color: var(--color-bg);
+    background: var(--status-error);
+    color: var(--bg-void);
   }
 
   .confirm-btn:hover:not(:disabled) {

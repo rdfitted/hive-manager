@@ -4,14 +4,14 @@
     export let status: AgentStatus;
 
     $: color = {
-        'queued': '#6b7280',
-        'launching': '#3b82f6',
-        'running': '#10b981',
-        'completed': '#10b981',
-        'waiting_input': '#f59e0b',
-        'failed': '#ef4444',
-        'killed': '#6b7280'
-    }[status] || '#6b7280';
+        'queued': 'var(--status-queued)',
+        'launching': 'var(--status-running)',
+        'running': 'var(--status-success)',
+        'completed': 'var(--status-success)',
+        'waiting_input': 'var(--status-warning)',
+        'failed': 'var(--status-error)',
+        'killed': 'var(--status-queued)'
+    }[status] || 'var(--status-queued)';
 </script>
 
 <div class="status-badge" style="--status-color: {color}">

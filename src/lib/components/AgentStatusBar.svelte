@@ -24,11 +24,11 @@
   });
 
   function getStatusColor(agentId: string, agentStatus: string): string {
-    if ($heartbeatStore.stalledAgents.has(agentId)) return '#f7768e'; // red
-    if (agentStatus === 'Running') return '#9ece6a'; // green
-    if (agentStatus === 'Starting') return '#e0af68'; // yellow
-    if (agentStatus === 'Completed') return '#565f89'; // dim
-    return '#e0af68'; // yellow default
+    if ($heartbeatStore.stalledAgents.has(agentId)) return 'var(--status-error)';
+    if (agentStatus === 'Running') return 'var(--status-success)';
+    if (agentStatus === 'Starting') return 'var(--status-warning)';
+    if (agentStatus === 'Completed') return 'var(--text-secondary)';
+    return 'var(--status-warning)';
   }
 
   function getStatusLabel(agentId: string, agentStatus: string): string {
@@ -86,8 +86,8 @@
     flex-wrap: wrap;
     gap: 6px;
     padding: 8px 12px;
-    background: var(--bg-tertiary, #24283b);
-    border-bottom: 1px solid var(--border-color, #414868);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .agent-chip {
@@ -95,9 +95,9 @@
     align-items: center;
     gap: 5px;
     padding: 4px 10px;
-    background: var(--bg-primary, #1a1b26);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 12px;
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     font-size: 11px;
     cursor: default;
   }
@@ -110,18 +110,18 @@
   }
 
   .agent-name {
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
     font-weight: 600;
   }
 
   .agent-status {
-    color: var(--text-secondary, #a9b1d6);
+    color: var(--text-secondary);
     font-size: 10px;
     text-transform: uppercase;
   }
 
   .agent-time {
-    color: var(--text-muted, #3b4261);
+    color: var(--text-secondary);
     font-size: 10px;
   }
 </style>

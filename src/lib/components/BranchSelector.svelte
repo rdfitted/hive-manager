@@ -120,7 +120,7 @@
   .branch-selector label {
     font-size: 12px;
     font-weight: 600;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
     white-space: nowrap;
   }
 
@@ -130,10 +130,10 @@
     max-width: 200px;
     padding: 4px 8px;
     font-size: 11px;
-    background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 4px;
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     cursor: pointer;
     /* Fix dropdown appearance */
     appearance: none;
@@ -147,29 +147,29 @@
 
   .branch-selector select:focus {
     outline: none;
-    border-color: var(--accent-color, #7aa2f7);
+    border-color: var(--accent-cyan);
   }
 
   .branch-selector select option {
-    background: var(--bg-tertiary, #24283b);
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-surface);
+    color: var(--text-primary);
     padding: 8px;
   }
 
   .branch-selector select option:hover,
   .branch-selector select option:focus,
   .branch-selector select option:checked {
-    background: var(--accent-color, #7aa2f7);
+    background: var(--accent-cyan);
     color: white;
   }
 
   .action-btn {
     padding: 4px 8px;
     font-size: 14px;
-    background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 4px;
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     cursor: pointer;
     transition: all 0.2s;
     min-width: 28px;
@@ -179,9 +179,9 @@
   }
 
   .action-btn:hover:not(:disabled) {
-    background: var(--bg-secondary, #1a1b26);
-    border-color: var(--accent-color, #7aa2f7);
-    color: var(--accent-color, #7aa2f7);
+    background: var(--bg-void);
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
   }
 
   .action-btn:disabled {
@@ -190,8 +190,8 @@
   }
 
   .pull-btn:hover:not(:disabled) {
-    border-color: var(--color-success, #9ece6a);
-    color: var(--color-success, #9ece6a);
+    border-color: var(--status-success);
+    color: var(--status-success);
   }
 
   .spinner {
@@ -205,12 +205,12 @@
 
   .loading {
     font-size: 11px;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
   }
 
   .error {
     font-size: 11px;
-    color: var(--color-error, #f7768e);
+    color: var(--status-error);
     max-width: 150px;
     overflow: hidden;
     text-overflow: ellipsis;
