@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use parking_lot::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use crate::domain::event::EventType;
+use crate::http::handlers::cells::build_cells;
 use crate::http::state::AppState;
 use tauri::Emitter;
 
@@ -52,6 +54,7 @@ pub fn run() {
     let storage = Arc::new(SessionStorage::new().expect("Failed to initialize session storage"));
     let config = storage.load_config().expect("Failed to load config");
     let shared_config = Arc::new(tokio::sync::RwLock::new(config));
+    let event_bus = EventBus::new(storage.base_dir().clone());
 
     // Create shared state
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
@@ -65,6 +68,7 @@ pub fn run() {
     {
         let mut controller = session_controller.write();
         controller.set_storage(Arc::clone(&storage));
+        controller.set_event_bus(Arc::clone(&event_bus));
     }
 
     tauri::Builder::default()
@@ -138,10 +142,43 @@ pub fn run() {
                 }
             });
 
+            let cell_event_controller = session_controller.clone();
+            let cell_event_storage = storage.clone();
+            let cell_event_bus = event_bus.clone();
+            let cell_event_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut receiver = cell_event_bus.subscribe();
+                loop {
+                    let Ok(event) = receiver.recv().await else {
+                        continue;
+                    };
+
+                    if !matches!(
+                        event.event_type,
+                        EventType::AgentLaunched | EventType::CellCreated | EventType::CellStatusChanged
+                    ) {
+                        continue;
+                    }
+
+                    let session = {
+                        let controller = cell_event_controller.read();
+                        controller.get_session(&event.session_id)
+                    };
+
+                    if let Some(session) = session {
+                        let payload = serde_json::json!({
+                            "session_id": event.session_id,
+                            "cells": build_cells(&session, &cell_event_storage),
+                        });
+                        let _ = cell_event_app_handle.emit("cell-updated", payload);
+                    }
+                }
+            });
+
             // Start HTTP server if enabled
             let http_config = shared_config.clone();
             let http_session_controller = session_controller.clone();
-            let http_event_bus = EventBus::new(storage.base_dir().clone());
+            let http_event_bus = event_bus.clone();
             tauri::async_runtime::spawn(async move {
                 let (enabled, port) = {
                     let cfg = http_config.read().await;
