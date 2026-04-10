@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::cli::{CliRegistry, CliBehavior};
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
-use crate::storage::SessionStorage;
+use crate::storage::{SessionStorage, StorageError};
 use crate::templates::{PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
 
@@ -799,17 +799,27 @@ impl SessionController {
     }
 
     pub fn mark_session_completed(&self, session_id: &str) -> Result<(), String> {
-        let updated_active_session = {
+        let previous_state = {
             let mut sessions = self.sessions.write();
             sessions.get_mut(session_id).map(|session| {
+                let previous_state = (session.state.clone(), session.auth_strategy.clone());
                 session.state = SessionState::Completed;
                 session.auth_strategy = AuthStrategy::None;
+                previous_state
             })
         };
 
-        if updated_active_session.is_some() {
+        if let Some((previous_session_state, previous_auth_strategy)) = previous_state {
+            if let Err(err) = self.update_session_storage_checked(session_id) {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    session.state = previous_session_state;
+                    session.auth_strategy = previous_auth_strategy;
+                }
+                return Err(err);
+            }
+
             self.emit_session_update(session_id);
-            self.update_session_storage_checked(session_id)?;
             return Ok(());
         }
 
@@ -819,7 +829,10 @@ impl SessionController {
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
         let mut persisted = storage
             .load_session(session_id)
-            .map_err(|_| format!("Session not found: {}", session_id))?;
+            .map_err(|err| match err {
+                StorageError::SessionNotFound(_) => format!("Session not found: {}", session_id),
+                _ => format!("Storage error: {}", err),
+            })?;
         persisted.state = serialize_session_state(&SessionState::Completed);
         persisted.auth_strategy = AuthStrategy::None.persist_value();
         storage
