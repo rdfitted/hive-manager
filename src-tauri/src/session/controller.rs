@@ -1617,9 +1617,24 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
             "Review the milestone handoff, coordinate QA workers only when evidence is missing, and return a strict contract-based verdict to the Queen.",
         );
+        let default_model = config.model.as_deref().unwrap_or("");
+        let default_model_suffix = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(", Model: {}", default_model)
+        };
+        let default_model_field = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(r#""model": "{}", "#, default_model)
+        };
 
         let mut variables = HashMap::new();
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
+        variables.insert("default_cli".to_string(), config.cli.clone());
+        variables.insert("default_model".to_string(), default_model.to_string());
+        variables.insert("default_model_field".to_string(), default_model_field);
+        variables.insert("default_model_suffix".to_string(), default_model_suffix);
 
         if smoke_test {
             variables.insert("idle_poll_interval".to_string(), "30 seconds".to_string());
@@ -7440,6 +7455,23 @@ mod tests {
 
         assert!(content.contains("/api/sessions/session-123/qa-workers"));
         assert!(content.contains("\"specialization\": \"ui\""));
+    }
+
+    #[test]
+    fn evaluator_prompt_uses_session_default_cli_and_model() {
+        let prompt = SessionController::build_evaluator_prompt(
+            "session-123",
+            &AgentConfig {
+                cli: "codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                ..AgentConfig::default()
+            },
+            false,
+        );
+
+        assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
+        assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
+        assert!(!prompt.contains(r#""cli": "claude""#));
     }
 }
 
