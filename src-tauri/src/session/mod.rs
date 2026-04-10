@@ -1,3 +1,4 @@
+pub(crate) mod cell_status;
 mod controller;
 
 #[allow(unused_imports)]

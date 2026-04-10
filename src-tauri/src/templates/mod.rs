@@ -508,7 +508,9 @@ Use the session tools directory for reference docs:
 
 You are the UI QA specialist for session `{{session_id}}`.
 
+{{#if supports_chrome}}
 **You were launched with `--chrome` — you have native browser access.**
+{{/if}}
 
 ## Start Here
 
@@ -518,10 +520,11 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 ## Focus
 
-- Run click-through flows end to end using your **native Chrome integration**.
+- Run click-through flows end to end using your UI automation/browser tooling.
 - Capture screenshot evidence for visual regressions or broken flows.
 - Verify interactive elements work: buttons, links, forms, navigation, modals.
 
+{{#if supports_chrome}}
 ## How to Test — Native Chrome Tools
 
 You have Claude Code's built-in Chrome integration (`--chrome` flag). This gives you direct browser control through your real Chrome/Edge window with shared login sessions and cookies.
@@ -551,6 +554,7 @@ You have Claude Code's built-in Chrome integration (`--chrome` flag). This gives
 - **Interactive elements**: Do buttons, modals, dropdowns, and toggles work?
 - **Visual state**: Do loading states, error states, and empty states render correctly?
 - **Responsiveness**: Does the layout break at different widths?
+{{/if}}
 
 ## Auth Bypass
 
@@ -1171,7 +1175,36 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             rendered = rendered.replace(&placeholder, value);
         }
 
+        rendered = self.render_if_blocks(rendered, &context.variables);
+
         Ok(rendered)
+    }
+
+    fn render_if_blocks(
+        &self,
+        mut template: String,
+        variables: &HashMap<String, String>,
+    ) -> String {
+        for (key, value) in variables {
+            let start = format!("{{{{#if {key}}}}}");
+            let end = "{{/if}}";
+            while let Some(start_idx) = template.find(&start) {
+                let content_start = start_idx + start.len();
+                let Some(relative_end_idx) = template[content_start..].find(end) else {
+                    break;
+                };
+                let end_idx = content_start + relative_end_idx;
+                let inner = template[content_start..end_idx].to_string();
+                let replacement = if matches!(value.as_str(), "true" | "1" | "yes") {
+                    inner.as_str()
+                } else {
+                    ""
+                };
+                template.replace_range(start_idx..end_idx + end.len(), replacement);
+            }
+        }
+
+        template
     }
 
     /// Format workers list for prompt
@@ -1312,5 +1345,52 @@ mod tests {
             DEFAULT_API_BASE_URL
         );
         assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
+    }
+
+    #[test]
+    fn qa_worker_ui_chrome_guidance_is_gated_by_support_flag() {
+        let mut enabled = HashMap::new();
+        enabled.insert("qa_worker_index".to_string(), "1".to_string());
+        enabled.insert("custom_instructions".to_string(), "Test".to_string());
+        enabled.insert("supports_chrome".to_string(), "true".to_string());
+        enabled.insert("auth_bypass_url".to_string(), "http://localhost".to_string());
+        enabled.insert("auth_bypass_token".to_string(), "token".to_string());
+
+        let enabled_prompt = TemplateEngine::default()
+            .render_template(
+                "roles/qa-worker-ui",
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: None,
+                    variables: enabled,
+                },
+            )
+            .unwrap();
+
+        assert!(enabled_prompt.contains("--chrome"));
+        assert!(enabled_prompt.contains("built-in Chrome integration"));
+
+        let mut disabled = HashMap::new();
+        disabled.insert("qa_worker_index".to_string(), "1".to_string());
+        disabled.insert("custom_instructions".to_string(), "Test".to_string());
+        disabled.insert("supports_chrome".to_string(), "false".to_string());
+        disabled.insert("auth_bypass_url".to_string(), "http://localhost".to_string());
+        disabled.insert("auth_bypass_token".to_string(), "token".to_string());
+
+        let disabled_prompt = TemplateEngine::default()
+            .render_template(
+                "roles/qa-worker-ui",
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: None,
+                    variables: disabled,
+                },
+            )
+            .unwrap();
+
+        assert!(!disabled_prompt.contains("--chrome"));
+        assert!(!disabled_prompt.contains("built-in Chrome integration"));
     }
 }
