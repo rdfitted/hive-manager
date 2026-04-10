@@ -580,8 +580,8 @@
     position: relative;
     width: 100%;
     height: 100%;
-    background: #1a1b26;
-    border-radius: 4px;
+    background: var(--bg-void);
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -591,7 +591,7 @@
   }
 
   .terminal-wrapper :global(.xterm-viewport) {
-    background: #1a1b26 !important;
+    background: var(--bg-void) !important;
   }
 
   .drop-overlay {
@@ -614,7 +614,7 @@
     gap: 6px;
     padding: 16px 20px;
     min-width: 240px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     background: rgba(36, 40, 59, 0.92);
     border: 1px solid rgba(125, 207, 255, 0.35);
     box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
@@ -630,7 +630,7 @@
   }
 
   .drop-copy {
-    color: #a9b1d6;
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.4;
   }
@@ -643,7 +643,7 @@
     padding: 8px 12px;
     background: rgba(26, 27, 38, 0.85);
     backdrop-filter: blur(4px);
-    border-top: 1px solid var(--color-warning);
+    border-top: 1px solid var(--status-warning);
     z-index: 10;
     display: flex;
     justify-content: center;
@@ -663,7 +663,7 @@
 
   .prompt-text {
     font-size: 11px;
-    color: var(--color-warning);
+    color: var(--status-warning);
     font-weight: 600;
     text-transform: uppercase;
     margin-right: 4px;
@@ -671,10 +671,10 @@
 
   .action-btn {
     padding: 4px 12px;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;
@@ -682,14 +682,14 @@
   }
 
   .action-btn:hover {
-    background: var(--color-surface-hover);
-    border-color: var(--color-accent);
+    background: var(--bg-elevated);
+    border-color: var(--accent-cyan);
   }
 
   .action-btn.approve {
     background: rgba(158, 206, 106, 0.15);
-    border-color: var(--color-success);
-    color: var(--color-success);
+    border-color: var(--status-success);
+    color: var(--status-success);
   }
 
   .action-btn.approve:hover {
@@ -698,8 +698,8 @@
 
   .action-btn.reject {
     background: rgba(247, 118, 142, 0.15);
-    border-color: var(--color-error);
-    color: var(--color-error);
+    border-color: var(--status-error);
+    color: var(--status-error);
   }
 
   .action-btn.reject:hover {
@@ -709,9 +709,9 @@
   /* Context Menu */
   .context-menu {
     position: fixed;
-    background: var(--color-surface, #24283b);
-    border: 1px solid var(--color-border, #414868);
-    border-radius: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     padding: 4px;
     min-width: 180px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
@@ -726,15 +726,15 @@
     padding: 8px 12px;
     background: none;
     border: none;
-    border-radius: 4px;
-    color: var(--color-text, #c0caf5);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     font-size: 13px;
     cursor: pointer;
     text-align: left;
   }
 
   .context-item:hover:not(:disabled) {
-    background: var(--color-surface-hover, #2f3549);
+    background: var(--bg-elevated);
   }
 
   .context-item:disabled {
@@ -751,12 +751,12 @@
   .context-shortcut {
     margin-left: auto;
     font-size: 11px;
-    color: var(--color-text-muted, #565f89);
+    color: var(--text-secondary);
   }
 
   .context-divider {
     height: 1px;
-    background: var(--color-border, #414868);
+    background: var(--border-structural);
     margin: 4px 8px;
   }
 </style>
