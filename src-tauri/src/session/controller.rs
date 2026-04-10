@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::cli::{CliRegistry, CliBehavior};
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
+use crate::events::{EventBus, EventEmitter};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::{SessionStorage, StorageError};
 use crate::templates::{PromptContext, TemplateEngine};
@@ -341,6 +342,7 @@ pub struct SessionController {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     pty_manager: Arc<RwLock<PtyManager>>,
     app_handle: Option<AppHandle>,
+    event_emitter: Option<EventEmitter>,
     storage: Option<Arc<SessionStorage>>,
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
     /// session_id -> agent_id -> heartbeat info
@@ -381,6 +383,142 @@ fn next_qa_failure_iteration(state: &SessionState) -> u8 {
         SessionState::QaInProgress { iteration } => iteration.unwrap_or(0).saturating_add(1),
         _ => 1,
     }
+}
+
+fn variant_to_cell_id(variant: &str) -> String {
+    let normalized = variant
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>();
+    let trimmed = normalized.trim_matches('-');
+    if trimmed.is_empty() {
+        "primary".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn session_cell_ids(session: &Session) -> Vec<String> {
+    match &session.session_type {
+        SessionType::Fusion { variants } if !variants.is_empty() => {
+            let mut cell_ids = variants.iter().map(|variant| variant_to_cell_id(variant)).collect::<Vec<_>>();
+            cell_ids.push("resolver".to_string());
+            cell_ids
+        }
+        _ => vec!["primary".to_string()],
+    }
+}
+
+fn cell_type_for_id(cell_id: &str) -> &'static str {
+    if cell_id == "resolver" {
+        "resolver"
+    } else {
+        "hive"
+    }
+}
+
+fn agent_cell_id(session: &Session, agent: &AgentInfo) -> String {
+    match &session.session_type {
+        SessionType::Fusion { .. } => match &agent.role {
+            AgentRole::Fusion { variant } => variant_to_cell_id(variant),
+            _ => "resolver".to_string(),
+        },
+        _ => "primary".to_string(),
+    }
+}
+
+fn agent_belongs_to_cell(session: &Session, cell_id: &str, agent: &AgentInfo) -> bool {
+    match &session.session_type {
+        SessionType::Fusion { .. } if cell_id == "resolver" => {
+            !matches!(&agent.role, AgentRole::Fusion { .. })
+        }
+        SessionType::Fusion { .. } => matches!(
+            &agent.role,
+            AgentRole::Fusion { variant } if variant_to_cell_id(variant) == cell_id
+        ),
+        _ => true,
+    }
+}
+
+fn session_state_to_cell_status_name(state: &SessionState) -> &'static str {
+    match state {
+        SessionState::Planning | SessionState::PlanReady => "queued",
+        SessionState::Starting
+        | SessionState::SpawningWorker(_)
+        | SessionState::SpawningPlanner(_)
+        | SessionState::SpawningFusionVariant(_)
+        | SessionState::SpawningJudge
+        | SessionState::SpawningEvaluator => "launching",
+        SessionState::WaitingForWorker(_)
+        | SessionState::WaitingForPlanner(_)
+        | SessionState::WaitingForFusionVariants
+        | SessionState::Judging
+        | SessionState::MergingWinner
+        | SessionState::QaInProgress { .. }
+        | SessionState::Running => "running",
+        SessionState::AwaitingVerdictSelection | SessionState::Paused => "waiting_input",
+        SessionState::QaPassed | SessionState::Completed | SessionState::Closed => "completed",
+        SessionState::QaFailed { .. } | SessionState::QaMaxRetriesExceeded | SessionState::Failed(_) => "failed",
+        SessionState::Closing => "summarizing",
+    }
+}
+
+fn agent_status_to_cell_status_name(status: &AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Starting => "launching",
+        AgentStatus::Running | AgentStatus::Idle => "running",
+        AgentStatus::WaitingForInput(_) => "waiting_input",
+        AgentStatus::Completed => "completed",
+        AgentStatus::Error(_) => "failed",
+    }
+}
+
+fn derive_cell_status_name(session: &Session, cell_id: &str) -> String {
+    let agent_statuses = session
+        .agents
+        .iter()
+        .filter(|agent| agent_belongs_to_cell(session, cell_id, agent))
+        .map(|agent| agent_status_to_cell_status_name(&agent.status))
+        .collect::<Vec<_>>();
+
+    if agent_statuses.iter().any(|status| *status == "running") {
+        "running".to_string()
+    } else if !agent_statuses.is_empty() && agent_statuses.iter().all(|status| *status == "completed") {
+        "completed".to_string()
+    } else if agent_statuses.iter().any(|status| *status == "failed") {
+        "failed".to_string()
+    } else if agent_statuses.iter().any(|status| *status == "waiting_input") {
+        "waiting_input".to_string()
+    } else {
+        session_state_to_cell_status_name(&session.state).to_string()
+    }
+}
+
+fn cell_status_changes_for_transition(
+    session: &Session,
+    new_state: &SessionState,
+) -> Vec<(String, String, String)> {
+    let before = session_cell_ids(session)
+        .into_iter()
+        .map(|cell_id| (cell_id.clone(), derive_cell_status_name(session, &cell_id)))
+        .collect::<HashMap<_, _>>();
+
+    let mut updated = session.clone();
+    updated.state = new_state.clone();
+
+    let mut changes = Vec::new();
+    for cell_id in session_cell_ids(&updated) {
+        let next_status = derive_cell_status_name(&updated, &cell_id);
+        if let Some(previous_status) = before.get(&cell_id) {
+            if previous_status != &next_status {
+                changes.push((cell_id, previous_status.clone(), next_status));
+            }
+        }
+    }
+
+    changes
 }
 
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
@@ -443,6 +581,7 @@ impl SessionController {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             pty_manager,
             app_handle: None,
+            event_emitter: None,
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
@@ -458,6 +597,10 @@ impl SessionController {
 
     pub fn set_storage(&mut self, storage: Arc<SessionStorage>) {
         self.storage = Some(storage);
+    }
+
+    pub fn set_event_bus(&mut self, event_bus: Arc<EventBus>) {
+        self.event_emitter = Some(EventEmitter::new(event_bus));
     }
 
     pub fn launch_hive(
@@ -591,6 +734,8 @@ impl SessionController {
             let mut sessions = self.sessions.write();
             sessions.insert(session_id.clone(), session.clone());
         }
+
+        self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
@@ -756,6 +901,73 @@ impl SessionController {
         }
     }
 
+    fn emit_cell_created(&self, session_id: &str, cell_id: &str) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        let cell_id = cell_id.to_string();
+        let cell_type = cell_type_for_id(&cell_id).to_string();
+        tokio::spawn(async move {
+            if let Err(error) = emitter.emit_cell_created(&session_id, &cell_id, &cell_type).await {
+                tracing::debug!("Failed to emit cell created event: {}", error);
+            }
+        });
+    }
+
+    fn emit_agent_launched(&self, session: &Session, agent: &AgentInfo) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let session_id = session.id.clone();
+        let cell_id = agent_cell_id(session, agent);
+        let agent_id = agent.id.clone();
+        let cli = agent.config.cli.clone();
+        tokio::spawn(async move {
+            if let Err(error) = emitter
+                .emit_agent_launched(&session_id, &cell_id, &agent_id, &cli)
+                .await
+            {
+                tracing::debug!("Failed to emit agent launched event: {}", error);
+            }
+        });
+    }
+
+    fn emit_agent_batch_launched(&self, session: &Session, agents: &[AgentInfo]) {
+        let mut emitted_cells = HashMap::<String, bool>::new();
+        for agent in agents {
+            let cell_id = agent_cell_id(session, agent);
+            if !emitted_cells.contains_key(&cell_id) {
+                self.emit_cell_created(&session.id, &cell_id);
+                emitted_cells.insert(cell_id, true);
+            }
+            self.emit_agent_launched(session, agent);
+        }
+    }
+
+    fn emit_cell_status_changes(&self, session_id: &str, changes: Vec<(String, String, String)>) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            for (cell_id, from, to) in changes {
+                if let Err(error) = emitter
+                    .emit_cell_status_changed(&session_id, &cell_id, &from, &to)
+                    .await
+                {
+                    tracing::debug!("Failed to emit cell status change event: {}", error);
+                }
+            }
+        });
+    }
+
+    fn set_session_state_with_events(&self, session: &mut Session, new_state: SessionState) {
+        let changes = cell_status_changes_for_transition(session, &new_state);
+        session.state = new_state;
+        self.emit_cell_status_changes(&session.id, changes);
+    }
+
     /// Insert a session directly (for testing purposes only)
     #[cfg(test)]
     pub fn insert_test_session(&self, session: Session) {
@@ -778,7 +990,7 @@ impl SessionController {
             {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(id) {
-                    s.state = SessionState::Completed;
+                    self.set_session_state_with_events(s, SessionState::Completed);
                     s.auth_strategy = AuthStrategy::None;
                 }
             }
@@ -803,7 +1015,7 @@ impl SessionController {
             let mut sessions = self.sessions.write();
             sessions.get_mut(session_id).map(|session| {
                 let previous_state = (session.state.clone(), session.auth_strategy.clone());
-                session.state = SessionState::Completed;
+                self.set_session_state_with_events(session, SessionState::Completed);
                 session.auth_strategy = AuthStrategy::None;
                 previous_state
             })
@@ -846,7 +1058,7 @@ impl SessionController {
         let agent_ids: Vec<String> = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(id) {
-                session.state = SessionState::Closing;
+                self.set_session_state_with_events(session, SessionState::Closing);
                 session.agents.iter().map(|a| a.id.clone()).collect()
             } else {
                 return Err(format!("Session not found: {}", id));
@@ -880,7 +1092,7 @@ impl SessionController {
                 for agent in &mut session.agents {
                     agent.status = AgentStatus::Completed;
                 }
-                session.state = SessionState::Closed;
+                self.set_session_state_with_events(session, SessionState::Closed);
                 session.auth_strategy = AuthStrategy::None;
             }
         }
@@ -4176,6 +4388,8 @@ Last updated: {timestamp}
             sessions.insert(session_id.clone(), session.clone());
         }
 
+        self.emit_agent_batch_launched(&session, &session.agents);
+
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
                 session: session.clone(),
@@ -4323,6 +4537,8 @@ Last updated: {timestamp}
             sessions.insert(session_id.clone(), session.clone());
         }
 
+        self.emit_agent_batch_launched(&session, &session.agents);
+
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
                 session: session.clone(),
@@ -4432,7 +4648,7 @@ Last updated: {timestamp}
             {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(&session_id) {
-                    s.state = SessionState::SpawningFusionVariant(variant.index);
+                    self.set_session_state_with_events(s, SessionState::SpawningFusionVariant(variant.index));
                 }
             }
             self.emit_session_update(&session_id);
@@ -4532,8 +4748,9 @@ Last updated: {timestamp}
             {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(&session_id) {
-                    s.agents.push(agent_info);
-                    s.state = SessionState::WaitingForFusionVariants;
+                    s.agents.push(agent_info.clone());
+                    self.emit_agent_launched(s, &agent_info);
+                    self.set_session_state_with_events(s, SessionState::WaitingForFusionVariants);
                 }
             }
             self.emit_session_update(&session_id);
@@ -4654,6 +4871,8 @@ Last updated: {timestamp}
             sessions.insert(session_id.clone(), session.clone());
         }
 
+        self.emit_agent_batch_launched(&session, &session.agents);
+
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
                 session: session.clone(),
@@ -4742,6 +4961,8 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             sessions.insert(session_id.clone(), session.clone());
         }
+
+        self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
@@ -4987,8 +5208,9 @@ Last updated: {timestamp}
         let updated_session = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.extend(new_agents);
-                s.state = SessionState::WaitingForFusionVariants;
+                s.agents.extend(new_agents.clone());
+                self.emit_agent_batch_launched(s, &new_agents);
+                self.set_session_state_with_events(s, SessionState::WaitingForFusionVariants);
                 s.clone()
             } else {
                 return Err("Session disappeared".to_string());
@@ -5113,7 +5335,7 @@ Last updated: {timestamp}
             // All workers spawned - session complete
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::Running;
+                self.set_session_state_with_events(s, SessionState::Running);
             }
             return Ok(());
         }
@@ -5126,7 +5348,7 @@ Last updated: {timestamp}
         {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::SpawningWorker(index);
+                self.set_session_state_with_events(s, SessionState::SpawningWorker(index));
             }
         }
 
@@ -5162,14 +5384,16 @@ Last updated: {timestamp}
         // 5. Add worker to session
         let mut sessions = self.sessions.write();
         if let Some(s) = sessions.get_mut(session_id) {
-            s.agents.push(AgentInfo {
+            let agent = AgentInfo {
                 id: worker_id,
                 role: AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
                 status: AgentStatus::Running,
                 config: worker_config.clone(),
                 parent_id: Some(queen_id.to_string()),
-            });
-            s.state = SessionState::WaitingForWorker(index);
+            };
+            s.agents.push(agent.clone());
+            self.emit_agent_launched(s, &agent);
+            self.set_session_state_with_events(s, SessionState::WaitingForWorker(index));
         }
 
         Ok(())
@@ -5278,7 +5502,7 @@ Last updated: {timestamp}
                 {
                     let mut sessions = self.sessions.write();
                     if let Some(session) = sessions.get_mut(session_id) {
-                        session.state = SessionState::QaPassed;
+                        self.set_session_state_with_events(session, SessionState::QaPassed);
                     }
                 }
                 self.emit_session_update(session_id);
@@ -5287,7 +5511,7 @@ Last updated: {timestamp}
                 {
                     let mut sessions = self.sessions.write();
                     if let Some(session) = sessions.get_mut(session_id) {
-                        session.state = SessionState::Running;
+                        self.set_session_state_with_events(session, SessionState::Running);
                     }
                 }
                 self.emit_session_update(session_id);
@@ -5305,10 +5529,10 @@ Last updated: {timestamp}
                     let next_iteration = next_qa_failure_iteration(&session.state);
 
                     if next_iteration > session.max_qa_iterations {
-                        session.state = SessionState::QaMaxRetriesExceeded;
+                        self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                         session.auth_strategy = AuthStrategy::None;
                     } else {
-                        session.state = SessionState::QaFailed { iteration: next_iteration };
+                        self.set_session_state_with_events(session, SessionState::QaFailed { iteration: next_iteration });
                     }
 
                     session.state.clone()
@@ -5354,6 +5578,7 @@ Last updated: {timestamp}
         let sid = session_id.to_string();
         let sessions = Arc::clone(&self.sessions);
         let app_handle = self.app_handle.clone();
+        let event_emitter = self.event_emitter.clone();
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
@@ -5374,7 +5599,21 @@ Last updated: {timestamp}
                 let updated_session = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
+                        let changes = cell_status_changes_for_transition(session, &SessionState::Running);
                         session.state = SessionState::Running;
+                        if let Some(emitter) = event_emitter.clone() {
+                            let session_id = sid.clone();
+                            tokio::spawn(async move {
+                                for (cell_id, from, to) in changes {
+                                    if let Err(error) = emitter
+                                        .emit_cell_status_changed(&session_id, &cell_id, &from, &to)
+                                        .await
+                                    {
+                                        tracing::debug!("Failed to emit cell status change event: {}", error);
+                                    }
+                                }
+                            });
+                        }
                         Some(session.clone())
                     } else {
                         None
@@ -5492,7 +5731,7 @@ Last updated: {timestamp}
         {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::SpawningJudge;
+                self.set_session_state_with_events(s, SessionState::SpawningJudge);
             }
         }
         self.emit_session_update(session_id);
@@ -5538,7 +5777,7 @@ Last updated: {timestamp}
         {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.push(AgentInfo {
+                let agent = AgentInfo {
                     id: judge_id,
                     role: AgentRole::Judge {
                         session_id: session_id.to_string(),
@@ -5546,8 +5785,10 @@ Last updated: {timestamp}
                     status: AgentStatus::Running,
                     config: judge_config,
                     parent_id: None,
-                });
-                s.state = SessionState::Judging;
+                };
+                s.agents.push(agent.clone());
+                self.emit_agent_launched(s, &agent);
+                self.set_session_state_with_events(s, SessionState::Judging);
             }
         }
         self.emit_session_update(session_id);
@@ -5601,7 +5842,7 @@ Last updated: {timestamp}
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(session_id) {
                     if s.state == SessionState::Judging {
-                        s.state = SessionState::AwaitingVerdictSelection;
+                        self.set_session_state_with_events(s, SessionState::AwaitingVerdictSelection);
                         should_emit = true;
                     }
                 }
@@ -5640,7 +5881,7 @@ Last updated: {timestamp}
         {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::MergingWinner;
+                self.set_session_state_with_events(s, SessionState::MergingWinner);
             }
         }
         self.emit_session_update(session_id);
@@ -5684,7 +5925,7 @@ Last updated: {timestamp}
                 for agent in &mut s.agents {
                     agent.status = AgentStatus::Completed;
                 }
-                s.state = SessionState::Completed;
+                self.set_session_state_with_events(s, SessionState::Completed);
                 s.auth_strategy = AuthStrategy::None;
             }
         }
@@ -5822,9 +6063,10 @@ Last updated: {timestamp}
         let updated_session = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.extend(new_agents);
+                s.agents.extend(new_agents.clone());
+                self.emit_agent_batch_launched(s, &new_agents);
                 // Set state to Running - Queen will spawn workers via HTTP API
-                s.state = SessionState::Running;
+                self.set_session_state_with_events(s, SessionState::Running);
                 s.clone()
             } else {
                 return Err("Session disappeared".to_string());
@@ -5860,7 +6102,7 @@ Last updated: {timestamp}
         let mut sessions = self.sessions.write();
         if let Some(session) = sessions.get_mut(session_id) {
             if session.state == SessionState::Planning {
-                session.state = SessionState::PlanReady;
+                self.set_session_state_with_events(session, SessionState::PlanReady);
 
                 if let Some(ref app_handle) = self.app_handle {
                     let _ = app_handle.emit("session-update", SessionUpdate {
@@ -6082,8 +6324,9 @@ Last updated: {timestamp}
         let updated_session = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
-                session.agents.extend(new_agents);
-                session.state = SessionState::Running;  // Queen will spawn planners sequentially
+                session.agents.extend(new_agents.clone());
+                self.emit_agent_batch_launched(session, &new_agents);
+                self.set_session_state_with_events(session, SessionState::Running);  // Queen will spawn planners sequentially
                 session.clone()
             } else {
                 return Err("Session disappeared".to_string());
@@ -6363,6 +6606,7 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
+                self.emit_agent_launched(session, &agent_info);
             }
         }
 
@@ -6399,7 +6643,7 @@ Last updated: {timestamp}
         {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
-                current.state = SessionState::SpawningEvaluator;
+                self.set_session_state_with_events(current, SessionState::SpawningEvaluator);
             }
         }
         self.emit_session_update(session_id);
@@ -6448,7 +6692,9 @@ Last updated: {timestamp}
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             current.agents.push(agent_info.clone());
-            current.state = qa_in_progress_state(&current.state);
+            self.emit_agent_launched(current, &agent_info);
+            let next_state = qa_in_progress_state(&current.state);
+            self.set_session_state_with_events(current, next_state);
             current.qa_timeout_secs
         };
 
@@ -6564,7 +6810,9 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.push(agent_info.clone());
-                current.state = qa_in_progress_state(&current.state);
+                self.emit_agent_launched(current, &agent_info);
+                let next_state = qa_in_progress_state(&current.state);
+                self.set_session_state_with_events(current, next_state);
             }
         }
 
@@ -6677,7 +6925,8 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
-                session.state = SessionState::WaitingForPlanner(planner_index);
+                self.emit_agent_launched(session, &agent_info);
+                self.set_session_state_with_events(session, SessionState::WaitingForPlanner(planner_index));
             }
         }
 
