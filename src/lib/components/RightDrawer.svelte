@@ -2,8 +2,9 @@
   import PlanView from './PlanView.svelte';
   import CoordinationPanel from './CoordinationPanel.svelte';
   import ConversationViewer from './ConversationViewer.svelte';
+  import TimelineView from './timeline/TimelineView.svelte';
 
-  type Tab = 'plan' | 'logs' | 'chat';
+  type Tab = 'plan' | 'logs' | 'chat' | 'timeline';
   let activeTab: Tab = $state('plan');
   let collapsed = $state(true);
 </script>
@@ -39,6 +40,13 @@
       >
         Chat
       </button>
+      <button
+        class="tab"
+        class:active={activeTab === 'timeline'}
+        onclick={() => activeTab = 'timeline'}
+      >
+        Timeline
+      </button>
     </div>
 
     <div class="tab-content">
@@ -46,6 +54,8 @@
         <PlanView />
       {:else if activeTab === 'logs'}
         <CoordinationPanel />
+      {:else if activeTab === 'timeline'}
+        <TimelineView />
       {:else}
         <ConversationViewer />
       {/if}

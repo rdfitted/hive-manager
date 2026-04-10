@@ -3607,3 +3607,179 @@ async fn test_stream_events_rejects_path_traversal_session_id() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+// ── Resolver launch endpoint tests ──────────────────────────────────────
+
+fn make_fusion_session(id: &str, project_path: &str) -> Session {
+    Session {
+        id: id.to_string(),
+        name: None,
+        color: None,
+        session_type: SessionType::Fusion { variants: vec!["variant-a".to_string(), "variant-b".to_string()] },
+        project_path: PathBuf::from(project_path),
+        state: SessionState::Running,
+        created_at: chrono::Utc::now(),
+        agents: vec![],
+        default_cli: "claude".to_string(),
+        default_model: Some("opus-4-6".to_string()),
+        max_qa_iterations: 3,
+        qa_timeout_secs: 300,
+        auth_strategy: AuthStrategy::default(),
+    }
+}
+
+#[tokio::test]
+async fn test_resolver_launch_success_with_artifacts() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let storage = SessionStorage::new().unwrap();
+    let session_id = format!("resolver-launch-{}", uuid::Uuid::new_v4());
+
+    // Create session dir and artifacts
+    storage.create_session_dir(&session_id).unwrap();
+    storage
+        .save_artifact(
+            &session_id,
+            "variant-a",
+            &crate::domain::ArtifactBundle {
+                summary: Some("Variant A impl".to_string()),
+                changed_files: vec!["src/a.rs".to_string()],
+                commits: vec!["a1".to_string()],
+                branch: "fusion/a".to_string(),
+                test_results: None,
+                diff_summary: None,
+                unresolved_issues: vec![],
+                confidence: Some(0.9),
+                recommended_next_step: None,
+            },
+        )
+        .unwrap();
+    storage
+        .save_artifact(
+            &session_id,
+            "variant-b",
+            &crate::domain::ArtifactBundle {
+                summary: Some("Variant B impl".to_string()),
+                changed_files: vec!["src/b.rs".to_string()],
+                commits: vec!["b1".to_string()],
+                branch: "fusion/b".to_string(),
+                test_results: None,
+                diff_summary: None,
+                unresolved_issues: vec!["todo".to_string()],
+                confidence: Some(0.5),
+                recommended_next_step: None,
+            },
+        )
+        .unwrap();
+
+    // Register Fusion session in controller
+    let session = make_fusion_session(&session_id, &std::env::temp_dir().to_string_lossy());
+    controller.write().insert_test_session(session);
+
+    let body = serde_json::json!({
+        "candidate_ids": ["variant-a", "variant-b"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/resolver/launch", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let output: crate::domain::ResolverOutput = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(output.selected_candidate, "variant-a");
+    assert!(!output.rationale.is_empty());
+
+    // Verify output was persisted
+    let persisted_output = storage.load_resolver_output(&session_id).unwrap();
+    assert!(persisted_output.is_some());
+
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+}
+
+#[tokio::test]
+async fn test_resolver_launch_missing_session_returns_404() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "candidate_ids": ["variant-a"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/nonexistent-session-id/resolver/launch")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_resolver_launch_empty_candidates_returns_400() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("resolver-empty-{}", uuid::Uuid::new_v4());
+
+    let session = make_fusion_session(&session_id, &std::env::temp_dir().to_string_lossy());
+    controller.write().insert_test_session(session);
+
+    let body = serde_json::json!({
+        "candidate_ids": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/resolver/launch", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_resolver_launch_non_fusion_session_returns_400() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("resolver-hive-{}", uuid::Uuid::new_v4());
+
+    let session = make_test_session(&session_id, &std::env::temp_dir().to_string_lossy());
+    controller.write().insert_test_session(session);
+
+    let body = serde_json::json!({
+        "candidate_ids": ["variant-a"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/resolver/launch", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

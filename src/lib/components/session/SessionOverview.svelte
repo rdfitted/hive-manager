@@ -7,6 +7,13 @@
     import SessionHeader from './SessionHeader.svelte';
     import CellGrid from '../cell/CellGrid.svelte';
     import Terminal from '../Terminal.svelte';
+    import TimelineView from '../timeline/TimelineView.svelte';
+    import ReplayView from '../replay/ReplayView.svelte';
+    import ReplayControls from '../replay/ReplayControls.svelte';
+    import ArtifactBrowser from '../artifacts/ArtifactBrowser.svelte';
+
+    type SessionView = 'terminal' | 'observability' | 'artifacts';
+    let activeView: SessionView = $state('terminal');
 
     $: sessionId = $activeSession?.id;
     $: terminalMaximized = $ui.terminalMaximized;
@@ -46,14 +53,34 @@
 
         <div class="terminal-section">
             <div class="terminal-controls">
-                <span class="label">Terminal</span>
+                <div class="tab-bar">
+                    <button class="tab-btn" class:active={activeView === 'terminal'} on:click={() => activeView = 'terminal'}>Terminal</button>
+                    <button class="tab-btn" class:active={activeView === 'observability'} on:click={() => activeView = 'observability'}>Observability</button>
+                    <button class="tab-btn" class:active={activeView === 'artifacts'} on:click={() => activeView = 'artifacts'}>Artifacts</button>
+                </div>
                 <button class="expand-btn" on:click={toggleTerminal}>
                     {terminalMaximized ? 'Minimize' : 'Maximize'}
                 </button>
             </div>
             <div class="terminal-wrapper">
-                {#if terminalAgentId}
-                    <Terminal agentId={terminalAgentId} />
+                {#if activeView === 'terminal'}
+                    {#if terminalAgentId}
+                        <Terminal agentId={terminalAgentId} />
+                    {/if}
+                {:else if activeView === 'observability'}
+                    <div class="observability-container">
+                        <div class="obs-main">
+                            <div class="obs-timeline">
+                                <TimelineView />
+                            </div>
+                            <div class="obs-replay">
+                                <ReplayView />
+                            </div>
+                        </div>
+                        <ReplayControls />
+                    </div>
+                {:else if activeView === 'artifacts'}
+                    <ArtifactBrowser />
                 {/if}
             </div>
         </div>
@@ -99,7 +126,7 @@
     }
 
     .terminal-controls {
-        padding: 4px 12px;
+        padding: 0 12px;
         background: #111;
         display: flex;
         justify-content: space-between;
@@ -107,28 +134,68 @@
         border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
 
-    .terminal-controls .label {
-        font-size: 10px;
+    .tab-bar {
+        display: flex;
+        gap: 2px;
+    }
+
+    .tab-btn {
+        padding: 8px 16px;
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: #666;
+        font-size: 11px;
+        font-weight: 600;
         text-transform: uppercase;
-        color: #555;
-        font-weight: 700;
-        letter-spacing: 0.1em;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .tab-btn:hover {
+        color: #aaa;
+    }
+
+    .tab-btn.active {
+        color: var(--color-accent, #7aa2f7);
+        border-bottom-color: var(--color-accent, #7aa2f7);
     }
 
     .expand-btn {
         background: transparent;
         border: none;
-        color: #888;
+        color: #555;
         font-size: 10px;
         cursor: pointer;
+        text-transform: uppercase;
+        font-weight: bold;
     }
 
     .expand-btn:hover {
-        color: #fff;
+        color: #888;
     }
 
     .terminal-wrapper {
         flex: 1;
         overflow: hidden;
+    }
+
+    .observability-container {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        background: #1a1b26;
+    }
+
+    .obs-main {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        overflow: hidden;
+    }
+
+    .obs-timeline, .obs-replay {
+        overflow: hidden;
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
     }
 </style>

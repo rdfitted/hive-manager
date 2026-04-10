@@ -93,6 +93,23 @@ pub fn validate_template_id(template_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Validate candidate IDs for path traversal attacks
+pub fn validate_candidate_ids(candidate_ids: &[String]) -> Result<(), ApiError> {
+    for id in candidate_ids {
+        if id.is_empty() || id.len() > 64 {
+            return Err(ApiError::bad_request(
+                "Invalid candidate ID: must be 1-64 characters",
+            ));
+        }
+        if id.contains("..") || id.contains('/') || id.contains('\\') {
+            return Err(ApiError::bad_request(
+                "Invalid candidate ID: must not contain '..', '/', or '\\'",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate CLI against allowlist
 pub fn validate_cli(cli: &str) -> Result<(), ApiError> {
     if !VALID_CLIS.contains(&cli) {
