@@ -302,7 +302,7 @@
                             class="color-toggle"
                             onclick={() => showColorPicker = !showColorPicker}
                             title="Choose Color"
-                            style:background={editColor || 'var(--color-bg-secondary)'}
+                            style:background={editColor || 'var(--bg-void)'}
                             type="button"
                           >
                           </button>
@@ -444,8 +444,8 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--color-surface);
-    border-right: 1px solid var(--color-border);
+    background: var(--bg-surface);
+    border-right: 1px solid var(--border-structural);
     transition: width 0.2s ease, min-width 0.2s ease;
   }
 
@@ -459,7 +459,7 @@
     align-items: center;
     gap: 10px;
     padding: 16px;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--border-structural);
     background: none;
     border-left: none;
     border-right: none;
@@ -470,7 +470,7 @@
   }
 
   .sidebar-header:hover {
-    background: var(--color-surface-hover);
+    background: var(--bg-elevated);
   }
 
   .sidebar-icon {
@@ -482,7 +482,7 @@
     margin: 0;
     font-size: 14px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
     white-space: nowrap;
@@ -513,21 +513,21 @@
   }
 
   .section-header:hover h3 {
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .section-header h3 {
     margin: 0;
     font-size: 11px;
     font-weight: 600;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
 
   .chevron {
     font-size: 8px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     transition: transform 0.2s ease;
   }
 
@@ -537,7 +537,7 @@
 
   .empty-state {
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     padding: 8px 4px;
     margin: 0;
   }
@@ -551,12 +551,12 @@
   .session-item {
     margin-bottom: 4px;
     border-left: 3px solid var(--session-color);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
 
   .session-item.active .session-button {
-    background: var(--color-accent-dim);
-    border-color: var(--color-accent);
+    background: var(--bg-elevated);
+    border-color: var(--accent-cyan);
   }
 
   .session-button {
@@ -566,7 +566,7 @@
     align-items: flex-start;
     padding: 8px 10px;
     border: 1px solid transparent;
-    border-radius: 0 4px 4px 0;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     background: transparent;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -578,7 +578,7 @@
     border: none;
     cursor: pointer;
     font-size: 10px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     padding: 2px 4px;
     margin-left: 4px;
     transition: all 0.15s ease;
@@ -594,13 +594,13 @@
   }
 
   .edit-btn:hover {
-    color: var(--color-accent);
-    background: var(--color-bg-secondary);
-    border-radius: 3px;
+    color: var(--accent-cyan);
+    background: var(--bg-void);
+    border-radius: var(--radius-sm);
   }
 
   .edit-btn:focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid var(--accent-cyan);
     outline-offset: 2px;
   }
 
@@ -613,10 +613,10 @@
 
   .edit-container input {
     width: 100%;
-    background: var(--color-bg);
-    border: 1px solid var(--color-accent);
-    border-radius: 4px;
-    color: var(--color-text);
+    background: var(--bg-void);
+    border: 1px solid var(--accent-cyan);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     padding: 4px 8px;
     font-size: 13px;
   }
@@ -632,7 +632,7 @@
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    border: 1px solid var(--color-border);
+    border: 1px solid var(--border-structural);
     cursor: pointer;
   }
 
@@ -640,28 +640,28 @@
     position: absolute;
     top: 24px;
     left: 0;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     padding: 6px;
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 4px;
     z-index: 20;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-void) 30%, transparent);
   }
 
   .color-option {
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    border: 1px solid rgba(0,0,0,0.2);
+    border: 1px solid color-mix(in srgb, var(--bg-void) 20%, transparent);
     cursor: pointer;
     padding: 0;
   }
 
   .color-option.selected {
-    border: 2px solid var(--color-text);
+    border: 2px solid var(--text-primary);
   }
 
   .color-option.clear {
@@ -669,8 +669,8 @@
     align-items: center;
     justify-content: center;
     font-size: 12px;
-    color: var(--color-text-muted);
-    background: var(--color-bg-secondary);
+    color: var(--text-secondary);
+    background: var(--bg-void);
   }
 
   .save-btn, .cancel-btn-inline {
@@ -679,27 +679,27 @@
     cursor: pointer;
     font-size: 14px;
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
 
   .save-btn {
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .save-btn:hover {
-    background: rgba(158, 206, 106, 0.1);
+    background: color-mix(in srgb, var(--status-success) 10%, transparent);
   }
 
   .cancel-btn-inline {
-    color: var(--color-error);
+    color: var(--status-error);
   }
 
   .cancel-btn-inline:hover {
-    background: rgba(247, 118, 142, 0.1);
+    background: color-mix(in srgb, var(--status-error) 10%, transparent);
   }
 
   .session-button:hover {
-    background: var(--color-surface-hover);
+    background: var(--bg-elevated);
   }
 
   .session-row {
@@ -717,17 +717,17 @@
     width: 28px;
     min-width: 28px;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     cursor: pointer;
     transition: all 0.15s ease;
   }
 
   .close-session-button:hover:not(:disabled) {
-    background: var(--color-surface-hover);
-    border-color: var(--color-border);
-    color: var(--color-text);
+    background: var(--bg-elevated);
+    border-color: var(--border-structural);
+    color: var(--text-primary);
   }
 
   .close-session-button:disabled {
@@ -737,12 +737,12 @@
 
   .session-path {
     font-size: 13px;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .session-meta {
     font-size: 11px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     margin-top: 2px;
     display: flex;
     align-items: center;
@@ -751,24 +751,24 @@
 
   .type-tag {
     padding: 1px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     font-size: 9px;
     font-weight: 600;
     text-transform: uppercase;
-    background: var(--color-bg-secondary);
-    color: var(--color-text-muted);
-    border: 1px solid var(--color-border);
+    background: var(--bg-void);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-structural);
   }
 
   .type-tag.solo {
-    background: rgba(122, 162, 247, 0.1);
-    color: var(--color-accent);
-    border-color: rgba(122, 162, 247, 0.3);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+    color: var(--accent-cyan);
+    border-color: color-mix(in srgb, var(--accent-cyan) 30%, transparent);
   }
 
   .sidebar-footer {
     padding: 12px;
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid var(--border-structural);
   }
 
   .launch-button {
@@ -779,9 +779,9 @@
     gap: 6px;
     padding: 10px;
     border: none;
-    border-radius: 6px;
-    background: var(--color-accent);
-    color: var(--color-bg);
+    border-radius: var(--radius-sm);
+    background: var(--accent-cyan);
+    color: var(--bg-void);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
@@ -795,7 +795,7 @@
   }
 
   .launch-button:hover {
-    background: var(--color-accent-bright);
+    background: var(--accent-cyan);
   }
 
   .launch-button .icon {
@@ -810,12 +810,12 @@
     gap: 8px;
     padding: 8px 10px;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     transition: all 0.15s ease;
   }
 
   .session-item.recent:hover {
-    background: var(--color-surface-hover);
+    background: var(--bg-elevated);
   }
 
   .session-info {
@@ -827,10 +827,10 @@
 
   .load-button {
     padding: 4px 8px;
-    border: 1px solid var(--color-accent);
-    border-radius: 4px;
+    border: 1px solid var(--accent-cyan);
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--color-accent);
+    color: var(--accent-cyan);
     font-size: 12px;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -838,14 +838,14 @@
   }
 
   .load-button:hover {
-    background: var(--color-accent);
-    color: var(--color-bg);
+    background: var(--accent-cyan);
+    color: var(--bg-void);
   }
 
   .confirm-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -853,9 +853,9 @@
   }
 
   .confirm-dialog {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     padding: 20px;
     width: 220px;
   }
@@ -864,13 +864,13 @@
     margin: 0 0 8px 0;
     font-size: 14px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .confirm-dialog p {
     margin: 0 0 16px 0;
     font-size: 12px;
-    color: var(--color-text-secondary);
+    color: var(--text-secondary);
     line-height: 1.5;
   }
 
@@ -884,7 +884,7 @@
   .confirm-btn {
     padding: 8px 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
@@ -892,17 +892,17 @@
   }
 
   .cancel-btn {
-    background: var(--color-surface-hover);
-    color: var(--color-text);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
   }
 
   .cancel-btn:hover:not(:disabled) {
-    background: var(--color-border);
+    background: var(--border-structural);
   }
 
   .confirm-btn {
-    background: var(--color-error);
-    color: var(--color-bg);
+    background: var(--status-error);
+    color: var(--bg-void);
   }
 
   .confirm-btn:hover:not(:disabled) {

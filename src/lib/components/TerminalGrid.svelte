@@ -95,17 +95,17 @@
   .terminal-item {
     display: flex;
     flex-direction: column;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     overflow: hidden;
     transition: border-color 0.2s, box-shadow 0.2s;
     min-height: 0;
   }
 
   .terminal-item.focused {
-    border-color: var(--color-accent);
-    box-shadow: 0 0 0 1px var(--color-accent);
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 0 1px var(--accent-cyan);
   }
 
   .terminal-header {
@@ -113,15 +113,15 @@
     align-items: center;
     justify-content: space-between;
     padding: 6px 10px;
-    background: var(--color-surface);
-    border-bottom: 1px solid var(--color-border);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-structural);
     user-select: none;
   }
 
   .role-label {
     font-size: 11px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
@@ -135,9 +135,9 @@
   .cli-badge {
     font-size: 9px;
     padding: 1px 4px;
-    background: var(--color-border);
-    border-radius: 3px;
-    color: var(--color-text-muted);
+    background: var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
     text-transform: lowercase;
   }
 
@@ -146,16 +146,16 @@
   }
 
   .status-indicator.running {
-    color: var(--color-running);
+    color: var(--accent-cyan);
   }
 
   .status-indicator.waiting {
-    color: var(--color-warning);
+    color: var(--status-warning);
     animation: pulse 2s infinite;
   }
 
   .status-indicator.completed {
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   @keyframes pulse {

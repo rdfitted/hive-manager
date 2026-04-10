@@ -41,11 +41,14 @@
   }
 
   function getRoleColor(role: AgentInfo['role']): string {
-    if (typeof role === 'object' && role !== null && 'QaWorker' in role) return '#9333ea'; // Purple
+    if (typeof role === 'object' && role !== null) {
+      if ('Worker' in role) return 'var(--accent-cyan)';
+      if ('QaWorker' in role) return 'var(--accent-chrome)';
+    }
     const k = serdeEnumVariantName(role);
-    if (k === 'Queen') return 'var(--color-primary)';
-    if (k === 'Evaluator') return '#d946ef'; // Fuchsia
-    return 'var(--color-text-muted)';
+    if (k === 'Queen') return 'var(--accent-amber)';
+    if (k === 'Evaluator') return 'var(--accent-chrome)';
+    return 'var(--text-secondary)';
   }
 
   function getStatusIcon(status: AgentInfo['status']): string {
@@ -63,16 +66,16 @@
     const sk = serdeEnumVariantName(status);
     const isQaWorkerRole = typeof role === 'object' && role !== null && 'QaWorker' in role;
     if (rk === 'Evaluator' || isQaWorkerRole) {
-      if (sk === 'Running') return rk === 'Evaluator' ? '#d946ef' : '#9333ea';
+      if (sk === 'Running') return 'var(--accent-cyan)';
     }
 
-    if (sk === 'Running') return 'var(--color-running)';
+    if (sk === 'Running') return 'var(--accent-cyan)';
     if (typeof status === 'object' && status !== null && 'WaitingForInput' in status)
-      return 'var(--color-warning)';
-    if (sk === 'Completed') return 'var(--color-success)';
-    if (sk === 'Starting') return 'var(--color-text-muted)';
-    if (typeof status === 'object' && status !== null && 'Error' in status) return 'var(--color-error)';
-    return 'var(--color-text)';
+      return 'var(--status-warning)';
+    if (sk === 'Completed') return 'var(--status-success)';
+    if (sk === 'Starting') return 'var(--text-secondary)';
+    if (typeof status === 'object' && status !== null && 'Error' in status) return 'var(--status-error)';
+    return 'var(--text-primary)';
   }
 
   function handleClick() {
@@ -155,21 +158,21 @@
     gap: 6px;
     padding: 6px 8px;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     transition: background 0.15s ease;
   }
 
   .tree-row:hover {
-    background: var(--color-bg);
+    background: var(--bg-void);
   }
 
   .tree-row.selected {
-    background: var(--color-primary-muted, rgba(139, 92, 246, 0.15));
+    background: color-mix(in srgb, var(--accent-cyan) 15%, transparent);
   }
 
   .tree-row:focus {
     outline: none;
-    box-shadow: inset 0 0 0 1px var(--color-primary, #8b5cf6);
+    box-shadow: inset 0 0 0 1px var(--accent-cyan);
   }
 
   .indent {
@@ -184,17 +187,17 @@
     justify-content: center;
     background: none;
     border: none;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     cursor: pointer;
     font-size: 8px;
     padding: 0;
     flex-shrink: 0;
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
   }
 
   .chevron:hover {
-    background: var(--color-border);
-    color: var(--color-text);
+    background: var(--border-structural);
+    color: var(--text-primary);
   }
 
   .chevron-spacer {
@@ -211,7 +214,7 @@
   .label {
     flex: 1;
     font-size: 13px;
-    color: var(--color-text);
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -220,9 +223,9 @@
   .cli-badge {
     font-size: 10px;
     padding: 2px 6px;
-    background: var(--color-border);
-    border-radius: 3px;
-    color: var(--color-text-muted);
+    background: var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
     text-transform: lowercase;
     flex-shrink: 0;
   }

@@ -23,10 +23,10 @@
 
 <style>
     .diff-summary-panel {
-        background: rgba(0, 0, 0, 0.2);
-        border-radius: 4px;
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+        border-radius: var(--radius-sm);
         padding: 12px;
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
         overflow-x: auto;
     }
 
@@ -34,7 +34,7 @@
         margin: 0;
         font-family: var(--font-mono);
         font-size: 11px;
-        color: #888;
+        color: var(--text-secondary);
         line-height: 1.4;
     }
 
@@ -48,7 +48,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        color: #aaa;
+        color: var(--text-secondary);
     }
 
     .file-path {

@@ -104,7 +104,7 @@
         padding: 12px;
         background: var(--color-surface);
         border-bottom: 1px solid var(--color-border);
-        font-family: 'JetBrains Mono', monospace;
+        font-family: var(--font-mono);
         font-size: 0.8rem;
     }
 
@@ -136,7 +136,7 @@
         padding: 4px 8px;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text);
         font-family: inherit;
         font-size: inherit;
@@ -151,7 +151,7 @@
         padding: 2px 8px;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text-muted);
         cursor: pointer;
         font-size: 0.7rem;
@@ -178,7 +178,7 @@
         padding: 4px;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text);
         font-family: inherit;
         font-size: 0.7rem;
@@ -188,7 +188,7 @@
         padding: 4px 12px;
         background: transparent;
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text-muted);
         cursor: pointer;
         font-size: 0.7rem;

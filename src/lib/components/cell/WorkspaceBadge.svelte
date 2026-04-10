@@ -22,14 +22,14 @@
         gap: 6px;
         background: rgba(255, 255, 255, 0.05);
         padding: 2px 8px;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         font-family: var(--font-mono);
         font-size: 11px;
         border: 1px solid rgba(255, 255, 255, 0.1);
     }
 
     .strategy {
-        color: #888;
+        color: var(--text-secondary);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         font-size: 9px;
@@ -39,13 +39,13 @@
         display: flex;
         align-items: center;
         gap: 4px;
-        color: #ddd;
+        color: var(--text-primary);
     }
 
     .dirty-dot {
         width: 6px;
         height: 6px;
-        background: #f59e0b;
+        background: var(--status-warning);
         border-radius: 50%;
     }
 </style>

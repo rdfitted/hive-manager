@@ -97,7 +97,7 @@
         align-items: center;
         justify-content: center;
         z-index: 1000;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: var(--font-mono);
     }
 
     .modal-dismiss {
@@ -116,7 +116,7 @@
         max-height: 80%;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
         box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
@@ -144,7 +144,7 @@
         padding: 4px 12px;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text);
         cursor: pointer;
     }
@@ -192,9 +192,9 @@
     pre {
         margin: 0;
         padding: 12px;
-        background: #0f111a;
-        border-radius: 4px;
-        color: #9ece6a;
+        background: var(--bg-void);
+        border-radius: var(--radius-sm);
+        color: var(--status-success);
         font-size: 0.85rem;
         overflow-x: auto;
     }

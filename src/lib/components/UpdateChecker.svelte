@@ -94,15 +94,15 @@
     position: fixed;
     bottom: 16px;
     right: 16px;
-    background: var(--bg-secondary, #1a1b26);
-    border: 1px solid var(--accent-color, #7aa2f7);
-    border-radius: 8px;
+    background: var(--bg-void);
+    border: 1px solid var(--accent-cyan);
+    border-radius: var(--radius-sm);
     padding: 12px 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
     z-index: 1000;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-void) 70%, transparent);
     max-width: 300px;
   }
 
@@ -118,12 +118,12 @@
 
   .update-text {
     font-size: 13px;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .update-error {
     font-size: 11px;
-    color: var(--color-error, #f7768e);
+    color: var(--status-error);
   }
 
   .update-actions {
@@ -134,10 +134,10 @@
   .btn-update {
     padding: 6px 12px;
     font-size: 12px;
-    background: var(--accent-color, #7aa2f7);
+    background: var(--accent-cyan);
     border: none;
-    border-radius: 4px;
-    color: white;
+    border-radius: var(--radius-sm);
+    color: var(--bg-void);
     cursor: pointer;
     font-weight: 500;
   }
@@ -150,13 +150,13 @@
     padding: 6px 12px;
     font-size: 12px;
     background: transparent;
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 4px;
-    color: var(--text-secondary, #565f89);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
     cursor: pointer;
   }
 
   .btn-dismiss:hover {
-    background: var(--bg-tertiary, #24283b);
+    background: var(--bg-surface);
   }
 </style>

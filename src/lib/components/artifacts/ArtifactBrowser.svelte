@@ -66,7 +66,7 @@
         height: 100%;
         background: var(--color-bg);
         overflow: hidden;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: var(--font-mono);
     }
 
     .browser-header {
@@ -101,7 +101,7 @@
         padding: 2px 8px;
         background: var(--color-bg);
         border: 1px solid var(--color-border);
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         color: var(--color-text-muted);
         font-size: 0.75rem;
         cursor: pointer;
@@ -135,7 +135,7 @@
         flex-direction: column;
         background: var(--color-surface);
         border: 1px solid var(--color-border);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         height: 100%;
     }
 

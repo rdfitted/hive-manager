@@ -101,11 +101,11 @@
   }
 
   function getSenderColor(from: string): string {
-    if (from === 'queen') return '#c084fc';
-    if (from === 'system' || from === 'SYSTEM') return '#9ca3af';
-    if (from === 'operator') return '#7aa2f7';
-    if (from.startsWith('worker')) return '#22d3ee';
-    return '#c0caf5';
+    if (from === 'queen') return 'var(--accent-amber)';
+    if (from === 'system' || from === 'SYSTEM') return 'var(--text-secondary)';
+    if (from === 'operator') return 'var(--accent-amber)';
+    if (from.startsWith('worker')) return 'var(--accent-cyan)';
+    return 'var(--text-primary)';
   }
 
   function formatTimestamp(ts: string): string {
@@ -211,15 +211,15 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--bg-secondary, #1a1b26);
+    background: var(--bg-void);
   }
 
   .agent-tabs {
     display: flex;
     flex-wrap: wrap;
     gap: 0;
-    background: var(--bg-tertiary, #24283b);
-    border-bottom: 1px solid var(--border-color, #414868);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-structural);
     padding: 0 4px;
     overflow-x: auto;
   }
@@ -228,7 +228,7 @@
     padding: 8px 12px;
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
@@ -238,12 +238,12 @@
   }
 
   .agent-tab:hover {
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .agent-tab.active {
-    color: var(--accent-color, #7aa2f7);
-    border-bottom-color: var(--accent-color, #7aa2f7);
+    color: var(--accent-cyan);
+    border-bottom-color: var(--accent-cyan);
   }
 
   .controls {
@@ -257,23 +257,23 @@
     flex: 1;
     padding: 4px 8px;
     font-size: 12px;
-    background: var(--bg-primary, #1a1b26);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 4px;
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
   }
 
   .search-input:focus {
     outline: none;
-    border-color: var(--accent-color, #7aa2f7);
+    border-color: var(--accent-cyan);
   }
 
   .scroll-btn {
     padding: 4px 8px;
     font-size: 12px;
-    background: var(--accent-color, #7aa2f7);
+    background: var(--accent-cyan);
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: white;
     cursor: pointer;
   }
@@ -282,13 +282,13 @@
     flex: 1;
     overflow-y: auto;
     padding: 8px 12px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.6;
   }
 
   .empty {
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     text-align: center;
     padding: 24px;
     font-style: italic;
@@ -298,7 +298,7 @@
     display: flex;
     gap: 6px;
     padding: 3px 0;
-    border-bottom: 1px solid var(--border-color-subtle, #292e42);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .message:last-child {
@@ -306,7 +306,7 @@
   }
 
   .msg-time {
-    color: var(--text-muted, #3b4261);
+    color: var(--text-secondary);
     font-size: 11px;
     flex-shrink: 0;
   }
@@ -317,7 +317,7 @@
   }
 
   .msg-content {
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
     word-break: break-word;
   }
 
@@ -325,32 +325,32 @@
     display: flex;
     gap: 8px;
     padding: 8px 12px;
-    border-top: 1px solid var(--border-color, #414868);
-    background: var(--bg-tertiary, #24283b);
+    border-top: 1px solid var(--border-structural);
+    background: var(--bg-surface);
   }
 
   .message-input {
     flex: 1;
     padding: 6px 10px;
     font-size: 12px;
-    background: var(--bg-primary, #1a1b26);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 4px;
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
   }
 
   .message-input:focus {
     outline: none;
-    border-color: var(--accent-color, #7aa2f7);
+    border-color: var(--accent-cyan);
   }
 
   .send-btn {
     padding: 6px 14px;
     font-size: 12px;
     font-weight: 600;
-    background: var(--accent-color, #7aa2f7);
+    background: var(--accent-cyan);
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: white;
     cursor: pointer;
   }
@@ -369,15 +369,16 @@
     justify-content: space-between;
     align-items: center;
     padding: 8px 12px;
-    background: var(--error-bg, #3b2030);
-    color: var(--error-text, #f7768e);
+    background: var(--bg-surface);
+    color: var(--status-error);
     font-size: 12px;
+    border: 1px solid var(--status-error);
   }
 
   .dismiss-btn {
     background: none;
     border: none;
-    color: var(--error-text, #f7768e);
+    color: var(--status-error);
     cursor: pointer;
     padding: 2px 6px;
   }

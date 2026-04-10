@@ -59,38 +59,38 @@
     .summary-item {
         flex: 1;
         padding: 8px;
-        background: rgba(0, 0, 0, 0.2);
-        border-radius: 4px;
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+        border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
         align-items: center;
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
     }
 
     .summary-item.pass {
-        border-color: rgba(16, 185, 129, 0.2);
+        border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
     }
 
     .summary-item.fail {
-        border-color: rgba(239, 68, 68, 0.2);
+        border-color: color-mix(in srgb, var(--status-error) 20%, transparent);
     }
 
     .count {
         font-family: var(--font-mono);
         font-size: 18px;
         font-weight: 700;
-        color: #fff;
+        color: var(--text-primary);
     }
 
     .label {
         font-size: 10px;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: #666;
+        color: var(--text-secondary);
     }
 
-    .summary-item.pass .count { color: #10b981; }
-    .summary-item.fail .count { color: #ef4444; }
+    .summary-item.pass .count { color: var(--status-success); }
+    .summary-item.fail .count { color: var(--status-error); }
 
     .failures-list {
         display: flex;
@@ -102,20 +102,20 @@
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: #555;
+        color: var(--text-disabled);
         font-weight: 700;
     }
 
     .failure-item {
-        background: rgba(239, 68, 68, 0.05);
-        border: 1px solid rgba(239, 68, 68, 0.1);
-        border-radius: 4px;
+        background: color-mix(in srgb, var(--status-error) 5%, transparent);
+        border: 1px solid color-mix(in srgb, var(--status-error) 10%, transparent);
+        border-radius: var(--radius-sm);
         padding: 8px;
     }
 
     .test-name {
         font-size: 12px;
-        color: #ef4444;
+        color: var(--status-error);
         font-weight: 600;
         margin-bottom: 4px;
         display: flex;
@@ -131,10 +131,10 @@
         margin: 0;
         font-family: var(--font-mono);
         font-size: 11px;
-        color: #888;
-        background: rgba(0, 0, 0, 0.2);
+        color: var(--text-secondary);
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
         padding: 6px;
-        border-radius: 2px;
+        border-radius: var(--radius-sm);
         overflow-x: auto;
     }
 </style>

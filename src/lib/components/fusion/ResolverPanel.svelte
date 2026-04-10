@@ -80,9 +80,9 @@
     }
 
     .output-card {
-        background: rgba(59, 130, 246, 0.05);
-        border: 1px solid rgba(59, 130, 246, 0.2);
-        border-radius: 8px;
+        background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-surface));
+        border: 1px solid color-mix(in srgb, var(--accent-cyan) 20%, transparent);
+        border-radius: var(--radius-sm);
         padding: 20px;
         display: flex;
         flex-direction: column;
@@ -93,7 +93,7 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-        border-bottom: 1px solid rgba(59, 130, 246, 0.1);
+        border-bottom: 1px solid color-mix(in srgb, var(--accent-cyan) 10%, transparent);
         padding-bottom: 12px;
     }
 
@@ -101,21 +101,21 @@
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.1em;
-        color: #3b82f6;
+        color: var(--accent-cyan);
         font-weight: 700;
     }
 
     .selected-badge {
         font-size: 13px;
-        color: #888;
+        color: var(--text-secondary);
     }
 
     .candidate-name {
         font-weight: 700;
-        color: #fff;
-        background: rgba(16, 185, 129, 0.2);
+        color: var(--text-primary);
+        background: color-mix(in srgb, var(--status-success) 20%, transparent);
         padding: 2px 8px;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         margin-left: 4px;
     }
 
@@ -124,20 +124,20 @@
         font-size: 12px;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: #555;
+        color: var(--text-disabled);
     }
 
     .rationale {
         margin: 0;
         font-size: 14px;
-        color: #ccc;
+        color: var(--text-primary);
         line-height: 1.6;
     }
 
     .tradeoffs {
         margin: 0;
         padding-left: 20px;
-        color: #bbb;
+        color: var(--text-secondary);
         font-size: 13px;
         display: flex;
         flex-direction: column;
@@ -145,26 +145,26 @@
     }
 
     .hybrid {
-        background: rgba(0, 0, 0, 0.2);
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
         padding: 12px;
-        border-radius: 6px;
-        border-left: 3px solid #f59e0b;
+        border-radius: var(--radius-sm);
+        border-left: 3px solid var(--status-warning);
     }
 
     .plan-content {
         font-size: 13px;
-        color: #aaa;
+        color: var(--text-secondary);
         line-height: 1.5;
         white-space: pre-wrap;
     }
 
     .recommendation {
         margin-top: 12px;
-        background: #3b82f6;
-        color: #fff;
+        background: var(--accent-cyan);
+        color: var(--bg-void);
         padding: 16px;
-        border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 4px 12px color-mix(in srgb, var(--accent-cyan) 30%, transparent);
     }
 
     .rec-label {
@@ -186,7 +186,7 @@
         align-items: center;
         justify-content: center;
         padding: 60px 20px;
-        color: #666;
+        color: var(--text-disabled);
         text-align: center;
         gap: 16px;
         max-width: 400px;
@@ -197,10 +197,10 @@
         margin: 0 auto;
         max-width: 480px;
         padding: 14px 16px;
-        border-radius: 8px;
-        background: rgba(239, 68, 68, 0.12);
-        border: 1px solid rgba(239, 68, 68, 0.3);
-        color: #fca5a5;
+        border-radius: var(--radius-sm);
+        background: color-mix(in srgb, var(--status-error) 12%, transparent);
+        border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
+        color: var(--status-error);
         text-align: center;
     }
 
@@ -215,8 +215,8 @@
     .spinner {
         width: 32px;
         height: 32px;
-        border: 2px solid rgba(255, 255, 255, 0.1);
-        border-top-color: #3b82f6;
+        border: 2px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
+        border-top-color: var(--accent-cyan);
         border-radius: 50%;
         animation: spin 1s linear infinite;
     }

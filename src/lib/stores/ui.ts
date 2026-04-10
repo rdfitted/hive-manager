@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type LayoutMode = 'grid' | 'focused';
+export type LayoutMode = 'focused';
 
 interface UIState {
   focusedAgentId: string | null;
@@ -34,12 +34,6 @@ function createUIStore() {
     },
     setLayoutMode(mode: LayoutMode) {
       update((state) => ({ ...state, layoutMode: mode }));
-    },
-    toggleLayoutMode() {
-      update((state) => ({
-        ...state,
-        layoutMode: state.layoutMode === 'grid' ? 'focused' : 'grid',
-      }));
     },
     setCellGridCollapsed(collapsed: boolean) {
       update((state) => ({ ...state, cellGridCollapsed: collapsed }));

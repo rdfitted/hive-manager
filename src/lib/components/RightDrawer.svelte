@@ -69,7 +69,7 @@
     flex-direction: column;
     height: 100%;
     width: 100%;
-    background: var(--bg-secondary, #1a1b26);
+    background: var(--bg-void);
   }
 
   .drawer-header {
@@ -77,7 +77,7 @@
     align-items: center;
     gap: 10px;
     padding: 16px;
-    border-bottom: 1px solid var(--border-color, #414868);
+    border-bottom: 1px solid var(--border-structural);
     background: none;
     border-left: none;
     border-right: none;
@@ -88,7 +88,7 @@
   }
 
   .drawer-header:hover {
-    background: var(--bg-tertiary, #24283b);
+    background: var(--bg-surface);
   }
 
   .drawer-icon {
@@ -99,7 +99,7 @@
   .drawer-title {
     font-size: 14px;
     font-weight: 600;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
     white-space: nowrap;
@@ -107,8 +107,8 @@
 
   .tab-bar {
     display: flex;
-    background: var(--bg-tertiary, #24283b);
-    border-bottom: 1px solid var(--border-color, #414868);
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border-structural);
     padding: 0 8px;
   }
 
@@ -116,7 +116,7 @@
     padding: 10px 16px;
     font-size: 13px;
     font-weight: 500;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
@@ -125,12 +125,12 @@
   }
 
   .tab:hover {
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .tab.active {
-    color: var(--accent-color, #7aa2f7);
-    border-bottom-color: var(--accent-color, #7aa2f7);
+    color: var(--accent-cyan);
+    border-bottom-color: var(--accent-cyan);
   }
 
   .tab-content {

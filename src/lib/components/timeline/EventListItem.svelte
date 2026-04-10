@@ -69,7 +69,7 @@
         background: var(--color-surface);
         border-bottom: 1px solid var(--color-border);
         cursor: pointer;
-        font-family: 'JetBrains Mono', monospace;
+        font-family: var(--font-mono);
         font-size: 0.8rem;
         transition: background 0.2s;
     }
@@ -98,7 +98,7 @@
 
     .badge {
         padding: 2px 6px;
-        border-radius: 4px;
+        border-radius: var(--radius-sm);
         font-size: 0.7rem;
         background: var(--color-accent-dim);
         color: var(--color-accent);
@@ -107,7 +107,7 @@
 
     .cell-badge {
         background: rgba(139, 92, 246, 0.1);
-        color: #a78bfa;
+        color: var(--accent-cyan);
     }
 
     .event-payload {

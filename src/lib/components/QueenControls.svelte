@@ -28,8 +28,8 @@
 <style>
   .queen-controls {
     padding: 12px;
-    background: var(--bg-secondary, #1a1b26);
-    border-radius: 8px;
+    background: var(--bg-void);
+    border-radius: var(--radius-sm);
   }
 
   .controls-header {
@@ -43,15 +43,15 @@
     margin: 0;
     font-size: 13px;
     font-weight: 600;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .add-worker-btn {
     padding: 4px 10px;
     font-size: 11px;
-    background: var(--accent-color, #7aa2f7);
+    background: var(--accent-cyan);
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: white;
     cursor: pointer;
     font-weight: 500;
@@ -62,7 +62,7 @@
   }
 
   .no-session {
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     font-size: 12px;
     text-align: center;
     padding: 16px;

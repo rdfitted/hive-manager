@@ -897,7 +897,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .dialog-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -905,9 +905,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .dialog {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     padding: 24px;
     width: 520px;
     max-width: 90vw;
@@ -918,25 +918,25 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .dialog h2 {
     margin: 0 0 16px 0;
     font-size: 18px;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .mode-tabs {
     display: flex;
     gap: 4px;
     margin-bottom: 20px;
-    background: var(--color-bg);
+    background: var(--bg-void);
     padding: 4px;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
   }
 
   .mode-tab {
     flex: 1;
     padding: 8px 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
@@ -944,13 +944,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .mode-tab:hover {
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .mode-tab.active {
-    background: var(--color-surface);
-    color: var(--color-text);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--bg-void) 20%, transparent);
   }
 
   .mode-tab.legacy {
@@ -971,7 +971,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     margin-bottom: 6px;
     font-size: 13px;
     font-weight: 500;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .form-row {
@@ -988,9 +988,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     flex-wrap: wrap;
     gap: 6px;
     padding: 6px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
   }
 
   .color-circle {
@@ -1008,7 +1008,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .color-circle.selected {
-    border-color: var(--color-text);
+    border-color: var(--text-primary);
     transform: scale(1.1);
   }
 
@@ -1016,20 +1016,20 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--color-surface-hover);
-    color: var(--color-text-muted);
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
     font-size: 14px;
-    border: 1px solid var(--color-border);
+    border: 1px solid var(--border-structural);
   }
 
   .form-group input,
   .form-group textarea {
     width: 100%;
     padding: 10px 12px;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    background: var(--color-bg);
-    color: var(--color-text);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    background: var(--bg-void);
+    color: var(--text-primary);
     font-size: 14px;
     font-family: inherit;
   }
@@ -1037,7 +1037,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .form-group input:focus,
   .form-group textarea:focus {
     outline: none;
-    border-color: var(--color-accent, #8b5cf6);
+    border-color: var(--accent-cyan);
   }
 
   .path-picker {
@@ -1051,15 +1051,15 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .path-picker input:read-only {
-    background: var(--color-surface);
+    background: var(--bg-surface);
   }
 
   .browse-button {
     padding: 10px 16px;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-    background: var(--color-surface-hover, var(--color-surface));
-    color: var(--color-text);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
     font-size: 14px;
     font-weight: 500;
     cursor: pointer;
@@ -1068,42 +1068,42 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .browse-button:hover {
-    background: var(--color-border);
-    border-color: var(--color-accent, #8b5cf6);
+    background: var(--border-structural);
+    border-color: var(--accent-cyan);
   }
 
   .form-section {
     margin-bottom: 20px;
     padding: 16px;
-    background: var(--color-bg);
-    border-radius: 6px;
+    background: var(--bg-void);
+    border-radius: var(--radius-sm);
   }
 
   .form-section h3 {
     margin: 0 0 12px 0;
     font-size: 13px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .form-section h4 {
     margin: 0;
     font-size: 12px;
     font-weight: 500;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   .section-description {
     margin: 0 0 12px 0;
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     line-height: 1.4;
   }
 
   .subsection {
     margin-top: 16px;
     padding-top: 12px;
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid var(--border-structural);
   }
 
   .subsection h4 {
@@ -1124,18 +1124,18 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .add-button {
     padding: 6px 12px;
-    border: 1px dashed var(--color-border);
-    border-radius: 4px;
+    border: 1px dashed var(--border-structural);
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     cursor: pointer;
     transition: all 0.15s ease;
   }
 
   .add-button:hover:not(:disabled) {
-    border-color: var(--color-accent, #8b5cf6);
-    color: var(--color-accent, #8b5cf6);
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
   }
 
   .add-button:disabled {
@@ -1158,20 +1158,20 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .worker-card,
   .planner-card {
     padding: 12px;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
   }
 
   .qa-worker-card {
-    border-left: 3px solid #9333ea;
+    border-left: 3px solid var(--accent-cyan);
   }
 
   .worker-mini-card {
     padding: 10px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     margin-top: 8px;
   }
 
@@ -1185,38 +1185,38 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .card-title {
     font-size: 12px;
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .card-title-input {
     font-size: 12px;
     font-weight: 600;
-    color: var(--color-text);
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
+    color: var(--text-primary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     padding: 4px 8px;
     width: 150px;
   }
 
   .card-title-input:focus {
     outline: none;
-    border-color: var(--color-accent);
+    border-color: var(--accent-cyan);
   }
 
   .remove-button {
     padding: 4px 10px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--color-error, #f7768e);
+    color: var(--status-error);
     font-size: 11px;
     cursor: pointer;
     transition: all 0.15s ease;
   }
 
   .remove-button:hover:not(:disabled) {
-    background: rgba(247, 118, 142, 0.15);
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
   }
 
   .remove-button:disabled {
@@ -1232,7 +1232,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .planner-workers {
     margin-top: 12px;
     padding-top: 12px;
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid var(--border-structural);
   }
 
   .field {
@@ -1245,22 +1245,22 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .field label {
     font-size: 12px;
     font-weight: 500;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   .field input {
     width: 100%;
     padding: 8px 10px;
     font-size: 13px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text);
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
   }
 
   .field input:focus {
     outline: none;
-    border-color: var(--color-accent, #8b5cf6);
+    border-color: var(--accent-cyan);
   }
 
   .dialog-actions {
@@ -1275,7 +1275,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .smoke-test-button {
     padding: 10px 20px;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     font-size: 14px;
     font-weight: 500;
     cursor: pointer;
@@ -1283,28 +1283,28 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .cancel-button {
-    background: var(--color-surface-hover, var(--color-surface));
-    color: var(--color-text);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
   }
 
   .cancel-button:hover:not(:disabled) {
-    background: var(--color-border);
+    background: var(--border-structural);
   }
 
   .smoke-test-button {
     background: transparent;
-    border: 1px dashed var(--color-warning, #e0af68);
-    color: var(--color-warning, #e0af68);
+    border: 1px dashed var(--status-warning);
+    color: var(--status-warning);
   }
 
   .smoke-test-button:hover:not(:disabled) {
-    background: rgba(224, 175, 104, 0.1);
+    background: color-mix(in srgb, var(--status-warning) 10%, transparent);
     border-style: solid;
   }
 
   .submit-button {
-    background: var(--color-accent, #8b5cf6);
-    color: var(--color-bg);
+    background: var(--accent-cyan);
+    color: var(--bg-void);
   }
 
   .submit-button:hover:not(:disabled) {
@@ -1321,10 +1321,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .error-message {
     padding: 12px;
     margin-bottom: 16px;
-    background: rgba(247, 118, 142, 0.15);
-    border: 1px solid var(--color-error, #f7768e);
-    border-radius: 6px;
-    color: var(--color-error, #f7768e);
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
+    border: 1px solid var(--status-error);
+    border-radius: var(--radius-sm);
+    color: var(--status-error);
     font-size: 13px;
     word-break: break-word;
   }
@@ -1339,7 +1339,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .role-selector label {
     font-size: 12px;
     font-weight: 500;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 
   .role-selector.small {
@@ -1354,16 +1354,16 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     width: 100%;
     padding: 8px 10px;
     font-size: 13px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 4px;
-    color: var(--color-text);
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     cursor: pointer;
   }
 
   .role-select:focus {
     outline: none;
-    border-color: var(--color-accent, #8b5cf6);
+    border-color: var(--accent-cyan);
   }
 
   .role-selector.small .role-select {
@@ -1381,21 +1381,21 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     gap: 12px;
     cursor: pointer;
     padding: 12px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
     transition: all 0.15s ease;
   }
 
   .checkbox-label:hover {
-    border-color: var(--color-accent, #8b5cf6);
+    border-color: var(--accent-cyan);
   }
 
   .checkbox-label input[type="checkbox"] {
     width: 18px;
     height: 18px;
     margin-top: 2px;
-    accent-color: var(--color-accent, #8b5cf6);
+    accent-color: var(--accent-cyan);
     cursor: pointer;
   }
 
@@ -1408,25 +1408,25 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .checkbox-title {
     font-size: 14px;
     font-weight: 500;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .checkbox-description {
     font-size: 12px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     line-height: 1.4;
   }
 
   .launch-preview-section {
     margin-top: 20px;
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid var(--border-structural);
     padding-top: 16px;
   }
 
   .preview-toggle {
     background: transparent;
     border: none;
-    color: var(--color-accent);
+    color: var(--accent-cyan);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -1438,8 +1438,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .preview-content {
     margin-top: 16px;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg-void) 20%, transparent);
+    border-radius: var(--radius-sm);
     padding: 16px;
   }
 
@@ -1452,9 +1452,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .node {
     padding: 8px 12px;
-    border-radius: 6px;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1462,8 +1462,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .node.queen {
-    border-color: var(--color-accent);
-    background: rgba(139, 92, 246, 0.1);
+    border-color: var(--accent-amber);
+    background: color-mix(in srgb, var(--accent-amber) 10%, transparent);
   }
 
   .node-icon {
@@ -1474,19 +1474,19 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .node-label {
     font-size: 11px;
     font-weight: 700;
-    color: #fff;
+    color: var(--text-primary);
   }
 
   .node-cli {
     font-size: 9px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     font-family: var(--font-mono);
   }
 
   .connector {
     width: 2px;
     height: 16px;
-    background: var(--color-border);
+    background: var(--border-structural);
   }
 
   .worker-nodes {
@@ -1496,7 +1496,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     gap: 8px;
   }
 
-  .node.worker { border-color: #3b82f6; }
-  .node.fusion { border-color: #10b981; }
-  .node.solo { border-color: #f59e0b; }
+  .node.worker {
+    border-color: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  }
+  .node.fusion { border-color: var(--status-success); }
+  .node.solo { border-color: var(--status-warning); }
 </style>
