@@ -6,7 +6,7 @@
     $: color = {
         'queued': 'var(--status-queued)',
         'launching': 'var(--status-running)',
-        'running': 'var(--status-success)',
+        'running': 'var(--status-running)',
         'completed': 'var(--status-success)',
         'waiting_input': 'var(--status-warning)',
         'failed': 'var(--status-error)',

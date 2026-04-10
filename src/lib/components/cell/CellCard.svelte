@@ -115,13 +115,13 @@
     }
 
     .cell-card:focus-visible {
-        outline: 2px solid rgba(59, 130, 246, 0.9);
+        outline: 2px solid var(--accent-cyan);
         outline-offset: 2px;
     }
 
     .cell-card.selected {
-        background: rgba(59, 130, 246, 0.08);
-        border-color: rgba(59, 130, 246, 0.5);
+        background: color-mix(in srgb, var(--accent-cyan) 8%, transparent);
+        border-color: color-mix(in srgb, var(--accent-cyan) 50%, transparent);
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
     }
 

@@ -687,23 +687,23 @@
   }
 
   .action-btn.approve {
-    background: rgba(158, 206, 106, 0.15);
+    background: color-mix(in srgb, var(--status-success) 15%, transparent);
     border-color: var(--status-success);
     color: var(--status-success);
   }
 
   .action-btn.approve:hover {
-    background: rgba(158, 206, 106, 0.25);
+    background: color-mix(in srgb, var(--status-success) 25%, transparent);
   }
 
   .action-btn.reject {
-    background: rgba(247, 118, 142, 0.15);
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
     border-color: var(--status-error);
     color: var(--status-error);
   }
 
   .action-btn.reject:hover {
-    background: rgba(247, 118, 142, 0.25);
+    background: color-mix(in srgb, var(--status-error) 25%, transparent);
   }
 
   /* Context Menu */

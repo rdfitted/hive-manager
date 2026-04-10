@@ -268,7 +268,7 @@
     padding: 2px 8px;
     border-radius: var(--radius-sm);
     background: var(--accent-cyan);
-    color: var(--accent-cyan);
+    color: var(--bg-void);
     font-weight: 500;
   }
 
@@ -316,7 +316,7 @@
 
   .status-badge.running {
     background: var(--accent-cyan);
-    color: var(--accent-cyan);
+    color: var(--bg-void);
   }
 
   .status-badge.completed {

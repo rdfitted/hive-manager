@@ -98,8 +98,8 @@
     .search-box input {
         width: 100%;
         padding: 8px 12px 8px 36px;
-        background: rgba(0, 0, 0, 0.3);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: color-mix(in srgb, var(--bg-void) 70%, transparent);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
         border-radius: var(--radius-sm);
         color: var(--text-primary);
         font-size: 14px;
@@ -108,7 +108,7 @@
     .new-btn {
         padding: 8px 16px;
         background: transparent;
-        border: 1px dashed rgba(255, 255, 255, 0.2);
+        border: 1px dashed color-mix(in srgb, var(--text-primary) 20%, transparent);
         border-radius: var(--radius-sm);
         color: var(--text-primary);
         font-size: 13px;
@@ -131,8 +131,8 @@
     }
 
     .template-card {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 8%, transparent);
         border-radius: var(--radius-sm);
         padding: 12px;
         display: flex;
@@ -143,8 +143,8 @@
     }
 
     .template-card:hover {
-        background: rgba(255, 255, 255, 0.06);
-        border-color: rgba(255, 255, 255, 0.15);
+        background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+        border-color: color-mix(in srgb, var(--text-primary) 15%, transparent);
         transform: translateY(-2px);
     }
 
@@ -155,12 +155,12 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(0, 0, 0, 0.2);
+        background: color-mix(in srgb, var(--bg-void) 80%, transparent);
         border-radius: var(--radius-sm);
     }
 
     .card-icon.builtin {
-        border: 1px solid rgba(139, 92, 246, 0.3);
+        border: 1px solid color-mix(in srgb, var(--accent-cyan) 30%, transparent);
     }
 
     .card-info {
@@ -190,7 +190,7 @@
     .badge {
         font-size: 9px;
         text-transform: uppercase;
-        background: rgba(139, 92, 246, 0.2);
+        background: color-mix(in srgb, var(--accent-cyan) 20%, transparent);
         color: var(--accent-cyan);
         padding: 1px 4px;
         border-radius: var(--radius-sm);

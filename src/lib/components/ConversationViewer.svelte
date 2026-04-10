@@ -101,9 +101,9 @@
   }
 
   function getSenderColor(from: string): string {
-    if (from === 'queen') return 'var(--accent-cyan)';
+    if (from === 'queen') return 'var(--accent-amber)';
     if (from === 'system' || from === 'SYSTEM') return 'var(--text-secondary)';
-    if (from === 'operator') return 'var(--accent-cyan)';
+    if (from === 'operator') return 'var(--accent-amber)';
     if (from.startsWith('worker')) return 'var(--accent-cyan)';
     return 'var(--text-primary)';
   }

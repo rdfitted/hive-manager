@@ -1462,8 +1462,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .node.queen {
-    border-color: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+    border-color: var(--accent-amber);
+    background: color-mix(in srgb, var(--accent-amber) 10%, transparent);
   }
 
   .node-icon {
@@ -1496,7 +1496,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     gap: 8px;
   }
 
-  .node.worker { border-color: var(--accent-cyan); }
+  .node.worker {
+    border-color: var(--accent-cyan);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  }
   .node.fusion { border-color: var(--status-success); }
   .node.solo { border-color: var(--status-warning); }
 </style>

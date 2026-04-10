@@ -41,10 +41,13 @@
   }
 
   function getRoleColor(role: AgentInfo['role']): string {
-    if (typeof role === 'object' && role !== null && 'QaWorker' in role) return 'var(--accent-cyan)';
+    if (typeof role === 'object' && role !== null) {
+      if ('Worker' in role) return 'var(--accent-cyan)';
+      if ('QaWorker' in role) return 'var(--accent-chrome)';
+    }
     const k = serdeEnumVariantName(role);
-    if (k === 'Queen') return 'var(--accent-cyan)';
-    if (k === 'Evaluator') return 'var(--accent-cyan)';
+    if (k === 'Queen') return 'var(--accent-amber)';
+    if (k === 'Evaluator') return 'var(--accent-chrome)';
     return 'var(--text-secondary)';
   }
 

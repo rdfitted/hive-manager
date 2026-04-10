@@ -87,7 +87,10 @@
                              typeof agent.role === 'object' && 'QaWorker' in agent.role ? `QA Worker ${agent.role.QaWorker.index}` :
                              'Agent')}
                         <div class="agent-terminal-view" class:hidden={!isVisible}>
-                            <div class="terminal-header" style:border-top-color={$activeSession?.color || 'transparent'} style:border-top-width={$activeSession?.color ? '3px' : '0'}>
+                            <div
+                                class="terminal-header"
+                                style:border-top={$activeSession?.color ? `3px solid ${$activeSession.color}` : 'none'}
+                            >
                                 <span class="terminal-title">{agentRoleName}</span>
                                 <div class="terminal-meta">
                                     <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
@@ -235,6 +238,10 @@
         display: flex;
         flex-direction: column;
         height: 100%;
+    }
+
+    .agent-terminal-view.hidden {
+        display: none;
     }
 
     .terminal-header {

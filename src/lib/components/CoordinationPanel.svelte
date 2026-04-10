@@ -260,7 +260,7 @@
   }
 
   .text-purple-400 {
-    color: var(--accent-cyan);
+    color: var(--accent-amber);
   }
 
   .text-cyan-400 {

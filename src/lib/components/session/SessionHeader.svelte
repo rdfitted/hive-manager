@@ -87,7 +87,7 @@
         text-transform: capitalize;
     }
 
-    .status-badge.running { color: var(--status-success); border-color: var(--status-success); background: rgba(16, 185, 129, 0.05); }
+    .status-badge.running { color: var(--status-success); border-color: var(--status-success); background: color-mix(in srgb, var(--status-success) 5%, transparent); }
 
     .objective {
         margin: 0;

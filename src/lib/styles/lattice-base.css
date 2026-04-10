@@ -229,6 +229,12 @@ body::after {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .status-blocked {
+    animation: none;
+  }
+}
+
 
 /* ═══════════════════════════════════════════════════════════════════
    DATA TABLE
