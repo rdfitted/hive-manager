@@ -890,6 +890,17 @@ impl SessionController {
         changes
     }
 
+    fn persist_then_emit_session_update(
+        &self,
+        session_id: &str,
+        changes: Vec<(String, String, String)>,
+    ) -> Result<(), String> {
+        self.update_session_storage_checked(session_id)?;
+        self.emit_cell_status_changes(session_id, changes);
+        self.emit_session_update(session_id);
+        Ok(())
+    }
+
     /// Insert a session directly (for testing purposes only)
     #[cfg(test)]
     pub fn insert_test_session(&self, session: Session) {
@@ -909,21 +920,24 @@ impl SessionController {
                 let _ = pty_manager.kill(&agent.id);
             }
 
-            {
+            let previous_state = {
                 let mut sessions = self.sessions.write();
-                if let Some(s) = sessions.get_mut(id) {
+                sessions.get_mut(id).map(|s| {
+                    let previous_state = (s.state.clone(), s.auth_strategy.clone());
                     let changes = self.set_session_state_with_events(s, SessionState::Completed);
-                    self.emit_cell_status_changes(id, changes);
                     s.auth_strategy = AuthStrategy::None;
-                }
-            }
+                    (previous_state, changes)
+                })
+            };
 
-            if let Some(ref app_handle) = self.app_handle {
-                let sessions = self.sessions.read();
-                if let Some(session) = sessions.get(id) {
-                    let _ = app_handle.emit("session-update", SessionUpdate {
-                        session: session.clone(),
-                    });
+            if let Some(((previous_session_state, previous_auth_strategy), changes)) = previous_state {
+                if let Err(err) = self.persist_then_emit_session_update(id, changes) {
+                    let mut sessions = self.sessions.write();
+                    if let Some(session) = sessions.get_mut(id) {
+                        session.state = previous_session_state;
+                        session.auth_strategy = previous_auth_strategy;
+                    }
+                    return Err(err);
                 }
             }
 
@@ -5308,7 +5322,8 @@ Last updated: {timestamp}
                     .map(|s| self.set_session_state_with_events(s, SessionState::Running))
             };
             if let Some(changes) = changes {
-                self.emit_cell_status_changes(session_id, changes);
+                self.persist_then_emit_session_update(session_id, changes)
+                    .map_err(SessionError::ConfigError)?;
             }
             return Ok(());
         }
@@ -5330,7 +5345,8 @@ Last updated: {timestamp}
             }
         };
         if let Some(changes) = spawning_changes {
-            self.emit_cell_status_changes(session_id, changes);
+            self.persist_then_emit_session_update(session_id, changes)
+                .map_err(SessionError::ConfigError)?;
         }
 
         let pty_manager = self.pty_manager.read();
@@ -5384,7 +5400,8 @@ Last updated: {timestamp}
             }
         };
         if let Some(changes) = waiting_changes {
-            self.emit_cell_status_changes(session_id, changes);
+            self.persist_then_emit_session_update(session_id, changes)
+                .map_err(SessionError::ConfigError)?;
         }
 
         Ok(())
@@ -5585,6 +5602,7 @@ Last updated: {timestamp}
         let sessions = Arc::clone(&self.sessions);
         let app_handle = self.app_handle.clone();
         let event_emitter = self.event_emitter.clone();
+        let storage = self.storage.clone();
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
@@ -5602,33 +5620,45 @@ Last updated: {timestamp}
                 tracing::warn!("QA timeout fired for session {} after {}s — auto-passing", sid, timeout_secs);
 
                 // Transition directly to Running (skip transient QaPassed to avoid race)
-                let updated_session = {
+                let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
+                        let previous_state = session.state.clone();
                         let changes = cell_status_changes_for_transition(session, &SessionState::Running);
                         session.state = SessionState::Running;
-                        if let Some(emitter) = event_emitter.clone() {
-                            SessionController::fire_cell_status_changes(
-                                emitter,
-                                sid.clone(),
-                                changes,
-                            );
-                        }
-                        Some(session.clone())
+                        Some((previous_state, changes, session.clone()))
                     } else {
                         None
                     }
                 };
 
-                if let Some(ref app_handle) = app_handle {
-                    // Emit session update so frontend sees the state change
-                    if let Some(session) = updated_session {
-                        let _ = app_handle.emit("session-update", SessionUpdate { session });
+                if let Some((previous_state, changes, updated_session)) = transition {
+                    if let Some(storage) = storage.as_ref() {
+                        if let Err(error) =
+                            SessionController::persist_session_snapshot(storage, &updated_session, &sid)
+                        {
+                            tracing::warn!("Failed to persist QA timeout state for {}: {}", sid, error);
+                            let mut sessions = sessions.write();
+                            if let Some(session) = sessions.get_mut(&sid) {
+                                session.state = previous_state;
+                            }
+                            return;
+                        }
                     }
-                    let _ = app_handle.emit("qa-timeout", serde_json::json!({
-                        "session_id": sid,
-                        "action": "pass-with-warning"
-                    }));
+
+                    if let Some(emitter) = event_emitter.clone() {
+                        SessionController::fire_cell_status_changes(emitter, sid.clone(), changes);
+                    }
+
+                    if let Some(ref app_handle) = app_handle {
+                        let _ = app_handle.emit("session-update", SessionUpdate {
+                            session: updated_session,
+                        });
+                        let _ = app_handle.emit("qa-timeout", serde_json::json!({
+                            "session_id": sid,
+                            "action": "pass-with-warning"
+                        }));
+                    }
                 }
             }
         });
@@ -7014,6 +7044,10 @@ Last updated: {timestamp}
     /// Initialize session storage for a new session
     /// Convert a Session to PersistedSession for storage
     fn session_to_persisted(&self, session: &Session) -> crate::storage::PersistedSession {
+        Self::session_to_persisted_snapshot(session)
+    }
+
+    fn session_to_persisted_snapshot(session: &Session) -> crate::storage::PersistedSession {
         use crate::storage::{PersistedSession, SessionTypeInfo, PersistedAgentInfo, PersistedAgentConfig};
 
         let session_type = match &session.session_type {
@@ -7160,54 +7194,72 @@ Last updated: {timestamp}
 
     fn update_session_storage_checked(&self, session_id: &str) -> Result<(), String> {
         if let Some(ref storage) = self.storage {
-            let sessions = self.sessions.read();
-            if let Some(session) = sessions.get(session_id) {
-                // Update session.json with latest state
-                let persisted = self.session_to_persisted(session);
-                storage
-                    .save_session(&persisted)
-                    .map_err(|e| format!("Failed to update session metadata: {}", e))?;
+            let session = {
+                let sessions = self.sessions.read();
+                sessions.get(session_id).cloned()
+            };
 
-                // Build hierarchy nodes
-                let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
-                    let role_str = format_agent_display(&agent.role);
+            if let Some(session) = session {
+                Self::persist_session_snapshot(storage, &session, session_id)?;
+            }
+        }
 
-                    let children: Vec<String> = session.agents.iter()
-                        .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
-                        .map(|a| a.id.clone())
-                        .collect();
+        Ok(())
+    }
 
-                    HierarchyNode {
-                        id: agent.id.clone(),
-                        role: role_str,
-                        parent_id: agent.parent_id.clone(),
-                        children,
-                    }
-                }).collect();
+    fn persist_session_snapshot(
+        storage: &SessionStorage,
+        session: &Session,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let persisted = Self::session_to_persisted_snapshot(session);
+        storage
+            .save_session(&persisted)
+            .map_err(|e| format!("Failed to update session metadata: {}", e))?;
 
-                // Build worker state info
-                let workers: Vec<WorkerStateInfo> = session.agents.iter()
-                    .filter(|a| include_in_worker_roster(&a.role))
-                    .map(|a| WorkerStateInfo {
-                        id: a.id.clone(),
-                        role: a.config.role.clone().unwrap_or_default(),
-                        cli: a.config.cli.clone(),
-                        status: format!("{:?}", a.status),
-                        current_task: None,
-                        last_update: Utc::now(),
-                        last_heartbeat: None,
-                    })
+        let hierarchy: Vec<HierarchyNode> = session
+            .agents
+            .iter()
+            .map(|agent| {
+                let role_str = format_agent_display(&agent.role);
+
+                let children: Vec<String> = session
+                    .agents
+                    .iter()
+                    .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
+                    .map(|a| a.id.clone())
                     .collect();
 
-                // Update state files
-                let state_manager = StateManager::new(storage.session_dir(session_id));
-                if let Err(e) = state_manager.update_hierarchy(&hierarchy) {
-                    tracing::warn!("Failed to update hierarchy: {}", e);
+                HierarchyNode {
+                    id: agent.id.clone(),
+                    role: role_str,
+                    parent_id: agent.parent_id.clone(),
+                    children,
                 }
-                if let Err(e) = state_manager.update_workers_file(&workers) {
-                    tracing::warn!("Failed to update workers file: {}", e);
-                }
-            }
+            })
+            .collect();
+
+        let workers: Vec<WorkerStateInfo> = session
+            .agents
+            .iter()
+            .filter(|a| include_in_worker_roster(&a.role))
+            .map(|a| WorkerStateInfo {
+                id: a.id.clone(),
+                role: a.config.role.clone().unwrap_or_default(),
+                cli: a.config.cli.clone(),
+                status: format!("{:?}", a.status),
+                current_task: None,
+                last_update: Utc::now(),
+                last_heartbeat: None,
+            })
+            .collect();
+
+        let state_manager = StateManager::new(storage.session_dir(session_id));
+        if let Err(e) = state_manager.update_hierarchy(&hierarchy) {
+            tracing::warn!("Failed to update hierarchy: {}", e);
+        }
+        if let Err(e) = state_manager.update_workers_file(&workers) {
+            tracing::warn!("Failed to update workers file: {}", e);
         }
 
         Ok(())
