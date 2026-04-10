@@ -70,6 +70,9 @@
         padding: 2px 6px;
         border-radius: var(--radius-sm);
         letter-spacing: 0.1em;
+        background: var(--bg-surface);
+        color: var(--text-primary);
+        border: 1px solid var(--border-structural);
     }
 
     .mode-badge.hive { background: var(--status-warning); color: var(--bg-void); }
@@ -87,7 +90,7 @@
         text-transform: capitalize;
     }
 
-    .status-badge.running { color: var(--status-success); border-color: var(--status-success); background: color-mix(in srgb, var(--status-success) 5%, transparent); }
+    .status-badge.running { color: var(--status-running); border-color: var(--status-running); background: color-mix(in srgb, var(--status-running) 5%, transparent); }
 
     .objective {
         margin: 0;

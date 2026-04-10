@@ -276,7 +276,7 @@
   }
 
   .text-gray-300 {
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
 
   .error {
