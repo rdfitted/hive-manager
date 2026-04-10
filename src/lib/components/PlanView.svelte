@@ -204,10 +204,10 @@
 
   function getStatusColor(status: PlanTask['status']): string {
     switch (status) {
-      case 'completed': return 'var(--color-success, #9ece6a)';
-      case 'in_progress': return 'var(--color-running, #7aa2f7)';
-      case 'blocked': return 'var(--color-error, #f7768e)';
-      default: return 'var(--text-secondary, #565f89)';
+      case 'completed': return 'var(--status-success)';
+      case 'in_progress': return 'var(--accent-cyan)';
+      case 'blocked': return 'var(--status-error)';
+      default: return 'var(--text-secondary)';
     }
   }
 
@@ -222,9 +222,9 @@
 
   function getPriorityColor(priority?: PlanTask['priority']): string {
     switch (priority) {
-      case 'high': return 'var(--color-error, #f7768e)';
-      case 'medium': return 'var(--color-warning, #e0af68)';
-      case 'low': return 'var(--text-secondary, #565f89)';
+      case 'high': return 'var(--status-error)';
+      case 'medium': return 'var(--status-warning)';
+      case 'low': return 'var(--text-secondary)';
       default: return 'transparent';
     }
   }
@@ -394,7 +394,7 @@
     justify-content: center;
     gap: 8px;
     padding: 32px;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
   }
 
   .spinner {
@@ -423,39 +423,39 @@
 
   .empty-state p {
     margin: 0;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
     font-size: 14px;
   }
 
   .empty-state .hint {
     margin-top: 8px;
-    color: var(--text-muted, #3b4261);
+    color: var(--text-muted);
     font-size: 12px;
   }
 
   .plan-header {
     margin-bottom: 20px;
     padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-color, #414868);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .plan-header h3 {
     margin: 0 0 8px 0;
     font-size: 16px;
     font-weight: 600;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .plan-header .summary {
     margin: 0 0 8px 0;
     font-size: 13px;
-    color: var(--text-secondary, #a9b1d6);
+    color: var(--text-secondary);
     line-height: 1.5;
   }
 
   .plan-header .timestamp {
     font-size: 11px;
-    color: var(--text-muted, #3b4261);
+    color: var(--text-muted);
   }
 
   .tasks-header {
@@ -469,12 +469,12 @@
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
   }
 
   .tasks-count {
     font-size: 12px;
-    color: var(--text-muted, #3b4261);
+    color: var(--text-muted);
   }
 
   .tasks-list {
@@ -487,8 +487,8 @@
     display: flex;
     gap: 10px;
     padding: 12px;
-    background: var(--bg-tertiary, #24283b);
-    border-radius: 6px;
+    background: var(--bg-surface);
+    border-radius: var(--radius-sm);
     transition: opacity 0.15s;
   }
 
@@ -518,21 +518,21 @@
   .task-title {
     font-size: 13px;
     font-weight: 500;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .priority-badge {
     font-size: 10px;
     font-weight: 600;
     padding: 1px 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     color: white;
   }
 
   .task-description {
     margin: 0;
     font-size: 12px;
-    color: var(--text-secondary, #a9b1d6);
+    color: var(--text-secondary);
     line-height: 1.4;
   }
 
@@ -540,16 +540,17 @@
     display: inline-block;
     margin-top: 6px;
     font-size: 11px;
-    color: var(--accent-color, #7aa2f7);
+    color: var(--accent-cyan);
   }
 
   .error {
     padding: 12px;
-    background: var(--error-bg, #3b2030);
-    color: var(--error-text, #f7768e);
-    border-radius: 6px;
+    background: var(--bg-surface);
+    color: var(--status-error);
+    border-radius: var(--radius-sm);
     font-size: 12px;
     margin-top: 12px;
+    border: 1px solid var(--status-error);
   }
 
   /* Raw content display (for plans in progress) */
@@ -563,7 +564,7 @@
     gap: 8px;
     margin-bottom: 12px;
     padding-bottom: 8px;
-    border-bottom: 1px solid var(--border-color, #414868);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .raw-icon {
@@ -574,7 +575,7 @@
     font-size: 12px;
     font-weight: 600;
     text-transform: uppercase;
-    color: var(--text-secondary, #565f89);
+    color: var(--text-secondary);
   }
 
   .writing-indicator {
@@ -583,17 +584,17 @@
     gap: 6px;
     margin-left: auto;
     font-size: 11px;
-    color: var(--accent-color, #7aa2f7);
+    color: var(--accent-cyan);
   }
 
   .raw-markdown {
     margin: 0;
     padding: 16px;
-    background: var(--bg-tertiary, #24283b);
-    border-radius: 6px;
+    background: var(--bg-surface);
+    border-radius: var(--radius-sm);
     font-size: 12px;
-    font-family: 'Fira Code', 'Monaco', monospace;
-    color: var(--text-primary, #c0caf5);
+    font-family: var(--font-mono);
+    color: var(--text-primary);
     white-space: pre-wrap;
     word-wrap: break-word;
     max-height: 400px;
@@ -626,12 +627,12 @@
     margin: 0;
     font-size: 18px;
     font-weight: 600;
-    color: var(--text-primary, #c0caf5);
+    color: var(--text-primary);
   }
 
   .planning-description {
     margin: 0 0 24px 0;
-    color: var(--text-secondary, #a9b1d6);
+    color: var(--text-secondary);
     font-size: 14px;
     max-width: 300px;
     line-height: 1.5;
@@ -642,9 +643,9 @@
     align-items: center;
     gap: 10px;
     padding: 12px 20px;
-    background: var(--bg-tertiary, #24283b);
-    border-radius: 8px;
-    color: var(--accent-color, #7aa2f7);
+    background: var(--bg-surface);
+    border-radius: var(--radius-sm);
+    color: var(--accent-cyan);
     font-size: 13px;
   }
 
@@ -656,7 +657,7 @@
   .plan-actions {
     margin-top: 24px;
     padding-top: 20px;
-    border-top: 1px solid var(--border-color, #414868);
+    border-top: 1px solid var(--border-structural);
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -670,7 +671,7 @@
 
   .refinement-hint {
     margin: 0;
-    color: var(--text-secondary, #a9b1d6);
+    color: var(--text-secondary);
     font-size: 12px;
   }
 
@@ -682,20 +683,20 @@
   .refinement-input {
     flex: 1;
     padding: 10px 12px;
-    background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 6px;
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     font-size: 13px;
   }
 
   .refinement-input:focus {
     outline: none;
-    border-color: var(--accent-color, #7aa2f7);
+    border-color: var(--accent-cyan);
   }
 
   .refinement-input::placeholder {
-    color: var(--text-muted, #565f89);
+    color: var(--text-secondary);
   }
 
   .refinement-input:disabled {
@@ -708,10 +709,10 @@
     justify-content: center;
     gap: 6px;
     padding: 10px 16px;
-    background: var(--bg-tertiary, #24283b);
-    border: 1px solid var(--border-color, #414868);
-    border-radius: 6px;
-    color: var(--text-primary, #c0caf5);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
@@ -720,8 +721,8 @@
   }
 
   .refinement-button:hover:not(:disabled) {
-    border-color: var(--accent-color, #7aa2f7);
-    background: var(--bg-secondary, #1f2335);
+    border-color: var(--accent-cyan);
+    background: var(--bg-elevated);
   }
 
   .refinement-button:disabled {
@@ -735,13 +736,13 @@
     align-items: center;
     gap: 12px;
     padding-top: 16px;
-    border-top: 1px dashed var(--border-color, #414868);
+    border-top: 1px dashed var(--border-structural);
   }
 
   .plan-ready-hint {
     margin: 0;
     text-align: center;
-    color: var(--text-secondary, #a9b1d6);
+    color: var(--text-secondary);
     font-size: 13px;
     max-width: 280px;
     line-height: 1.5;
@@ -753,10 +754,10 @@
     justify-content: center;
     gap: 8px;
     padding: 12px 28px;
-    background: var(--color-success, #9ece6a);
-    color: var(--bg-primary, #1a1b26);
+    background: var(--status-success);
+    color: var(--bg-void);
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
