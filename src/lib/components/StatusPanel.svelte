@@ -421,6 +421,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    color: var(--accent-cyan);
   }
 
   .panel-header h2 {
