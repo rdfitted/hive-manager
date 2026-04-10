@@ -91,13 +91,7 @@ fn build_fusion_cell(session: &Session, storage: &SessionStorage, variant: &str)
         .map(|agent| agent.id.clone())
         .collect();
 
-    let status = session
-        .agents
-        .iter()
-        .filter(|agent| agent_in_cell(session, &cell_id, agent))
-        .map(|agent| agent_status_to_cell_status(&agent.status))
-        .next()
-        .unwrap_or_else(|| session_state_to_cell_status(&session.state));
+    let status = aggregate_cell_status(session, &cell_id);
 
     Cell {
         id: cell_id.clone(),
@@ -127,13 +121,7 @@ fn build_resolver_cell(session: &Session, storage: &SessionStorage) -> Cell {
         .map(|agent| agent.id.clone())
         .collect();
 
-    let status = session
-        .agents
-        .iter()
-        .filter(|agent| agent_in_cell(session, RESOLVER_CELL_ID, agent))
-        .map(|agent| agent_status_to_cell_status(&agent.status))
-        .next()
-        .unwrap_or_else(|| session_state_to_cell_status(&session.state));
+    let status = aggregate_cell_status(session, RESOLVER_CELL_ID);
 
     Cell {
         id: RESOLVER_CELL_ID.to_string(),
@@ -232,6 +220,32 @@ fn agent_status_to_cell_status(status: &PtyAgentStatus) -> CellStatus {
         PtyAgentStatus::WaitingForInput(_) => CellStatus::WaitingInput,
         PtyAgentStatus::Completed => CellStatus::Completed,
         PtyAgentStatus::Error(_) => CellStatus::Failed,
+    }
+}
+
+fn aggregate_cell_status(session: &Session, cell_id: &str) -> CellStatus {
+    let agent_statuses = session
+        .agents
+        .iter()
+        .filter(|agent| agent_in_cell(session, cell_id, agent))
+        .map(|agent| agent_status_to_cell_status(&agent.status))
+        .collect::<Vec<_>>();
+
+    if agent_statuses.iter().any(|status| *status == CellStatus::Running) {
+        CellStatus::Running
+    } else if !agent_statuses.is_empty()
+        && agent_statuses.iter().all(|status| *status == CellStatus::Completed)
+    {
+        CellStatus::Completed
+    } else if agent_statuses.iter().any(|status| *status == CellStatus::Failed) {
+        CellStatus::Failed
+    } else if agent_statuses
+        .iter()
+        .any(|status| *status == CellStatus::WaitingInput)
+    {
+        CellStatus::WaitingInput
+    } else {
+        session_state_to_cell_status(&session.state)
     }
 }
 
