@@ -1,0 +1,329 @@
+/* ═══════════════════════════════════════════════════════════════════
+   BASE
+   ═══════════════════════════════════════════════════════════════════ */
+
+body {
+  background-color: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+/* CRT scanline overlay — barely perceptible, adds physical depth */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    transparent 50%,
+    rgba(0, 0, 0, 0.1) 50%,
+    rgba(0, 0, 0, 0.1)
+  );
+  background-size: 100% 4px;
+  opacity: 0.03;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   TYPOGRAPHY UTILITIES
+   ═══════════════════════════════════════════════════════════════════ */
+
+.font-display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.font-body {
+  font-family: var(--font-body);
+  font-weight: 400;
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+  font-weight: 400;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   STRUCTURAL COMPONENTS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-panel {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-structural);
+  border-radius: var(--radius-none);
+}
+
+.lattice-panel--active {
+  border-color: var(--border-active);
+}
+
+.lattice-modal {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--accent-chrome);
+  border-top: 2px solid var(--accent-cyan);
+  border-radius: var(--radius-none);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.8);
+}
+
+.lattice-modal-backdrop {
+  backdrop-filter: blur(4px);
+  background-color: rgba(6, 7, 9, 0.7);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   BUTTONS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-btn {
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  background: transparent;
+}
+
+.lattice-btn--primary {
+  border: 1px solid var(--accent-cyan);
+  color: var(--accent-cyan);
+  background-color: rgba(var(--rgb-running), 0.1);
+}
+
+.lattice-btn--primary:hover {
+  background-color: rgba(var(--rgb-running), 0.2);
+  box-shadow: 0 0 8px rgba(var(--rgb-running), 0.3), inset 0 0 4px rgba(var(--rgb-running), 0.2);
+  text-shadow: 0 0 4px var(--accent-cyan);
+}
+
+.lattice-btn--secondary {
+  border: 1px solid var(--border-structural);
+  color: var(--text-primary);
+}
+
+.lattice-btn--secondary:hover {
+  border-color: var(--accent-chrome);
+}
+
+.lattice-btn--ghost {
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+}
+
+.lattice-btn--ghost:hover {
+  color: var(--text-primary);
+}
+
+.lattice-btn--danger {
+  border: 1px solid var(--status-error);
+  color: var(--status-error);
+}
+
+.lattice-btn--danger:hover {
+  background-color: rgba(var(--rgb-error), 0.1);
+  box-shadow: 0 0 8px rgba(var(--rgb-error), 0.2);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   STATUS BADGES & GLOW EFFECTS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+
+.status-success {
+  color: var(--status-success);
+  border-color: rgba(var(--rgb-success), 0.4);
+  background-color: rgba(var(--rgb-success), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-success), 0.3), 0 0 8px rgba(var(--rgb-success), 0.1);
+}
+
+.status-running {
+  color: var(--status-running);
+  border-color: rgba(var(--rgb-running), 0.4);
+  background-color: rgba(var(--rgb-running), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-running), 0.3), 0 0 8px rgba(var(--rgb-running), 0.1);
+}
+
+.status-warning {
+  color: var(--status-warning);
+  border-color: rgba(var(--rgb-warning), 0.4);
+  background-color: rgba(var(--rgb-warning), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-warning), 0.3), 0 0 8px rgba(var(--rgb-warning), 0.1);
+}
+
+.status-error {
+  color: var(--status-error);
+  border-color: rgba(var(--rgb-error), 0.4);
+  background-color: rgba(var(--rgb-error), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-error), 0.3), 0 0 8px rgba(var(--rgb-error), 0.1);
+}
+
+.status-blocked {
+  color: var(--text-primary);
+  border-color: var(--status-blocked);
+  background-color: rgba(var(--rgb-blocked), 0.15);
+  animation: pulse-blocked 1s infinite alternate ease-in-out;
+}
+
+.status-queued {
+  color: var(--status-queued);
+  border-color: var(--border-structural);
+  background-color: transparent;
+}
+
+.status-canceled {
+  color: var(--status-canceled);
+  border-color: transparent;
+  background-color: transparent;
+  text-decoration: line-through;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   KEYFRAME ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════ */
+
+@keyframes pulse-blocked {
+  0% {
+    box-shadow: 0 0 2px rgba(var(--rgb-blocked), 0.4),
+                0 0 4px rgba(var(--rgb-blocked), 0.2);
+  }
+  100% {
+    box-shadow: 0 0 6px rgba(var(--rgb-blocked), 0.8),
+                0 0 12px rgba(var(--rgb-blocked), 0.4);
+  }
+}
+
+@keyframes pulse-error {
+  0% {
+    box-shadow: 0 0 2px rgba(var(--rgb-error), 0.4),
+                0 0 4px rgba(var(--rgb-error), 0.2);
+  }
+  100% {
+    box-shadow: 0 0 6px rgba(var(--rgb-error), 0.8),
+                0 0 12px rgba(var(--rgb-error), 0.4);
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   DATA TABLE
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+}
+
+.lattice-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--text-micro);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-structural);
+}
+
+.lattice-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-structural);
+  height: 32px;
+  vertical-align: middle;
+}
+
+.lattice-table tr:hover td {
+  background-color: var(--bg-surface);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   INPUTS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-input {
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  background-color: var(--bg-void);
+  color: var(--text-primary);
+  border: 1px solid var(--border-structural);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.lattice-input:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 4px rgba(var(--rgb-running), 0.2);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   NAVIGATION / TABS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-tab {
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-4);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.lattice-tab:hover {
+  color: var(--text-primary);
+}
+
+.lattice-tab--active {
+  color: var(--accent-cyan);
+  border-bottom-color: var(--accent-cyan);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   TOOLTIP
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-tooltip {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--accent-chrome);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  color: var(--text-primary);
+  padding: var(--space-1) var(--space-2);
+}
