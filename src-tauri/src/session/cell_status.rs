@@ -90,6 +90,10 @@ pub(crate) fn derive_cell_status_name(session: &Session, cell_id: &str) -> Strin
     .to_string()
 }
 
+fn is_fusion_scoped_cell(session: &Session, cell_id: &str) -> bool {
+    matches!(session.session_type, SessionType::Fusion { .. }) && cell_id != PRIMARY_CELL_ID
+}
+
 pub(crate) fn aggregate_cell_status(session: &Session, cell_id: &str) -> CellStatus {
     if matches!(session.state, SessionState::Closing) {
         return CellStatus::Summarizing;
@@ -121,6 +125,8 @@ pub(crate) fn aggregate_cell_status(session: &Session, cell_id: &str) -> CellSta
         && agent_statuses.iter().all(|status| *status == CellStatus::Completed)
     {
         CellStatus::Completed
+    } else if agent_statuses.is_empty() && is_fusion_scoped_cell(session, cell_id) {
+        CellStatus::Queued
     } else {
         session_state_to_cell_status(&session.state)
     }
@@ -237,5 +243,12 @@ mod tests {
             aggregate_cell_status(&session, "variant:alpha"),
             CellStatus::Summarizing
         );
+    }
+
+    #[test]
+    fn empty_fusion_resolver_cell_stays_queued_while_session_runs() {
+        let session = test_session(SessionState::Running, vec![]);
+
+        assert_eq!(aggregate_cell_status(&session, RESOLVER_CELL_ID), CellStatus::Queued);
     }
 }
