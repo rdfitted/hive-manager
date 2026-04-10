@@ -9,7 +9,7 @@
         sessionStatus: string;
     }
 
-    $: state = $eventsAtTimestamp.reduce((acc: ReplayedState, event) => {
+    $: state = $eventsAtTimestamp.reduce<ReplayedState>((acc, event) => {
         switch (event.event_type) {
             case 'session_status_changed':
                 acc.sessionStatus = event.payload.status;
@@ -29,10 +29,10 @@
         }
         return acc;
     }, {
-        cells: {},
-        agents: {},
-        sessionStatus: $activeSession?.status || 'unknown'
-    });
+        cells: {} as Record<string, CellStatus>,
+        agents: {} as Record<string, AgentStatus>,
+        sessionStatus: ($activeSession?.state as string) || 'unknown'
+    } as ReplayedState);
 
     function getStatusColor(status: string) {
         switch (status?.toLowerCase()) {

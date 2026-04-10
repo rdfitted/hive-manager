@@ -1,9 +1,10 @@
 <script lang="ts">
-    import { activeSession } from '$lib/stores/sessions';
+    import { cells } from '$lib/stores/cells';
     import ArtifactSummary from './ArtifactSummary.svelte';
     import type { Cell } from '$lib/types/domain';
 
-    $: cellsWithArtifacts = ($activeSession?.cells ?? []).filter(c => c.artifacts);
+    $: allCells = Object.values($cells.cells);
+    $: cellsWithArtifacts = allCells.filter(c => c.artifacts);
 
     let selectedCellIds: string[] = [];
 

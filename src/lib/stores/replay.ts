@@ -18,6 +18,25 @@ function createReplayStore() {
     const { subscribe, set, update } = writable<ReplayState>(initialReplayState);
 
     let playbackInterval: any = null;
+    let currentEvents: Event[] = [];
+
+    function startInterval(speed: number) {
+        if (playbackInterval) clearInterval(playbackInterval);
+        playbackInterval = setInterval(() => {
+            update(s => {
+                const currentIndex = currentEvents.findIndex(e => e.timestamp === s.currentTimestamp);
+                const nextIndex = currentIndex + 1;
+
+                if (nextIndex >= currentEvents.length) {
+                    if (playbackInterval) clearInterval(playbackInterval);
+                    playbackInterval = null;
+                    return { ...s, isPlaying: false };
+                }
+
+                return { ...s, currentTimestamp: currentEvents[nextIndex].timestamp };
+            });
+        }, 1000 / speed);
+    }
 
     return {
         subscribe,
@@ -25,26 +44,12 @@ function createReplayStore() {
         update,
         play: (allEvents: Event[]) => {
             if (allEvents.length === 0) return;
-            
+            currentEvents = allEvents;
+
             update(state => {
                 if (state.isPlaying) return state;
-                
-                if (playbackInterval) clearInterval(playbackInterval);
-                
-                playbackInterval = setInterval(() => {
-                    update(s => {
-                        const currentIndex = allEvents.findIndex(e => e.timestamp === s.currentTimestamp);
-                        const nextIndex = currentIndex + 1;
-                        
-                        if (nextIndex >= allEvents.length) {
-                            if (playbackInterval) clearInterval(playbackInterval);
-                            return { ...s, isPlaying: false };
-                        }
-                        
-                        return { ...s, currentTimestamp: allEvents[nextIndex].timestamp };
-                    });
-                }, 1000 / initialReplayState.playbackSpeed); // Use speed from state in actual implementation
-                
+
+                startInterval(state.playbackSpeed);
                 return { ...state, isPlaying: true };
             });
         },
@@ -59,12 +64,15 @@ function createReplayStore() {
         setSpeed: (speed: number) => {
             update(state => {
                 const newState = { ...state, playbackSpeed: speed };
-                // If playing, we'd need to restart the interval with the new speed
+                if (newState.isPlaying) {
+                    startInterval(speed);
+                }
                 return newState;
             });
         },
         reset: () => {
             set(initialReplayState);
+            currentEvents = [];
             if (playbackInterval) {
                 clearInterval(playbackInterval);
                 playbackInterval = null;
@@ -83,10 +91,10 @@ export const chronologicalEvents = derived(
 );
 
 export const eventsAtTimestamp = derived(
-    [events, replay],
-    ([$events, $replay]) => {
-        if (!$replay.currentTimestamp) return $events.events;
+    [chronologicalEvents, replay],
+    ([$chronologicalEvents, $replay]) => {
+        if (!$replay.currentTimestamp) return $chronologicalEvents;
         const targetTs = new Date($replay.currentTimestamp).getTime();
-        return $events.events.filter(e => new Date(e.timestamp).getTime() <= targetTs);
+        return $chronologicalEvents.filter(e => new Date(e.timestamp).getTime() <= targetTs);
     }
 );

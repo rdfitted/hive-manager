@@ -111,9 +111,11 @@ pub async fn launch_resolver(
         .persist_output(&session_id, &output)
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
-    // Persist session state as completed
+    // Persist session state as completed (capitalized to match SessionState::Completed serialization).
+    // NOTE: In-memory session state is not updated here because SessionController lacks a public
+    // state setter. The next session list refresh will pick up the persisted state.
     if let Ok(mut persisted) = state.storage.load_session(&session_id) {
-        persisted.state = "completed".to_string();
+        persisted.state = "Completed".to_string();
         let _ = state.storage.save_session(&persisted);
     }
 

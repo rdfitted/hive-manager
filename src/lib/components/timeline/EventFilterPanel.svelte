@@ -1,6 +1,7 @@
 <script lang="ts">
     import { filters } from '$lib/stores/filters';
     import { activeSession } from '$lib/stores/sessions';
+    import { cells as cellsStore } from '$lib/stores/cells';
     import type { EventType, Severity } from '$lib/types/domain';
 
     const EVENT_TYPES: EventType[] = [
@@ -19,7 +20,7 @@
 
     const SEVERITIES: Severity[] = ['info', 'warning', 'error'];
 
-    $: cells = $activeSession?.cells ?? [];
+    $: cells = Object.values($cellsStore.cells);
     $: agents = $activeSession?.agents ?? [];
 </script>
 

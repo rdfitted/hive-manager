@@ -52,7 +52,18 @@
       if (wasHidden && fitAddon) {
         requestAnimationFrame(() => {
           if (term && fitAddon) {
-            fitAddon.fit();
+            try {
+              fitAddon.fit();
+              const dims = fitAddon.proposeDimensions();
+              if (dims && dims.cols > 0 && dims.rows > 0) {
+                if (dims.cols !== lastDims.cols || dims.rows !== lastDims.rows) {
+                  lastDims = { cols: dims.cols, rows: dims.rows };
+                  invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
+                }
+              }
+            } catch (e) {
+              console.error('Failed to fit terminal on focus restore:', e);
+            }
             term.scrollToBottom();
             wasHidden = false;
           }
