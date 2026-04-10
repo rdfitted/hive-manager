@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
-  import Terminal from '$lib/components/Terminal.svelte';
   import TerminalGrid from '$lib/components/TerminalGrid.svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import StatusPanel from '$lib/components/StatusPanel.svelte';
@@ -10,6 +9,7 @@
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
   import FusionPanel from '$lib/components/FusionPanel.svelte';
+  import SessionOverview from '$lib/components/session/SessionOverview.svelte';
   import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
@@ -236,37 +236,7 @@
             onSelect={(id) => focusedAgentId = id}
           />
         {:else}
-          <!-- Render all terminals, show only the focused one -->
-          {#each $activeAgents as agent (agent.id)}
-            {@const isVisible = agent.id === focusedAgentId}
-            {@const roleName = agent.config?.label ||
-              (agent.role === 'Queen' ? 'Queen' :
-               agent.role === 'Evaluator' ? 'Evaluator' :
-               typeof agent.role === 'object' && 'Planner' in agent.role ? `Planner ${agent.role.Planner.index}` :
-               typeof agent.role === 'object' && 'Worker' in agent.role ? `Worker ${agent.role.Worker.index}` :
-               typeof agent.role === 'object' && 'QaWorker' in agent.role ? `QA Worker ${agent.role.QaWorker.index}` :
-               'Agent')}
-            <div class="focused-terminal" class:hidden={!isVisible}>
-              <div class="terminal-header" style:border-top-color={$activeSession?.color || 'transparent'} style:border-top-width={$activeSession?.color ? '3px' : '0'}>
-                <span class="terminal-title">{roleName}</span>
-                <div class="terminal-meta">
-                  <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
-                  <span class="terminal-status" 
-                    class:running={agent.status === 'Running'} 
-                    class:waiting={typeof agent.status === 'object' && 'WaitingForInput' in agent.status} 
-                    class:completed={agent.status === 'Completed'}
-                  >
-                    {agent.status === 'Running' ? '█' : 
-                     (typeof agent.status === 'object' && 'WaitingForInput' in agent.status) ? '⏳' : 
-                     agent.status === 'Completed' ? '✓' : '○'}
-                  </span>
-                </div>
-              </div>
-              <div class="terminal-container">
-                <Terminal agentId={agent.id} isFocused={isVisible} />
-              </div>
-            </div>
-          {/each}
+          <SessionOverview />
         {/if}
       </div>
     {/if}
@@ -463,74 +433,6 @@
     align-items: center;
     justify-content: center;
     color: var(--color-text-muted);
-  }
-
-  .focused-terminal {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
-  .focused-terminal.hidden {
-    visibility: hidden;
-    pointer-events: none;
-  }
-
-  .terminal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    background: var(--color-surface);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .terminal-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .terminal-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .cli-badge {
-    font-size: 10px;
-    padding: 2px 6px;
-    background: var(--color-border);
-    border-radius: 3px;
-    color: var(--color-text-muted);
-    text-transform: lowercase;
-  }
-
-  .terminal-status {
-    font-size: 10px;
-  }
-
-  .terminal-status.running {
-    color: var(--color-running);
-  }
-
-  .terminal-status.waiting {
-    color: var(--color-warning);
-  }
-
-  .terminal-status.completed {
-    color: var(--color-success);
-  }
-
-  .terminal-container {
-    flex: 1;
-    min-height: 0;
   }
 
   .queen-controls-section {

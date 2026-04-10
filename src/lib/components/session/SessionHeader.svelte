@@ -34,9 +34,9 @@
 
 <style>
     .session-header {
-        background: #0a0a0a;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-        padding: 16px 24px;
+        background: var(--color-bg);
+        border-bottom: 1px solid var(--color-border);
+        padding: 12px 20px;
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
@@ -47,7 +47,7 @@
         flex: 1;
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 4px;
     }
 
     .top-row {
@@ -58,13 +58,13 @@
 
     .session-name {
         margin: 0;
-        font-size: 20px;
+        font-size: 18px;
         font-weight: 600;
-        color: #fff;
+        color: var(--color-text);
     }
 
     .mode-badge {
-        font-size: 10px;
+        font-size: 9px;
         font-weight: 800;
         text-transform: uppercase;
         padding: 2px 6px;
@@ -72,55 +72,55 @@
         letter-spacing: 0.1em;
     }
 
-    .mode-badge.hive { background: #facc15; color: #000; }
+    .mode-badge.hive { background: var(--color-warning); color: #000; }
     .mode-badge.fusion { background: #818cf8; color: #fff; }
-    .mode-badge.swarm { background: #34d399; color: #000; }
+    .mode-badge.swarm { background: var(--color-success); color: #000; }
     .mode-badge.solo { background: #f472b6; color: #000; }
 
     .status-badge {
-        font-size: 11px;
+        font-size: 10px;
         padding: 2px 8px;
         border-radius: 999px;
-        background: rgba(255, 255, 255, 0.05);
-        color: #888;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: var(--color-surface);
+        color: var(--color-text-muted);
+        border: 1px solid var(--color-border);
         text-transform: capitalize;
     }
 
-    .status-badge.running { color: #10b981; border-color: rgba(16, 185, 129, 0.3); background: rgba(16, 185, 129, 0.05); }
+    .status-badge.running { color: var(--color-success); border-color: var(--color-success); background: rgba(16, 185, 129, 0.05); }
 
     .objective {
         margin: 0;
-        font-size: 14px;
-        color: #888;
+        font-size: 12px;
+        color: var(--color-text-muted);
         max-width: 800px;
-        line-height: 1.5;
+        line-height: 1.4;
     }
 
     .stats {
         display: flex;
-        gap: 24px;
+        gap: 20px;
     }
 
     .stat {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 2px;
         align-items: flex-end;
     }
 
     .stat .label {
-        font-size: 10px;
+        font-size: 9px;
         text-transform: uppercase;
-        color: #555;
+        color: var(--color-text-muted);
         font-weight: 700;
         letter-spacing: 0.05em;
     }
 
     .stat .value {
-        font-size: 12px;
-        color: #bbb;
-        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--color-text);
+        font-family: var(--font-mono, monospace);
     }
 
     .placeholder {
