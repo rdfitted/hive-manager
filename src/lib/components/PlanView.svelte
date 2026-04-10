@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Brain, Check, Circle, ClipboardText, Dot, FileText, NotePencil, Warning } from 'phosphor-svelte';
   import { activeSession, sessions, serdeEnumVariantName, type Session } from '$lib/stores/sessions';
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -193,12 +194,12 @@
     }
   }
 
-  function getStatusIcon(status: PlanTask['status']): string {
+  function getStatusIcon(status: PlanTask['status']) {
     switch (status) {
-      case 'completed': return '✓';
-      case 'in_progress': return '●';
-      case 'blocked': return '!';
-      default: return '○';
+      case 'completed': return Check;
+      case 'in_progress': return Dot;
+      case 'blocked': return Warning;
+      default: return Circle;
     }
   }
 
@@ -238,13 +239,17 @@
     </div>
   {:else if !$activeSession}
     <div class="empty-state">
-      <span class="icon">📋</span>
+      <span class="icon">
+        <ClipboardText size={48} weight="light" />
+      </span>
       <p>No active session</p>
     </div>
   {:else if isPlanning() && !plan}
     <div class="planning-state">
       <div class="planning-header">
-        <span class="planning-icon">🧠</span>
+        <span class="planning-icon">
+          <Brain size={32} weight="light" />
+        </span>
         <h3>Master Planner Working</h3>
       </div>
       <p class="planning-description">
@@ -257,7 +262,9 @@
     </div>
   {:else if !plan}
     <div class="empty-state">
-      <span class="icon">📝</span>
+      <span class="icon">
+        <NotePencil size={48} weight="light" />
+      </span>
       <p>No plan generated yet</p>
       <span class="hint">The Master Planner will create a plan when the session starts.</span>
     </div>
@@ -278,9 +285,10 @@
 
       <div class="tasks-list">
         {#each plan.tasks as task (task.id)}
+          {@const StatusIcon = getStatusIcon(task.status)}
           <div class="task-item" class:completed={task.status === 'completed'}>
             <span class="task-status" style="color: {getStatusColor(task.status)}">
-              {getStatusIcon(task.status)}
+              <StatusIcon size={task.status === 'completed' ? 12 : 14} weight={task.status === 'completed' ? 'fill' : 'light'} />
             </span>
             <div class="task-content">
               <div class="task-header">
@@ -305,7 +313,9 @@
       <!-- Show raw markdown when no tasks parsed yet (plan in progress) -->
       <div class="raw-content">
         <div class="raw-header">
-          <span class="raw-icon">📄</span>
+          <span class="raw-icon">
+            <FileText size={16} weight="light" />
+          </span>
           <span class="raw-label">Plan Content</span>
           {#if isPlanning()}
             <span class="writing-indicator">
@@ -416,7 +426,9 @@
   }
 
   .empty-state .icon {
-    font-size: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     margin-bottom: 16px;
     opacity: 0.5;
   }
@@ -497,7 +509,9 @@
   }
 
   .task-status {
-    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
     width: 20px;
     text-align: center;
@@ -568,7 +582,9 @@
   }
 
   .raw-icon {
-    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .raw-label {
@@ -620,7 +636,9 @@
   }
 
   .planning-icon {
-    font-size: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .planning-header h3 {

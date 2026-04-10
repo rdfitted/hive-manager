@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CaretDown, CaretRight, Check, ClipboardText, PencilSimple } from 'phosphor-svelte';
   import { sessions, activeSession, serdeEnumVariantName, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
@@ -259,7 +260,9 @@
 
 <aside class="sidebar" class:collapsed={sidebarCollapsed}>
   <button class="sidebar-header" onclick={() => sidebarCollapsed = !sidebarCollapsed} title={sidebarCollapsed ? "Expand Sessions" : "Collapse Sessions"}>
-    <span class="sidebar-icon">📋</span>
+    <span class="sidebar-icon">
+      <ClipboardText size={18} weight="light" />
+    </span>
     {#if !sidebarCollapsed}
       <h2>Sessions</h2>
     {/if}
@@ -269,7 +272,13 @@
   <div class="sidebar-content">
     <section class="section">
       <button class="section-header" onclick={() => activeCollapsed = !activeCollapsed}>
-        <span class="chevron" class:collapsed={activeCollapsed}>▼</span>
+        <span class="chevron" class:collapsed={activeCollapsed}>
+          {#if activeCollapsed}
+            <CaretRight size={12} weight="light" />
+          {:else}
+            <CaretDown size={12} weight="light" />
+          {/if}
+        </span>
         <h3>Active</h3>
       </button>
       {#if !activeCollapsed}
@@ -327,7 +336,9 @@
                               >×</button>
                             </div>
                           {/if}
-                          <button class="save-btn" onclick={saveMetadata} title="Save" type="button">✓</button>
+                          <button class="save-btn" onclick={saveMetadata} title="Save" type="button">
+                            <Check size={14} weight="light" />
+                          </button>
                           <button class="cancel-btn-inline" onclick={cancelEdit} title="Cancel" type="button">×</button>
                         </div>
                       </div>
@@ -339,7 +350,9 @@
                           onclick={(e) => { e.stopPropagation(); startEdit(session); }}
                           title="Rename Session"
                           type="button"
-                        >✎</button>
+                        >
+                          <PencilSimple size={12} weight="light" />
+                        </button>
                       </span>
                       <span class="session-meta">
                         {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
@@ -369,7 +382,13 @@
 
     <section class="section">
       <button class="section-header" onclick={() => recentCollapsed = !recentCollapsed}>
-        <span class="chevron" class:collapsed={recentCollapsed}>▼</span>
+        <span class="chevron" class:collapsed={recentCollapsed}>
+          {#if recentCollapsed}
+            <CaretRight size={12} weight="light" />
+          {:else}
+            <CaretDown size={12} weight="light" />
+          {/if}
+        </span>
         <h3>Recent</h3>
       </button>
       {#if !recentCollapsed}
@@ -391,7 +410,7 @@
                   </span>
                 </div>
                 <button class="load-button" onclick={() => handleResumeSession(session.id)} title="Load Session">
-                  ▶
+                  <CaretRight size={14} weight="light" />
                 </button>
               </li>
             {/each}
@@ -474,7 +493,9 @@
   }
 
   .sidebar-icon {
-    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
   }
 
@@ -574,10 +595,12 @@
 
   .edit-btn {
     opacity: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: none;
     border: none;
     cursor: pointer;
-    font-size: 10px;
     color: var(--text-secondary);
     padding: 2px 4px;
     margin-left: 4px;
@@ -674,6 +697,9 @@
   }
 
   .save-btn, .cancel-btn-inline {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: none;
     border: none;
     cursor: pointer;
@@ -826,12 +852,14 @@
   }
 
   .load-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     padding: 4px 8px;
     border: 1px solid var(--accent-cyan);
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--accent-cyan);
-    font-size: 12px;
     cursor: pointer;
     transition: all 0.15s ease;
     flex-shrink: 0;

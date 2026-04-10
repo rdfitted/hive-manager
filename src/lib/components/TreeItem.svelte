@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CaretDown, CaretRight, Check, ClipboardText, Crown, MagnifyingGlass, Microscope, Scales, X } from 'phosphor-svelte';
   import { createEventDispatcher } from 'svelte';
   import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
 
@@ -25,18 +26,18 @@
     return 'Agent';
   }
 
-  function getRoleIcon(role: AgentInfo['role']): string {
+  function getRoleIcon(role: AgentInfo['role']) {
     if (typeof role === 'object' && role !== null) {
-      if ('Judge' in role) return '⚖';
+      if ('Judge' in role) return Scales;
       if ('Planner' in role) return '◆';
       if ('Worker' in role) return '●';
-      if ('QaWorker' in role) return '🔬';
+      if ('QaWorker' in role) return Microscope;
       if ('Fusion' in role) return '◎';
     }
     const k = serdeEnumVariantName(role);
-    if (k === 'Queen') return '♕';
-    if (k === 'Evaluator') return '🔍';
-    if (k === 'MasterPlanner') return '📋';
+    if (k === 'Queen') return Crown;
+    if (k === 'Evaluator') return MagnifyingGlass;
+    if (k === 'MasterPlanner') return ClipboardText;
     return '○';
   }
 
@@ -51,12 +52,12 @@
     return 'var(--text-secondary)';
   }
 
-  function getStatusIcon(status: AgentInfo['status']): string {
+  function getStatusIcon(status: AgentInfo['status']) {
     if (typeof status === 'object' && status !== null && 'WaitingForInput' in status) return '⏳';
-    if (typeof status === 'object' && status !== null && 'Error' in status) return '✗';
+    if (typeof status === 'object' && status !== null && 'Error' in status) return X;
     const k = serdeEnumVariantName(status);
     if (k === 'Running') return '█';
-    if (k === 'Completed') return '✓';
+    if (k === 'Completed') return Check;
     if (k === 'Starting') return '○';
     return '?';
   }
@@ -98,6 +99,8 @@
   $: hasChildren = children.length > 0;
   $: isSelected = selectedId === agent.id;
   $: displayLabel = agent.config?.label || getRoleName(agent.role);
+  $: RoleIcon = getRoleIcon(agent.role);
+  $: StatusIcon = getStatusIcon(agent.status);
 </script>
 
 <div class="tree-item">
@@ -115,19 +118,33 @@
 
     {#if hasChildren}
       <button class="chevron" on:click={toggleExpand} aria-label={expanded ? 'Collapse' : 'Expand'}>
-        {expanded ? '▼' : '▶'}
+        {#if expanded}
+          <CaretDown size={12} weight="light" />
+        {:else}
+          <CaretRight size={12} weight="light" />
+        {/if}
       </button>
     {:else}
       <span class="chevron-spacer"></span>
     {/if}
 
-    <span class="role-icon" style="color: {getRoleColor(agent.role)}; opacity: 1;">{getRoleIcon(agent.role)}</span>
+    <span class="role-icon" style="color: {getRoleColor(agent.role)}; opacity: 1;">
+      {#if typeof RoleIcon === 'string'}
+        {RoleIcon}
+      {:else}
+        <RoleIcon size={12} weight="light" />
+      {/if}
+    </span>
     <span class="label">{displayLabel}</span>
 
     <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
 
     <span class="status-indicator" style="color: {getStatusColor(agent.status, agent.role)}">
-      {getStatusIcon(agent.status)}
+      {#if typeof StatusIcon === 'string'}
+        {StatusIcon}
+      {:else}
+        <StatusIcon size={12} weight="fill" />
+      {/if}
     </span>
   </div>
 
@@ -206,8 +223,10 @@
   }
 
   .role-icon {
-    font-size: 12px;
-    opacity: 0.7;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 12px;
     flex-shrink: 0;
   }
 
@@ -231,6 +250,10 @@
   }
 
   .status-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 12px;
     font-size: 10px;
     flex-shrink: 0;
   }
