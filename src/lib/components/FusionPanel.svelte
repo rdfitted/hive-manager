@@ -213,13 +213,13 @@
 
   .tab-button:hover {
     color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.05);
+    background: color-mix(in srgb, var(--text-primary) 5%, transparent);
   }
 
   .tab-button.active {
     background: var(--bg-surface);
     color: var(--accent-cyan);
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 2px 4px color-mix(in srgb, var(--bg-void) 20%, transparent);
   }
 
   .comparison-container {
@@ -232,7 +232,7 @@
     border: 1px solid var(--accent-cyan);
     border-radius: var(--radius-sm);
     overflow: hidden;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 4px 20px color-mix(in srgb, var(--bg-void) 30%, transparent);
   }
 
   .orchestrator-section {
@@ -266,7 +266,7 @@
   .cli-badge {
     font-size: 11px;
     padding: 2px 8px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     background: var(--accent-cyan);
     color: var(--accent-cyan);
     font-weight: 500;
@@ -310,7 +310,7 @@
   .status-badge {
     font-size: 11px;
     padding: 2px 8px;
-    border-radius: 10px;
+    border-radius: var(--radius-sm);
     font-weight: 500;
   }
 
@@ -320,12 +320,12 @@
   }
 
   .status-badge.completed {
-    background: rgba(158, 206, 106, 0.15);
+    background: color-mix(in srgb, var(--status-success) 15%, transparent);
     color: var(--status-success);
   }
 
   .status-badge.failed {
-    background: rgba(247, 118, 142, 0.15);
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
     color: var(--status-error);
   }
 
@@ -403,7 +403,7 @@
 
   .error-banner {
     padding: 12px;
-    background: rgba(247, 118, 142, 0.15);
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
     color: var(--status-error);
     border: 1px solid var(--status-error);
     border-radius: var(--radius-sm);
@@ -413,7 +413,7 @@
   .modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.7);
+    background: color-mix(in srgb, var(--bg-void) 70%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;

@@ -136,7 +136,7 @@
     font-size: 9px;
     padding: 1px 4px;
     background: var(--border-structural);
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     color: var(--text-secondary);
     text-transform: lowercase;
   }

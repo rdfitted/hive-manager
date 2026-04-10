@@ -897,7 +897,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .dialog-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -950,7 +950,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .mode-tab.active {
     background: var(--bg-surface);
     color: var(--text-primary);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--bg-void) 20%, transparent);
   }
 
   .mode-tab.legacy {
@@ -1216,7 +1216,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .remove-button:hover:not(:disabled) {
-    background: rgba(247, 118, 142, 0.15);
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
   }
 
   .remove-button:disabled {
@@ -1298,7 +1298,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .smoke-test-button:hover:not(:disabled) {
-    background: rgba(224, 175, 104, 0.1);
+    background: color-mix(in srgb, var(--status-warning) 10%, transparent);
     border-style: solid;
   }
 
@@ -1321,7 +1321,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .error-message {
     padding: 12px;
     margin-bottom: 16px;
-    background: rgba(247, 118, 142, 0.15);
+    background: color-mix(in srgb, var(--status-error) 15%, transparent);
     border: 1px solid var(--status-error);
     border-radius: var(--radius-sm);
     color: var(--status-error);
@@ -1438,7 +1438,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .preview-content {
     margin-top: 16px;
-    background: rgba(0, 0, 0, 0.2);
+    background: color-mix(in srgb, var(--bg-void) 20%, transparent);
     border-radius: var(--radius-sm);
     padding: 16px;
   }
@@ -1463,7 +1463,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .node.queen {
     border-color: var(--accent-cyan);
-    background: rgba(139, 92, 246, 0.1);
+    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
 
   .node-icon {

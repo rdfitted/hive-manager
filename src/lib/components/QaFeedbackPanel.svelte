@@ -177,9 +177,9 @@
   .summary {
     font-size: 12px;
     line-height: 1.5;
-    color: var(--color-text);
+    color: var(--text-primary);
     padding-bottom: 12px;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .summary p {
@@ -195,13 +195,13 @@
   .criterion-item {
     padding: 10px;
     border-radius: var(--radius-sm);
-    background: rgba(247, 118, 142, 0.05);
-    border: 1px solid rgba(247, 118, 142, 0.1);
+    background: color-mix(in srgb, var(--status-error) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-error) 10%, transparent);
   }
 
   .criterion-item.passed {
-    background: rgba(158, 206, 106, 0.05);
-    border-color: rgba(158, 206, 106, 0.1);
+    background: color-mix(in srgb, var(--status-success) 5%, transparent);
+    border-color: color-mix(in srgb, var(--status-success) 10%, transparent);
   }
 
   .criterion-header {
@@ -217,23 +217,23 @@
   }
 
   .criterion-item:not(.passed) .criterion-icon {
-    color: var(--color-error);
+    color: var(--status-error);
   }
 
   .criterion-item.passed .criterion-icon {
-    color: var(--color-success);
+    color: var(--status-success);
   }
 
   .criterion-label {
     font-size: 12px;
     font-weight: 500;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
   .criterion-evidence {
     margin: 0;
     font-size: 11px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
     line-height: 1.4;
     padding-left: 20px;
   }
@@ -246,6 +246,6 @@
 
   .timestamp {
     font-size: 10px;
-    color: var(--color-text-muted);
+    color: var(--text-secondary);
   }
 </style>

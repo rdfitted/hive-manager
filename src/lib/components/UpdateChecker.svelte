@@ -102,7 +102,7 @@
     flex-direction: column;
     gap: 8px;
     z-index: 1000;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-void) 70%, transparent);
     max-width: 300px;
   }
 
@@ -137,7 +137,7 @@
     background: var(--accent-cyan);
     border: none;
     border-radius: var(--radius-sm);
-    color: white;
+    color: var(--bg-void);
     cursor: pointer;
     font-weight: 500;
   }

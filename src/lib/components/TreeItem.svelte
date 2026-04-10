@@ -164,7 +164,7 @@
   }
 
   .tree-row.selected {
-    background: rgba(125, 207, 255, 0.15);
+    background: color-mix(in srgb, var(--accent-cyan) 15%, transparent);
   }
 
   .tree-row:focus {
@@ -189,7 +189,7 @@
     font-size: 8px;
     padding: 0;
     flex-shrink: 0;
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
   }
 
   .chevron:hover {
@@ -221,7 +221,7 @@
     font-size: 10px;
     padding: 2px 6px;
     background: var(--border-structural);
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     color: var(--text-secondary);
     text-transform: lowercase;
     flex-shrink: 0;

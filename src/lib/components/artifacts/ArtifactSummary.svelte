@@ -90,10 +90,10 @@
         display: flex;
         flex-direction: column;
         gap: 12px;
-        background: rgba(0, 0, 0, 0.2);
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
         padding: 12px;
         border-radius: var(--radius-sm);
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
     }
 
     .artifact-summary.compact {
@@ -148,8 +148,8 @@
     .confidence-bar {
         flex: 1;
         height: 4px;
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 2px;
+        background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+        border-radius: var(--radius-sm);
         overflow: hidden;
     }
 
@@ -184,7 +184,7 @@
         flex-direction: column;
         gap: 8px;
         margin-top: 8px;
-        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        border-top: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
         padding-top: 12px;
     }
 
@@ -227,7 +227,7 @@
     .show-details-btn {
         margin-top: 8px;
         background: transparent;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
         color: var(--text-secondary);
         font-size: 10px;
         padding: 4px 8px;
@@ -236,7 +236,7 @@
     }
 
     .show-details-btn:hover {
-        background: rgba(255, 255, 255, 0.05);
+        background: color-mix(in srgb, var(--text-primary) 5%, transparent);
         color: var(--text-primary);
     }
 </style>

@@ -59,20 +59,20 @@
     .summary-item {
         flex: 1;
         padding: 8px;
-        background: rgba(0, 0, 0, 0.2);
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
         border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
         align-items: center;
-        border: 1px solid rgba(255, 255, 255, 0.05);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
     }
 
     .summary-item.pass {
-        border-color: rgba(16, 185, 129, 0.2);
+        border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
     }
 
     .summary-item.fail {
-        border-color: rgba(239, 68, 68, 0.2);
+        border-color: color-mix(in srgb, var(--status-error) 20%, transparent);
     }
 
     .count {
@@ -107,8 +107,8 @@
     }
 
     .failure-item {
-        background: rgba(239, 68, 68, 0.05);
-        border: 1px solid rgba(239, 68, 68, 0.1);
+        background: color-mix(in srgb, var(--status-error) 5%, transparent);
+        border: 1px solid color-mix(in srgb, var(--status-error) 10%, transparent);
         border-radius: var(--radius-sm);
         padding: 8px;
     }
@@ -132,9 +132,9 @@
         font-family: var(--font-mono);
         font-size: 11px;
         color: var(--text-secondary);
-        background: rgba(0, 0, 0, 0.2);
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
         padding: 6px;
-        border-radius: 2px;
+        border-radius: var(--radius-sm);
         overflow-x: auto;
     }
 </style>

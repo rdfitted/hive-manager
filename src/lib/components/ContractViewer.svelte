@@ -143,13 +143,13 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: rgba(247, 118, 142, 0.1);
+    background: color-mix(in srgb, var(--status-error) 10%, transparent);
     pointer-events: none;
     z-index: 1;
   }
 
   .status-overlay.passed {
-    background: rgba(158, 206, 106, 0.1);
+    background: color-mix(in srgb, var(--status-success) 10%, transparent);
   }
 
   .overlay-icon {
@@ -190,7 +190,7 @@
     margin: 0;
     white-space: pre-wrap;
     word-break: break-word;
-    font-family: inherit;
+    font-family: var(--font-body);
     font-size: 13px;
     color: var(--text-primary);
     line-height: 1.5;
