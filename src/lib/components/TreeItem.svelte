@@ -139,7 +139,11 @@
 
     <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
 
-    <span class="status-indicator" style="color: {getStatusColor(agent.status, agent.role)}">
+    <span
+      class="status-indicator"
+      class:pulse-error={serdeEnumVariantName(agent.status) === 'Error'}
+      style="color: {getStatusColor(agent.status, agent.role)}"
+    >
       {#if typeof StatusIcon === 'string'}
         {StatusIcon}
       {:else}
@@ -256,6 +260,17 @@
     min-width: 12px;
     font-size: 10px;
     flex-shrink: 0;
+    text-shadow: 0 0 4px currentColor;
+  }
+
+  .status-indicator.pulse-error {
+    animation: pulse-error 1.5s infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .status-indicator.pulse-error {
+      animation: none;
+    }
   }
 
   .children {

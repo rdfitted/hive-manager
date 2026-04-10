@@ -132,7 +132,7 @@
     .cell-card.selected {
         background: color-mix(in srgb, var(--accent-cyan) 8%, transparent);
         border-color: color-mix(in srgb, var(--accent-cyan) 50%, transparent);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        box-shadow: var(--shadow-md);
     }
 
     .header {

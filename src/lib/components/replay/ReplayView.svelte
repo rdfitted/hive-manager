@@ -130,6 +130,7 @@
         width: 8px;
         height: 8px;
         border-radius: 50%;
+        box-shadow: 0 0 6px currentColor;
     }
 
     .label {

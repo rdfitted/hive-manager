@@ -119,7 +119,7 @@
         border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        box-shadow: var(--shadow-lg);
     }
 
     .modal-header {

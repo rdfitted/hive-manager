@@ -287,7 +287,11 @@
         {#each plan.tasks as task (task.id)}
           {@const StatusIcon = getStatusIcon(task.status)}
           <div class="task-item" class:completed={task.status === 'completed'}>
-            <span class="task-status" style="color: {getStatusColor(task.status)}">
+            <span
+              class="task-status"
+              class:pulse-blocked={task.status === 'blocked'}
+              style="color: {getStatusColor(task.status)}"
+            >
               <StatusIcon size={task.status === 'completed' ? 12 : 14} weight={task.status === 'completed' ? 'fill' : 'light'} />
             </span>
             <div class="task-content">
@@ -515,6 +519,17 @@
     flex-shrink: 0;
     width: 20px;
     text-align: center;
+    text-shadow: 0 0 4px currentColor;
+  }
+
+  .task-status.pulse-blocked {
+    animation: pulse-blocked 1.5s infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .task-status.pulse-blocked {
+      animation: none;
+    }
   }
 
   .task-content {
