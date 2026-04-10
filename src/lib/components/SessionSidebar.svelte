@@ -336,10 +336,10 @@
                               >×</button>
                             </div>
                           {/if}
-                          <button class="save-btn" onclick={saveMetadata} title="Save" type="button">
+                          <button class="save-btn" onclick={saveMetadata} title="Save" aria-label="Save session metadata" type="button">
                             <Check size={14} weight="light" />
                           </button>
-                          <button class="cancel-btn-inline" onclick={cancelEdit} title="Cancel" type="button">×</button>
+                          <button class="cancel-btn-inline" onclick={cancelEdit} title="Cancel" aria-label="Cancel edit" type="button">×</button>
                         </div>
                       </div>
                     {:else}
@@ -349,6 +349,7 @@
                           class="edit-btn"
                           onclick={(e) => { e.stopPropagation(); startEdit(session); }}
                           title="Rename Session"
+                          aria-label="Rename session"
                           type="button"
                         >
                           <PencilSimple size={12} weight="light" />
@@ -409,7 +410,7 @@
                     {formatTimestamp(session.created_at)}
                   </span>
                 </div>
-                <button class="load-button" onclick={() => handleResumeSession(session.id)} title="Load Session">
+                <button class="load-button" onclick={() => handleResumeSession(session.id)} title="Load Session" aria-label="Load session" type="button">
                   <CaretRight size={14} weight="light" />
                 </button>
               </li>
