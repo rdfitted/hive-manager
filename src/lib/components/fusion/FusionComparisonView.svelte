@@ -62,7 +62,7 @@
         height: 100%;
         overflow-x: auto;
         padding: 16px;
-        background: rgba(0, 0, 0, 0.2);
+        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
     }
 
     .grid {
@@ -72,8 +72,8 @@
     }
 
     .candidate-card {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: color-mix(in srgb, var(--text-primary) 3%, var(--bg-surface));
+        border: 1px solid color-mix(in srgb, var(--text-primary) 8%, transparent);
         border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
@@ -83,18 +83,18 @@
     }
 
     .candidate-card.completed {
-        border-color: rgba(16, 185, 129, 0.2);
-        background: rgba(16, 185, 129, 0.02);
+        border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
+        background: color-mix(in srgb, var(--status-success) 4%, var(--bg-surface));
     }
 
     .candidate-card.failed {
-        border-color: rgba(239, 68, 68, 0.2);
-        background: rgba(239, 68, 68, 0.02);
+        border-color: color-mix(in srgb, var(--status-error) 20%, transparent);
+        background: color-mix(in srgb, var(--status-error) 4%, var(--bg-surface));
     }
 
     .card-header {
         padding: 16px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        border-bottom: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -112,7 +112,7 @@
         letter-spacing: 0.05em;
         font-weight: 700;
         color: var(--text-secondary);
-        background: rgba(0, 0, 0, 0.3);
+        background: color-mix(in srgb, var(--bg-void) 60%, var(--bg-surface));
         padding: 2px 8px;
         border-radius: var(--radius-sm);
     }
@@ -164,7 +164,7 @@
     .spinner {
         width: 24px;
         height: 24px;
-        border: 2px solid rgba(255, 255, 255, 0.1);
+        border: 2px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
         border-top-color: var(--accent-cyan);
         border-radius: 50%;
         animation: spin 1s linear infinite;

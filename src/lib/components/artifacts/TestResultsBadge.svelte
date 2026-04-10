@@ -34,21 +34,21 @@
     }
 
     .test-badge.pass {
-        background: rgba(16, 185, 129, 0.1);
+        background: color-mix(in srgb, var(--status-success) 10%, transparent);
         color: var(--status-success);
-        border: 1px solid rgba(16, 185, 129, 0.2);
+        border: 1px solid color-mix(in srgb, var(--status-success) 20%, transparent);
     }
 
     .test-badge.fail {
-        background: rgba(239, 68, 68, 0.1);
+        background: color-mix(in srgb, var(--status-error) 10%, transparent);
         color: var(--status-error);
-        border: 1px solid rgba(239, 68, 68, 0.2);
+        border: 1px solid color-mix(in srgb, var(--status-error) 20%, transparent);
     }
 
     .test-badge.unknown {
-        background: rgba(255, 255, 255, 0.05);
-        color: var(--text-secondary);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+        color: var(--text-disabled);
+        border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
     }
 
     .icon {
