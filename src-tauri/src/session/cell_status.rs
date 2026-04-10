@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::domain::CellStatus;
 use crate::pty::{AgentRole, AgentStatus};
 
@@ -22,9 +24,11 @@ pub(crate) fn variant_to_cell_id(variant: &str) -> String {
 pub(crate) fn session_cell_ids(session: &Session) -> Vec<String> {
     match &session.session_type {
         SessionType::Fusion { variants } if !variants.is_empty() => {
+            let mut seen = HashSet::new();
             let mut cell_ids = variants
                 .iter()
                 .map(|variant| variant_to_cell_id(variant))
+                .filter(|cell_id| seen.insert(cell_id.clone()))
                 .collect::<Vec<_>>();
             cell_ids.push(RESOLVER_CELL_ID.to_string());
             cell_ids
@@ -87,6 +91,10 @@ pub(crate) fn derive_cell_status_name(session: &Session, cell_id: &str) -> Strin
 }
 
 pub(crate) fn aggregate_cell_status(session: &Session, cell_id: &str) -> CellStatus {
+    if matches!(session.state, SessionState::Closing) {
+        return CellStatus::Summarizing;
+    }
+
     if is_terminal_session_state(&session.state) {
         return session_state_to_cell_status(&session.state);
     }
@@ -190,6 +198,21 @@ mod tests {
     }
 
     #[test]
+    fn session_cell_ids_dedupe_normalized_variants() {
+        let session = Session {
+            session_type: SessionType::Fusion {
+                variants: vec!["A/B".to_string(), "A B".to_string()],
+            },
+            ..test_session(SessionState::Running, vec![])
+        };
+
+        assert_eq!(
+            session_cell_ids(&session),
+            vec!["variant:a-b".to_string(), RESOLVER_CELL_ID.to_string()]
+        );
+    }
+
+    #[test]
     fn terminal_session_state_overrides_running_agent_status() {
         let session = test_session(SessionState::Completed, vec![AgentStatus::Running]);
 
@@ -204,5 +227,15 @@ mod tests {
         );
 
         assert_eq!(aggregate_cell_status(&session, "variant:alpha"), CellStatus::Launching);
+    }
+
+    #[test]
+    fn closing_session_overrides_running_agent_status() {
+        let session = test_session(SessionState::Closing, vec![AgentStatus::Running]);
+
+        assert_eq!(
+            aggregate_cell_status(&session, "variant:alpha"),
+            CellStatus::Summarizing
+        );
     }
 }
