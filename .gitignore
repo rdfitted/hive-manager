@@ -31,3 +31,6 @@ logs/
 .swarm/
 .hive-manager/
 nul
+
+# Local planning docs (not shipped)
+PLANNING DOCS/
