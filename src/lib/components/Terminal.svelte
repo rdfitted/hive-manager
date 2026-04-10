@@ -29,6 +29,7 @@
   let lastDims = { cols: 0, rows: 0 };
   let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
   let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
+  let wasHidden = false; // Track if terminal was ever hidden to conditionally re-fit
 
   // Context menu state
   let showContextMenu = $state(false);
@@ -45,6 +46,33 @@
   $effect(() => {
     if (isFocused && term) {
       term.focus();
+      // Re-fit terminal after becoming visible to restore correct dimensions.
+      // Only needed if terminal was previously hidden (visibility: hidden corrupted dimensions).
+      // Use requestAnimationFrame to ensure DOM has updated before fitting.
+      if (wasHidden && fitAddon) {
+        requestAnimationFrame(() => {
+          if (term && fitAddon) {
+            try {
+              fitAddon.fit();
+              const dims = fitAddon.proposeDimensions();
+              if (dims && dims.cols > 0 && dims.rows > 0) {
+                if (dims.cols !== lastDims.cols || dims.rows !== lastDims.rows) {
+                  lastDims = { cols: dims.cols, rows: dims.rows };
+                  invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
+                }
+              }
+            } catch (e) {
+              console.error('Failed to fit terminal on focus restore:', e);
+            }
+            term.scrollToBottom();
+            wasHidden = false;
+          }
+        });
+      }
+    } else if (!isFocused) {
+      // Mark terminal as potentially hidden when it loses focus
+      // (it may have visibility: hidden applied by parent)
+      wasHidden = true;
     }
   });
 
@@ -426,8 +454,20 @@
     });
 
     // Handle resize
-    const handleResize = () => {
+    // Guard: skip fit if terminal is hidden (visibility: hidden returns 0x0 dimensions,
+    // corrupting xterm's scroll state). offsetParent is null when element or any ancestor
+    // has display:none, but visibility:hidden elements still have offsetParent.
+    // We check both offsetParent AND getBoundingClientRect to catch visibility:hidden.
+    const handleResize = (forceFit = false) => {
       if (fitAddon && term) {
+        // Skip resize if terminal is hidden unless force-fitting (e.g., after becoming visible)
+        if (!forceFit) {
+          const rect = terminalContainer.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) {
+            // Terminal is hidden, skip fit to prevent corruption
+            return;
+          }
+        }
         try {
           fitAddon.fit();
           const dims = fitAddon.proposeDimensions();

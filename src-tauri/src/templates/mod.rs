@@ -42,6 +42,17 @@ impl Default for PromptContext {
     }
 }
 
+const DEFAULT_API_BASE_URL: &str = "http://localhost:18800";
+
+fn normalize_api_base_url(raw: Option<&String>) -> String {
+    let trimmed = raw.map(|value| value.trim()).unwrap_or_default();
+    if trimmed.is_empty() {
+        return DEFAULT_API_BASE_URL.to_string();
+    }
+
+    trimmed.trim_end_matches('/').to_string()
+}
+
 /// Information about a worker for prompt rendering
 #[derive(Debug, Clone)]
 pub struct WorkerInfo {
@@ -371,7 +382,7 @@ You are spawned early — workers are still building. Use this time wisely, then
 2. **Enter polling loop** — check for activation every **{{idle_poll_interval}}**:
    ```bash
    # Send heartbeat (keeps you alive in the session)
-   curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/heartbeat" \
+   curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
      -H "Content-Type: application/json" \
      -d '{"agent_id":"{{session_id}}-evaluator","status":"idle","summary":"Waiting for milestone handoff"}'
 
@@ -379,7 +390,7 @@ You are spawned early — workers are still building. Use this time wisely, then
    cat .hive-manager/{{session_id}}/peer/milestone-ready.md 2>/dev/null || echo "NOT_READY"
 
    # Also check conversation for Queen activation message
-   curl -s "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen" | grep -i "milestone\|evaluate\|QA"
+   curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen" | grep -i "milestone\|evaluate\|QA"
    ```
 
 3. **Stay idle until activated.** Do NOT start grading, spawning QA workers, or reading contracts until:
@@ -408,17 +419,17 @@ You start with NO QA workers — you MUST spawn all three specializations.
 1. **Spawn all 3 QA workers** — one at a time, in this order:
    ```bash
    # 1. API QA worker
-   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
      -d '{"specialization": "api", "cli": "claude"}'
 
    # 2. UI QA worker (spawns with --chrome automatically)
-   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
      -d '{"specialization": "ui", "cli": "claude"}'
 
    # 3. A11Y QA worker
-   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
      -d '{"specialization": "a11y", "cli": "claude"}'
    ```
@@ -454,7 +465,7 @@ REQUIRED_FIXES:
 - Send remediation requests to QA workers only when you need missing evidence.
 - Post your verdict summary to the Queen conversation so the Reconciler can collect it:
   ```bash
-  curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen/append" \
+  curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen/append" \
     -H "Content-Type: application/json" \
     -d '{"from":"evaluator","content":"<your full QA_VERDICT block>"}'
   ```
@@ -464,7 +475,7 @@ REQUIRED_FIXES:
 ### Spawn QA Worker
 
 ```bash
-curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
   -H "Content-Type: application/json" \
   -d '{"specialization": "ui", "cli": "claude"}'
 ```
@@ -476,7 +487,7 @@ curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
 ### Check Worker Status
 
 ```bash
-curl "http://localhost:18800/api/sessions/{{session_id}}/workers"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/workers"
 ```
 
 Use the session tools directory for reference docs:
@@ -703,13 +714,13 @@ Before assigning work, read:
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -s "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
 
 ## Learning Curation Protocol
 
@@ -717,12 +728,134 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   ```
+
+3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+   - Group by theme/topic
+   - Remove duplicates
+   - Improve clarity where needed
+   - Capture architectural decisions and project conventions
+
+### .ai-docs/ Structure
+```
+.ai-docs/
+├── learnings.jsonl      # Raw learnings from all sessions
+├── project-dna.md       # Curated patterns and conventions
+├── curation-state.json  # Tracks curation state
+└── archive/             # Retired learnings (after 50+ entries)
+```
+
+### Curation Process
+1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
+2. Synthesize insights into `.ai-docs/project-dna.md`
+3. After 50+ learnings, archive to `.ai-docs/archive/`
+
+### When to Curate
+- After each major task phase completes
+- Before creating a PR
+- When learnings count exceeds 10
+
+## QA Milestone Handoff
+
+When a milestone is ready for QA:
+- Signal `MILESTONE_READY` through the peer channel to the Evaluator.
+- Include the milestone name, contract path, scope, and any known risks.
+- The coordination runtime mirrors this handoff into `.hive-manager/{{session_id}}/peer/milestone-ready.json`.
+
+## Communication Format
+
+To send a message to a worker, use this format:
+```
+@worker-id: Your task description here
+```
+
+The system will route your message to the correct worker.
+
+## Version Control
+
+When the session's work is complete and ready to commit:
+- **New features**: Bump the minor version (e.g., 0.17.1 → 0.18.0) in `src-tauri/Cargo.toml`
+- **Feature extensions or bug fixes**: Bump the patch version (e.g., 0.17.1 → 0.17.2) in `src-tauri/Cargo.toml`
+- Include a `chore: bump version to x.y.z` commit alongside or after the feature commits
+
+## Current Task
+
+{{task}}
+"#.to_string());
+
+        // Queen prompt for Fusion sessions
+        self.builtin_templates.insert("queen-fusion".to_string(), r#"# Queen - Fusion Session Orchestrator
+
+You are the Queen agent orchestrating a Fusion session with competing candidate workers and a resolver pass.
+
+## Your Workers
+
+{{workers_list}}
+
+## Coordination Protocol
+
+1. **Assign tasks**: Send messages to workers via the coordination system
+2. **Monitor progress**: Check coordination.log for updates
+3. **Add workers**: Request additional workers if needed
+
+## Start Here
+
+Before assigning work, read:
+- `.ai-docs/project-dna.md`
+- `.ai-docs/learnings.jsonl`
+
+## Inter-Agent Communication
+### Check your inbox:
+curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+### Send message to worker:
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+### Broadcast to all:
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+### Heartbeat (every 60-90s):
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+
+## Resolver Invocation
+
+When all Fusion candidate workers have completed their implementation pass, or when remaining candidates have timed out or failed, launch the resolver with the successful candidate IDs.
+
+### Launch the resolver
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
+  -H "Content-Type: application/json" \
+  -d '{"candidate_ids": {{variant_ids}}, "timeout_secs": 120}'
+```
+
+### Partial failure handling
+- Invoke the resolver even if some candidates failed or timed out.
+- Pass only the successful candidate IDs in `candidate_ids`.
+
+### Response handling
+- Log the resolver output summary to `coordination.log`.
+
+### Error handling
+- If the resolver returns `400` because there are no successful candidates, log the failure in `coordination.log`.
+- If the resolver returns `408`, retry the resolver launch once with the same successful candidate IDs.
+- If the resolver returns `404` (session not found), log the error in `coordination.log`; this usually indicates a stale session reference.
+- If the resolver returns `500`, log the failure in `coordination.log` and escalate as a blocking infrastructure error.
+
+## Learning Curation Protocol
+
+Workers record learnings during task completion. Your curation responsibilities:
+
+1. **Review learnings periodically**:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+
+2. **Review current project DNA**:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -805,12 +938,12 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -915,7 +1048,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         let template_name = match session_type {
             SessionType::Hive { .. } => "queen-hive",
             SessionType::Swarm { .. } => "queen-swarm",
-            SessionType::Fusion { .. } => "queen-hive", // Use hive template for fusion
+            SessionType::Fusion { .. } => "queen-fusion",
             SessionType::Solo { .. } => "queen-hive", // Solo has no queen, keep fallback template for compatibility
         };
 
@@ -1025,6 +1158,8 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             "{{task}}",
             context.task.as_deref().unwrap_or("Awaiting instructions"),
         );
+        let api_base_url = normalize_api_base_url(context.variables.get("api_base_url"));
+        rendered = rendered.replace("{{api_base_url}}", &api_base_url);
 
         for (key, value) in &context.variables {
             let placeholder = format!("{{{{{}}}}}", key);
@@ -1109,7 +1244,12 @@ impl Default for TemplateEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_role_packs, builtin_session_templates, SessionTemplate, TemplateCatalog};
+    use std::collections::HashMap;
+
+    use super::{
+        builtin_role_packs, builtin_session_templates, normalize_api_base_url, PromptContext,
+        SessionTemplate, TemplateCatalog, TemplateEngine, DEFAULT_API_BASE_URL,
+    };
 
     #[test]
     fn session_template_roundtrip() {
@@ -1129,5 +1269,43 @@ mod tests {
         assert!(catalog.templates.len() >= 3);
         assert!(catalog.role_packs.len() >= 4);
         assert!(catalog.templates.iter().all(|template| template.is_builtin));
+    }
+
+    #[test]
+    fn normalize_api_base_url_trims_and_strips_trailing_slashes() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "api_base_url".to_string(),
+            "  http://localhost:18800///  ".to_string(),
+        );
+        let context = PromptContext {
+            session_id: "session-123".to_string(),
+            project_path: ".".to_string(),
+            task: None,
+            variables,
+        };
+
+        let prompt = TemplateEngine::default()
+            .render_template("queen-fusion", &context)
+            .unwrap();
+
+        assert!(prompt.contains("http://localhost:18800/api/sessions/session-123/resolver/launch"));
+        assert!(!prompt.contains("http://localhost:18800///api"));
+        assert_eq!(
+            normalize_api_base_url(context.variables.get("api_base_url")),
+            "http://localhost:18800"
+        );
+    }
+
+    #[test]
+    fn normalize_api_base_url_falls_back_for_blank_values() {
+        let mut variables = HashMap::new();
+        variables.insert("api_base_url".to_string(), "   ".to_string());
+
+        assert_eq!(
+            normalize_api_base_url(variables.get("api_base_url")),
+            DEFAULT_API_BASE_URL
+        );
+        assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
     }
 }

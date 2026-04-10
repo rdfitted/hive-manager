@@ -171,12 +171,12 @@ How we do things in this project. Updated by AI sessions.
 - Hierarchy in `coordination/state.rs` must place new root agents with `parent_id: None`
 
 ### CLI Worker Reliability (Hive Sessions)
-- **codex**: May stall on interactive approval; performs well when it runs (5-25min). Always have replacements ready.
-- **gemini**: Fast (~7-12min), completes quickly. Good for frontend, data model changes.
+- **codex**: Performs extensive codebase indexing before producing output (8-12 min with no git diff is normal). Performs well once indexing completes. Occasional interactive approval stalls but rarer than indexing delays.
+- **gemini**: Also indexes codebase before starting (~7-12 min). Good for frontend, data model changes. Reliable once indexing completes.
 - **cursor**: Good for review/test tasks. WSL environment may lack Rust toolchain.
-- **claude**: Most reliable for autonomous work. Best for complex multi-site refactors.
-- **droid**: Fastest (~2min). Excellent for handler changes, validation, straightforward tasks.
-- **Strategy**: Monitor `git diff --stat` — no changes for >5min = likely stalled. Re-assign immediately.
+- **claude**: Most reliable for autonomous work. Starts producing output faster than codex/gemini. Best for complex multi-site refactors.
+- **droid**: Fastest (~2min). Excellent for handler changes, validation, straightforward tasks. Minimal indexing overhead.
+- **Strategy**: Wait at least **12-15 minutes** before declaring a worker stalled. Codex and Gemini index extensively — no git diff for 8-12 min is normal startup behavior. Only Droid and Claude start producing output quickly. Check terminal/PTY activity if possible, not just git diff. Only flag as truly stalled if zero terminal activity AND >15 min elapsed.
 
 ## Model Performance Notes
 

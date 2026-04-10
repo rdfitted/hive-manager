@@ -37,6 +37,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/fusion/status", get(sessions::get_fusion_status))
         .route("/api/sessions/{id}/fusion/evaluation", get(sessions::get_fusion_evaluation))
         .route("/api/sessions/{id}/resolver", get(resolver::get_resolver_output))
+        .route("/api/sessions/{id}/resolver/launch", post(resolver::launch_resolver))
         .route("/api/sessions/{id}/stop", post(sessions::stop_session))
         .route("/api/sessions/{id}/close", post(sessions::close_session))
         // Worker routes
