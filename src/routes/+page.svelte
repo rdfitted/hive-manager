@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
-  import TerminalGrid from '$lib/components/TerminalGrid.svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import StatusPanel from '$lib/components/StatusPanel.svelte';
   import AgentTree from '$lib/components/AgentTree.svelte';
@@ -140,11 +139,6 @@
       event.preventDefault();
       // Focus the new session button - handled by SessionSidebar
     }
-    // Ctrl+G to toggle grid layout
-    if (event.ctrlKey && event.key === 'g') {
-      event.preventDefault();
-      ui.toggleLayoutMode();
-    }
     // Navigate agents with arrow keys when tree is focused
     if ($activeAgents.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
       const currentIndex = $activeAgents.findIndex(a => a.id === focusedAgentId);
@@ -229,12 +223,6 @@
           </div>
         {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && $activeSession.state !== 'Planning' && $activeSession.state !== 'PlanReady'}
           <FusionPanel />
-        {:else if $ui.layoutMode === 'grid'}
-          <TerminalGrid
-            agents={$activeAgents}
-            {focusedAgentId}
-            onSelect={(id) => focusedAgentId = id}
-          />
         {:else}
           <SessionOverview />
         {/if}
@@ -267,32 +255,13 @@
     overflow: hidden;
   }
 
-  :global(:root) {
-    /* Tokyo Night theme */
-    --color-bg: #1a1b26;
-    --color-surface: #24283b;
-    --color-surface-hover: #2f3549;
-    --color-border: #414868;
-    --color-text: #c0caf5;
-    --color-text-muted: #565f89;
-    --color-accent: #7aa2f7;
-    --color-accent-bright: #89b4fa;
-    --color-accent-dim: rgba(122, 162, 247, 0.15);
-    --color-primary: #8b5cf6;
-    --color-primary-muted: rgba(139, 92, 246, 0.15);
-    --color-success: #9ece6a;
-    --color-warning: #e0af68;
-    --color-error: #f7768e;
-    --color-running: #7aa2f7;
-  }
-
   .app {
     display: flex;
     width: 100vw;
     height: 100vh;
     background: var(--color-bg);
     color: var(--color-text);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--font-body);
   }
 
   .hierarchy-sidebar {
