@@ -42,6 +42,8 @@ impl Default for PromptContext {
     }
 }
 
+const DEFAULT_API_BASE_URL: &str = "http://localhost:18800";
+
 /// Information about a worker for prompt rendering
 #[derive(Debug, Clone)]
 pub struct WorkerInfo {
@@ -371,7 +373,7 @@ You are spawned early — workers are still building. Use this time wisely, then
 2. **Enter polling loop** — check for activation every **{{idle_poll_interval}}**:
    ```bash
    # Send heartbeat (keeps you alive in the session)
-   curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/heartbeat" \
+   curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
      -H "Content-Type: application/json" \
      -d '{"agent_id":"{{session_id}}-evaluator","status":"idle","summary":"Waiting for milestone handoff"}'
 
@@ -379,7 +381,7 @@ You are spawned early — workers are still building. Use this time wisely, then
    cat .hive-manager/{{session_id}}/peer/milestone-ready.md 2>/dev/null || echo "NOT_READY"
 
    # Also check conversation for Queen activation message
-   curl -s "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen" | grep -i "milestone\|evaluate\|QA"
+   curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen" | grep -i "milestone\|evaluate\|QA"
    ```
 
 3. **Stay idle until activated.** Do NOT start grading, spawning QA workers, or reading contracts until:
@@ -408,17 +410,17 @@ You start with NO QA workers — you MUST spawn all three specializations.
 1. **Spawn all 3 QA workers** — one at a time, in this order:
    ```bash
    # 1. API QA worker
-   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
      -d '{"specialization": "api", "cli": "claude"}'
 
    # 2. UI QA worker (spawns with --chrome automatically)
-   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
      -d '{"specialization": "ui", "cli": "claude"}'
 
    # 3. A11Y QA worker
-   curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
      -d '{"specialization": "a11y", "cli": "claude"}'
    ```
@@ -454,7 +456,7 @@ REQUIRED_FIXES:
 - Send remediation requests to QA workers only when you need missing evidence.
 - Post your verdict summary to the Queen conversation so the Reconciler can collect it:
   ```bash
-  curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen/append" \
+  curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen/append" \
     -H "Content-Type: application/json" \
     -d '{"from":"evaluator","content":"<your full QA_VERDICT block>"}'
   ```
@@ -464,7 +466,7 @@ REQUIRED_FIXES:
 ### Spawn QA Worker
 
 ```bash
-curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
+curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
   -H "Content-Type: application/json" \
   -d '{"specialization": "ui", "cli": "claude"}'
 ```
@@ -476,7 +478,7 @@ curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/qa-workers" \
 ### Check Worker Status
 
 ```bash
-curl "http://localhost:18800/api/sessions/{{session_id}}/workers"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/workers"
 ```
 
 Use the session tools directory for reference docs:
@@ -703,13 +705,13 @@ Before assigning work, read:
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -s "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
 
 ## Learning Curation Protocol
 
@@ -717,12 +719,12 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -801,13 +803,13 @@ Before assigning work, read:
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -s "http://localhost:18800/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
 
 ## Resolver Invocation
 
@@ -815,7 +817,7 @@ When all Fusion candidate workers have completed their implementation pass, or w
 
 ### Launch the resolver
 ```bash
-curl -s -X POST "http://localhost:18800/api/sessions/{{session_id}}/resolver/launch" \
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
   -H "Content-Type: application/json" \
   -d '{"candidate_ids": ["variant-1", "variant-2"], "timeout_secs": 120}'
 ```
@@ -837,12 +839,12 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -925,12 +927,12 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 1. **Review learnings periodically**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/learnings"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
    ```
 
 2. **Review current project DNA**:
    ```bash
-   curl "http://localhost:18800/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
 3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
@@ -1144,6 +1146,14 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         rendered = rendered.replace(
             "{{task}}",
             context.task.as_deref().unwrap_or("Awaiting instructions"),
+        );
+        rendered = rendered.replace(
+            "{{api_base_url}}",
+            context
+                .variables
+                .get("api_base_url")
+                .map(String::as_str)
+                .unwrap_or(DEFAULT_API_BASE_URL),
         );
 
         for (key, value) in &context.variables {

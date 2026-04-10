@@ -83,11 +83,44 @@ function createReplayStore() {
 
 export const replay = createReplayStore();
 
+function compareEventTimestamp(left: Event, right: Event): number {
+    return new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime();
+}
+
+function toChronologicalOrder(events: Event[]): Event[] {
+    if (events.length < 2) {
+        return events;
+    }
+
+    let isAscending = true;
+    let isDescending = true;
+
+    for (let index = 1; index < events.length; index += 1) {
+        const comparison = compareEventTimestamp(events[index - 1], events[index]);
+        if (comparison > 0) {
+            isAscending = false;
+        }
+        if (comparison < 0) {
+            isDescending = false;
+        }
+        if (!isAscending && !isDescending) {
+            break;
+        }
+    }
+
+    if (isAscending) {
+        return [...events];
+    }
+    if (isDescending) {
+        return [...events].reverse();
+    }
+
+    return [...events].sort(compareEventTimestamp);
+}
+
 export const chronologicalEvents = derived(
     events,
-    $events => [...$events.events].sort((a, b) => 
-        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    )
+    $events => toChronologicalOrder($events.events)
 );
 
 export const eventsAtTimestamp = derived(

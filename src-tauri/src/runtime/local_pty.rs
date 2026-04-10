@@ -18,15 +18,12 @@ const CHUNK_SIZE: usize = 16 * 1024;
 /// Wrapper to make the writer Send.
 struct SendWriter(Box<dyn io::Write + Send>);
 
-/// Wrapper to make the reader Send.
-struct SendReader(Box<dyn io::Read + Send>);
-
 /// Wrapper to hold the master PTY handle.
 struct MasterPtyHandle(Box<dyn portable_pty::MasterPty + Send>);
 
 /// A single PTY session for an agent.
 struct PtySession {
-    role: String,
+    _role: String,
     writer: Arc<Mutex<SendWriter>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
     master: Arc<Mutex<MasterPtyHandle>>,
@@ -119,7 +116,7 @@ impl PtySession {
         let master = pty_pair.master;
 
         Ok(Self {
-            role: role.to_string(),
+            _role: role.to_string(),
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             child: Arc::new(Mutex::new(Some(child))),
             master: Arc::new(Mutex::new(MasterPtyHandle(master))),
@@ -277,24 +274,6 @@ impl PtySession {
             .map_err(|e| RuntimeError::resize(format!("Resize failed: {}", e)))?;
         tracing::debug!("PTY resized to {}x{}", cols, rows);
         Ok(())
-    }
-
-    /// Check if the child process is still running.
-    fn is_running(&self) -> bool {
-        let mut child = match self.child.lock() {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        if let Some(ref mut child) = *child {
-            match child.try_wait() {
-                Ok(None) => true, // Still running
-                Ok(Some(_)) => false, // Exited
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
     }
 
     /// Kill the child process.

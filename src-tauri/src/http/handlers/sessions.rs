@@ -162,7 +162,8 @@ pub struct CreateSessionRequest {
 
 #[derive(Deserialize)]
 pub struct LaunchSessionRequest {
-    pub mode: Option<String>,
+    #[serde(rename = "mode")]
+    pub _mode: Option<String>,
 }
 
 #[derive(Deserialize)]

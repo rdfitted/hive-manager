@@ -22,6 +22,23 @@ const initialFilters: EventFilters = {
     endTime: null,
 };
 
+const payloadSearchCache = new Map<string, string>();
+
+function getPayloadSearchText(event: Event): string {
+    const cached = payloadSearchCache.get(event.id);
+    if (cached !== undefined) {
+        return cached;
+    }
+
+    const serializedPayload =
+        typeof event.payload === 'string'
+            ? event.payload
+            : JSON.stringify(event.payload ?? null);
+    const normalizedPayload = serializedPayload.toLowerCase();
+    payloadSearchCache.set(event.id, normalizedPayload);
+    return normalizedPayload;
+}
+
 function createFiltersStore() {
     const { subscribe, set, update } = writable<EventFilters>(initialFilters);
 
@@ -58,6 +75,8 @@ export const filters = createFiltersStore();
 export const filteredEvents = derived(
     [events, filters],
     ([$events, $filters]) => {
+        const searchLower = $filters.searchText.trim().toLowerCase();
+
         return $events.events.filter(event => {
             if ($filters.types.length > 0 && !$filters.types.includes(event.event_type)) {
                 return false;
@@ -71,10 +90,11 @@ export const filteredEvents = derived(
             if ($filters.agentId && event.agent_id !== $filters.agentId) {
                 return false;
             }
-            if ($filters.searchText) {
-                const searchLower = $filters.searchText.toLowerCase();
-                const payloadString = JSON.stringify(event.payload).toLowerCase();
-                if (!payloadString.includes(searchLower) && !event.event_type.toLowerCase().includes(searchLower)) {
+            if (searchLower) {
+                const matchesSearch =
+                    event.event_type.toLowerCase().includes(searchLower) ||
+                    getPayloadSearchText(event).includes(searchLower);
+                if (!matchesSearch) {
                     return false;
                 }
             }
