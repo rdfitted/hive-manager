@@ -3,6 +3,7 @@
     import WorkspaceBadge from './WorkspaceBadge.svelte';
     import AgentList from '../agent/AgentList.svelte';
     import { ui } from '../../stores/ui';
+    import { Hourglass, Wrench, Rocket, Lightning, NotePencil, CheckCircle, Question, XCircle, Skull, Users } from 'phosphor-svelte';
 
     export let cell: Cell;
 
@@ -26,17 +27,17 @@
         toggleSelection();
     }
 
-    $: statusIcon = {
-        'queued': '⏳',
-        'preparing': '🛠️',
-        'launching': '🚀',
-        'running': '⚡',
-        'summarizing': '📝',
-        'completed': '✅',
-        'waiting_input': '❓',
-        'failed': '❌',
-        'killed': '💀'
-    }[cell.status] || '❓';
+    const statusIcons: Record<string, any> = {
+        'queued': Hourglass,
+        'preparing': Wrench,
+        'launching': Rocket,
+        'running': Lightning,
+        'summarizing': NotePencil,
+        'completed': CheckCircle,
+        'waiting_input': Question,
+        'failed': XCircle,
+        'killed': Skull
+    };
 </script>
 
 <div 
@@ -51,14 +52,23 @@
     on:keydown={handleKeyDown}
 >
     <div class="header">
-        <div class="status-icon" title={cell.status} aria-hidden="true">{statusIcon}</div>
+        <div class="status-icon" title={cell.status} aria-hidden="true">
+            <svelte:component 
+                this={statusIcons[cell.status] || Question} 
+                size={isCollapsed ? 14 : 18}
+                weight={cell.status === 'completed' || cell.status === 'failed' ? 'fill' : 'light'}
+            />
+        </div>
         <div class="name-box">
             <span class="type-tag">{cell.cell_type}</span>
             <span class="name">{cell.name}</span>
         </div>
         {#if isCollapsed}
             <div class="collapsed-info">
-                <span class="agent-count">👥 {cell.agents.length}</span>
+                <span class="agent-count">
+                    <Users size={11} weight="light" />
+                    {cell.agents.length}
+                </span>
                 <span class="objective-preview">{cell.objective}</span>
             </div>
         {/if}

@@ -11,6 +11,7 @@
     import ReplayView from '../replay/ReplayView.svelte';
     import ReplayControls from '../replay/ReplayControls.svelte';
     import ArtifactBrowser from '../artifacts/ArtifactBrowser.svelte';
+    import { Hourglass, Check, Circle } from 'phosphor-svelte';
 
     type SessionView = 'terminal' | 'observability' | 'artifacts';
     let activeView: SessionView = $state('terminal');
@@ -99,10 +100,17 @@
                                         class:waiting={typeof agent.status === 'object' && 'WaitingForInput' in agent.status} 
                                         class:completed={agent.status === 'Completed'}
                                     >
-                                        {agent.status === 'Running' ? '█' : 
-                                        (typeof agent.status === 'object' && 'WaitingForInput' in agent.status) ? '⏳' : 
-                                        agent.status === 'Completed' ? '✓' : '○'}
+                                        {#if agent.status === 'Running'}
+                                            █
+                                        {:else if typeof agent.status === 'object' && 'WaitingForInput' in agent.status}
+                                            <Hourglass size={10} weight="light" />
+                                        {:else if agent.status === 'Completed'}
+                                            <Check size={10} weight="light" />
+                                        {:else}
+                                            <Circle size={10} weight="light" />
+                                        {/if}
                                     </span>
+
                                 </div>
                             </div>
                             <div class="terminal-container">

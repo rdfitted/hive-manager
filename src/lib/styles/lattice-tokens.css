@@ -73,4 +73,11 @@
   --color-warning: var(--status-warning);
   --color-error: var(--status-error);
   --color-running: var(--status-running);
+
+  /* ── Shadows ───────────────────────────────────────────────────── */
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.15);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
+  --shadow-glow-sm: 0 0 4px;
+  --shadow-glow-md: 0 0 8px;
 }

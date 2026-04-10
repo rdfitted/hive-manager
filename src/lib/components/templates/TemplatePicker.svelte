@@ -2,6 +2,7 @@
     import { onMount } from 'svelte';
     import { templates, selectedTemplate } from '../../stores/templates';
     import type { SessionTemplate } from '../../types/domain';
+    import { MagnifyingGlass, Hexagon, TestTube } from 'phosphor-svelte';
 
     let searchQuery = '';
 
@@ -22,7 +23,7 @@
 <div class="template-picker">
     <div class="picker-header">
         <div class="search-box">
-            <span class="search-icon">🔍</span>
+            <MagnifyingGlass size={14} weight="light" class="search-icon" />
             <input 
                 type="text" 
                 placeholder="Search templates..." 
@@ -47,7 +48,11 @@
                     title={template.description}
                 >
                     <div class="card-icon" class:builtin={template.is_builtin}>
-                        {template.mode === 'hive' ? '🐝' : '🧪'}
+                        {#if template.mode === 'hive'}
+                            <Hexagon size={24} weight="light" />
+                        {:else}
+                            <TestTube size={24} weight="light" />
+                        {/if}
                     </div>
                     <div class="card-info">
                         <div class="name-row">
@@ -86,13 +91,6 @@
         position: relative;
         display: flex;
         align-items: center;
-    }
-
-    .search-icon {
-        position: absolute;
-        left: 12px;
-        font-size: 14px;
-        opacity: 0.5;
     }
 
     .search-box input {

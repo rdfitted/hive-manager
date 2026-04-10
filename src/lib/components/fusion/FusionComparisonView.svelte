@@ -1,24 +1,23 @@
 <script lang="ts">
     import { cells } from '../../stores/cells';
     import ArtifactSummary from '../artifacts/ArtifactSummary.svelte';
+    import { Hourglass, Wrench, Rocket, Lightning, NotePencil, CheckCircle, Question, XCircle, Skull } from 'phosphor-svelte';
     export let sessionId: string;
 
     $: sessionCells = Object.values($cells.cells).filter(c => c.session_id === sessionId);
     $: candidates = sessionCells.filter(c => c.cell_type !== 'resolver');
 
-    function getStatusIcon(status: string) {
-        return {
-            'queued': '⏳',
-            'preparing': '🛠️',
-            'launching': '🚀',
-            'running': '⚡',
-            'summarizing': '📝',
-            'completed': '✅',
-            'waiting_input': '❓',
-            'failed': '❌',
-            'killed': '💀'
-        }[status] || '❓';
-    }
+    const statusIcons: Record<string, any> = {
+        'queued': Hourglass,
+        'preparing': Wrench,
+        'launching': Rocket,
+        'running': Lightning,
+        'summarizing': NotePencil,
+        'completed': CheckCircle,
+        'waiting_input': Question,
+        'failed': XCircle,
+        'killed': Skull
+    };
 </script>
 
 <div class="fusion-comparison-view">
@@ -27,9 +26,17 @@
             <div class="candidate-card" class:completed={cell.status === 'completed'} class:failed={cell.status === 'failed'}>
                 <div class="card-header">
                     <div class="status-row">
-                        <span class="status-badge" title={cell.status}>{getStatusIcon(cell.status)} {cell.status}</span>
+                        <span class="status-badge" title={cell.status}>
+                            <svelte:component 
+                                this={statusIcons[cell.status] || Question} 
+                                size={12} 
+                                weight={cell.status === 'completed' || cell.status === 'failed' ? 'fill' : 'light'} 
+                            />
+                            {cell.status}
+                        </span>
                         <span class="type-tag">{cell.cell_type}</span>
                     </div>
+
                     <h3 class="name">{cell.name}</h3>
                     <div class="branch-info">
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>

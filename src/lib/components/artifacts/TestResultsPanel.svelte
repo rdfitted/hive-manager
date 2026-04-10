@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { X } from 'phosphor-svelte';
     export let results: any;
 
     $: passed = results?.passed || 0;
@@ -32,7 +33,7 @@
             {#each failures as failure}
                 <div class="failure-item">
                     <div class="test-name">
-                        <span class="fail-icon">✗</span>
+                        <X size={14} weight="light" />
                         {failure.name || 'Unknown test'}
                     </div>
                     {#if failure.message}
@@ -121,10 +122,6 @@
         display: flex;
         align-items: center;
         gap: 6px;
-    }
-
-    .fail-icon {
-        font-size: 14px;
     }
 
     .error-message {

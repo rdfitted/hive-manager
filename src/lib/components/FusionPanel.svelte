@@ -4,6 +4,7 @@
   import Terminal from './Terminal.svelte';
   import FusionComparisonView from './fusion/FusionComparisonView.svelte';
   import ResolverPanel from './fusion/ResolverPanel.svelte';
+  import { Keyboard, ChartBar, Crown, Scales, MagnifyingGlass } from 'phosphor-svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   let fusionAgents = $derived($activeAgents.filter(a => typeof a.role === 'object' && 'Fusion' in a.role));
@@ -58,10 +59,10 @@
   <div class="panel-controls">
     <div class="view-tabs">
       <button class="tab-button" class:active={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
-        <span class="icon">⌨️</span> Terminals
+        <Keyboard size={20} weight="light" /> Terminals
       </button>
       <button class="tab-button" class:active={viewMode === 'comparison'} onclick={() => viewMode = 'comparison'}>
-        <span class="icon">📊</span> Comparison
+        <ChartBar size={20} weight="light" /> Comparison
       </button>
     </div>
   </div>
@@ -70,7 +71,7 @@
     {#if queenAgent}
       <div class="orchestrator-section">
         <div class="orchestrator-header">
-          <span class="icon">♕</span>
+          <Crown size={24} weight="light" />
           <h3>Fusion Queen</h3>
           <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
         </div>
@@ -112,7 +113,7 @@
     {#if judgeAgent}
       <div class="orchestrator-section">
         <div class="orchestrator-header">
-          <span class="icon">⚖️</span>
+          <Scales size={24} weight="light" />
           <h3>Judge</h3>
           <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
         </div>
@@ -132,7 +133,7 @@
   {#if isResolvingOrCompleted}
     <div class="resolver-section">
       <div class="section-header">
-        <span class="icon">🔍</span>
+        <MagnifyingGlass size={24} weight="light" />
         <h3>Resolver Analysis</h3>
       </div>
       {#if $activeSession}
@@ -144,7 +145,7 @@
   {#if evaluationReady && judgeReport}
     <div class="judge-section">
       <div class="section-header">
-        <span class="icon">⚖️</span>
+        <Scales size={24} weight="light" />
         <h3>Judge Evaluation Report</h3>
       </div>
       <div class="report-content">

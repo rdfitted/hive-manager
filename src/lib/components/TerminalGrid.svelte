@@ -1,6 +1,7 @@
 <script lang="ts">
   import { activeSession, serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
   import Terminal from './Terminal.svelte';
+  import { Hourglass, Check, Circle } from 'phosphor-svelte';
 
   interface Props {
     agents: AgentInfo[];
@@ -62,9 +63,15 @@
             class:running={status === 'Running'} 
             class:completed={status === 'Completed'}
           >
-             {status === 'Running' ? '█' : 
-              (typeof agent.status === 'object' && 'WaitingForInput' in agent.status) ? '⏳' : 
-              status === 'Completed' ? '✓' : '○'}
+             {#if status === 'Running'}
+               █
+             {:else if typeof agent.status === 'object' && 'WaitingForInput' in agent.status}
+               <Hourglass size={10} weight="light" />
+             {:else if status === 'Completed'}
+               <Check size={10} weight="light" />
+             {:else}
+               <Circle size={10} weight="light" />
+             {/if}
           </span>
         </div>
       </div>
