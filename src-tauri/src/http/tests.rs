@@ -3700,6 +3700,9 @@ async fn test_resolver_launch_success_with_artifacts() {
     assert_eq!(output.selected_candidate, "variant-a");
     assert!(!output.rationale.is_empty());
 
+    let session = controller.read().get_session(&session_id).unwrap();
+    assert_eq!(session.state, SessionState::Completed);
+
     // Verify output was persisted
     let persisted_output = storage.load_resolver_output(&session_id).unwrap();
     assert!(persisted_output.is_some());

@@ -68,15 +68,26 @@ function createReplayStore() {
         update,
         play: (allEvents: Event[]) => {
             if (allEvents.length === 0) return;
-            currentEvents = allEvents;
+            let shouldStart = false;
+            let playbackSpeed = 1;
 
             update(state => {
-                if (state.isPlaying) return state;
+                if (state.isPlaying) {
+                    return state;
+                }
 
+                shouldStart = true;
+                playbackSpeed = state.playbackSpeed;
                 const currentIndex = resolvePlaybackIndex(allEvents, state.currentTimestamp);
-                startInterval(state.playbackSpeed);
                 return { ...state, currentIndex, isPlaying: true };
             });
+
+            if (!shouldStart) {
+                return;
+            }
+
+            currentEvents = allEvents;
+            startInterval(playbackSpeed);
         },
         pause: () => {
             update(state => ({ ...state, isPlaying: false }));

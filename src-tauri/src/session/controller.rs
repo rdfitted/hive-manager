@@ -798,6 +798,37 @@ impl SessionController {
         }
     }
 
+    pub fn mark_session_completed(&self, session_id: &str) -> Result<(), String> {
+        let updated_active_session = {
+            let mut sessions = self.sessions.write();
+            sessions.get_mut(session_id).map(|session| {
+                session.state = SessionState::Completed;
+                session.auth_strategy = AuthStrategy::None;
+            })
+        };
+
+        if updated_active_session.is_some() {
+            self.emit_session_update(session_id);
+            self.update_session_storage_checked(session_id)?;
+            return Ok(());
+        }
+
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+        let mut persisted = storage
+            .load_session(session_id)
+            .map_err(|_| format!("Session not found: {}", session_id))?;
+        persisted.state = serialize_session_state(&SessionState::Completed);
+        persisted.auth_strategy = AuthStrategy::None.persist_value();
+        storage
+            .save_session(&persisted)
+            .map_err(|e| format!("Failed to persist session completion: {}", e))?;
+
+        Ok(())
+    }
+
     pub fn close_session(&self, id: &str) -> Result<(), String> {
         let agent_ids: Vec<String> = {
             let mut sessions = self.sessions.write();

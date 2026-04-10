@@ -44,6 +44,15 @@ impl Default for PromptContext {
 
 const DEFAULT_API_BASE_URL: &str = "http://localhost:18800";
 
+fn normalize_api_base_url(raw: Option<&String>) -> String {
+    let trimmed = raw.map(|value| value.trim()).unwrap_or_default();
+    if trimmed.is_empty() {
+        return DEFAULT_API_BASE_URL.to_string();
+    }
+
+    trimmed.trim_end_matches('/').to_string()
+}
+
 /// Information about a worker for prompt rendering
 #[derive(Debug, Clone)]
 pub struct WorkerInfo {
@@ -832,6 +841,7 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
 ### Error handling
 - If the resolver returns `400` because there are no successful candidates, log the failure in `coordination.log`.
 - If the resolver returns `408`, retry the resolver launch once with the same successful candidate IDs.
+- If the resolver returns `404` (session not found), log the error in `coordination.log`; this usually indicates a stale session reference.
 - If the resolver returns `500`, log the failure in `coordination.log` and escalate as a blocking infrastructure error.
 
 ## Learning Curation Protocol
@@ -1148,14 +1158,8 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             "{{task}}",
             context.task.as_deref().unwrap_or("Awaiting instructions"),
         );
-        rendered = rendered.replace(
-            "{{api_base_url}}",
-            context
-                .variables
-                .get("api_base_url")
-                .map(String::as_str)
-                .unwrap_or(DEFAULT_API_BASE_URL),
-        );
+        let api_base_url = normalize_api_base_url(context.variables.get("api_base_url"));
+        rendered = rendered.replace("{{api_base_url}}", &api_base_url);
 
         for (key, value) in &context.variables {
             let placeholder = format!("{{{{{}}}}}", key);
@@ -1240,7 +1244,12 @@ impl Default for TemplateEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_role_packs, builtin_session_templates, SessionTemplate, TemplateCatalog};
+    use std::collections::HashMap;
+
+    use super::{
+        builtin_role_packs, builtin_session_templates, normalize_api_base_url, PromptContext,
+        SessionTemplate, TemplateCatalog, TemplateEngine, DEFAULT_API_BASE_URL,
+    };
 
     #[test]
     fn session_template_roundtrip() {
@@ -1260,5 +1269,43 @@ mod tests {
         assert!(catalog.templates.len() >= 3);
         assert!(catalog.role_packs.len() >= 4);
         assert!(catalog.templates.iter().all(|template| template.is_builtin));
+    }
+
+    #[test]
+    fn normalize_api_base_url_trims_and_strips_trailing_slashes() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "api_base_url".to_string(),
+            "  http://localhost:18800///  ".to_string(),
+        );
+        let context = PromptContext {
+            session_id: "session-123".to_string(),
+            project_path: ".".to_string(),
+            task: None,
+            variables,
+        };
+
+        let prompt = TemplateEngine::default()
+            .render_template("queen-fusion", &context)
+            .unwrap();
+
+        assert!(prompt.contains("http://localhost:18800/api/sessions/session-123/resolver/launch"));
+        assert!(!prompt.contains("http://localhost:18800///api"));
+        assert_eq!(
+            normalize_api_base_url(context.variables.get("api_base_url")),
+            "http://localhost:18800"
+        );
+    }
+
+    #[test]
+    fn normalize_api_base_url_falls_back_for_blank_values() {
+        let mut variables = HashMap::new();
+        variables.insert("api_base_url".to_string(), "   ".to_string());
+
+        assert_eq!(
+            normalize_api_base_url(variables.get("api_base_url")),
+            DEFAULT_API_BASE_URL
+        );
+        assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
     }
 }

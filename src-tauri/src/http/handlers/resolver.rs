@@ -140,19 +140,11 @@ pub async fn launch_resolver(
         .persist_output(&session_id, &output)
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
-    // Persist session state as completed (capitalized to match SessionState::Completed serialization).
-    // NOTE: AppState exposes SessionController, but it does not provide a public state mutator for
-    // already-running sessions. Persisted storage is updated here as the source of truth, and the
-    // next session refresh will reconcile the in-memory state.
-    let mut persisted = state
-        .storage
-        .load_session(&session_id)
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-    persisted.state = "Completed".to_string();
     state
-        .storage
-        .save_session(&persisted)
-        .map_err(|err| ApiError::internal(err.to_string()))?;
+        .session_controller
+        .read()
+        .mark_session_completed(&session_id)
+        .map_err(ApiError::internal)?;
 
     Ok(Json(output))
 }

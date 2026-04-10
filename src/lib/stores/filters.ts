@@ -22,6 +22,7 @@ const initialFilters: EventFilters = {
     endTime: null,
 };
 
+const MAX_PAYLOAD_SEARCH_CACHE_ENTRIES = 1000;
 const payloadSearchCache = new Map<string, string>();
 
 function getPayloadSearchText(event: Event): string {
@@ -36,6 +37,12 @@ function getPayloadSearchText(event: Event): string {
             : JSON.stringify(event.payload ?? null);
     const normalizedPayload = serializedPayload.toLowerCase();
     payloadSearchCache.set(event.id, normalizedPayload);
+    if (payloadSearchCache.size > MAX_PAYLOAD_SEARCH_CACHE_ENTRIES) {
+        const oldestKey = payloadSearchCache.keys().next().value;
+        if (oldestKey !== undefined) {
+            payloadSearchCache.delete(oldestKey);
+        }
+    }
     return normalizedPayload;
 }
 
