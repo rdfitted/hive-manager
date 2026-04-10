@@ -1185,22 +1185,55 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         mut template: String,
         variables: &HashMap<String, String>,
     ) -> String {
-        for (key, value) in variables {
+        let mut keys: Vec<&String> = variables.keys().collect();
+        keys.sort();
+
+        for key in keys {
+            let value = &variables[key];
             let start = format!("{{{{#if {key}}}}}");
+            let open = "{{#if ";
             let end = "{{/if}}";
-            while let Some(start_idx) = template.find(&start) {
-                let content_start = start_idx + start.len();
-                let Some(relative_end_idx) = template[content_start..].find(end) else {
+
+            loop {
+                let Some(start_idx) = template.find(&start) else {
                     break;
                 };
-                let end_idx = content_start + relative_end_idx;
+                let content_start = start_idx + start.len();
+
+                // Track nested conditional blocks so we close the matching {{/if}}.
+                let mut depth = 1usize;
+                let mut cursor = content_start;
+                let matching_end_idx = loop {
+                    let next_open = template[cursor..].find(open).map(|idx| cursor + idx);
+                    let next_close = template[cursor..].find(end).map(|idx| cursor + idx);
+
+                    match (next_open, next_close) {
+                        (Some(open_idx), Some(close_idx)) if open_idx < close_idx => {
+                            depth += 1;
+                            cursor = open_idx + open.len();
+                        }
+                        (_, Some(close_idx)) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break Some(close_idx);
+                            }
+                            cursor = close_idx + end.len();
+                        }
+                        _ => break None,
+                    }
+                };
+
+                let Some(end_idx) = matching_end_idx else {
+                    break;
+                };
+
                 let inner = template[content_start..end_idx].to_string();
                 let replacement = if matches!(value.as_str(), "true" | "1" | "yes") {
-                    inner.as_str()
+                    inner
                 } else {
-                    ""
+                    String::new()
                 };
-                template.replace_range(start_idx..end_idx + end.len(), replacement);
+                template.replace_range(start_idx..end_idx + end.len(), &replacement);
             }
         }
 
@@ -1392,5 +1425,39 @@ mod tests {
 
         assert!(!disabled_prompt.contains("--chrome"));
         assert!(!disabled_prompt.contains("built-in Chrome integration"));
+    }
+
+    #[test]
+    fn render_if_blocks_supports_nested_conditionals() {
+        let mut variables = HashMap::new();
+        variables.insert("outer".to_string(), "true".to_string());
+        variables.insert("inner".to_string(), "true".to_string());
+
+        let rendered = TemplateEngine::default().render_if_blocks(
+            "before {{#if outer}}outer {{#if inner}}inner{{/if}} done{{/if}} after".to_string(),
+            &variables,
+        );
+
+        assert_eq!(rendered, "before outer inner done after");
+    }
+
+    #[test]
+    fn render_if_blocks_is_stable_across_hash_map_insertion_order() {
+        let template = "{{#if a}}A{{/if}}{{#if ab}}AB{{/if}}".to_string();
+
+        let mut variables_ab_first = HashMap::new();
+        variables_ab_first.insert("ab".to_string(), "true".to_string());
+        variables_ab_first.insert("a".to_string(), "true".to_string());
+
+        let mut variables_a_first = HashMap::new();
+        variables_a_first.insert("a".to_string(), "true".to_string());
+        variables_a_first.insert("ab".to_string(), "true".to_string());
+
+        let engine = TemplateEngine::default();
+        let ab_first = engine.render_if_blocks(template.clone(), &variables_ab_first);
+        let a_first = engine.render_if_blocks(template, &variables_a_first);
+
+        assert_eq!(ab_first, "AAB");
+        assert_eq!(ab_first, a_first);
     }
 }
