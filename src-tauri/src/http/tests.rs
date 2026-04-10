@@ -3758,6 +3758,60 @@ async fn test_resolver_launch_empty_candidates_returns_400() {
 }
 
 #[tokio::test]
+async fn test_resolver_launch_rejects_duplicate_candidate_ids() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("resolver-duplicate-{}", uuid::Uuid::new_v4());
+
+    let session = make_fusion_session(&session_id, &std::env::temp_dir().to_string_lossy());
+    controller.write().insert_test_session(session);
+
+    let body = serde_json::json!({
+        "candidate_ids": ["variant-a", "variant-a"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/resolver/launch", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_resolver_launch_rejects_unknown_candidate_ids() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("resolver-unknown-{}", uuid::Uuid::new_v4());
+
+    let session = make_fusion_session(&session_id, &std::env::temp_dir().to_string_lossy());
+    controller.write().insert_test_session(session);
+
+    let body = serde_json::json!({
+        "candidate_ids": ["variant-a", "variant-c"]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/resolver/launch", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_resolver_launch_non_fusion_session_returns_400() {
     let (app, controller) = setup_test_app_with_controller().await;
     let session_id = format!("resolver-hive-{}", uuid::Uuid::new_v4());

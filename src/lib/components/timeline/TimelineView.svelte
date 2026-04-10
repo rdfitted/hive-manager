@@ -9,6 +9,10 @@
 
     let selectedEvent: SessionEvent | null = null;
 
+    $: if (selectedEvent && !$filteredEvents.some((event) => event.id === selectedEvent?.id)) {
+        selectedEvent = null;
+    }
+
     async function handleFetchHistory() {
         if ($activeSession) {
             await events.fetchEvents($activeSession.id);

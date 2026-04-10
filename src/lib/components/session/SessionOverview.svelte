@@ -14,23 +14,27 @@
 
     type SessionView = 'terminal' | 'observability' | 'artifacts';
     let activeView: SessionView = $state('terminal');
+    const sessionId = $derived($activeSession?.id);
+    const terminalMaximized = $derived($ui.terminalMaximized);
+    const terminalAgentId = $derived($ui.selectedAgentId || $ui.focusedAgentId);
 
-    $: sessionId = $activeSession?.id;
-    $: terminalMaximized = $ui.terminalMaximized;
-    $: terminalAgentId = $ui.selectedAgentId || $ui.focusedAgentId;
     let connectedSessionId: string | null = null;
 
-    $: if (sessionId && sessionId !== connectedSessionId) {
-        connectedSessionId = sessionId;
-        cells.fetchCells(sessionId);
-        events.disconnect();
-        events.connect(sessionId);
-    }
+    $effect(() => {
+        if (sessionId && sessionId !== connectedSessionId) {
+            connectedSessionId = sessionId;
+            cells.fetchCells(sessionId);
+            events.disconnect();
+            events.connect(sessionId);
+        }
+    });
 
-    $: if (!sessionId && connectedSessionId) {
-        connectedSessionId = null;
-        events.disconnect();
-    }
+    $effect(() => {
+        if (!sessionId && connectedSessionId) {
+            connectedSessionId = null;
+            events.disconnect();
+        }
+    });
 
     onDestroy(() => {
         events.disconnect();
@@ -54,20 +58,21 @@
         <div class="terminal-section">
             <div class="terminal-controls">
                 <div class="tab-bar">
-                    <button class="tab-btn" class:active={activeView === 'terminal'} on:click={() => activeView = 'terminal'}>Terminal</button>
-                    <button class="tab-btn" class:active={activeView === 'observability'} on:click={() => activeView = 'observability'}>Observability</button>
-                    <button class="tab-btn" class:active={activeView === 'artifacts'} on:click={() => activeView = 'artifacts'}>Artifacts</button>
+                    <button class="tab-btn" class:active={activeView === 'terminal'} onclick={() => activeView = 'terminal'}>Terminal</button>
+                    <button class="tab-btn" class:active={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
+                    <button class="tab-btn" class:active={activeView === 'artifacts'} onclick={() => activeView = 'artifacts'}>Artifacts</button>
                 </div>
-                <button class="expand-btn" on:click={toggleTerminal}>
+                <button class="expand-btn" onclick={toggleTerminal}>
                     {terminalMaximized ? 'Minimize' : 'Maximize'}
                 </button>
             </div>
             <div class="terminal-wrapper">
-                {#if activeView === 'terminal'}
+                <div class="terminal-panel" class:hidden={activeView !== 'terminal'}>
                     {#if terminalAgentId}
                         <Terminal agentId={terminalAgentId} />
                     {/if}
-                {:else if activeView === 'observability'}
+                </div>
+                {#if activeView === 'observability'}
                     <div class="observability-container">
                         <div class="obs-main">
                             <div class="obs-timeline">
@@ -178,6 +183,15 @@
     .terminal-wrapper {
         flex: 1;
         overflow: hidden;
+        position: relative;
+    }
+
+    .terminal-panel {
+        height: 100%;
+    }
+
+    .terminal-panel.hidden {
+        display: none;
     }
 
     .observability-container {

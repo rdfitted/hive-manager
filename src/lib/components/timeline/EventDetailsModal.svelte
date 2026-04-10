@@ -5,29 +5,69 @@
     export let event: Event;
 
     const dispatch = createEventDispatcher();
+    let copyFeedback = '';
 
     function formatJSON(payload: any) {
         return JSON.stringify(payload, null, 2);
     }
 
-    function copyToClipboard() {
-        navigator.clipboard.writeText(JSON.stringify(event, null, 2));
+    async function copyToClipboard() {
+        try {
+            await navigator.clipboard.writeText(JSON.stringify(event, null, 2));
+            copyFeedback = 'Copied to clipboard';
+        } catch (error) {
+            console.error('Failed to copy event JSON', error);
+            copyFeedback = 'Clipboard write failed';
+        }
+    }
+
+    function closeModal() {
+        dispatch('close');
+    }
+
+    function handleWindowKeydown(event: KeyboardEvent) {
+        if (event.key === 'Escape') {
+            closeModal();
+        }
+    }
+
+    function handleBackdropKeydown(event: KeyboardEvent) {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            closeModal();
+        }
     }
 </script>
 
-<!-- svelte-ignore a11y-click-events-have-key-events -->
-<!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="modal-backdrop" on:click={() => dispatch('close')}>
-    <div class="modal-content" on:click|stopPropagation>
+<svelte:window on:keydown={handleWindowKeydown} />
+
+<div class="modal-backdrop">
+    <button
+        type="button"
+        class="modal-dismiss"
+        aria-label="Close event details"
+        on:click={closeModal}
+        on:keydown={handleBackdropKeydown}
+    ></button>
+    <div
+        class="modal-content"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Event details"
+        tabindex="-1"
+    >
         <div class="modal-header">
             <h3>Event Details</h3>
             <div class="header-actions">
                 <button on:click={copyToClipboard}>Copy JSON</button>
-                <button class="close-btn" on:click={() => dispatch('close')}>&times;</button>
+                <button class="close-btn" on:click={closeModal} aria-label="Close event details">&times;</button>
             </div>
         </div>
 
         <div class="modal-body">
+            {#if copyFeedback}
+                <p class="copy-feedback">{copyFeedback}</p>
+            {/if}
             <div class="info-grid">
                 <span class="label">ID:</span> <span class="value">{event.id}</span>
                 <span class="label">Type:</span> <span class="value">{event.event_type}</span>
@@ -60,7 +100,17 @@
         font-family: 'JetBrains Mono', monospace;
     }
 
+    .modal-dismiss {
+        position: absolute;
+        inset: 0;
+        border: 0;
+        background: transparent;
+        padding: 0;
+        cursor: default;
+    }
+
     .modal-content {
+        position: relative;
         width: 80%;
         max-width: 800px;
         max-height: 80%;
@@ -107,6 +157,12 @@
     .modal-body {
         padding: 20px;
         overflow-y: auto;
+    }
+
+    .copy-feedback {
+        margin: 0 0 16px 0;
+        color: var(--color-text-muted);
+        font-size: 0.85rem;
     }
 
     .info-grid {

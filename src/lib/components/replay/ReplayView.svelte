@@ -1,6 +1,6 @@
 <script lang="ts">
     import { eventsAtTimestamp } from '$lib/stores/replay';
-    import { activeSession } from '$lib/stores/sessions';
+    import { activeSession, serdeEnumVariantName } from '$lib/stores/sessions';
     import type { CellStatus, AgentStatus } from '$lib/types/domain';
 
     interface ReplayedState {
@@ -31,7 +31,7 @@
     }, {
         cells: {} as Record<string, CellStatus>,
         agents: {} as Record<string, AgentStatus>,
-        sessionStatus: ($activeSession?.state as string) || 'unknown'
+        sessionStatus: serdeEnumVariantName($activeSession?.state) || 'unknown'
     } as ReplayedState);
 
     function getStatusColor(status: string) {

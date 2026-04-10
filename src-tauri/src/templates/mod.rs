@@ -819,7 +819,7 @@ When all Fusion candidate workers have completed their implementation pass, or w
 ```bash
 curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
   -H "Content-Type: application/json" \
-  -d '{"candidate_ids": ["variant-1", "variant-2"], "timeout_secs": 120}'
+  -d '{"candidate_ids": {{variant_ids}}, "timeout_secs": 120}'
 ```
 
 ### Partial failure handling
@@ -832,6 +832,7 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
 ### Error handling
 - If the resolver returns `400` because there are no successful candidates, log the failure in `coordination.log`.
 - If the resolver returns `408`, retry the resolver launch once with the same successful candidate IDs.
+- If the resolver returns `500`, log the failure in `coordination.log` and escalate as a blocking infrastructure error.
 
 ## Learning Curation Protocol
 

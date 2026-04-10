@@ -4,12 +4,14 @@ import type { Event } from '../types/domain';
 
 interface ReplayState {
     currentTimestamp: string | null;
+    currentIndex: number;
     playbackSpeed: number;
     isPlaying: boolean;
 }
 
 const initialReplayState: ReplayState = {
     currentTimestamp: null,
+    currentIndex: -1,
     playbackSpeed: 1,
     isPlaying: false,
 };
@@ -17,15 +19,33 @@ const initialReplayState: ReplayState = {
 function createReplayStore() {
     const { subscribe, set, update } = writable<ReplayState>(initialReplayState);
 
-    let playbackInterval: any = null;
+    let playbackInterval: ReturnType<typeof setInterval> | null = null;
     let currentEvents: Event[] = [];
+
+    function resolvePlaybackIndex(events: Event[], timestamp: string | null): number {
+        if (!timestamp || events.length === 0) {
+            return -1;
+        }
+
+        const targetTime = new Date(timestamp).getTime();
+        let index = -1;
+
+        for (let i = 0; i < events.length; i += 1) {
+            if (new Date(events[i].timestamp).getTime() <= targetTime) {
+                index = i;
+                continue;
+            }
+            break;
+        }
+
+        return index;
+    }
 
     function startInterval(speed: number) {
         if (playbackInterval) clearInterval(playbackInterval);
         playbackInterval = setInterval(() => {
             update(s => {
-                const currentIndex = currentEvents.findIndex(e => e.timestamp === s.currentTimestamp);
-                const nextIndex = currentIndex + 1;
+                const nextIndex = s.currentIndex + 1;
 
                 if (nextIndex >= currentEvents.length) {
                     if (playbackInterval) clearInterval(playbackInterval);
@@ -33,7 +53,11 @@ function createReplayStore() {
                     return { ...s, isPlaying: false };
                 }
 
-                return { ...s, currentTimestamp: currentEvents[nextIndex].timestamp };
+                return {
+                    ...s,
+                    currentIndex: nextIndex,
+                    currentTimestamp: currentEvents[nextIndex].timestamp,
+                };
             });
         }, 1000 / speed);
     }
@@ -49,8 +73,9 @@ function createReplayStore() {
             update(state => {
                 if (state.isPlaying) return state;
 
+                const currentIndex = resolvePlaybackIndex(allEvents, state.currentTimestamp);
                 startInterval(state.playbackSpeed);
-                return { ...state, isPlaying: true };
+                return { ...state, currentIndex, isPlaying: true };
             });
         },
         pause: () => {
@@ -60,7 +85,12 @@ function createReplayStore() {
                 playbackInterval = null;
             }
         },
-        setTimestamp: (ts: string | null) => update(state => ({ ...state, currentTimestamp: ts })),
+        setTimestamp: (ts: string | null) =>
+            update(state => ({
+                ...state,
+                currentTimestamp: ts,
+                currentIndex: resolvePlaybackIndex(currentEvents, ts),
+            })),
         setSpeed: (speed: number) => {
             update(state => {
                 const newState = { ...state, playbackSpeed: speed };

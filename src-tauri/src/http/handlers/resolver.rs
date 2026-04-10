@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -39,15 +39,18 @@ pub async fn launch_resolver(
         controller.get_session(&session_id)
     };
 
-    let is_fusion = if let Some(ref session) = session {
-        matches!(session.session_type, SessionType::Fusion { .. })
+    let variants = if let Some(ref session) = session {
+        match &session.session_type {
+            SessionType::Fusion { variants } => Some(variants.clone()),
+            _ => None,
+        }
     } else {
         // Fall back to persisted session
         match state.storage.load_session(&session_id) {
-            Ok(persisted) => matches!(
-                persisted.session_type,
-                crate::storage::SessionTypeInfo::Fusion { .. }
-            ),
+            Ok(persisted) => match persisted.session_type {
+                crate::storage::SessionTypeInfo::Fusion { variants } => Some(variants),
+                _ => None,
+            },
             Err(StorageError::SessionNotFound(_)) => {
                 return Err(ApiError::not_found(format!(
                     "Session {} not found",
@@ -58,10 +61,25 @@ pub async fn launch_resolver(
         }
     };
 
-    if !is_fusion {
+    let variants = match variants {
+        Some(variants) => variants,
+        None => {
         return Err(ApiError::bad_request(
             "Resolver launch is only available for Fusion sessions",
-        ));
+        ))
+        }
+    };
+
+    let allowed_candidates: HashSet<_> = variants.into_iter().collect();
+    if let Some(unknown_candidate) = body
+        .candidate_ids
+        .iter()
+        .find(|candidate_id| !allowed_candidates.contains(candidate_id.as_str()))
+    {
+        return Err(ApiError::bad_request(format!(
+            "Unknown candidate ID '{}' for Fusion session {}",
+            unknown_candidate, session_id
+        )));
     }
 
     // Launch resolver
@@ -74,8 +92,19 @@ pub async fn launch_resolver(
     // Wait for candidates if timeout specified
     if let Some(timeout_secs) = body.timeout_secs {
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        resolver
-            .wait_for_candidates(&session_id, &body.candidate_ids, timeout)
+        let session_id = session_id.clone();
+        let candidate_ids = body.candidate_ids.clone();
+        let wait_storage =
+            crate::storage::SessionStorage::new_with_base(state.storage.base_dir().clone())
+                .map_err(|err| {
+                    ApiError::internal(format!("Failed to initialize resolver storage: {}", err))
+                })?;
+        tokio::task::spawn_blocking(move || {
+            let resolver = Resolver::new(wait_storage);
+            resolver.wait_for_candidates(&session_id, &candidate_ids, timeout)
+        })
+            .await
+            .map_err(|err| ApiError::internal(format!("Resolver wait task failed: {}", err)))?
             .map_err(|err| match err {
                 ResolverError::Timeout => {
                     ApiError::new(StatusCode::REQUEST_TIMEOUT, "Timed out waiting for candidate artifacts")

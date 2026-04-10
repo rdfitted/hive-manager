@@ -15,6 +15,7 @@ pub mod resolver;
 pub mod templates;
 
 use crate::http::error::ApiError;
+use std::collections::HashSet;
 
 const VALID_CLIS: &[&str] = &["claude", "gemini", "codex", "opencode", "cursor", "droid", "qwen"];
 
@@ -95,6 +96,8 @@ pub fn validate_template_id(template_id: &str) -> Result<(), ApiError> {
 
 /// Validate candidate IDs for path traversal attacks
 pub fn validate_candidate_ids(candidate_ids: &[String]) -> Result<(), ApiError> {
+    let mut seen = HashSet::new();
+
     for id in candidate_ids {
         if id.is_empty() || id.len() > 64 {
             return Err(ApiError::bad_request(
@@ -105,6 +108,12 @@ pub fn validate_candidate_ids(candidate_ids: &[String]) -> Result<(), ApiError> 
             return Err(ApiError::bad_request(
                 "Invalid candidate ID: must not contain '..', '/', or '\\'",
             ));
+        }
+        if !seen.insert(id) {
+            return Err(ApiError::bad_request(format!(
+                "Duplicate candidate ID: {}",
+                id
+            )));
         }
     }
     Ok(())
