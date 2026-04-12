@@ -82,7 +82,14 @@ function createEventsStore() {
                 if (eventSource !== source) {
                     return;
                 }
-                update(state => ({ ...state, loading: false, error: 'Connection lost' }));
+
+                const permanentlyClosed = source.readyState === EventSource.CLOSED;
+                if (permanentlyClosed) {
+                    this.disconnect();
+                    update(state => ({ ...state, loading: false, error: 'Connection failed (404 or server error)' }));
+                } else {
+                    update(state => ({ ...state, loading: false, error: 'Connection lost, retrying...' }));
+                }
             };
         },
 

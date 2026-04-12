@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import { apiUrl } from '$lib/config';
 
@@ -28,8 +28,12 @@ interface HeartbeatState {
   stalledAgents: Set<string>;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function createConversationStore() {
-  const { subscribe, set, update } = writable<ConversationState>({
+  const { subscribe, update } = writable<ConversationState>({
     messages: [],
     loading: false,
     error: null,
@@ -147,10 +151,18 @@ function createHeartbeatStore() {
   return {
     subscribe,
 
-    async loadHeartbeats(sessionId: string) {
+    async loadHeartbeats(sessionId: string): Promise<void> {
       try {
-        const resp = await fetch(apiUrl('/api/sessions/active'));
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        let resp = await fetch(apiUrl('/api/sessions/active'));
+        if (resp.status === 404) {
+          await delay(1000);
+          resp = await fetch(apiUrl('/api/sessions/active'));
+        }
+
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+
         const data = await resp.json();
         // Extract agent heartbeats for this session
         const session = Array.isArray(data)

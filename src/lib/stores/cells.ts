@@ -1,4 +1,4 @@
-import { writable, get } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import type { Cell } from '../types/domain';
 import { apiUrl } from '$lib/config';
@@ -8,6 +8,7 @@ interface CellsState {
     cells: Record<string, Cell>; // cell_id -> Cell
     loading: boolean;
     error: string | null;
+    sessionNotFound: boolean;
 }
 
 interface CellUpdatedEvent {
@@ -15,25 +16,31 @@ interface CellUpdatedEvent {
     cells?: Cell[];
 }
 
+function mergeCells(existing: Record<string, Cell>, incoming: Cell[]): Record<string, Cell> {
+    return {
+        ...existing,
+        ...Object.fromEntries(incoming.map((cell) => [cell.id, cell])),
+    };
+}
+
 function createCellsStore() {
-    const { subscribe, set, update } = writable<CellsState>({
+    const { subscribe, update } = writable<CellsState>({
         cells: {},
         loading: false,
         error: null,
+        sessionNotFound: false,
     });
     let onExternalRefresh: ((sessionId: string) => void) | null = null;
 
     void listen<CellUpdatedEvent>('cell-updated', (event) => {
         const current = get(sessions).activeSessionId;
+        const updatedCells = event.payload.cells;
         if (event.payload.session_id === current) {
             onExternalRefresh?.(event.payload.session_id);
-            if (event.payload.cells) {
-                update(state => ({
+            if (updatedCells) {
+                update((state) => ({
                     ...state,
-                    cells: {
-                        ...state.cells,
-                        ...Object.fromEntries(event.payload.cells!.map(cell => [cell.id, cell])),
-                    },
+                    cells: mergeCells(state.cells, updatedCells),
                     error: null,
                 }));
             } else {
@@ -46,21 +53,31 @@ function createCellsStore() {
         subscribe,
 
         async fetchCells(sessionId: string) {
-            update(state => ({ ...state, loading: true, error: null }));
+            update((state) => ({ ...state, loading: true, error: null, sessionNotFound: false }));
             try {
                 const response = await fetch(apiUrl(`/api/sessions/${sessionId}/cells`));
+
+                if (response.status === 404) {
+                    update((state) => ({
+                        ...state,
+                        cells: {},
+                        loading: false,
+                        sessionNotFound: true,
+                    }));
+                    return;
+                }
+
                 if (!response.ok) throw new Error(`Failed to fetch cells: ${response.statusText}`);
                 const cells: Cell[] = await response.json();
-                
-                update(state => {
-                    const newCells = { ...state.cells };
-                    cells.forEach(cell => {
-                        newCells[cell.id] = cell;
-                    });
-                    return { ...state, cells: newCells, loading: false };
-                });
+
+                update((state) => ({
+                    ...state,
+                    cells: mergeCells(state.cells, cells),
+                    loading: false,
+                    sessionNotFound: false,
+                }));
             } catch (err) {
-                update(state => ({ ...state, loading: false, error: (err as Error).message }));
+                update((state) => ({ ...state, loading: false, error: (err as Error).message }));
             }
         },
 
@@ -70,25 +87,25 @@ function createCellsStore() {
                 if (!response.ok) throw new Error(`Failed to fetch cell: ${response.statusText}`);
                 const cell: Cell = await response.json();
                 
-                update(state => ({
+                update((state) => ({
                     ...state,
-                    cells: { ...state.cells, [cell.id]: cell }
+                    cells: { ...state.cells, [cell.id]: cell },
                 }));
             } catch (err) {
-                update(state => ({ ...state, error: (err as Error).message }));
+                update((state) => ({ ...state, error: (err as Error).message }));
             }
         },
 
         updateCell(cell: Cell) {
-            update(state => ({
+            update((state) => ({
                 ...state,
-                cells: { ...state.cells, [cell.id]: cell }
+                cells: { ...state.cells, [cell.id]: cell },
             }));
         },
 
         setExternalRefreshHandler(handler: ((sessionId: string) => void) | null) {
             onExternalRefresh = handler;
-        }
+        },
     };
 }
 

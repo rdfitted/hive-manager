@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::domain::CellStatus;
 use crate::pty::{AgentRole, AgentStatus};
@@ -38,16 +38,7 @@ pub(crate) fn session_cell_ids(session: &Session) -> Vec<String> {
 }
 
 pub(crate) fn agent_in_cell(session: &Session, cell_id: &str, agent: &AgentInfo) -> bool {
-    match &session.session_type {
-        SessionType::Fusion { .. } if cell_id == RESOLVER_CELL_ID => {
-            !matches!(&agent.role, AgentRole::Fusion { .. })
-        }
-        SessionType::Fusion { .. } if cell_id != PRIMARY_CELL_ID => matches!(
-            &agent.role,
-            AgentRole::Fusion { variant } if variant_to_cell_id(variant) == cell_id
-        ),
-        _ => true,
-    }
+    agent_in_cell_with_variant_cache(session, cell_id, agent, None)
 }
 
 pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
@@ -76,7 +67,15 @@ pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
 }
 
 pub(crate) fn derive_cell_status_name(session: &Session, cell_id: &str) -> String {
-    match aggregate_cell_status(session, cell_id) {
+    derive_cell_status_name_for_state(session, cell_id, &session.state)
+}
+
+pub(crate) fn derive_cell_status_name_for_state(
+    session: &Session,
+    cell_id: &str,
+    state: &SessionState,
+) -> String {
+    match aggregate_cell_status_for_state(session, cell_id, state) {
         CellStatus::Queued => "queued",
         CellStatus::Preparing => "preparing",
         CellStatus::Launching => "launching",
@@ -95,18 +94,29 @@ fn is_fusion_scoped_cell(session: &Session, cell_id: &str) -> bool {
 }
 
 pub(crate) fn aggregate_cell_status(session: &Session, cell_id: &str) -> CellStatus {
-    if matches!(session.state, SessionState::Closing) {
+    aggregate_cell_status_for_state(session, cell_id, &session.state)
+}
+
+pub(crate) fn aggregate_cell_status_for_state(
+    session: &Session,
+    cell_id: &str,
+    state: &SessionState,
+) -> CellStatus {
+    if matches!(state, SessionState::Closing) {
         return CellStatus::Summarizing;
     }
 
-    if is_terminal_session_state(&session.state) {
-        return session_state_to_cell_status(&session.state);
+    if is_terminal_session_state(state) {
+        return session_state_to_cell_status(state);
     }
 
+    let mut variant_cell_cache = HashMap::new();
     let agent_statuses = session
         .agents
         .iter()
-        .filter(|agent| agent_in_cell(session, cell_id, agent))
+        .filter(|agent| {
+            agent_in_cell_with_variant_cache(session, cell_id, agent, Some(&mut variant_cell_cache))
+        })
         .map(|agent| agent_status_to_cell_status(&agent.status))
         .collect::<Vec<_>>();
 
@@ -128,7 +138,43 @@ pub(crate) fn aggregate_cell_status(session: &Session, cell_id: &str) -> CellSta
     } else if agent_statuses.is_empty() && is_fusion_scoped_cell(session, cell_id) {
         CellStatus::Queued
     } else {
-        session_state_to_cell_status(&session.state)
+        session_state_to_cell_status(state)
+    }
+}
+
+fn agent_in_cell_with_variant_cache(
+    session: &Session,
+    cell_id: &str,
+    agent: &AgentInfo,
+    variant_cell_cache: Option<&mut HashMap<String, String>>,
+) -> bool {
+    match &session.session_type {
+        SessionType::Fusion { .. } if cell_id == RESOLVER_CELL_ID => {
+            !matches!(&agent.role, AgentRole::Fusion { .. })
+        }
+        SessionType::Fusion { .. } if cell_id != PRIMARY_CELL_ID => {
+            fusion_agent_matches_cell(cell_id, agent, variant_cell_cache)
+        }
+        _ => true,
+    }
+}
+
+fn fusion_agent_matches_cell(
+    cell_id: &str,
+    agent: &AgentInfo,
+    variant_cell_cache: Option<&mut HashMap<String, String>>,
+) -> bool {
+    let AgentRole::Fusion { variant } = &agent.role else {
+        return false;
+    };
+
+    if let Some(cache) = variant_cell_cache {
+        cache
+            .entry(variant.clone())
+            .or_insert_with(|| variant_to_cell_id(variant))
+            == cell_id
+    } else {
+        variant_to_cell_id(variant) == cell_id
     }
 }
 

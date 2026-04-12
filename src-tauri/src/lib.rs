@@ -15,7 +15,7 @@ mod http;
 mod watcher;
 pub mod events;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use parking_lot::RwLock;
@@ -148,6 +148,7 @@ pub fn run() {
             let cell_event_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut receiver = cell_event_bus.subscribe();
+
                 loop {
                     let Ok(event) = receiver.recv().await else {
                         continue;
@@ -160,17 +161,32 @@ pub fn run() {
                         continue;
                     }
 
-                    let session = {
-                        let controller = cell_event_controller.read();
-                        controller.get_session(&event.session_id)
-                    };
+                    let mut pending_sessions = HashMap::from([(event.session_id, ())]);
 
-                    if let Some(session) = session {
-                        let payload = serde_json::json!({
-                            "session_id": event.session_id,
-                            "cells": build_cells(&session, &cell_event_storage),
-                        });
-                        let _ = cell_event_app_handle.emit("cell-updated", payload);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+
+                    while let Ok(event) = receiver.try_recv() {
+                        if matches!(
+                            event.event_type,
+                            EventType::AgentLaunched | EventType::CellCreated | EventType::CellStatusChanged
+                        ) {
+                            pending_sessions.insert(event.session_id, ());
+                        }
+                    }
+
+                    for (session_id, _) in pending_sessions.drain() {
+                        let session = {
+                            let controller = cell_event_controller.read();
+                            controller.get_session(&session_id)
+                        };
+
+                        if let Some(session) = session {
+                            let payload = serde_json::json!({
+                                "session_id": session_id,
+                                "cells": build_cells(&session, &cell_event_storage),
+                            });
+                            let _ = cell_event_app_handle.emit("cell-updated", payload);
+                        }
                     }
                 }
             });
