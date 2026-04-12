@@ -414,9 +414,7 @@ fn cell_status_changes_for_transition(
     let cell_ids = session_cell_ids(session);
     let before = cell_ids
         .iter()
-        .cloned()
-        .into_iter()
-        .map(|cell_id| (cell_id.clone(), derive_cell_status_name(session, &cell_id)))
+        .map(|cell_id| (cell_id.clone(), derive_cell_status_name(session, cell_id)))
         .collect::<HashMap<_, _>>();
 
     let mut changes = Vec::new();

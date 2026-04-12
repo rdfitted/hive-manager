@@ -30,6 +30,8 @@ function createEventsStore() {
     });
 
     let eventSource: EventSource | null = null;
+    const MAX_CONSECUTIVE_ERRORS_BEFORE_PROBE = 3;
+    const SESSION_NOT_FOUND_ERROR = 'Session no longer exists';
 
     function prependEvent(raw: MessageEvent<string>, source: EventSource) {
         if (eventSource !== source) {
@@ -55,6 +57,7 @@ function createEventsStore() {
                 eventSource.close();
             }
 
+            let consecutiveErrors = 0;
             update(state => ({ ...state, loading: true, error: null }));
 
             const source = new EventSource(apiUrl(`/api/sessions/${sessionId}/stream`));
@@ -69,27 +72,41 @@ function createEventsStore() {
             };
 
             source.onmessage = (event) => {
+                consecutiveErrors = 0;
                 prependEvent(event, source);
             };
             EVENT_TYPES.forEach((eventType) => {
                 source.addEventListener(eventType, (event) => {
+                    consecutiveErrors = 0;
                     prependEvent(event as MessageEvent<string>, source);
                 });
             });
 
-            source.onerror = (err) => {
+            source.onerror = async (err) => {
                 console.error('EventSource failed:', err);
                 if (eventSource !== source) {
                     return;
                 }
 
-                const permanentlyClosed = source.readyState === EventSource.CLOSED;
-                if (permanentlyClosed) {
-                    this.disconnect();
-                    update(state => ({ ...state, loading: false, error: 'Connection failed (404 or server error)' }));
-                } else {
-                    update(state => ({ ...state, loading: false, error: 'Connection lost, retrying...' }));
+                consecutiveErrors += 1;
+                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS_BEFORE_PROBE) {
+                    try {
+                        const response = await fetch(apiUrl(`/api/sessions/${sessionId}`));
+                        if (eventSource !== source) {
+                            return;
+                        }
+
+                        if (response.status === 404) {
+                            this.disconnect();
+                            update(state => ({ ...state, loading: false, error: SESSION_NOT_FOUND_ERROR }));
+                            return;
+                        }
+                    } catch (probeError) {
+                        console.error('Failed to probe session after EventSource error:', probeError);
+                    }
                 }
+
+                update(state => ({ ...state, loading: false, error: 'Connection lost, retrying...' }));
             };
         },
 

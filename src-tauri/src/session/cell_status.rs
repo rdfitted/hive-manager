@@ -169,10 +169,13 @@ fn fusion_agent_matches_cell(
     };
 
     if let Some(cache) = variant_cell_cache {
-        cache
-            .entry(variant.clone())
-            .or_insert_with(|| variant_to_cell_id(variant))
-            == cell_id
+        if let Some(cached_cell_id) = cache.get(variant) {
+            cached_cell_id == cell_id
+        } else {
+            let derived_cell_id = variant_to_cell_id(variant);
+            cache.insert(variant.clone(), derived_cell_id.clone());
+            derived_cell_id == cell_id
+        }
     } else {
         variant_to_cell_id(variant) == cell_id
     }
