@@ -120,7 +120,7 @@
   }
 
   function handleAgentSelect(e: CustomEvent<string>) {
-    focusedAgentId = e.detail;
+    ui.setFocusedAgent(e.detail);
   }
 
   // Keyboard shortcuts
@@ -148,7 +148,7 @@
         const nextIndex = event.key === 'ArrowUp'
           ? Math.max(0, currentIndex - 1)
           : Math.min($activeAgents.length - 1, currentIndex + 1);
-        focusedAgentId = $activeAgents[nextIndex].id;
+        ui.setFocusedAgent($activeAgents[nextIndex].id);
       }
     }
   }
@@ -315,6 +315,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    color: var(--accent-cyan);
   }
 
   .hierarchy-sidebar .sidebar-header h2 {

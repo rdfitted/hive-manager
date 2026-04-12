@@ -3,7 +3,7 @@
     import { ui } from '../../stores/ui';
     import { cells } from '../../stores/cells';
     import { events } from '../../stores/events';
-    import { activeSession, activeAgents, serdeEnumVariantName } from '../../stores/sessions';
+    import { activeSession, activeAgents, type AgentInfo } from '../../stores/sessions';
     import SessionHeader from './SessionHeader.svelte';
     import CellGrid from '../cell/CellGrid.svelte';
     import Terminal from '../Terminal.svelte';
@@ -18,16 +18,31 @@
     const sessionId = $derived($activeSession?.id);
     const terminalMaximized = $derived($ui.terminalMaximized);
     const terminalAgentId = $derived($ui.selectedAgentId || $ui.focusedAgentId);
-    
-    const focusedAgent = $derived($activeAgents.find(a => a.id === terminalAgentId));
-    const roleName = $derived(focusedAgent ? (focusedAgent.config?.label ||
-              (focusedAgent.role === 'Queen' ? 'Queen' :
-               focusedAgent.role === 'Evaluator' ? 'Evaluator' :
-               typeof focusedAgent.role === 'object' && 'Planner' in focusedAgent.role ? `Planner ${focusedAgent.role.Planner.index}` :
-               typeof focusedAgent.role === 'object' && 'Worker' in focusedAgent.role ? `Worker ${focusedAgent.role.Worker.index}` :
-               typeof focusedAgent.role === 'object' && 'QaWorker' in focusedAgent.role ? `QA Worker ${focusedAgent.role.QaWorker.index}` :
-               'Agent')) : '');
 
+    function getAgentRoleName(agent: AgentInfo): string {
+        if (agent.config?.label) {
+            return agent.config.label;
+        }
+
+        if (agent.role === 'Queen' || agent.role === 'Evaluator') {
+            return agent.role;
+        }
+
+        if (typeof agent.role === 'object') {
+            if ('Planner' in agent.role) return `Planner ${agent.role.Planner.index}`;
+            if ('Worker' in agent.role) return `Worker ${agent.role.Worker.index}`;
+            if ('QaWorker' in agent.role) return `QA Worker ${agent.role.QaWorker.index}`;
+            if ('Fusion' in agent.role) return agent.role.Fusion.variant;
+        }
+
+        return 'Agent';
+    }
+
+    function isWaitingForInput(agent: AgentInfo): boolean {
+        return typeof agent.status === 'object' && 'WaitingForInput' in agent.status;
+    }
+
+    const sessionNotFound = $derived($cells.sessionNotFound);
     let connectedSessionId: string | null = null;
     let pollTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -40,12 +55,17 @@
 
     function schedulePoll() {
         clearPollTimeout();
-        if (!sessionId) return;
+        if (!sessionId || sessionNotFound) return;
+
         pollTimeout = setTimeout(async () => {
-            if (sessionId) {
-                try {
-                    await cells.fetchCells(sessionId);
-                } finally {
+            if (!sessionId || sessionNotFound) {
+                return;
+            }
+
+            try {
+                await cells.fetchCells(sessionId);
+            } finally {
+                if (!sessionNotFound) {
                     schedulePoll();
                 }
             }
@@ -95,86 +115,87 @@
     </header>
 
     <main>
-        <div class="grid-section">
-            <CellGrid />
-        </div>
-
-        <div class="terminal-section">
-            <div class="terminal-controls">
-                <div class="tab-bar">
-                    <button class="tab-btn" class:active={activeView === 'terminal'} onclick={() => activeView = 'terminal'}>Terminal</button>
-                    <button class="tab-btn" class:active={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
-                    <button class="tab-btn" class:active={activeView === 'artifacts'} onclick={() => activeView = 'artifacts'}>Artifacts</button>
-                </div>
-                <button class="expand-btn" onclick={toggleTerminal}>
-                    {terminalMaximized ? 'Minimize' : 'Maximize'}
-                </button>
+        {#if sessionNotFound}
+            <div class="session-not-found">
+                <h2>Session Not Found</h2>
+                <p>The session may have been deleted or never existed.</p>
+                <p>ID: {sessionId}</p>
             </div>
-            <div class="terminal-wrapper">
-                <div class="terminal-panel" class:hidden={activeView !== 'terminal'}>
-                    {#each $activeAgents as agent (agent.id)}
-                        {@const isVisible = agent.id === terminalAgentId}
-                        {@const agentRoleName = agent.config?.label ||
-                            (agent.role === 'Queen' ? 'Queen' :
-                             agent.role === 'Evaluator' ? 'Evaluator' :
-                             typeof agent.role === 'object' && 'Planner' in agent.role ? `Planner ${agent.role.Planner.index}` :
-                             typeof agent.role === 'object' && 'Worker' in agent.role ? `Worker ${agent.role.Worker.index}` :
-                             typeof agent.role === 'object' && 'QaWorker' in agent.role ? `QA Worker ${agent.role.QaWorker.index}` :
-                             'Agent')}
-                        <div class="agent-terminal-view" class:hidden={!isVisible}>
-                            <div
-                                class="terminal-header"
-                                style:border-top={$activeSession?.color ? `3px solid ${$activeSession.color}` : 'none'}
-                            >
-                                <span class="terminal-title">{agentRoleName}</span>
-                                <div class="terminal-meta">
-                                    <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
-                                    <span class="terminal-status" 
-                                        class:running={agent.status === 'Running'} 
-                                        class:waiting={typeof agent.status === 'object' && 'WaitingForInput' in agent.status} 
-                                        class:completed={agent.status === 'Completed'}
-                                    >
-                                        {#if agent.status === 'Running'}
-                                            █
-                                        {:else if typeof agent.status === 'object' && 'WaitingForInput' in agent.status}
-                                            <Hourglass size={10} weight="light" />
-                                        {:else if agent.status === 'Completed'}
-                                            <Check size={10} weight="light" />
-                                        {:else}
-                                            <Circle size={10} weight="light" />
-                                        {/if}
-                                    </span>
+        {:else}
+            <div class="grid-section">
+                <CellGrid />
+            </div>
 
+            <div class="terminal-section">
+                <div class="terminal-controls">
+                    <div class="tab-bar">
+                        <button class="tab-btn" class:active={activeView === 'terminal'} onclick={() => activeView = 'terminal'}>Terminal</button>
+                        <button class="tab-btn" class:active={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
+                        <button class="tab-btn" class:active={activeView === 'artifacts'} onclick={() => activeView = 'artifacts'}>Artifacts</button>
+                    </div>
+                    <button class="expand-btn" onclick={toggleTerminal}>
+                        {terminalMaximized ? 'Minimize' : 'Maximize'}
+                    </button>
+                </div>
+                <div class="terminal-wrapper">
+                    <div class="terminal-panel" class:hidden={activeView !== 'terminal'}>
+                        {#each $activeAgents as agent (agent.id)}
+                            {@const isVisible = agent.id === terminalAgentId}
+                            <div class="agent-terminal-view" class:hidden={!isVisible}>
+                                <div
+                                    class="terminal-header"
+                                    style:border-top={$activeSession?.color ? `3px solid ${$activeSession.color}` : 'none'}
+                                >
+                                    <span class="terminal-title">{getAgentRoleName(agent)}</span>
+                                    <div class="terminal-meta">
+                                        <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
+                                        <span class="terminal-status" 
+                                            class:running={agent.status === 'Running'} 
+                                            class:waiting={isWaitingForInput(agent)} 
+                                            class:completed={agent.status === 'Completed'}
+                                        >
+                                            {#if agent.status === 'Running'}
+                                                █
+                                            {:else if isWaitingForInput(agent)}
+                                                <Hourglass size={10} weight="light" />
+                                            {:else if agent.status === 'Completed'}
+                                                <Check size={10} weight="light" />
+                                            {:else}
+                                                <Circle size={10} weight="light" />
+                                            {/if}
+                                        </span>
+
+                                    </div>
+                                </div>
+                                <div class="terminal-container">
+                                    <Terminal agentId={agent.id} isFocused={isVisible} />
                                 </div>
                             </div>
-                            <div class="terminal-container">
-                                <Terminal agentId={agent.id} isFocused={isVisible} />
+                        {/each}
+                        {#if $activeAgents.length === 0}
+                            <div class="no-agent-selected">
+                                No agents in this session
                             </div>
+                        {/if}
+                    </div>
+                    {#if activeView === 'observability'}
+                        <div class="observability-container">
+                            <div class="obs-main">
+                                <div class="obs-timeline">
+                                    <TimelineView />
+                                </div>
+                                <div class="obs-replay">
+                                    <ReplayView />
+                                </div>
+                            </div>
+                            <ReplayControls />
                         </div>
-                    {/each}
-                    {#if $activeAgents.length === 0}
-                        <div class="no-agent-selected">
-                            No agents in this session
-                        </div>
+                    {:else if activeView === 'artifacts'}
+                        <ArtifactBrowser />
                     {/if}
                 </div>
-                {#if activeView === 'observability'}
-                    <div class="observability-container">
-                        <div class="obs-main">
-                            <div class="obs-timeline">
-                                <TimelineView />
-                            </div>
-                            <div class="obs-replay">
-                                <ReplayView />
-                            </div>
-                        </div>
-                        <ReplayControls />
-                    </div>
-                {:else if activeView === 'artifacts'}
-                    <ArtifactBrowser />
-                {/if}
             </div>
-        </div>
+        {/if}
     </main>
 </div>
 
@@ -201,6 +222,28 @@
     .grid-section {
         flex: 1;
         overflow: hidden;
+    }
+
+    .session-not-found {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: var(--color-bg);
+        color: var(--color-text);
+        text-align: center;
+        padding: 2rem;
+    }
+
+    .session-not-found h2 {
+        color: var(--color-error, #ff4444);
+        margin-bottom: 1rem;
+    }
+
+    .session-not-found p {
+        color: var(--color-text-muted);
+        margin-bottom: 0.5rem;
     }
 
     .terminal-section {

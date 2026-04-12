@@ -148,29 +148,99 @@ pub fn run() {
             let cell_event_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut receiver = cell_event_bus.subscribe();
+
+                let emit_cell_updates_for_sessions = |session_ids: &mut HashSet<String>| {
+                    for session_id in session_ids.drain() {
+                        let session = {
+                            let controller = cell_event_controller.read();
+                            controller.get_session(&session_id)
+                        };
+
+                        if let Some(session) = session {
+                            let payload = serde_json::json!({
+                                "session_id": session_id,
+                                "cells": build_cells(&session, &cell_event_storage),
+                            });
+                            let _ = cell_event_app_handle.emit("cell-updated", payload);
+                        }
+                    }
+                };
+
                 loop {
-                    let Ok(event) = receiver.recv().await else {
-                        continue;
+                    let event = match receiver.recv().await {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let mut pending_sessions = {
+                                let controller = cell_event_controller.read();
+                                controller
+                                    .list_sessions()
+                                    .into_iter()
+                                    .filter(|session| session.state.is_monitorable())
+                                    .map(|session| session.id)
+                                    .collect::<HashSet<_>>()
+                            };
+                            emit_cell_updates_for_sessions(&mut pending_sessions);
+                            continue;
+                        }
                     };
 
                     if !matches!(
                         event.event_type,
-                        EventType::AgentLaunched | EventType::CellCreated | EventType::CellStatusChanged
+                        EventType::AgentLaunched
+                            | EventType::AgentCompleted
+                            | EventType::AgentWaitingInput
+                            | EventType::AgentFailed
+                            | EventType::CellCreated
+                            | EventType::CellStatusChanged
                     ) {
                         continue;
                     }
 
-                    let session = {
-                        let controller = cell_event_controller.read();
-                        controller.get_session(&event.session_id)
-                    };
+                    let mut pending_sessions = HashSet::from([event.session_id]);
 
-                    if let Some(session) = session {
-                        let payload = serde_json::json!({
-                            "session_id": event.session_id,
-                            "cells": build_cells(&session, &cell_event_storage),
-                        });
-                        let _ = cell_event_app_handle.emit("cell-updated", payload);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+
+                    let mut closed = false;
+
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(event) => {
+                                if matches!(
+                                    event.event_type,
+                                    EventType::AgentLaunched
+                                        | EventType::AgentCompleted
+                                        | EventType::AgentWaitingInput
+                                        | EventType::AgentFailed
+                                        | EventType::CellCreated
+                                        | EventType::CellStatusChanged
+                                ) {
+                                    pending_sessions.insert(event.session_id);
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                                closed = true;
+                                break;
+                            }
+                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                                let controller = cell_event_controller.read();
+                                pending_sessions.extend(
+                                    controller
+                                        .list_sessions()
+                                        .into_iter()
+                                        .filter(|session| session.state.is_monitorable())
+                                        .map(|session| session.id),
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    emit_cell_updates_for_sessions(&mut pending_sessions);
+
+                    if closed {
+                        break;
                     }
                 }
             });

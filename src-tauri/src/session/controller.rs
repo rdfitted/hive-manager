@@ -15,8 +15,8 @@ use crate::events::{EventBus, EventEmitter};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::{SessionStorage, StorageError};
 use crate::session::cell_status::{
-    derive_cell_status_name, session_cell_ids, variant_to_cell_id, PRIMARY_CELL_ID,
-    RESOLVER_CELL_ID,
+    derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids, variant_to_cell_id,
+    PRIMARY_CELL_ID, RESOLVER_CELL_ID,
 };
 use crate::templates::{PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
@@ -411,17 +411,15 @@ fn cell_status_changes_for_transition(
     session: &Session,
     new_state: &SessionState,
 ) -> Vec<(String, String, String)> {
-    let before = session_cell_ids(session)
-        .into_iter()
-        .map(|cell_id| (cell_id.clone(), derive_cell_status_name(session, &cell_id)))
+    let cell_ids = session_cell_ids(session);
+    let before = cell_ids
+        .iter()
+        .map(|cell_id| (cell_id.clone(), derive_cell_status_name(session, cell_id)))
         .collect::<HashMap<_, _>>();
 
-    let mut updated = session.clone();
-    updated.state = new_state.clone();
-
     let mut changes = Vec::new();
-    for cell_id in session_cell_ids(&updated) {
-        let next_status = derive_cell_status_name(&updated, &cell_id);
+    for cell_id in cell_ids {
+        let next_status = derive_cell_status_name_for_state(session, &cell_id, new_state);
         if let Some(previous_status) = before.get(&cell_id) {
             if previous_status != &next_status {
                 changes.push((cell_id, previous_status.clone(), next_status));
@@ -431,7 +429,6 @@ fn cell_status_changes_for_transition(
 
     changes
 }
-
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
 fn get_polling_instructions(cli: &str, task_file: &str, role_type: Option<&str>) -> String {
     match CliRegistry::get_behavior_for_role(cli, role_type) {
