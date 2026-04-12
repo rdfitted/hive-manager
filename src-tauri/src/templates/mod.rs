@@ -416,22 +416,27 @@ You start with NO QA workers — you MUST spawn all three specializations.
 
 **You are a coordinator, not a tester.** Your job is to spawn workers, collect their evidence, and grade.
 
+## CLI & Model Configuration
+
+This session uses CLI: {{default_cli}}{{default_model_suffix}}.
+Use these defaults when spawning QA workers unless the plan specifies otherwise.
+
 1. **Spawn all 3 QA workers** — one at a time, in this order:
    ```bash
    # 1. API QA worker
    curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
-     -d '{"specialization": "api", "cli": "claude"}'
+     -d '{"specialization": "api", {{default_model_field}}"cli": "{{default_cli}}"}'
 
    # 2. UI QA worker (spawns with --chrome automatically)
    curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
-     -d '{"specialization": "ui", "cli": "claude"}'
+     -d '{"specialization": "ui", {{default_model_field}}"cli": "{{default_cli}}"}'
 
    # 3. A11Y QA worker
    curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
      -H "Content-Type: application/json" \
-     -d '{"specialization": "a11y", "cli": "claude"}'
+     -d '{"specialization": "a11y", {{default_model_field}}"cli": "{{default_cli}}"}'
    ```
 2. **Poll worker results every {{active_poll_interval}}** (`sleep {{active_poll_secs}}`) — read each worker's task file for COMPLETED status
 3. Wait for ALL 3 workers to complete before rendering your verdict
@@ -477,7 +482,7 @@ REQUIRED_FIXES:
 ```bash
 curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
   -H "Content-Type: application/json" \
-  -d '{"specialization": "ui", "cli": "claude"}'
+  -d '{"specialization": "ui", {{default_model_field}}"cli": "{{default_cli}}"}'
 ```
 
 - Available specializations: `ui`, `api`, `a11y`
@@ -503,7 +508,9 @@ Use the session tools directory for reference docs:
 
 You are the UI QA specialist for session `{{session_id}}`.
 
+{{#if supports_chrome}}
 **You were launched with `--chrome` — you have native browser access.**
+{{/if}}
 
 ## Start Here
 
@@ -513,10 +520,11 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 ## Focus
 
-- Run click-through flows end to end using your **native Chrome integration**.
+- Run click-through flows end to end using your UI automation/browser tooling.
 - Capture screenshot evidence for visual regressions or broken flows.
 - Verify interactive elements work: buttons, links, forms, navigation, modals.
 
+{{#if supports_chrome}}
 ## How to Test — Native Chrome Tools
 
 You have Claude Code's built-in Chrome integration (`--chrome` flag). This gives you direct browser control through your real Chrome/Edge window with shared login sessions and cookies.
@@ -546,6 +554,7 @@ You have Claude Code's built-in Chrome integration (`--chrome` flag). This gives
 - **Interactive elements**: Do buttons, modals, dropdowns, and toggles work?
 - **Visual state**: Do loading states, error states, and empty states render correctly?
 - **Responsiveness**: Does the layout break at different widths?
+{{/if}}
 
 ## Auth Bypass
 
@@ -1166,7 +1175,69 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             rendered = rendered.replace(&placeholder, value);
         }
 
+        rendered = self.render_if_blocks(rendered, &context.variables);
+
         Ok(rendered)
+    }
+
+    fn render_if_blocks(
+        &self,
+        mut template: String,
+        variables: &HashMap<String, String>,
+    ) -> String {
+        let mut keys: Vec<&String> = variables.keys().collect();
+        keys.sort();
+
+        for key in keys {
+            let value = &variables[key];
+            let start = format!("{{{{#if {key}}}}}");
+            let open = "{{#if ";
+            let end = "{{/if}}";
+
+            loop {
+                let Some(start_idx) = template.find(&start) else {
+                    break;
+                };
+                let content_start = start_idx + start.len();
+
+                // Track nested conditional blocks so we close the matching {{/if}}.
+                let mut depth = 1usize;
+                let mut cursor = content_start;
+                let matching_end_idx = loop {
+                    let next_open = template[cursor..].find(open).map(|idx| cursor + idx);
+                    let next_close = template[cursor..].find(end).map(|idx| cursor + idx);
+
+                    match (next_open, next_close) {
+                        (Some(open_idx), Some(close_idx)) if open_idx < close_idx => {
+                            depth += 1;
+                            cursor = open_idx + open.len();
+                        }
+                        (_, Some(close_idx)) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break Some(close_idx);
+                            }
+                            cursor = close_idx + end.len();
+                        }
+                        _ => break None,
+                    }
+                };
+
+                let Some(end_idx) = matching_end_idx else {
+                    break;
+                };
+
+                let inner = template[content_start..end_idx].to_string();
+                let replacement = if matches!(value.as_str(), "true" | "1" | "yes") {
+                    inner
+                } else {
+                    String::new()
+                };
+                template.replace_range(start_idx..end_idx + end.len(), &replacement);
+            }
+        }
+
+        template
     }
 
     /// Format workers list for prompt
@@ -1307,5 +1378,86 @@ mod tests {
             DEFAULT_API_BASE_URL
         );
         assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
+    }
+
+    #[test]
+    fn qa_worker_ui_chrome_guidance_is_gated_by_support_flag() {
+        let mut enabled = HashMap::new();
+        enabled.insert("qa_worker_index".to_string(), "1".to_string());
+        enabled.insert("custom_instructions".to_string(), "Test".to_string());
+        enabled.insert("supports_chrome".to_string(), "true".to_string());
+        enabled.insert("auth_bypass_url".to_string(), "http://localhost".to_string());
+        enabled.insert("auth_bypass_token".to_string(), "token".to_string());
+
+        let enabled_prompt = TemplateEngine::default()
+            .render_template(
+                "roles/qa-worker-ui",
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: None,
+                    variables: enabled,
+                },
+            )
+            .unwrap();
+
+        assert!(enabled_prompt.contains("--chrome"));
+        assert!(enabled_prompt.contains("built-in Chrome integration"));
+
+        let mut disabled = HashMap::new();
+        disabled.insert("qa_worker_index".to_string(), "1".to_string());
+        disabled.insert("custom_instructions".to_string(), "Test".to_string());
+        disabled.insert("supports_chrome".to_string(), "false".to_string());
+        disabled.insert("auth_bypass_url".to_string(), "http://localhost".to_string());
+        disabled.insert("auth_bypass_token".to_string(), "token".to_string());
+
+        let disabled_prompt = TemplateEngine::default()
+            .render_template(
+                "roles/qa-worker-ui",
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: None,
+                    variables: disabled,
+                },
+            )
+            .unwrap();
+
+        assert!(!disabled_prompt.contains("--chrome"));
+        assert!(!disabled_prompt.contains("built-in Chrome integration"));
+    }
+
+    #[test]
+    fn render_if_blocks_supports_nested_conditionals() {
+        let mut variables = HashMap::new();
+        variables.insert("outer".to_string(), "true".to_string());
+        variables.insert("inner".to_string(), "true".to_string());
+
+        let rendered = TemplateEngine::default().render_if_blocks(
+            "before {{#if outer}}outer {{#if inner}}inner{{/if}} done{{/if}} after".to_string(),
+            &variables,
+        );
+
+        assert_eq!(rendered, "before outer inner done after");
+    }
+
+    #[test]
+    fn render_if_blocks_is_stable_across_hash_map_insertion_order() {
+        let template = "{{#if a}}A{{/if}}{{#if ab}}AB{{/if}}".to_string();
+
+        let mut variables_ab_first = HashMap::new();
+        variables_ab_first.insert("ab".to_string(), "true".to_string());
+        variables_ab_first.insert("a".to_string(), "true".to_string());
+
+        let mut variables_a_first = HashMap::new();
+        variables_a_first.insert("a".to_string(), "true".to_string());
+        variables_a_first.insert("ab".to_string(), "true".to_string());
+
+        let engine = TemplateEngine::default();
+        let ab_first = engine.render_if_blocks(template.clone(), &variables_ab_first);
+        let a_first = engine.render_if_blocks(template, &variables_a_first);
+
+        assert_eq!(ab_first, "AAB");
+        assert_eq!(ab_first, a_first);
     }
 }

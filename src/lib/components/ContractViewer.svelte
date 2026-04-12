@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Check, X } from 'phosphor-svelte';
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { activeSession } from '$lib/stores/sessions';
@@ -60,7 +61,11 @@
       {#if contract.passed !== null}
         <div class="status-overlay" class:passed={contract.passed}>
           <div class="overlay-icon">
-            {contract.passed ? '✓' : '✗'}
+            {#if contract.passed}
+              <Check size={80} weight="fill" />
+            {:else}
+              <X size={80} weight="fill" />
+            {/if}
           </div>
           <div class="overlay-text">
             {contract.passed ? 'PASSED' : 'FAILED'}
@@ -153,8 +158,9 @@
   }
 
   .overlay-icon {
-    font-size: 80px;
-    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     opacity: 0.3;
   }
 

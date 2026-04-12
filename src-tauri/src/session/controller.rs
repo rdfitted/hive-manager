@@ -11,8 +11,13 @@ use uuid::Uuid;
 
 use crate::cli::{CliRegistry, CliBehavior};
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
+use crate::events::{EventBus, EventEmitter};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::{SessionStorage, StorageError};
+use crate::session::cell_status::{
+    derive_cell_status_name, session_cell_ids, variant_to_cell_id, PRIMARY_CELL_ID,
+    RESOLVER_CELL_ID,
+};
 use crate::templates::{PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
 
@@ -341,6 +346,7 @@ pub struct SessionController {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     pty_manager: Arc<RwLock<PtyManager>>,
     app_handle: Option<AppHandle>,
+    event_emitter: Option<EventEmitter>,
     storage: Option<Arc<SessionStorage>>,
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
     /// session_id -> agent_id -> heartbeat info
@@ -381,6 +387,49 @@ fn next_qa_failure_iteration(state: &SessionState) -> u8 {
         SessionState::QaInProgress { iteration } => iteration.unwrap_or(0).saturating_add(1),
         _ => 1,
     }
+}
+
+fn cell_type_for_id(cell_id: &str) -> &'static str {
+    if cell_id == RESOLVER_CELL_ID {
+        "resolver"
+    } else {
+        "hive"
+    }
+}
+
+fn agent_cell_id(session: &Session, agent: &AgentInfo) -> String {
+    match &session.session_type {
+        SessionType::Fusion { .. } => match &agent.role {
+            AgentRole::Fusion { variant } => variant_to_cell_id(variant),
+            _ => RESOLVER_CELL_ID.to_string(),
+        },
+        _ => PRIMARY_CELL_ID.to_string(),
+    }
+}
+
+fn cell_status_changes_for_transition(
+    session: &Session,
+    new_state: &SessionState,
+) -> Vec<(String, String, String)> {
+    let before = session_cell_ids(session)
+        .into_iter()
+        .map(|cell_id| (cell_id.clone(), derive_cell_status_name(session, &cell_id)))
+        .collect::<HashMap<_, _>>();
+
+    let mut updated = session.clone();
+    updated.state = new_state.clone();
+
+    let mut changes = Vec::new();
+    for cell_id in session_cell_ids(&updated) {
+        let next_status = derive_cell_status_name(&updated, &cell_id);
+        if let Some(previous_status) = before.get(&cell_id) {
+            if previous_status != &next_status {
+                changes.push((cell_id, previous_status.clone(), next_status));
+            }
+        }
+    }
+
+    changes
 }
 
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
@@ -443,6 +492,7 @@ impl SessionController {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             pty_manager,
             app_handle: None,
+            event_emitter: None,
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
@@ -458,6 +508,10 @@ impl SessionController {
 
     pub fn set_storage(&mut self, storage: Arc<SessionStorage>) {
         self.storage = Some(storage);
+    }
+
+    pub fn set_event_bus(&mut self, event_bus: Arc<EventBus>) {
+        self.event_emitter = Some(EventEmitter::new(event_bus));
     }
 
     pub fn launch_hive(
@@ -591,6 +645,8 @@ impl SessionController {
             let mut sessions = self.sessions.write();
             sessions.insert(session_id.clone(), session.clone());
         }
+
+        self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
@@ -756,6 +812,95 @@ impl SessionController {
         }
     }
 
+    fn emit_cell_created(&self, session_id: &str, cell_id: &str) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        let cell_id = cell_id.to_string();
+        let cell_type = cell_type_for_id(&cell_id).to_string();
+        tokio::spawn(async move {
+            if let Err(error) = emitter.emit_cell_created(&session_id, &cell_id, &cell_type).await {
+                tracing::debug!("Failed to emit cell created event: {}", error);
+            }
+        });
+    }
+
+    fn emit_agent_launched(&self, session: &Session, agent: &AgentInfo) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let session_id = session.id.clone();
+        let cell_id = agent_cell_id(session, agent);
+        let agent_id = agent.id.clone();
+        let cli = agent.config.cli.clone();
+        tokio::spawn(async move {
+            if let Err(error) = emitter
+                .emit_agent_launched(&session_id, &cell_id, &agent_id, &cli)
+                .await
+            {
+                tracing::debug!("Failed to emit agent launched event: {}", error);
+            }
+        });
+    }
+
+    fn emit_agent_batch_launched(&self, session: &Session, agents: &[AgentInfo]) {
+        let mut emitted_cells = HashMap::<String, bool>::new();
+        for agent in agents {
+            let cell_id = agent_cell_id(session, agent);
+            if !emitted_cells.contains_key(&cell_id) {
+                self.emit_cell_created(&session.id, &cell_id);
+                emitted_cells.insert(cell_id, true);
+            }
+            self.emit_agent_launched(session, agent);
+        }
+    }
+
+    fn fire_cell_status_changes(
+        emitter: EventEmitter,
+        session_id: String,
+        changes: Vec<(String, String, String)>,
+    ) {
+        tokio::spawn(async move {
+            for (cell_id, from, to) in changes {
+                if let Err(error) = emitter
+                    .emit_cell_status_changed(&session_id, &cell_id, &from, &to)
+                    .await
+                {
+                    tracing::debug!("Failed to emit cell status change event: {}", error);
+                }
+            }
+        });
+    }
+
+    fn emit_cell_status_changes(&self, session_id: &str, changes: Vec<(String, String, String)>) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        Self::fire_cell_status_changes(emitter, session_id.to_string(), changes);
+    }
+
+    fn set_session_state_with_events(
+        &self,
+        session: &mut Session,
+        new_state: SessionState,
+    ) -> Vec<(String, String, String)> {
+        let changes = cell_status_changes_for_transition(session, &new_state);
+        session.state = new_state;
+        changes
+    }
+
+    fn persist_then_emit_session_update(
+        &self,
+        session_id: &str,
+        changes: Vec<(String, String, String)>,
+    ) -> Result<(), String> {
+        self.update_session_storage_checked(session_id)?;
+        self.emit_cell_status_changes(session_id, changes);
+        self.emit_session_update(session_id);
+        Ok(())
+    }
+
     /// Insert a session directly (for testing purposes only)
     #[cfg(test)]
     pub fn insert_test_session(&self, session: Session) {
@@ -775,20 +920,24 @@ impl SessionController {
                 let _ = pty_manager.kill(&agent.id);
             }
 
-            {
+            let previous_state = {
                 let mut sessions = self.sessions.write();
-                if let Some(s) = sessions.get_mut(id) {
-                    s.state = SessionState::Completed;
+                sessions.get_mut(id).map(|s| {
+                    let previous_state = (s.state.clone(), s.auth_strategy.clone());
+                    let changes = self.set_session_state_with_events(s, SessionState::Completed);
                     s.auth_strategy = AuthStrategy::None;
-                }
-            }
+                    (previous_state, changes)
+                })
+            };
 
-            if let Some(ref app_handle) = self.app_handle {
-                let sessions = self.sessions.read();
-                if let Some(session) = sessions.get(id) {
-                    let _ = app_handle.emit("session-update", SessionUpdate {
-                        session: session.clone(),
-                    });
+            if let Some(((previous_session_state, previous_auth_strategy), changes)) = previous_state {
+                if let Err(err) = self.persist_then_emit_session_update(id, changes) {
+                    let mut sessions = self.sessions.write();
+                    if let Some(session) = sessions.get_mut(id) {
+                        session.state = previous_session_state;
+                        session.auth_strategy = previous_auth_strategy;
+                    }
+                    return Err(err);
                 }
             }
 
@@ -803,13 +952,13 @@ impl SessionController {
             let mut sessions = self.sessions.write();
             sessions.get_mut(session_id).map(|session| {
                 let previous_state = (session.state.clone(), session.auth_strategy.clone());
-                session.state = SessionState::Completed;
+                let changes = self.set_session_state_with_events(session, SessionState::Completed);
                 session.auth_strategy = AuthStrategy::None;
-                previous_state
+                (previous_state, changes)
             })
         };
 
-        if let Some((previous_session_state, previous_auth_strategy)) = previous_state {
+        if let Some(((previous_session_state, previous_auth_strategy), changes)) = previous_state {
             if let Err(err) = self.update_session_storage_checked(session_id) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
@@ -819,6 +968,7 @@ impl SessionController {
                 return Err(err);
             }
 
+            self.emit_cell_status_changes(session_id, changes);
             self.emit_session_update(session_id);
             return Ok(());
         }
@@ -846,7 +996,8 @@ impl SessionController {
         let agent_ids: Vec<String> = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(id) {
-                session.state = SessionState::Closing;
+                let changes = self.set_session_state_with_events(session, SessionState::Closing);
+                self.emit_cell_status_changes(id, changes);
                 session.agents.iter().map(|a| a.id.clone()).collect()
             } else {
                 return Err(format!("Session not found: {}", id));
@@ -874,18 +1025,24 @@ impl SessionController {
             heartbeats.remove(id);
         }
 
-        {
+        let closed_changes = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(id) {
                 for agent in &mut session.agents {
                     agent.status = AgentStatus::Completed;
                 }
-                session.state = SessionState::Closed;
+                let changes = self.set_session_state_with_events(session, SessionState::Closed);
                 session.auth_strategy = AuthStrategy::None;
+                Some(changes)
+            } else {
+                None
             }
-        }
+        };
 
         self.update_session_storage(id);
+        if let Some(changes) = closed_changes {
+            self.emit_cell_status_changes(id, changes);
+        }
         self.emit_session_update(id);
         if !kill_errors.is_empty() {
             tracing::warn!("Session {} closed with PTY kill errors: {}", id, kill_errors.join(" | "));
@@ -1405,9 +1562,24 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
             "Review the milestone handoff, coordinate QA workers only when evidence is missing, and return a strict contract-based verdict to the Queen.",
         );
+        let default_model = config.model.as_deref().unwrap_or("");
+        let default_model_suffix = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(", Model: {}", default_model)
+        };
+        let default_model_field = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(r#""model": "{}", "#, default_model)
+        };
 
         let mut variables = HashMap::new();
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
+        variables.insert("default_cli".to_string(), config.cli.clone());
+        variables.insert("default_model".to_string(), default_model.to_string());
+        variables.insert("default_model_field".to_string(), default_model_field);
+        variables.insert("default_model_suffix".to_string(), default_model_suffix);
 
         if smoke_test {
             variables.insert("idle_poll_interval".to_string(), "30 seconds".to_string());
@@ -1459,6 +1631,10 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         let mut variables = HashMap::new();
         variables.insert("qa_worker_index".to_string(), index.to_string());
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
+        variables.insert(
+            "supports_chrome".to_string(),
+            (specialization == "ui" && config.cli == "claude").to_string(),
+        );
 
         auth.apply_prompt_variables(session_id, &mut variables);
 
@@ -4176,6 +4352,8 @@ Last updated: {timestamp}
             sessions.insert(session_id.clone(), session.clone());
         }
 
+        self.emit_agent_batch_launched(&session, &session.agents);
+
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
                 session: session.clone(),
@@ -4323,6 +4501,8 @@ Last updated: {timestamp}
             sessions.insert(session_id.clone(), session.clone());
         }
 
+        self.emit_agent_batch_launched(&session, &session.agents);
+
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
                 session: session.clone(),
@@ -4429,11 +4609,19 @@ Last updated: {timestamp}
         Self::run_git_in_dir(&project_path, &["branch", &base_branch, "HEAD"])?;
 
         for (variant_idx, variant) in variants.iter().enumerate() {
-            {
+            let spawning_changes = {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(&session_id) {
-                    s.state = SessionState::SpawningFusionVariant(variant.index);
+                    Some(self.set_session_state_with_events(
+                        s,
+                        SessionState::SpawningFusionVariant(variant.index),
+                    ))
+                } else {
+                    None
                 }
+            };
+            if let Some(changes) = spawning_changes {
+                self.emit_cell_status_changes(&session_id, changes);
             }
             self.emit_session_update(&session_id);
 
@@ -4529,12 +4717,21 @@ Last updated: {timestamp}
                 parent_id: None,
             };
 
-            {
+            let waiting_changes = {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(&session_id) {
-                    s.agents.push(agent_info);
-                    s.state = SessionState::WaitingForFusionVariants;
+                    s.agents.push(agent_info.clone());
+                    self.emit_agent_launched(s, &agent_info);
+                    Some(self.set_session_state_with_events(
+                        s,
+                        SessionState::WaitingForFusionVariants,
+                    ))
+                } else {
+                    None
                 }
+            };
+            if let Some(changes) = waiting_changes {
+                self.emit_cell_status_changes(&session_id, changes);
             }
             self.emit_session_update(&session_id);
         }
@@ -4654,6 +4851,8 @@ Last updated: {timestamp}
             sessions.insert(session_id.clone(), session.clone());
         }
 
+        self.emit_agent_batch_launched(&session, &session.agents);
+
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
                 session: session.clone(),
@@ -4742,6 +4941,8 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             sessions.insert(session_id.clone(), session.clone());
         }
+
+        self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("session-update", SessionUpdate {
@@ -4984,12 +5185,14 @@ Last updated: {timestamp}
         Self::write_fusion_metadata(&session.project_path, session_id, &metadata)?;
 
         // Update session with new agents and Running state
-        let updated_session = {
+        let (updated_session, changes) = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.extend(new_agents);
-                s.state = SessionState::WaitingForFusionVariants;
-                s.clone()
+                s.agents.extend(new_agents.clone());
+                self.emit_agent_batch_launched(s, &new_agents);
+                let changes =
+                    self.set_session_state_with_events(s, SessionState::WaitingForFusionVariants);
+                (s.clone(), changes)
             } else {
                 return Err("Session disappeared".to_string());
             }
@@ -5002,6 +5205,7 @@ Last updated: {timestamp}
         }
 
         self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, changes);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
 
         // Clean up pending config
@@ -5111,9 +5315,15 @@ Last updated: {timestamp}
 
         if worker_index >= config.workers.len() {
             // All workers spawned - session complete
-            let mut sessions = self.sessions.write();
-            if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::Running;
+            let changes = {
+                let mut sessions = self.sessions.write();
+                sessions
+                    .get_mut(session_id)
+                    .map(|s| self.set_session_state_with_events(s, SessionState::Running))
+            };
+            if let Some(changes) = changes {
+                self.persist_then_emit_session_update(session_id, changes)
+                    .map_err(SessionError::ConfigError)?;
             }
             return Ok(());
         }
@@ -5123,11 +5333,20 @@ Last updated: {timestamp}
         let cwd = session.project_path.to_str().unwrap_or(".");
 
         // Update state to spawning this worker
-        {
+        let spawning_changes = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::SpawningWorker(index);
+                Some(self.set_session_state_with_events(
+                    s,
+                    SessionState::SpawningWorker(index),
+                ))
+            } else {
+                None
             }
+        };
+        if let Some(changes) = spawning_changes {
+            self.persist_then_emit_session_update(session_id, changes)
+                .map_err(SessionError::ConfigError)?;
         }
 
         let pty_manager = self.pty_manager.read();
@@ -5160,16 +5379,29 @@ Last updated: {timestamp}
             .map_err(|e| SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e)))?;
 
         // 5. Add worker to session
-        let mut sessions = self.sessions.write();
-        if let Some(s) = sessions.get_mut(session_id) {
-            s.agents.push(AgentInfo {
-                id: worker_id,
-                role: AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
-                status: AgentStatus::Running,
-                config: worker_config.clone(),
-                parent_id: Some(queen_id.to_string()),
-            });
-            s.state = SessionState::WaitingForWorker(index);
+        let waiting_changes = {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                let agent = AgentInfo {
+                    id: worker_id,
+                    role: AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
+                    status: AgentStatus::Running,
+                    config: worker_config.clone(),
+                    parent_id: Some(queen_id.to_string()),
+                };
+                s.agents.push(agent.clone());
+                self.emit_agent_launched(s, &agent);
+                Some(self.set_session_state_with_events(
+                    s,
+                    SessionState::WaitingForWorker(index),
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some(changes) = waiting_changes {
+            self.persist_then_emit_session_update(session_id, changes)
+                .map_err(SessionError::ConfigError)?;
         }
 
         Ok(())
@@ -5252,12 +5484,14 @@ Last updated: {timestamp}
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            session.state = qa_in_progress_state(&session.state);
-            session.qa_timeout_secs
+            let next_state = qa_in_progress_state(&session.state);
+            let changes = self.set_session_state_with_events(session, next_state);
+            (session.qa_timeout_secs, changes)
         };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
-        self.start_qa_timeout(session_id, timeout_secs);
+        self.emit_cell_status_changes(session_id, timeout_secs.1);
+        self.start_qa_timeout(session_id, timeout_secs.0);
 
         Ok(())
     }
@@ -5275,28 +5509,34 @@ Last updated: {timestamp}
         self.cancel_qa_timeout(session_id);
         match normalized.as_str() {
             "PASS" | "QA_VERDICT: PASS" => {
-                {
+                let pass_changes = {
                     let mut sessions = self.sessions.write();
-                    if let Some(session) = sessions.get_mut(session_id) {
-                        session.state = SessionState::QaPassed;
-                    }
-                }
+                    sessions
+                        .get_mut(session_id)
+                        .map(|session| self.set_session_state_with_events(session, SessionState::QaPassed))
+                };
                 self.emit_session_update(session_id);
                 self.update_session_storage(session_id);
+                if let Some(changes) = pass_changes {
+                    self.emit_cell_status_changes(session_id, changes);
+                }
 
-                {
+                let running_changes = {
                     let mut sessions = self.sessions.write();
-                    if let Some(session) = sessions.get_mut(session_id) {
-                        session.state = SessionState::Running;
-                    }
-                }
+                    sessions
+                        .get_mut(session_id)
+                        .map(|session| self.set_session_state_with_events(session, SessionState::Running))
+                };
                 self.emit_session_update(session_id);
                 self.update_session_storage(session_id);
+                if let Some(changes) = running_changes {
+                    self.emit_cell_status_changes(session_id, changes);
+                }
 
                 Ok(SessionState::Running)
             }
             "FAIL" | "QA_VERDICT: FAIL" => {
-                let next_state = {
+                let (next_state, changes) = {
                     let mut sessions = self.sessions.write();
                     let session = sessions
                         .get_mut(session_id)
@@ -5305,17 +5545,24 @@ Last updated: {timestamp}
                     let next_iteration = next_qa_failure_iteration(&session.state);
 
                     if next_iteration > session.max_qa_iterations {
-                        session.state = SessionState::QaMaxRetriesExceeded;
+                        let changes =
+                            self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                         session.auth_strategy = AuthStrategy::None;
+                        (session.state.clone(), changes)
                     } else {
-                        session.state = SessionState::QaFailed { iteration: next_iteration };
+                        let changes = self.set_session_state_with_events(
+                            session,
+                            SessionState::QaFailed {
+                                iteration: next_iteration,
+                            },
+                        );
+                        (session.state.clone(), changes)
                     }
-
-                    session.state.clone()
                 };
 
                 self.emit_session_update(session_id);
                 self.update_session_storage(session_id);
+                self.emit_cell_status_changes(session_id, changes);
 
                 Ok(next_state)
             }
@@ -5354,6 +5601,8 @@ Last updated: {timestamp}
         let sid = session_id.to_string();
         let sessions = Arc::clone(&self.sessions);
         let app_handle = self.app_handle.clone();
+        let event_emitter = self.event_emitter.clone();
+        let storage = self.storage.clone();
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
@@ -5371,25 +5620,45 @@ Last updated: {timestamp}
                 tracing::warn!("QA timeout fired for session {} after {}s — auto-passing", sid, timeout_secs);
 
                 // Transition directly to Running (skip transient QaPassed to avoid race)
-                let updated_session = {
+                let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
+                        let previous_state = session.state.clone();
+                        let changes = cell_status_changes_for_transition(session, &SessionState::Running);
                         session.state = SessionState::Running;
-                        Some(session.clone())
+                        Some((previous_state, changes, session.clone()))
                     } else {
                         None
                     }
                 };
 
-                if let Some(ref app_handle) = app_handle {
-                    // Emit session update so frontend sees the state change
-                    if let Some(session) = updated_session {
-                        let _ = app_handle.emit("session-update", SessionUpdate { session });
+                if let Some((previous_state, changes, updated_session)) = transition {
+                    if let Some(storage) = storage.as_ref() {
+                        if let Err(error) =
+                            SessionController::persist_session_snapshot(storage, &updated_session, &sid)
+                        {
+                            tracing::warn!("Failed to persist QA timeout state for {}: {}", sid, error);
+                            let mut sessions = sessions.write();
+                            if let Some(session) = sessions.get_mut(&sid) {
+                                session.state = previous_state;
+                            }
+                            return;
+                        }
                     }
-                    let _ = app_handle.emit("qa-timeout", serde_json::json!({
-                        "session_id": sid,
-                        "action": "pass-with-warning"
-                    }));
+
+                    if let Some(emitter) = event_emitter.clone() {
+                        SessionController::fire_cell_status_changes(emitter, sid.clone(), changes);
+                    }
+
+                    if let Some(ref app_handle) = app_handle {
+                        let _ = app_handle.emit("session-update", SessionUpdate {
+                            session: updated_session,
+                        });
+                        let _ = app_handle.emit("qa-timeout", serde_json::json!({
+                            "session_id": sid,
+                            "action": "pass-with-warning"
+                        }));
+                    }
                 }
             }
         });
@@ -5489,11 +5758,16 @@ Last updated: {timestamp}
             return Ok(());
         }
 
-        {
+        let spawning_changes = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::SpawningJudge;
+                Some(self.set_session_state_with_events(s, SessionState::SpawningJudge))
+            } else {
+                None
             }
+        };
+        if let Some(changes) = spawning_changes {
+            self.emit_cell_status_changes(session_id, changes);
         }
         self.emit_session_update(session_id);
 
@@ -5535,10 +5809,10 @@ Last updated: {timestamp}
                 .map_err(|e| format!("Failed to spawn fusion judge: {}", e))?;
         }
 
-        {
+        let judging_changes = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.push(AgentInfo {
+                let agent = AgentInfo {
                     id: judge_id,
                     role: AgentRole::Judge {
                         session_id: session_id.to_string(),
@@ -5546,12 +5820,19 @@ Last updated: {timestamp}
                     status: AgentStatus::Running,
                     config: judge_config,
                     parent_id: None,
-                });
-                s.state = SessionState::Judging;
+                };
+                s.agents.push(agent.clone());
+                self.emit_agent_launched(s, &agent);
+                Some(self.set_session_state_with_events(s, SessionState::Judging))
+            } else {
+                None
             }
-        }
+        };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        if let Some(changes) = judging_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
 
         Ok(())
     }
@@ -5596,19 +5877,25 @@ Last updated: {timestamp}
         };
 
         if report.is_some() {
-            let mut should_emit = false;
-            {
+            let awaiting_changes = {
                 let mut sessions = self.sessions.write();
                 if let Some(s) = sessions.get_mut(session_id) {
                     if s.state == SessionState::Judging {
-                        s.state = SessionState::AwaitingVerdictSelection;
-                        should_emit = true;
+                        Some(self.set_session_state_with_events(
+                            s,
+                            SessionState::AwaitingVerdictSelection,
+                        ))
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
-            }
-            if should_emit {
+            };
+            if let Some(changes) = awaiting_changes {
                 self.emit_session_update(session_id);
                 self.update_session_storage(session_id);
+                self.emit_cell_status_changes(session_id, changes);
             }
         }
 
@@ -5637,14 +5924,19 @@ Last updated: {timestamp}
             .find(|v| v.name == requested || v.slug == requested_slug)
             .ok_or_else(|| format!("Variant '{}' not found for session {}", requested, session_id))?;
 
-        {
+        let merging_changes = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.state = SessionState::MergingWinner;
+                Some(self.set_session_state_with_events(s, SessionState::MergingWinner))
+            } else {
+                None
             }
-        }
+        };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        if let Some(changes) = merging_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
 
         Self::run_git_in_dir(&session.project_path, &["merge", "--squash", &winner.branch])?;
 
@@ -5678,18 +5970,24 @@ Last updated: {timestamp}
             let _ = pty_manager.kill(&judge_id);
         }
 
-        {
+        let completed_changes = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 for agent in &mut s.agents {
                     agent.status = AgentStatus::Completed;
                 }
-                s.state = SessionState::Completed;
+                let changes = self.set_session_state_with_events(s, SessionState::Completed);
                 s.auth_strategy = AuthStrategy::None;
+                Some(changes)
+            } else {
+                None
             }
-        }
+        };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        if let Some(changes) = completed_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
 
         if cleanup_errors.is_empty() {
             Ok(())
@@ -5819,13 +6117,14 @@ Last updated: {timestamp}
         }
 
         // Update session with new agents - Queen will spawn workers
-        let updated_session = {
+        let (updated_session, changes) = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                s.agents.extend(new_agents);
+                s.agents.extend(new_agents.clone());
+                self.emit_agent_batch_launched(s, &new_agents);
                 // Set state to Running - Queen will spawn workers via HTTP API
-                s.state = SessionState::Running;
-                s.clone()
+                let changes = self.set_session_state_with_events(s, SessionState::Running);
+                (s.clone(), changes)
             } else {
                 return Err("Session disappeared".to_string());
             }
@@ -5839,6 +6138,7 @@ Last updated: {timestamp}
 
         // Update storage
         self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, changes);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
         self.spawn_launch_evaluator_agents(
@@ -5860,13 +6160,14 @@ Last updated: {timestamp}
         let mut sessions = self.sessions.write();
         if let Some(session) = sessions.get_mut(session_id) {
             if session.state == SessionState::Planning {
-                session.state = SessionState::PlanReady;
+                let changes = self.set_session_state_with_events(session, SessionState::PlanReady);
 
                 if let Some(ref app_handle) = self.app_handle {
                     let _ = app_handle.emit("session-update", SessionUpdate {
                         session: session.clone(),
                     });
                 }
+                self.emit_cell_status_changes(session_id, changes);
                 Ok(())
             } else {
                 Err(format!("Session is not in planning state: {:?}", session.state))
@@ -6079,12 +6380,13 @@ Last updated: {timestamp}
             .map_err(|e| format!("Failed to write planner config: {}", e))?;
 
         // Update session with new agents and Running state
-        let updated_session = {
+        let (updated_session, changes) = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
-                session.agents.extend(new_agents);
-                session.state = SessionState::Running;  // Queen will spawn planners sequentially
-                session.clone()
+                session.agents.extend(new_agents.clone());
+                self.emit_agent_batch_launched(session, &new_agents);
+                let changes = self.set_session_state_with_events(session, SessionState::Running);
+                (session.clone(), changes)  // Queen will spawn planners sequentially
             } else {
                 return Err("Session disappeared".to_string());
             }
@@ -6098,6 +6400,7 @@ Last updated: {timestamp}
 
         // Update storage
         self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, changes);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
         self.spawn_launch_evaluator_agents(
             session_id,
@@ -6363,6 +6666,7 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
+                self.emit_agent_launched(session, &agent_info);
             }
         }
 
@@ -6396,14 +6700,22 @@ Last updated: {timestamp}
             config.label = Some("Evaluator".to_string());
         }
 
-        {
+        let spawning_changes = {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
-                current.state = SessionState::SpawningEvaluator;
+                Some(self.set_session_state_with_events(
+                    current,
+                    SessionState::SpawningEvaluator,
+                ))
+            } else {
+                None
             }
-        }
+        };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        if let Some(changes) = spawning_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
 
         Self::write_tool_files(&session.project_path, session_id, &config.cli)?;
 
@@ -6442,18 +6754,21 @@ Last updated: {timestamp}
             parent_id: None,
         };
 
-        let timeout_secs = {
+        let (timeout_secs, qa_changes) = {
             let mut sessions = self.sessions.write();
             let current = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             current.agents.push(agent_info.clone());
-            current.state = qa_in_progress_state(&current.state);
-            current.qa_timeout_secs
+            self.emit_agent_launched(current, &agent_info);
+            let next_state = qa_in_progress_state(&current.state);
+            let changes = self.set_session_state_with_events(current, next_state);
+            (current.qa_timeout_secs, changes)
         };
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, qa_changes);
         self.ensure_task_watcher(session_id, &session.project_path);
         self.start_qa_timeout(session_id, timeout_secs);
 
@@ -6560,16 +6875,23 @@ Last updated: {timestamp}
             parent_id: Some(evaluator_id),
         };
 
-        {
+        let qa_changes = {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.push(agent_info.clone());
-                current.state = qa_in_progress_state(&current.state);
+                self.emit_agent_launched(current, &agent_info);
+                let next_state = qa_in_progress_state(&current.state);
+                Some(self.set_session_state_with_events(current, next_state))
+            } else {
+                None
             }
-        }
+        };
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
+        if let Some(changes) = qa_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
         self.ensure_task_watcher(session_id, &session.project_path);
 
         Ok(agent_info)
@@ -6673,13 +6995,19 @@ Last updated: {timestamp}
         };
 
         // Update session state to WaitingForPlanner
-        {
+        let waiting_changes = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
-                session.state = SessionState::WaitingForPlanner(planner_index);
+                self.emit_agent_launched(session, &agent_info);
+                Some(self.set_session_state_with_events(
+                    session,
+                    SessionState::WaitingForPlanner(planner_index),
+                ))
+            } else {
+                None
             }
-        }
+        };
 
         // Emit session update
         if let Some(ref app_handle) = self.app_handle {
@@ -6693,6 +7021,9 @@ Last updated: {timestamp}
 
         // Update session storage
         self.update_session_storage(session_id);
+        if let Some(changes) = waiting_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
         self.ensure_task_watcher(session_id, &session.project_path);
 
         // Store planner's worker config for sequential spawning
@@ -6713,6 +7044,10 @@ Last updated: {timestamp}
     /// Initialize session storage for a new session
     /// Convert a Session to PersistedSession for storage
     fn session_to_persisted(&self, session: &Session) -> crate::storage::PersistedSession {
+        Self::session_to_persisted_snapshot(session)
+    }
+
+    fn session_to_persisted_snapshot(session: &Session) -> crate::storage::PersistedSession {
         use crate::storage::{PersistedSession, SessionTypeInfo, PersistedAgentInfo, PersistedAgentConfig};
 
         let session_type = match &session.session_type {
@@ -6859,54 +7194,72 @@ Last updated: {timestamp}
 
     fn update_session_storage_checked(&self, session_id: &str) -> Result<(), String> {
         if let Some(ref storage) = self.storage {
-            let sessions = self.sessions.read();
-            if let Some(session) = sessions.get(session_id) {
-                // Update session.json with latest state
-                let persisted = self.session_to_persisted(session);
-                storage
-                    .save_session(&persisted)
-                    .map_err(|e| format!("Failed to update session metadata: {}", e))?;
+            let session = {
+                let sessions = self.sessions.read();
+                sessions.get(session_id).cloned()
+            };
 
-                // Build hierarchy nodes
-                let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
-                    let role_str = format_agent_display(&agent.role);
+            if let Some(session) = session {
+                Self::persist_session_snapshot(storage, &session, session_id)?;
+            }
+        }
 
-                    let children: Vec<String> = session.agents.iter()
-                        .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
-                        .map(|a| a.id.clone())
-                        .collect();
+        Ok(())
+    }
 
-                    HierarchyNode {
-                        id: agent.id.clone(),
-                        role: role_str,
-                        parent_id: agent.parent_id.clone(),
-                        children,
-                    }
-                }).collect();
+    fn persist_session_snapshot(
+        storage: &SessionStorage,
+        session: &Session,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let persisted = Self::session_to_persisted_snapshot(session);
+        storage
+            .save_session(&persisted)
+            .map_err(|e| format!("Failed to update session metadata: {}", e))?;
 
-                // Build worker state info
-                let workers: Vec<WorkerStateInfo> = session.agents.iter()
-                    .filter(|a| include_in_worker_roster(&a.role))
-                    .map(|a| WorkerStateInfo {
-                        id: a.id.clone(),
-                        role: a.config.role.clone().unwrap_or_default(),
-                        cli: a.config.cli.clone(),
-                        status: format!("{:?}", a.status),
-                        current_task: None,
-                        last_update: Utc::now(),
-                        last_heartbeat: None,
-                    })
+        let hierarchy: Vec<HierarchyNode> = session
+            .agents
+            .iter()
+            .map(|agent| {
+                let role_str = format_agent_display(&agent.role);
+
+                let children: Vec<String> = session
+                    .agents
+                    .iter()
+                    .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
+                    .map(|a| a.id.clone())
                     .collect();
 
-                // Update state files
-                let state_manager = StateManager::new(storage.session_dir(session_id));
-                if let Err(e) = state_manager.update_hierarchy(&hierarchy) {
-                    tracing::warn!("Failed to update hierarchy: {}", e);
+                HierarchyNode {
+                    id: agent.id.clone(),
+                    role: role_str,
+                    parent_id: agent.parent_id.clone(),
+                    children,
                 }
-                if let Err(e) = state_manager.update_workers_file(&workers) {
-                    tracing::warn!("Failed to update workers file: {}", e);
-                }
-            }
+            })
+            .collect();
+
+        let workers: Vec<WorkerStateInfo> = session
+            .agents
+            .iter()
+            .filter(|a| include_in_worker_roster(&a.role))
+            .map(|a| WorkerStateInfo {
+                id: a.id.clone(),
+                role: a.config.role.clone().unwrap_or_default(),
+                cli: a.config.cli.clone(),
+                status: format!("{:?}", a.status),
+                current_task: None,
+                last_update: Utc::now(),
+                last_heartbeat: None,
+            })
+            .collect();
+
+        let state_manager = StateManager::new(storage.session_dir(session_id));
+        if let Err(e) = state_manager.update_hierarchy(&hierarchy) {
+            tracing::warn!("Failed to update hierarchy: {}", e);
+        }
+        if let Err(e) = state_manager.update_workers_file(&workers) {
+            tracing::warn!("Failed to update workers file: {}", e);
         }
 
         Ok(())
@@ -7191,6 +7544,23 @@ mod tests {
 
         assert!(content.contains("/api/sessions/session-123/qa-workers"));
         assert!(content.contains("\"specialization\": \"ui\""));
+    }
+
+    #[test]
+    fn evaluator_prompt_uses_session_default_cli_and_model() {
+        let prompt = SessionController::build_evaluator_prompt(
+            "session-123",
+            &AgentConfig {
+                cli: "codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                ..AgentConfig::default()
+            },
+            false,
+        );
+
+        assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
+        assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
+        assert!(!prompt.contains(r#""cli": "claude""#));
     }
 }
 

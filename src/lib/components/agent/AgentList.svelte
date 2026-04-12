@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { Bug, Crown, MagnifyingGlass, Scales, TestTube } from 'phosphor-svelte';
     import { agents } from '../../stores/agents';
     import { ui } from '../../stores/ui';
     import AgentStatusBadge from './AgentStatusBadge.svelte';
@@ -22,15 +23,15 @@
         >
             <div class="role-icon" title={agent.role}>
                 {#if agent.role === 'queen'}
-                    👑
+                    <Crown size={16} weight="light" />
                 {:else if agent.role === 'worker'}
-                    🐝
+                    <Bug size={16} weight="light" />
                 {:else if agent.role === 'resolver'}
-                    ⚖️
+                    <Scales size={16} weight="light" />
                 {:else if agent.role === 'reviewer'}
-                    🔍
+                    <MagnifyingGlass size={16} weight="light" />
                 {:else if agent.role === 'tester'}
-                    🧪
+                    <TestTube size={16} weight="light" />
                 {/if}
             </div>
             <div class="details">
@@ -74,7 +75,6 @@
     }
 
     .role-icon {
-        font-size: 16px;
         width: 24px;
         height: 24px;
         display: flex;

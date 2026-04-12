@@ -66,7 +66,8 @@
       <div class="agent-chip" title={hb?.summary || statusStr}>
         <span
           class="status-dot"
-          style="background-color: {getStatusColor(agent.id, statusStr)}"
+          class:pulse-error={$heartbeatStore.stalledAgents.has(agent.id)}
+          style="background-color: {getStatusColor(agent.id, statusStr)}; color: {getStatusColor(agent.id, statusStr)}"
         ></span>
         <span class="agent-name">
           {agent.config?.label || getRoleName(agent.role)}
@@ -107,6 +108,17 @@
     height: 7px;
     border-radius: 50%;
     flex-shrink: 0;
+    box-shadow: 0 0 6px currentColor;
+  }
+
+  .status-dot.pulse-error {
+    animation: pulse-error 1.5s infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .status-dot.pulse-error {
+      animation: none;
+    }
   }
 
   .agent-name {

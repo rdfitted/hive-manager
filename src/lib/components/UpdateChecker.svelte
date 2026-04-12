@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { check } from '@tauri-apps/plugin-updater';
   import { relaunch } from '@tauri-apps/plugin-process';
+  import { ArrowUp } from 'phosphor-svelte';
 
   let updateAvailable = false;
   let updateVersion = '';
@@ -62,7 +63,7 @@
 {#if updateAvailable}
   <div class="update-banner">
     <div class="update-content">
-      <span class="update-icon">⬆</span>
+      <ArrowUp size={16} weight="light" />
       <span class="update-text">
         {#if downloading}
           Downloading update... {progress}%
@@ -110,10 +111,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .update-icon {
-    font-size: 16px;
   }
 
   .update-text {

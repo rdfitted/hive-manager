@@ -3,6 +3,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
   import TemplatePicker from './templates/TemplatePicker.svelte';
+  import { Crown, CaretDown, CaretRight } from 'phosphor-svelte';
   import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
   import { templates, selectedTemplate } from '$lib/stores/templates';
@@ -829,19 +830,24 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
         <div class="launch-preview-section">
           <button type="button" class="preview-toggle" on:click={() => showPreview = !showPreview}>
-            <span class="icon">{showPreview ? '▼' : '▶'}</span>
+            {#if showPreview}
+              <CaretDown size={12} weight="light" />
+            {:else}
+              <CaretRight size={12} weight="light" />
+            {/if}
             {showPreview ? 'Hide' : 'Show'} Launch Preview & Topology
           </button>
-          
+
           {#if showPreview}
             <div class="preview-content">
               <div class="topology-viz">
                 <div class="node queen">
-                  <span class="node-icon">♕</span>
+                  <span class="node-icon">
+                    <Crown size={16} weight="light" />
+                  </span>
                   <span class="node-label">Queen</span>
                   <span class="node-cli">{queenConfig.cli}</span>
                 </div>
-                
                 <div class="connector"></div>
                 
                 <div class="worker-nodes">

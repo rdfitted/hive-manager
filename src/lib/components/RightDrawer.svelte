@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NotePencil } from 'phosphor-svelte';
   import PlanView from './PlanView.svelte';
   import CoordinationPanel from './CoordinationPanel.svelte';
   import ConversationViewer from './ConversationViewer.svelte';
@@ -11,7 +12,9 @@
 
 <div class="right-drawer" class:collapsed>
   <button class="drawer-header" onclick={() => collapsed = !collapsed} title={collapsed ? "Expand Panel" : "Collapse Panel"}>
-    <span class="drawer-icon">📝</span>
+    <span class="drawer-icon">
+      <NotePencil size={18} weight="light" />
+    </span>
     {#if !collapsed}
       <span class="drawer-title">Panel</span>
     {/if}
@@ -92,7 +95,9 @@
   }
 
   .drawer-icon {
-    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
   }
 

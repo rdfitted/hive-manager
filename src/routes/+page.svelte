@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
+  import { ChartBar, ChatCenteredText, Crown, GearSix, TreeStructure } from 'phosphor-svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import StatusPanel from '$lib/components/StatusPanel.svelte';
   import AgentTree from '$lib/components/AgentTree.svelte';
@@ -168,7 +169,9 @@
   {#if $activeSession}
     <aside class="hierarchy-sidebar" class:collapsed={hierarchyCollapsed}>
       <button class="sidebar-header" onclick={() => hierarchyCollapsed = !hierarchyCollapsed} title={hierarchyCollapsed ? "Expand Hierarchy" : "Collapse Hierarchy"}>
-        <span class="sidebar-icon">🌳</span>
+        <span class="sidebar-icon">
+          <TreeStructure size={18} weight="light" />
+        </span>
         {#if !hierarchyCollapsed}
           <h2>Hierarchy</h2>
         {/if}
@@ -196,19 +199,27 @@
           <p>Orchestrate and monitor Claude Code multi-agent workflows</p>
           <div class="features">
             <div class="feature">
-              <span class="feature-icon">♕</span>
+              <span class="feature-icon">
+                <Crown size={24} weight="light" />
+              </span>
               <span class="feature-text">Launch Hive or Swarm sessions with hierarchical agents</span>
             </div>
             <div class="feature">
-              <span class="feature-icon">⚙</span>
+              <span class="feature-icon">
+                <GearSix size={24} weight="light" />
+              </span>
               <span class="feature-text">Configure each agent with different commands</span>
             </div>
             <div class="feature">
-              <span class="feature-icon">📊</span>
+              <span class="feature-icon">
+                <ChartBar size={24} weight="light" />
+              </span>
               <span class="feature-text">Monitor agent status in real-time</span>
             </div>
             <div class="feature">
-              <span class="feature-icon">💬</span>
+              <span class="feature-icon">
+                <ChatCenteredText size={24} weight="light" />
+              </span>
               <span class="feature-text">Interact with agents directly</span>
             </div>
           </div>
@@ -300,7 +311,9 @@
   }
 
   .hierarchy-sidebar .sidebar-icon {
-    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
   }
 
@@ -372,7 +385,10 @@
   }
 
   .feature-icon {
-    font-size: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
   }
 
   .feature-text {

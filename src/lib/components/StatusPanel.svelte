@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CaretDown, CaretRight, ChartBar, Warning } from 'phosphor-svelte';
   import { activeSession, activeAgents, sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import { apiUrl } from '$lib/config';
@@ -180,7 +181,9 @@
 
 <aside class="status-panel" class:collapsed>
   <button class="panel-header" onclick={() => collapsed = !collapsed} title={collapsed ? "Expand Status" : "Collapse Status"}>
-    <span class="panel-icon">📊</span>
+    <span class="panel-icon">
+      <ChartBar size={18} weight="light" />
+    </span>
     {#if !collapsed}
       <h2>Status</h2>
       {#if totalMilestones > 0}
@@ -207,7 +210,13 @@
 
         <section class="section">
           <button class="section-header" onclick={() => agentsCollapsed = !agentsCollapsed}>
-            <span class="chevron" class:collapsed={agentsCollapsed}>▼</span>
+            <span class="chevron" class:collapsed={agentsCollapsed}>
+              {#if agentsCollapsed}
+                <CaretRight size={12} weight="light" />
+              {:else}
+                <CaretDown size={12} weight="light" />
+              {/if}
+            </span>
             <h3>Agents ({$activeAgents.length})</h3>
           </button>
           {#if !agentsCollapsed}
@@ -219,7 +228,13 @@
 
         <section class="section">
           <button class="section-header" onclick={() => alertsCollapsed = !alertsCollapsed}>
-            <span class="chevron" class:collapsed={alertsCollapsed}>▼</span>
+            <span class="chevron" class:collapsed={alertsCollapsed}>
+              {#if alertsCollapsed}
+                <CaretRight size={12} weight="light" />
+              {:else}
+                <CaretDown size={12} weight="light" />
+              {/if}
+            </span>
             <h3>Alerts</h3>
           </button>
           {#if !alertsCollapsed}
@@ -228,7 +243,9 @@
                 {@const lastLine = typeof agent.status === 'object' && 'WaitingForInput' in agent.status ? agent.status.WaitingForInput : ''}
                 <button class="alert warning clickable" onclick={() => handleAlertClick(agent.id)}>
                   <div class="alert-header">
-                    <span class="alert-icon">⚠</span>
+                    <span class="alert-icon">
+                      <Warning size={14} weight="fill" />
+                    </span>
                     <span class="alert-title">{getAgentLabel(agent)} needs input</span>
                   </div>
                   {#if lastLine}
@@ -246,7 +263,13 @@
 
         <section class="section">
           <button class="section-header" onclick={() => infoCollapsed = !infoCollapsed}>
-            <span class="chevron" class:collapsed={infoCollapsed}>▼</span>
+            <span class="chevron" class:collapsed={infoCollapsed}>
+              {#if infoCollapsed}
+                <CaretRight size={12} weight="light" />
+              {:else}
+                <CaretDown size={12} weight="light" />
+              {/if}
+            </span>
             <h3>Session Info</h3>
           </button>
           {#if !infoCollapsed}
@@ -394,8 +417,11 @@
   }
 
   .panel-icon {
-    font-size: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
+    color: var(--accent-cyan);
   }
 
   .panel-header h2 {
@@ -541,7 +567,9 @@
   }
 
   .alert-icon {
-    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .no-alerts {

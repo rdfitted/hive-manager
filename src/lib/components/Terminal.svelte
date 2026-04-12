@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CheckSquare, ClipboardText, FileText, X } from 'phosphor-svelte';
   import { onMount, onDestroy } from 'svelte';
   import { Terminal as XTerm } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
@@ -556,20 +557,32 @@
       onclick={(e) => e.stopPropagation()}
     >
       <button class="context-item" onclick={handleCopy} disabled={!hasSelection}>
-        <span class="context-icon">📋</span> Copy
+        <span class="context-icon">
+          <ClipboardText size={14} weight="light" />
+        </span>
+        Copy
         <span class="context-shortcut">Ctrl+C</span>
       </button>
       <button class="context-item" onclick={handlePaste}>
-        <span class="context-icon">📄</span> Paste
+        <span class="context-icon">
+          <FileText size={14} weight="light" />
+        </span>
+        Paste
         <span class="context-shortcut">Ctrl+V</span>
       </button>
       <div class="context-divider"></div>
       <button class="context-item" onclick={handleSelectAll}>
-        <span class="context-icon">☑</span> Select All
+        <span class="context-icon">
+          <CheckSquare size={14} weight="light" />
+        </span>
+        Select All
         <span class="context-shortcut">Ctrl+A</span>
       </button>
       <button class="context-item" onclick={handleClearSelection} disabled={!hasSelection}>
-        <span class="context-icon">✕</span> Clear Selection
+        <span class="context-icon">
+          <X size={14} weight="light" />
+        </span>
+        Clear Selection
       </button>
     </div>
   {/if}
@@ -743,9 +756,11 @@
   }
 
   .context-icon {
-    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 20px;
-    text-align: center;
+    flex-shrink: 0;
   }
 
   .context-shortcut {

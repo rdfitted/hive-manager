@@ -11,6 +11,7 @@
     import ReplayView from '../replay/ReplayView.svelte';
     import ReplayControls from '../replay/ReplayControls.svelte';
     import ArtifactBrowser from '../artifacts/ArtifactBrowser.svelte';
+    import { Hourglass, Check, Circle } from 'phosphor-svelte';
 
     type SessionView = 'terminal' | 'observability' | 'artifacts';
     let activeView: SessionView = $state('terminal');
@@ -28,24 +29,58 @@
                'Agent')) : '');
 
     let connectedSessionId: string | null = null;
+    let pollTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    function clearPollTimeout() {
+        if (pollTimeout) {
+            clearTimeout(pollTimeout);
+            pollTimeout = null;
+        }
+    }
+
+    function schedulePoll() {
+        clearPollTimeout();
+        if (!sessionId) return;
+        pollTimeout = setTimeout(async () => {
+            if (sessionId) {
+                try {
+                    await cells.fetchCells(sessionId);
+                } finally {
+                    schedulePoll();
+                }
+            }
+        }, 10000);
+    }
 
     $effect(() => {
         if (sessionId && sessionId !== connectedSessionId) {
             connectedSessionId = sessionId;
             cells.fetchCells(sessionId);
+            cells.setExternalRefreshHandler(() => {
+                schedulePoll();
+            });
+            schedulePoll();
             events.disconnect();
             events.connect(sessionId);
+        } else if (sessionId) {
+            cells.setExternalRefreshHandler(() => {
+                schedulePoll();
+            });
         }
     });
 
     $effect(() => {
         if (!sessionId && connectedSessionId) {
             connectedSessionId = null;
+            clearPollTimeout();
+            cells.setExternalRefreshHandler(null);
             events.disconnect();
         }
     });
 
     onDestroy(() => {
+        clearPollTimeout();
+        cells.setExternalRefreshHandler(null);
         events.disconnect();
     });
 
@@ -99,10 +134,17 @@
                                         class:waiting={typeof agent.status === 'object' && 'WaitingForInput' in agent.status} 
                                         class:completed={agent.status === 'Completed'}
                                     >
-                                        {agent.status === 'Running' ? '█' : 
-                                        (typeof agent.status === 'object' && 'WaitingForInput' in agent.status) ? '⏳' : 
-                                        agent.status === 'Completed' ? '✓' : '○'}
+                                        {#if agent.status === 'Running'}
+                                            █
+                                        {:else if typeof agent.status === 'object' && 'WaitingForInput' in agent.status}
+                                            <Hourglass size={10} weight="light" />
+                                        {:else if agent.status === 'Completed'}
+                                            <Check size={10} weight="light" />
+                                        {:else}
+                                            <Circle size={10} weight="light" />
+                                        {/if}
                                     </span>
+
                                 </div>
                             </div>
                             <div class="terminal-container">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { CaretDown, CaretUp, Check, X } from 'phosphor-svelte';
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -72,11 +73,23 @@
   <div class="qa-feedback-panel" class:collapsed>
     <button class="panel-header" onclick={() => collapsed = !collapsed}>
       <div class="header-left">
-        <span class="status-icon {stateClass}">{verdict.passed ? '✓' : '✗'}</span>
+        <span class="status-icon {stateClass}">
+          {#if verdict.passed}
+            <Check size={14} weight="fill" />
+          {:else}
+            <X size={14} weight="fill" />
+          {/if}
+        </span>
         <h3>QA Feedback</h3>
         <span class="iteration-badge">Attempt {verdict.iteration}</span>
       </div>
-      <span class="chevron">{collapsed ? '▼' : '▲'}</span>
+      <span class="chevron">
+        {#if collapsed}
+          <CaretDown size={10} weight="light" />
+        {:else}
+          <CaretUp size={10} weight="light" />
+        {/if}
+      </span>
     </button>
 
     {#if !collapsed}
@@ -89,7 +102,13 @@
           {#each verdict.criteria as criterion}
             <div class="criterion-item" class:passed={criterion.passed}>
               <div class="criterion-header">
-                <span class="criterion-icon">{criterion.passed ? '✓' : '✗'}</span>
+                <span class="criterion-icon">
+                  {#if criterion.passed}
+                    <Check size={12} weight="fill" />
+                  {:else}
+                    <X size={12} weight="fill" />
+                  {/if}
+                </span>
                 <span class="criterion-label">{criterion.label}</span>
               </div>
               {#if criterion.evidence}
@@ -135,8 +154,9 @@
   }
 
   .status-icon {
-    font-size: 14px;
-    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .status-icon.passed {
@@ -163,7 +183,9 @@
   }
 
   .chevron {
-    font-size: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-secondary);
   }
 
@@ -212,8 +234,9 @@
   }
 
   .criterion-icon {
-    font-size: 12px;
-    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .criterion-item:not(.passed) .criterion-icon {
