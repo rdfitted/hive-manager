@@ -2,6 +2,7 @@
     import { onDestroy } from 'svelte';
     import { ui } from '../../stores/ui';
     import { cells } from '../../stores/cells';
+    import { agents } from '../../stores/agents';
     import { events } from '../../stores/events';
     import { activeSession, activeAgents, type AgentInfo } from '../../stores/sessions';
     import SessionHeader from './SessionHeader.svelte';
@@ -63,7 +64,7 @@
             }
 
             try {
-                await cells.fetchCells(sessionId);
+                await fetchCellsAndAgents(sessionId);
             } finally {
                 if (!sessionNotFound) {
                     schedulePoll();
@@ -72,10 +73,16 @@
         }, 10000);
     }
 
+    async function fetchCellsAndAgents(sid: string) {
+        await cells.fetchCells(sid);
+        const cellIds = Object.keys($cells.cells);
+        await Promise.all(cellIds.map(cid => agents.fetchAgents(sid, cid)));
+    }
+
     $effect(() => {
         if (sessionId && sessionId !== connectedSessionId) {
             connectedSessionId = sessionId;
-            cells.fetchCells(sessionId);
+            fetchCellsAndAgents(sessionId);
             cells.setExternalRefreshHandler(() => {
                 schedulePoll();
             });
