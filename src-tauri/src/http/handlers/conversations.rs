@@ -74,11 +74,16 @@ pub async fn append_conversation(
     validate_agent_id(&from)?;
     let content = sanitize_text(&req.content, MAX_MESSAGE_CONTENT_LEN, "content")?;
 
-    state
+    let message = state
         .storage
         .append_conversation_message(&session_id, &agent_id, &from, &content)
         .await
         .map_err(|e| ApiError::internal(format!("Failed to append conversation message: {}", e)))?;
+
+    state
+        .emit_conversation_message(&session_id, &agent_id, &message)
+        .await
+        .map_err(ApiError::internal)?;
 
     Ok((
         StatusCode::CREATED,

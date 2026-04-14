@@ -31,6 +31,8 @@
   let selectedRoleType = 'backend';
   let customRoleName = '';
   let selectedCli = 'claude';
+  let workerName = '';
+  let workerDescription = '';
   let initialTask = '';
   let selectedParent: string | null = null;
   let loading = false;
@@ -71,6 +73,9 @@
       return;
     }
 
+    const trimmedName = workerName.trim() || `Worker (${roleLabel})`;
+    const trimmedDescription = workerDescription.trim() || initialTask.trim() || `${roleLabel} tasks`;
+
     const role: WorkerRole = {
       role_type: roleType,
       label: roleLabel,
@@ -80,9 +85,13 @@
 
     const request: AddWorkerRequest = {
       session_id: $activeSession.id,
+      name: trimmedName,
+      description: trimmedDescription,
       config: {
         cli: selectedCli,
         flags: [],
+        name: trimmedName,
+        description: trimmedDescription,
         role,
         initial_prompt: initialTask || undefined,
       },
@@ -200,6 +209,28 @@
             </select>
           </div>
         {/if}
+
+        <div class="form-section">
+          <label class="section-label" for="name-input">Worker Name</label>
+          <input
+            id="name-input"
+            type="text"
+            placeholder="Worker 2 (Frontend)"
+            bind:value={workerName}
+            class="custom-role-input"
+          />
+        </div>
+
+        <div class="form-section">
+          <label class="section-label" for="description-input">Description</label>
+          <input
+            id="description-input"
+            type="text"
+            placeholder="One-line task summary"
+            bind:value={workerDescription}
+            class="custom-role-input"
+          />
+        </div>
 
         <div class="form-section">
           <label class="section-label" for="task-input">Initial Task (optional)</label>

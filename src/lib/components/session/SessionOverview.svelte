@@ -4,6 +4,7 @@
     import { cells } from '../../stores/cells';
     import { agents } from '../../stores/agents';
     import { events } from '../../stores/events';
+    import { conversationStore } from '../../stores/conversations';
     import { activeSession, activeAgents, type AgentInfo } from '../../stores/sessions';
     import SessionHeader from './SessionHeader.svelte';
     import CellGrid from '../cell/CellGrid.svelte';
@@ -77,6 +78,8 @@
         await cells.fetchCells(sid);
         const cellIds = Object.keys($cells.cells);
         await Promise.all(cellIds.map(cid => agents.fetchAgents(sid, cid)));
+        // Also poll for messages in the selected conversation
+        await conversationStore.pollMessages();
     }
 
     $effect(() => {
@@ -84,6 +87,8 @@
             connectedSessionId = sessionId;
             fetchCellsAndAgents(sessionId);
             cells.setExternalRefreshHandler(() => {
+                // Immediate refresh on external signal (e.g. Tauri event)
+                void fetchCellsAndAgents(sessionId);
                 schedulePoll();
             });
             schedulePoll();
@@ -91,6 +96,7 @@
             events.connect(sessionId);
         } else if (sessionId) {
             cells.setExternalRefreshHandler(() => {
+                void fetchCellsAndAgents(sessionId);
                 schedulePoll();
             });
         }

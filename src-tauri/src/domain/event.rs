@@ -20,6 +20,7 @@ pub enum EventType {
     SessionStatusChanged,
     CellCreated,
     CellStatusChanged,
+    ConversationMessage,
     WorkspaceCreated,
     AgentLaunched,
     AgentCompleted,

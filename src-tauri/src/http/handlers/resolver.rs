@@ -87,7 +87,7 @@ pub async fn launch_resolver(
         state.storage.base_dir().clone(),
     )
     .map_err(|err| ApiError::internal(format!("Failed to initialize resolver storage: {}", err)))?;
-    let resolver = Resolver::new(resolver_storage);
+    let resolver = Resolver::new_with_event_bus(resolver_storage, Arc::clone(&state.event_bus));
 
     // Wait for candidates if timeout specified
     if let Some(timeout_secs) = body.timeout_secs {

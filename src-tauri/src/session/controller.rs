@@ -15,11 +15,12 @@ use crate::events::{EventBus, EventEmitter};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
 use crate::storage::{SessionStorage, StorageError};
 use crate::session::cell_status::{
-    derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids, variant_to_cell_id,
+    agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids, variant_to_cell_id,
     PRIMARY_CELL_ID, RESOLVER_CELL_ID,
 };
 use crate::templates::{PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
+use crate::workspace::git::{cleanup_session_worktrees, create_session_worktree};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
@@ -568,6 +569,8 @@ impl SessionController {
                 model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
+                name: None,
+                description: None,
                 role: None,
                 initial_prompt: None,
             };
@@ -608,6 +611,8 @@ impl SessionController {
                     model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
+                    name: None,
+                    description: None,
                     role: None,
                     initial_prompt: None,
                 };
@@ -841,6 +846,91 @@ impl SessionController {
         });
     }
 
+    fn emit_agent_completed(&self, session: &Session, agent: &AgentInfo) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let session_id = session.id.clone();
+        let cell_id = agent_cell_id(session, agent);
+        let agent_id = agent.id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = emitter
+                .emit_agent_completed(&session_id, &cell_id, &agent_id)
+                .await
+            {
+                tracing::debug!("Failed to emit agent completed event: {}", error);
+            }
+        });
+    }
+
+    fn emit_workspace_created(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        branch: &str,
+        worktree_path: Option<&str>,
+    ) {
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        let cell_id = cell_id.to_string();
+        let branch = branch.to_string();
+        let worktree_path = worktree_path.map(str::to_string);
+        tokio::spawn(async move {
+            if let Err(error) = emitter
+                .emit_workspace_created(&session_id, &cell_id, &branch, worktree_path.as_deref())
+                .await
+            {
+                tracing::debug!("Failed to emit workspace created event: {}", error);
+            }
+        });
+    }
+
+    pub fn emit_artifact_updated_for_cell(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        agent_id: Option<&str>,
+    ) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let Some(emitter) = self.event_emitter.clone() else {
+            return;
+        };
+
+        let resolved_agent_id = agent_id
+            .map(str::to_string)
+            .or_else(|| {
+                self.get_session(session_id).and_then(|session| {
+                    session
+                        .agents
+                        .iter()
+                        .find(|agent| agent_in_cell(&session, cell_id, agent))
+                        .map(|agent| agent.id.clone())
+                })
+            })
+            .unwrap_or_else(|| cell_id.to_string());
+        let artifact_path = storage
+            .session_dir(session_id)
+            .join("artifacts")
+            .join(format!("{}.json", cell_id))
+            .to_string_lossy()
+            .to_string();
+        let session_id = session_id.to_string();
+        let cell_id = cell_id.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = emitter
+                .emit_artifact_updated(&session_id, &cell_id, &resolved_agent_id, &artifact_path)
+                .await
+            {
+                tracing::debug!("Failed to emit artifact updated event: {}", error);
+            }
+        });
+    }
+
     fn emit_agent_batch_launched(&self, session: &Session, agents: &[AgentInfo]) {
         let mut emitted_cells = HashMap::<String, bool>::new();
         for agent in agents {
@@ -990,12 +1080,15 @@ impl SessionController {
     }
 
     pub fn close_session(&self, id: &str) -> Result<(), String> {
-        let agent_ids: Vec<String> = {
+        let (agent_ids, cleanup_session): (Vec<String>, Session) = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(id) {
                 let changes = self.set_session_state_with_events(session, SessionState::Closing);
                 self.emit_cell_status_changes(id, changes);
-                session.agents.iter().map(|a| a.id.clone()).collect()
+                (
+                    session.agents.iter().map(|a| a.id.clone()).collect(),
+                    session.clone(),
+                )
             } else {
                 return Err(format!("Session not found: {}", id));
             }
@@ -1022,22 +1115,35 @@ impl SessionController {
             heartbeats.remove(id);
         }
 
-        let closed_changes = {
+        if let Err(err) = cleanup_session_worktrees(&cleanup_session) {
+            tracing::warn!("Session {} cleanup had issues: {}", id, err);
+        }
+
+        let closed_state = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(id) {
+                let completed_agents = session
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.status != AgentStatus::Completed)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 for agent in &mut session.agents {
                     agent.status = AgentStatus::Completed;
                 }
                 let changes = self.set_session_state_with_events(session, SessionState::Closed);
                 session.auth_strategy = AuthStrategy::None;
-                Some(changes)
+                Some((session.clone(), completed_agents, changes))
             } else {
                 None
             }
         };
 
         self.update_session_storage(id);
-        if let Some(changes) = closed_changes {
+        if let Some((session, completed_agents, changes)) = closed_state {
+            for agent in &completed_agents {
+                self.emit_agent_completed(&session, agent);
+            }
             self.emit_cell_status_changes(id, changes);
         }
         self.emit_session_update(id);
@@ -1051,16 +1157,89 @@ impl SessionController {
         let pty_manager = self.pty_manager.read();
         pty_manager.kill(agent_id).map_err(|e| e.to_string())?;
 
-        {
+        let completed_agent = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
-                if let Some(agent) = session.agents.iter_mut().find(|a| a.id == agent_id) {
-                    agent.status = AgentStatus::Completed;
+                if let Some(index) = session.agents.iter().position(|agent| agent.id == agent_id) {
+                    session.agents[index].status = AgentStatus::Completed;
+                    Some((session.clone(), session.agents[index].clone()))
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        };
+        self.update_session_storage(session_id);
+        if let Some((session, agent)) = completed_agent {
+            self.emit_agent_completed(&session, &agent);
         }
 
         Ok(())
+    }
+
+    fn truncate_agent_label(value: String, max_chars: usize) -> String {
+        let mut chars = value.chars();
+        let truncated: String = chars.by_ref().take(max_chars).collect();
+        if chars.next().is_some() {
+            format!("{}...", truncated.trim_end())
+        } else {
+            value
+        }
+    }
+
+    fn summarize_prompt_line(prompt: Option<&str>) -> Option<String> {
+        prompt
+            .and_then(|value| value.lines().find(|line| !line.trim().is_empty()))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|line| !line.is_empty())
+    }
+
+    fn derive_worker_name(
+        worker_index: u8,
+        role: &WorkerRole,
+        explicit_name: Option<&str>,
+    ) -> String {
+        explicit_name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("Worker {} ({})", worker_index, role.label))
+    }
+
+    fn derive_worker_description(
+        role: &WorkerRole,
+        explicit_description: Option<&str>,
+        prompt: Option<&str>,
+    ) -> String {
+        explicit_description
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| Self::summarize_prompt_line(prompt))
+            .unwrap_or_else(|| format!("{} tasks", role.label))
+    }
+
+    fn derive_worker_label(name: &str, description: &str) -> String {
+        Self::truncate_agent_label(format!("{} — {}", name, description), 80)
+    }
+
+    fn apply_worker_identity(
+        worker_index: u8,
+        role: &WorkerRole,
+        mut config: AgentConfig,
+    ) -> AgentConfig {
+        let name = Self::derive_worker_name(worker_index, role, config.name.as_deref());
+        let description = Self::derive_worker_description(
+            role,
+            config.description.as_deref(),
+            config.initial_prompt.as_deref(),
+        );
+        config.name = Some(name.clone());
+        config.description = Some(description.clone());
+        config.label = Some(Self::derive_worker_label(&name, &description));
+        config.role = Some(role.clone());
+        config
     }
 
     /// Build command and args from AgentConfig
@@ -2886,7 +3065,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 ```bash
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "backend", "cli": "{cli}"}}'
+  -d '{{"role_type": "backend", "cli": "{cli}", "name": "Worker 1 (Backend)", "description": "Implement backend changes"}}'
 ```
 
 ### Task Assignment
@@ -3352,7 +3531,7 @@ Read `.hive-manager/{session_id}/tools/spawn-worker.md` for detailed documentati
 # Spawn a worker
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "ROLE", "cli": "{cli}", "initial_task": "TASK", "parent_id": "{session_id}-planner-{index}"}}'
+  -d '{{"role_type": "ROLE", "cli": "{cli}", "name": "Worker N (Role)", "description": "TASK", "initial_task": "TASK", "parent_id": "{session_id}-planner-{index}"}}'
 ```
 
 ## SEQUENTIAL SPAWNING PROTOCOL (CRITICAL)
@@ -3717,6 +3896,8 @@ Content-Type: application/json
 {{
   "role_type": "backend",
   "cli": "{default_cli}",
+  "name": "Worker 2 (Frontend)",
+  "description": "One-line task summary",
   "initial_task": "Optional task description"
 }}
 ```
@@ -3727,7 +3908,9 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
-| label | string | No | Custom label for the worker |
+| name | string | No | Stable worker name; defaults to `Worker N (Role)` |
+| description | string | No | One-line task summary used for deterministic labels |
+| label | string | No | Legacy label field; kept as a fallback input |
 | initial_task | string | No | Initial task/prompt for the worker |
 | parent_id | string | No | Parent agent ID (defaults to Queen) |
 
@@ -3742,12 +3925,12 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 # Spawn a frontend worker with an initial task
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "frontend", "cli": "{default_cli}", "initial_task": "Implement the login form UI"}}'
+  -d '{{"role_type": "frontend", "cli": "{default_cli}", "name": "Worker 2 (Frontend)", "description": "Implement the login form UI", "initial_task": "Implement the login form UI"}}'
 
 # Spawn a reviewer worker
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "reviewer", "cli": "{default_cli}"}}'
+  -d '{{"role_type": "reviewer", "cli": "{default_cli}", "name": "Worker 3 (Reviewer)", "description": "Review the current implementation"}}'
 ```
 
 ## Response
@@ -4292,12 +4475,23 @@ Last updated: {timestamp}
         flags: Vec<String>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
-        let cwd = project_path.to_str().unwrap_or(".");
+        let (_, solo_cwd) = create_session_worktree(
+            &session_id,
+            "worker-1",
+            &format!("solo/{}/worker-1", session_id),
+            "HEAD",
+            &project_path,
+        )?;
+        let solo_name = "Solo Worker".to_string();
+        let solo_description = Self::summarize_prompt_line(task_description.as_deref())
+            .unwrap_or_else(|| "Solo session".to_string());
         let solo_config = AgentConfig {
             cli: cli.clone(),
             model: model.clone(),
             flags,
-            label: None,
+            label: Some(Self::derive_worker_label(&solo_name, &solo_description)),
+            name: Some(solo_name),
+            description: Some(solo_description),
             role: None,
             initial_prompt: task_description.clone(),
         };
@@ -4312,7 +4506,7 @@ Last updated: {timestamp}
                     AgentRole::Worker { index: 1, parent: None },
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(cwd),
+                    Some(&solo_cwd),
                     120,
                     30,
                 )
@@ -4383,7 +4577,6 @@ Last updated: {timestamp}
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
         let project_path = PathBuf::from(&config.project_path);
-        let cwd = config.project_path.as_str();
 
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
@@ -4401,6 +4594,13 @@ Last updated: {timestamp}
             // Create Queen agent
             let queen_id = format!("{}-queen", session_id);
             let (cmd, mut args) = Self::build_command(&config.queen_config);
+            let (_, queen_cwd) = create_session_worktree(
+                &session_id,
+                "queen",
+                &format!("hive/{}/queen", session_id),
+                "HEAD",
+                &project_path,
+            )?;
 
             // Check if plan.md exists (from previous planning phase)
             let plan_path = project_path.join(".hive-manager").join(&session_id).join("plan.md");
@@ -4415,7 +4615,7 @@ Last updated: {timestamp}
             // Write tool documentation files
             Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli)?;
 
-            tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, cwd);
+            tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, queen_cwd);
 
             pty_manager
                 .create_session(
@@ -4423,7 +4623,7 @@ Last updated: {timestamp}
                     AgentRole::Queen,
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(cwd),
+                    Some(&queen_cwd),
                     120,
                     30,
                 )
@@ -4441,19 +4641,31 @@ Last updated: {timestamp}
             for (i, worker_config) in config.workers.iter().enumerate() {
                 let index = (i + 1) as u8;
                 let worker_id = format!("{}-worker-{}", session_id, index);
-                let (cmd, mut args) = Self::build_command(worker_config);
+                let worker_role = worker_config.role.clone().unwrap_or_else(|| {
+                    WorkerRole::new("general", "Worker", &worker_config.cli)
+                });
+                let worker_config =
+                    Self::apply_worker_identity(index, &worker_role, worker_config.clone());
+                let (cmd, mut args) = Self::build_command(&worker_config);
+                let (_, worker_cwd) = create_session_worktree(
+                    &session_id,
+                    &format!("worker-{}", index),
+                    &format!("hive/{}/worker-{}", session_id, index),
+                    "HEAD",
+                    &project_path,
+                )?;
 
                 // Write task file for this worker (STANDBY or with initial task)
                 Self::write_task_file(&project_path, &session_id, index, worker_config.initial_prompt.as_deref())?;
 
                 // Write worker prompt to file and pass to CLI
-                let worker_prompt = Self::build_worker_prompt(index, worker_config, &queen_id, &session_id);
+                let worker_prompt = Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
                 let filename = format!("worker-{}-prompt.md", index);
                 let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
                 let prompt_path = prompt_file.to_string_lossy().to_string();
                 Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-                tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, cwd);
+                tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, worker_cwd);
 
                 pty_manager
                     .create_session(
@@ -4461,7 +4673,7 @@ Last updated: {timestamp}
                         AgentRole::Worker { index, parent: Some(queen_id.clone()) },
                         &cmd,
                         &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        Some(cwd),
+                        Some(&worker_cwd),
                         120,
                         30,
                     )
@@ -4639,6 +4851,12 @@ Last updated: {timestamp}
                     &base_branch,
                 ],
             )?;
+            self.emit_workspace_created(
+                &session_id,
+                &variant_to_cell_id(&variant.name),
+                &variant.branch,
+                Some(&variant.worktree_path),
+            );
 
             Self::write_fusion_variant_task_file(
                 &project_path,
@@ -4659,6 +4877,8 @@ Last updated: {timestamp}
                 model: source_variant.model.clone().or(config.default_model.clone()),
                 flags: source_variant.flags.clone(),
                 label: Some(format!("Fusion {}", variant.name)),
+                name: None,
+                description: None,
                 role: None,
                 initial_prompt: Some(config.task_description.clone()),
             };
@@ -5087,6 +5307,12 @@ Last updated: {timestamp}
                     &base_branch,
                 ],
             )?;
+            self.emit_workspace_created(
+                session_id,
+                &variant_to_cell_id(&variant.name),
+                &variant.branch,
+                Some(&variant.worktree_path),
+            );
 
             Self::write_fusion_variant_task_file(
                 &session.project_path,
@@ -5107,6 +5333,8 @@ Last updated: {timestamp}
                 model: source_variant.model.clone().or(config.default_model.clone()),
                 flags: source_variant.flags.clone(),
                 label: Some(format!("Fusion {}", variant.name)),
+                name: None,
+                description: None,
                 role: None,
                 initial_prompt: Some(config.task_description.clone()),
             };
@@ -5467,6 +5695,8 @@ Last updated: {timestamp}
                     model: session.default_model.clone(),
                     flags: vec![],
                     label: Some("Evaluator".to_string()),
+                    name: None,
+                    description: None,
                     role: None,
                     initial_prompt: None,
                 }
@@ -5697,15 +5927,23 @@ Last updated: {timestamp}
             }
         }
 
-        {
+        let completed_agent = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                if let Some(agent) = s.agents.iter_mut().find(|a| a.id == variant.agent_id) {
-                    agent.status = AgentStatus::Completed;
+                if let Some(index) = s.agents.iter().position(|agent| agent.id == variant.agent_id) {
+                    s.agents[index].status = AgentStatus::Completed;
+                    Some((s.clone(), s.agents[index].clone()))
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        }
+        };
         self.update_session_storage(session_id);
+        if let Some((session, agent)) = completed_agent {
+            self.emit_agent_completed(&session, &agent);
+        }
 
         let already_judging = {
             let sessions = self.sessions.read();
@@ -5943,22 +6181,11 @@ Last updated: {timestamp}
             &["commit", "-m", &format!("Merge fusion winner: {}", winner.name)],
         )?;
 
-        let mut cleanup_errors = Vec::new();
         for variant in &metadata.variants {
-            if let Err(err) = Self::run_git_in_dir(
-                &session.project_path,
-                &["worktree", "remove", &variant.worktree_path, "--force"],
-            ) {
-                cleanup_errors.push(format!("{}: {}", variant.worktree_path, err));
-            }
-
             let pty_manager = self.pty_manager.read();
             if let Err(err) = pty_manager.kill(&variant.agent_id) {
                 tracing::warn!("Failed to stop variant agent {}: {}", variant.agent_id, err);
             }
-        }
-        if let Err(err) = Self::run_git_in_dir(&session.project_path, &["worktree", "prune"]) {
-            cleanup_errors.push(format!("worktree prune: {}", err));
         }
 
         {
@@ -5967,31 +6194,42 @@ Last updated: {timestamp}
             let _ = pty_manager.kill(&judge_id);
         }
 
-        let completed_changes = {
+        let cleanup_result = cleanup_session_worktrees(&session);
+
+        let completed_state = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
+                let completed_agents = s
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.status != AgentStatus::Completed)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 for agent in &mut s.agents {
                     agent.status = AgentStatus::Completed;
                 }
                 let changes = self.set_session_state_with_events(s, SessionState::Completed);
                 s.auth_strategy = AuthStrategy::None;
-                Some(changes)
+                Some((s.clone(), completed_agents, changes))
             } else {
                 None
             }
         };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
-        if let Some(changes) = completed_changes {
+        if let Some((session, completed_agents, changes)) = completed_state {
+            for agent in &completed_agents {
+                self.emit_agent_completed(&session, agent);
+            }
             self.emit_cell_status_changes(session_id, changes);
         }
 
-        if cleanup_errors.is_empty() {
+        if cleanup_result.is_ok() {
             Ok(())
         } else {
             Err(format!(
                 "Winner merged, but worktree cleanup had issues: {}",
-                cleanup_errors.join(" | ")
+                cleanup_result.unwrap_err()
             ))
         }
     }
@@ -6007,11 +6245,26 @@ Last updated: {timestamp}
             .map_err(|e| SessionError::TerminationError(format!("Failed to kill worker {}: {}", worker_id, e)))?;
 
         // Update agent status
-        let mut sessions = self.sessions.write();
-        if let Some(session) = sessions.get_mut(session_id) {
-            if let Some(agent) = session.agents.iter_mut().find(|a| a.id == worker_agent_id) {
-                agent.status = AgentStatus::Completed;
+        let completed_agent = {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(session_id) {
+                if let Some(index) = session
+                    .agents
+                    .iter()
+                    .position(|agent| agent.id == worker_agent_id)
+                {
+                    session.agents[index].status = AgentStatus::Completed;
+                    Some((session.clone(), session.agents[index].clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
             }
+        };
+        self.update_session_storage(session_id);
+        if let Some((session, agent)) = completed_agent {
+            self.emit_agent_completed(&session, &agent);
         }
 
         Ok(())
@@ -6246,6 +6499,8 @@ Last updated: {timestamp}
                     model: pa.config.model.clone(),
                     flags: pa.config.flags.clone(),
                     label: pa.config.label.clone(),
+                    name: pa.config.name.clone(),
+                    description: pa.config.description.clone(),
                     role: pa.config.role_type.as_ref().map(|rt: &String| WorkerRole {
                         role_type: rt.clone(),
                         label: pa.config.label.clone().unwrap_or_default(),
@@ -6547,6 +6802,8 @@ Last updated: {timestamp}
             model: None,
             flags: vec![],
             label: Some("Evaluator".to_string()),
+            name: None,
+            description: None,
             role: None,
             initial_prompt: None,
         });
@@ -6599,15 +6856,15 @@ Last updated: {timestamp}
         // Generate worker ID
         let worker_id = format!("{}-worker-{}", session_id, worker_index);
 
-        // Build command
-        let (cmd, mut args) = Self::build_command(&config);
-
-        // Get project path
-        let cwd = session.project_path.to_str().unwrap_or(".");
-
-        // Create a temporary config with role for prompt generation
-        let mut config_with_role = config.clone();
-        config_with_role.role = Some(role.clone());
+        let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
+        let (cmd, mut args) = Self::build_command(&config_with_role);
+        let (_, worker_cwd) = create_session_worktree(
+            session_id,
+            &format!("worker-{}", worker_index),
+            &format!("hive/{}/worker-{}", session_id, worker_index),
+            "HEAD",
+            &session.project_path,
+        )?;
 
         // Write task file for this worker (STANDBY or with initial task)
         Self::write_task_file(&session.project_path, session_id, worker_index, config_with_role.initial_prompt.as_deref())?;
@@ -6639,7 +6896,7 @@ Last updated: {timestamp}
                     worker_role.clone(),
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(cwd),
+                    Some(&worker_cwd),
                     120,
                     30,
                 )
@@ -6647,8 +6904,7 @@ Last updated: {timestamp}
         }
 
         // Create agent info with role
-        let mut agent_config = config;
-        agent_config.role = Some(role);
+        let agent_config = config_with_role;
 
         let agent_info = AgentInfo {
             id: worker_id.clone(),
@@ -7068,6 +7324,8 @@ Last updated: {timestamp}
                     model: a.config.model.clone(),
                     flags: a.config.flags.clone(),
                     label: a.config.label.clone(),
+                    name: a.config.name.clone(),
+                    description: a.config.description.clone(),
                     role_type: a.config.role.as_ref().map(|r| r.role_type.clone()),
                     initial_prompt: a.config.initial_prompt.clone(),
                 },

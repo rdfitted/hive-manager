@@ -145,6 +145,8 @@ pub struct PersistedAgentConfig {
     pub model: Option<String>,
     pub flags: Vec<String>,
     pub label: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub role_type: Option<String>,
     pub initial_prompt: Option<String>,
 }
@@ -559,15 +561,20 @@ impl SessionStorage {
         agent_id: &str,
         from: &str,
         content: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<ConversationMessage, StorageError> {
         let conversations_dir = self.session_dir(session_id).join("conversations");
         fs::create_dir_all(&conversations_dir)?;
         let path = self.conversation_file_path(session_id, agent_id);
+        let message = ConversationMessage {
+            timestamp: Utc::now(),
+            from: from.to_string(),
+            content: content.to_string(),
+        };
         let entry = format!(
             "---\n[{}] from @{}\n{}\n\n",
-            Utc::now().to_rfc3339(),
-            from,
-            content
+            message.timestamp.to_rfc3339(),
+            message.from,
+            message.content
         );
 
         tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
@@ -576,7 +583,9 @@ impl SessionStorage {
             Ok(())
         })
         .await
-        .map_err(|e| StorageError::InvalidPath(format!("Join error in append conversation: {}", e)))?
+        .map_err(|e| StorageError::InvalidPath(format!("Join error in append conversation: {}", e)))??;
+
+        Ok(message)
     }
 
     /// Read conversation messages with optional since filter.

@@ -98,7 +98,10 @@
   $: children = childrenMap.get(agent.id) || [];
   $: hasChildren = children.length > 0;
   $: isSelected = selectedId === agent.id;
-  $: displayLabel = agent.config?.label || getRoleName(agent.role);
+  $: displayLabel = agent.config?.label
+    || (agent.config?.name && agent.config?.description ? `${agent.config.name} — ${agent.config.description}` : null)
+    || agent.config?.name
+    || getRoleName(agent.role);
   $: RoleIcon = getRoleIcon(agent.role);
   $: StatusIcon = getStatusIcon(agent.status);
 </script>

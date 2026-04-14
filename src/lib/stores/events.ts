@@ -7,6 +7,7 @@ const EVENT_TYPES = [
     'session_status_changed',
     'cell_created',
     'cell_status_changed',
+    'conversation_message',
     'workspace_created',
     'agent_launched',
     'agent_completed',
@@ -49,6 +50,34 @@ function createEventsStore() {
         }
     }
 
+    function handleLagged(raw: MessageEvent<string>, source: EventSource, sessionId: string, store: any) {
+        if (eventSource !== source) {
+            return;
+        }
+
+        try {
+            const data = JSON.parse(raw.data);
+            const syntheticEvent: SessionEvent = {
+                id: `lagged-${Date.now()}`,
+                session_id: sessionId,
+                event_type: 'lagged',
+                timestamp: new Date().toISOString(),
+                payload: data,
+                severity: 'warning'
+            };
+
+            update(state => ({
+                ...state,
+                events: [syntheticEvent, ...state.events].slice(0, 1000),
+            }));
+
+            // CONTRACT: resync after lag
+            store.fetchEvents(sessionId);
+        } catch (err) {
+            console.error('Failed to handle lagged event:', err);
+        }
+    }
+
     return {
         subscribe,
 
@@ -80,6 +109,10 @@ function createEventsStore() {
                     consecutiveErrors = 0;
                     prependEvent(event as MessageEvent<string>, source);
                 });
+            });
+
+            source.addEventListener('lagged', (event) => {
+                handleLagged(event as MessageEvent<string>, source, sessionId, this);
             });
 
             source.onerror = async (err) => {

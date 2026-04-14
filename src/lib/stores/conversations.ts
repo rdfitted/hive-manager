@@ -6,6 +6,7 @@ export interface ConversationMessage {
   timestamp: string;
   from: string;
   content: string;
+  agent_id?: string;
 }
 
 export interface HeartbeatInfo {
@@ -43,10 +44,16 @@ function createConversationStore() {
 
   // Listen for real-time conversation messages from Tauri
   listen<ConversationMessage>('conversation-message', (event) => {
-    update((state) => ({
-      ...state,
-      messages: [...state.messages, event.payload],
-    }));
+    update((state) => {
+      // CONTRACT: only push if it belongs to selected agent (or no agent_id in payload, but we fixed that)
+      if (event.payload.agent_id && state.selectedAgent !== event.payload.agent_id) {
+        return state;
+      }
+      return {
+        ...state,
+        messages: [...state.messages, event.payload],
+      };
+    });
   });
 
   return {
@@ -74,13 +81,20 @@ function createConversationStore() {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         const messages: ConversationMessage[] = data.messages ?? [];
-        update((state) => ({
-          ...state,
-          messages,
-          loading: false,
-          sessionId,
-          selectedAgent: agentId,
-        }));
+        
+        update((state) => {
+           // If we are appending (using 'since'), don't overwrite
+           const newMessages = since 
+             ? [...state.messages, ...messages] 
+             : messages;
+           return {
+             ...state,
+             messages: newMessages,
+             loading: false,
+             sessionId,
+             selectedAgent: agentId,
+           };
+        });
       } catch (err) {
         update((state) => ({ ...state, loading: false, error: String(err) }));
       }
@@ -97,14 +111,21 @@ function createConversationStore() {
           }
         );
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        // Reload to get the appended message
-        const state = getState();
-        if (state.sessionId && state.selectedAgent) {
-          await this.loadConversation(state.sessionId, state.selectedAgent);
-        }
+        // No need to reload - Tauri event will push it (and poll will catch up if missed)
       } catch (err) {
         update((state) => ({ ...state, error: String(err) }));
       }
+    },
+
+    // CONTRACT: Fallback poll in case Tauri event is lost
+    async pollMessages() {
+      const state = getState();
+      if (!state.sessionId || !state.selectedAgent) return;
+      
+      const lastMsg = state.messages[state.messages.length - 1];
+      const since = lastMsg?.timestamp;
+      
+      await this.loadConversation(state.sessionId, state.selectedAgent, since);
     },
 
     clearError() {

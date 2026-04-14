@@ -191,8 +191,10 @@ pub fn run() {
                             | EventType::AgentCompleted
                             | EventType::AgentWaitingInput
                             | EventType::AgentFailed
+                            | EventType::ArtifactUpdated
                             | EventType::CellCreated
                             | EventType::CellStatusChanged
+                            | EventType::WorkspaceCreated
                     ) {
                         continue;
                     }
@@ -212,8 +214,10 @@ pub fn run() {
                                         | EventType::AgentCompleted
                                         | EventType::AgentWaitingInput
                                         | EventType::AgentFailed
+                                        | EventType::ArtifactUpdated
                                         | EventType::CellCreated
                                         | EventType::CellStatusChanged
+                                        | EventType::WorkspaceCreated
                                 ) {
                                     pending_sessions.insert(event.session_id);
                                 }
@@ -249,6 +253,7 @@ pub fn run() {
             let http_config = shared_config.clone();
             let http_session_controller = session_controller.clone();
             let http_event_bus = event_bus.clone();
+            let http_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let (enabled, port) = {
                     let cfg = http_config.read().await;
@@ -264,6 +269,7 @@ pub fn run() {
                         injection_manager.clone(),
                         storage.clone(),
                         http_event_bus,
+                        Some(http_app_handle),
                     ));
                     if let Err(e) = http::serve(state, port).await {
                         tracing::error!("HTTP server error: {}", e);

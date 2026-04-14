@@ -223,6 +223,8 @@ pub async fn create_session(
                 model: req.default_model.clone(),
                 flags: vec![],
                 label: Some("Queen".to_string()),
+                name: None,
+                description: None,
                 role: None,
                 initial_prompt: None,
             };
@@ -233,6 +235,8 @@ pub async fn create_session(
                 model: req.default_model,
                 flags: vec![],
                 label: None,
+                name: None,
+                description: None,
                 role: None,
                 initial_prompt: None,
             };
@@ -301,6 +305,8 @@ pub async fn create_session(
                     model: req.judge_model.or(req.default_model.clone()),
                     flags: vec![],
                     label: Some("Fusion Judge".to_string()),
+                    name: None,
+                    description: None,
                     role: None,
                     initial_prompt: None,
                 },
@@ -454,6 +460,8 @@ pub async fn launch_swarm(
         model: None,
         flags: vec![],
         label: None,
+        name: None,
+        description: None,
         role: None,
         initial_prompt: None,
     };
@@ -502,6 +510,8 @@ pub async fn launch_solo(
         model: req.model,
         flags: req.flags.unwrap_or_default(),
         label: None,
+        name: None,
+        description: None,
         role: None,
         initial_prompt: None,
     };
@@ -577,6 +587,8 @@ pub async fn launch_fusion(
         model: req.judge_model.or(req.default_model.clone()),
         flags: vec![],
         label: Some("Fusion Judge".to_string()),
+        name: None,
+        description: None,
         role: None,
         initial_prompt: None,
     };

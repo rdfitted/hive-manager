@@ -38,11 +38,15 @@ export interface QueenInjectRequest {
 
 export interface AddWorkerRequest {
   session_id: string;
+  name?: string;
+  description?: string;
   config: {
     cli: string;
     model?: string;
     flags: string[];
     label?: string;
+    name?: string;
+    description?: string;
     role?: WorkerRole;
     initial_prompt?: string;
   };

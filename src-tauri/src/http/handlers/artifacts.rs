@@ -188,6 +188,11 @@ pub async fn post_artifact(
         .save_artifact(&session_id, &cell_id, &req.artifact)
         .map_err(|err| ApiError::internal(err.to_string()))?;
 
+    state
+        .session_controller
+        .read()
+        .emit_artifact_updated_for_cell(&session_id, &cell_id, None);
+
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({

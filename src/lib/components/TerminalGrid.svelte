@@ -30,6 +30,8 @@
 
   function getRoleLabel(agent: AgentInfo) {
     if (agent.config?.label) return agent.config.label;
+    if (agent.config?.name && agent.config?.description) return `${agent.config.name} — ${agent.config.description}`;
+    if (agent.config?.name) return agent.config.name;
     if (serdeEnumVariantName(agent.role) === 'Queen') return 'Queen';
     if (typeof agent.role === 'object' && agent.role !== null) {
       if ('Judge' in agent.role) return 'Judge';

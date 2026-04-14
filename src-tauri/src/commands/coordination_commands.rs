@@ -32,6 +32,8 @@ pub struct AddWorkerRequest {
     pub session_id: String,
     pub config: AgentConfig,
     pub role: WorkerRole,
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub parent_id: Option<String>,
 }
 
@@ -149,10 +151,14 @@ pub async fn add_worker_to_session(
     let controller = session_state.0.write();
 
     // Add worker through session controller
+    let mut config = request.config;
+    config.name = request.name.or(config.name);
+    config.description = request.description.or(config.description);
+
     let agent_info = controller
         .add_worker(
             &request.session_id,
-            request.config,
+            config,
             request.role.clone(),
             request.parent_id,
         )

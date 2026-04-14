@@ -165,6 +165,8 @@ pub async fn launch_solo(
         model,
         flags: flags.unwrap_or_default(),
         label: None,
+        name: None,
+        description: None,
         role: None,
         initial_prompt: None,
     };

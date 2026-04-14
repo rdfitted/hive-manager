@@ -1,10 +1,13 @@
 use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::{
     artifacts::{collector::ArtifactCollector, resolver_input::{assemble_resolver_input, ResolverInput}},
     domain::ResolverOutput,
+    events::{EventBus, EventEmitter},
+    session::cell_status::RESOLVER_CELL_ID,
     storage::{SessionStorage, StorageError},
     templates::{PromptContext, TemplateEngine},
 };
@@ -28,10 +31,22 @@ pub struct Resolver {
     #[allow(dead_code)]
     artifacts_collector: ArtifactCollector,
     template_engine: TemplateEngine,
+    event_emitter: Option<EventEmitter>,
 }
 
 impl Resolver {
     pub fn new(storage: SessionStorage) -> Self {
+        Self::new_with_optional_emitter(storage, None)
+    }
+
+    pub fn new_with_event_bus(storage: SessionStorage, event_bus: Arc<EventBus>) -> Self {
+        Self::new_with_optional_emitter(storage, Some(EventEmitter::new(event_bus)))
+    }
+
+    fn new_with_optional_emitter(
+        storage: SessionStorage,
+        event_emitter: Option<EventEmitter>,
+    ) -> Self {
         let templates_dir = storage.templates_dir();
         let artifacts_collector = ArtifactCollector::new(SessionStorage::new_with_base(
             storage.base_dir().clone(),
@@ -42,6 +57,7 @@ impl Resolver {
             storage,
             artifacts_collector,
             template_engine: TemplateEngine::new(templates_dir),
+            event_emitter,
         }
     }
 
@@ -118,6 +134,24 @@ impl Resolver {
         output: &ResolverOutput,
     ) -> Result<(), ResolverError> {
         self.storage.save_resolver_output(session_id, output)?;
+        if let Some(emitter) = self.event_emitter.clone() {
+            let session_id = session_id.to_string();
+            let selected_candidate = output.selected_candidate.clone();
+            let rationale = output.rationale.clone();
+            tokio::spawn(async move {
+                if let Err(error) = emitter
+                    .emit_resolver_selected_candidate(
+                        &session_id,
+                        RESOLVER_CELL_ID,
+                        &selected_candidate,
+                        &rationale,
+                    )
+                    .await
+                {
+                    tracing::debug!("Failed to emit resolver selected candidate event: {}", error);
+                }
+            });
+        }
         Ok(())
     }
 
