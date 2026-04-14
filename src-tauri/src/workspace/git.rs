@@ -117,6 +117,32 @@ pub fn create_session_worktree(
     Ok((worktree_path, worktree_str))
 }
 
+/// Remove a single session worktree under `.hive-manager/worktrees/{session}/{cell_id}`.
+/// Used when PTY spawn fails after `create_session_worktree` so branches/worktrees are not left behind.
+pub fn remove_session_worktree_cell(
+    project_path: &Path,
+    session_id: &str,
+    cell_id: &str,
+) -> Result<(), String> {
+    let worktree_path = project_path
+        .join(".hive-manager")
+        .join("worktrees")
+        .join(session_id)
+        .join(cell_id);
+    if !worktree_path.exists() {
+        return Ok(());
+    }
+
+    let manager = WorktreeManager::new(project_path);
+    if let Err(err) = manager.remove_worktree(&worktree_path, true) {
+        if !is_missing_worktree_error(&err.message) {
+            return Err(err.message);
+        }
+    }
+    let _ = manager.prune_worktrees();
+    Ok(())
+}
+
 pub fn cleanup_session_worktrees(session: &Session) -> Result<(), String> {
     let manager = WorktreeManager::new(&session.project_path);
     let worktrees = manager

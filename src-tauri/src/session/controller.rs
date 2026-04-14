@@ -20,7 +20,11 @@ use crate::session::cell_status::{
 };
 use crate::templates::{PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
-use crate::workspace::git::{cleanup_session_worktrees, create_session_worktree};
+use crate::artifacts::collector::ArtifactCollector;
+use crate::domain::ArtifactBundle;
+use crate::workspace::git::{
+    cleanup_session_worktrees, create_session_worktree, remove_session_worktree_cell,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
@@ -846,7 +850,141 @@ impl SessionController {
         });
     }
 
+    fn merge_primary_cell_artifact_bundles(existing: ArtifactBundle, incoming: ArtifactBundle) -> ArtifactBundle {
+        let mut commits = existing.commits.clone();
+        for c in incoming.commits {
+            if !commits.iter().any(|x| x == &c) {
+                commits.push(c);
+            }
+        }
+        let mut changed_files = existing.changed_files.clone();
+        for f in incoming.changed_files {
+            if !changed_files.iter().any(|x| x == &f) {
+                changed_files.push(f);
+            }
+        }
+        let branch = if existing.branch.trim().is_empty() {
+            incoming.branch
+        } else if incoming.branch.trim().is_empty() {
+            existing.branch
+        } else if existing.branch == incoming.branch {
+            existing.branch
+        } else {
+            format!("{} | {}", existing.branch, incoming.branch)
+        };
+        let summary = match (existing.summary, incoming.summary) {
+            (Some(a), Some(b)) if a != b => Some(format!("{} · {}", a, b)),
+            (Some(a), _) => Some(a),
+            (_, Some(b)) => Some(b),
+            _ => None,
+        };
+        let test_results = incoming.test_results.or(existing.test_results);
+        let diff_summary = match (existing.diff_summary, incoming.diff_summary) {
+            (Some(a), Some(b)) => Some(format!("{}\n---\n{}", a, b)),
+            (a, b) => a.or(b),
+        };
+        let mut unresolved_issues = existing.unresolved_issues;
+        unresolved_issues.extend(incoming.unresolved_issues);
+        let confidence = match (existing.confidence, incoming.confidence) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            _ => None,
+        };
+        let recommended_next_step = incoming
+            .recommended_next_step
+            .or(existing.recommended_next_step);
+        ArtifactBundle {
+            summary,
+            changed_files,
+            commits,
+            branch,
+            test_results,
+            diff_summary,
+            unresolved_issues,
+            confidence,
+            recommended_next_step,
+        }
+    }
+
+    fn agent_git_worktree_path_for_artifacts(session: &Session, agent: &AgentInfo) -> Option<PathBuf> {
+        match &agent.role {
+            AgentRole::Fusion { variant } => {
+                Self::read_fusion_metadata(&session.project_path, &session.id)
+                    .ok()
+                    .and_then(|meta| {
+                        meta.variants
+                            .iter()
+                            .find(|v| &v.name == variant || v.agent_id == agent.id)
+                            .map(|v| PathBuf::from(&v.worktree_path))
+                    })
+            }
+            AgentRole::Queen => Some(
+                session
+                    .project_path
+                    .join(".hive-manager")
+                    .join("worktrees")
+                    .join(&session.id)
+                    .join("queen"),
+            ),
+            AgentRole::Worker { index, .. } => Some(
+                session
+                    .project_path
+                    .join(".hive-manager")
+                    .join("worktrees")
+                    .join(&session.id)
+                    .join(format!("worker-{index}")),
+            ),
+            _ => None,
+        }
+    }
+
+    fn harvest_completion_artifacts(&self, session: &Session, agent: &AgentInfo) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let Some(wt) = Self::agent_git_worktree_path_for_artifacts(session, agent) else {
+            return;
+        };
+        if !wt.exists() {
+            return;
+        }
+        let bundle = match ArtifactCollector::collect_from_worktree(&wt) {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!(
+                    "Artifact harvest failed for agent {} in {}: {}",
+                    agent.id,
+                    wt.display(),
+                    err
+                );
+                return;
+            }
+        };
+        let cell_id = agent_cell_id(session, agent);
+        let session_id = session.id.as_str();
+        let bundle = if cell_id == PRIMARY_CELL_ID {
+            match storage.load_artifact(session_id, &cell_id) {
+                Ok(Some(existing)) => Self::merge_primary_cell_artifact_bundles(existing, bundle),
+                _ => bundle,
+            }
+        } else {
+            bundle
+        };
+        if let Err(err) = storage.save_artifact(session_id, &cell_id, &bundle) {
+            tracing::warn!(
+                "Failed to persist artifacts for session {} cell {}: {}",
+                session_id,
+                cell_id,
+                err
+            );
+            return;
+        }
+        self.emit_artifact_updated_for_cell(session_id, &cell_id, Some(agent.id.as_str()));
+    }
+
     fn emit_agent_completed(&self, session: &Session, agent: &AgentInfo) {
+        self.harvest_completion_artifacts(session, agent);
         let Some(emitter) = self.event_emitter.clone() else {
             return;
         };
@@ -1057,6 +1195,15 @@ impl SessionController {
 
             self.emit_cell_status_changes(session_id, changes);
             self.emit_session_update(session_id);
+            if let Some(session) = self.get_session(session_id) {
+                if let Err(err) = cleanup_session_worktrees(&session) {
+                    tracing::warn!(
+                        "Session {} worktree cleanup after mark_session_completed: {}",
+                        session_id,
+                        err
+                    );
+                }
+            }
             return Ok(());
         }
 
@@ -1075,6 +1222,15 @@ impl SessionController {
         storage
             .save_session(&persisted)
             .map_err(|e| format!("Failed to persist session completion: {}", e))?;
+
+        let session_shell = Self::session_shell_from_persisted_for_worktree_cleanup(&persisted);
+        if let Err(err) = cleanup_session_worktrees(&session_shell) {
+            tracing::warn!(
+                "Session {} worktree cleanup after persisted mark_session_completed: {}",
+                session_id,
+                err
+            );
+        }
 
         Ok(())
     }
@@ -4475,13 +4631,20 @@ Last updated: {timestamp}
         flags: Vec<String>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
+        let solo_branch = format!("solo/{}/worker-1", session_id);
         let (_, solo_cwd) = create_session_worktree(
             &session_id,
             "worker-1",
-            &format!("solo/{}/worker-1", session_id),
+            &solo_branch,
             "HEAD",
             &project_path,
         )?;
+        self.emit_workspace_created(
+            &session_id,
+            PRIMARY_CELL_ID,
+            &solo_branch,
+            Some(&solo_cwd),
+        );
         let solo_name = "Solo Worker".to_string();
         let solo_description = Self::summarize_prompt_line(task_description.as_deref())
             .unwrap_or_else(|| "Solo session".to_string());
@@ -4500,28 +4663,29 @@ Last updated: {timestamp}
 
         {
             let pty_manager = self.pty_manager.read();
-            pty_manager
-                .create_session(
-                    solo_id.clone(),
-                    AgentRole::Worker { index: 1, parent: None },
-                    &cmd,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(&solo_cwd),
-                    120,
-                    30,
-                )
-                .map_err(|e| format!("Failed to spawn solo agent: {}", e))?;
+            if let Err(e) = pty_manager.create_session(
+                solo_id.clone(),
+                AgentRole::Worker { index: 1, parent: None },
+                &cmd,
+                &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                Some(&solo_cwd),
+                120,
+                30,
+            ) {
+                let _ = remove_session_worktree_cell(&project_path, &session_id, "worker-1");
+                return Err(format!("Failed to spawn solo agent: {}", e));
+            }
         }
 
         let session = Session {
             id: session_id.clone(),
             name,
             color,
+            project_path: project_path.clone(),
             session_type: SessionType::Solo {
                 cli: cli.clone(),
                 model: model.clone(),
             },
-            project_path,
             state: SessionState::Running,
             created_at: Utc::now(),
             agents: vec![AgentInfo {
@@ -4588,105 +4752,127 @@ Last updated: {timestamp}
             return self.launch_solo(config);
         }
 
+        // Create Queen agent
+        let queen_id = format!("{}-queen", session_id);
+        let (cmd, mut args) = Self::build_command(&config.queen_config);
+        let queen_branch = format!("hive/{}/queen", session_id);
+        let (_, queen_cwd) = create_session_worktree(
+            &session_id,
+            "queen",
+            &queen_branch,
+            "HEAD",
+            &project_path,
+        )?;
+        self.emit_workspace_created(
+            &session_id,
+            PRIMARY_CELL_ID,
+            &queen_branch,
+            Some(&queen_cwd),
+        );
+
+        // Check if plan.md exists (from previous planning phase)
+        let plan_path = project_path.join(".hive-manager").join(&session_id).join("plan.md");
+        let has_plan = plan_path.exists();
+
+        // Write Queen prompt to file and pass to CLI
+        let master_prompt = Self::build_queen_master_prompt(&config.queen_config.cli, &session_id, &config.workers, config.prompt.as_deref(), has_plan);
+        let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+        let prompt_path = prompt_file.to_string_lossy().to_string();
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+        // Write tool documentation files
+        Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli)?;
+
+        tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, queen_cwd);
+
         {
             let pty_manager = self.pty_manager.read();
+            if let Err(e) = pty_manager.create_session(
+                queen_id.clone(),
+                AgentRole::Queen,
+                &cmd,
+                &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                Some(&queen_cwd),
+                120,
+                30,
+            ) {
+                let _ = remove_session_worktree_cell(&project_path, &session_id, "queen");
+                return Err(format!("Failed to spawn Queen: {}", e));
+            }
+        }
 
-            // Create Queen agent
-            let queen_id = format!("{}-queen", session_id);
-            let (cmd, mut args) = Self::build_command(&config.queen_config);
-            let (_, queen_cwd) = create_session_worktree(
+        agents.push(AgentInfo {
+            id: queen_id.clone(),
+            role: AgentRole::Queen,
+            status: AgentStatus::Running,
+            config: config.queen_config.clone(),
+            parent_id: None,
+        });
+
+        // Create Worker agents
+        for (i, worker_config) in config.workers.iter().enumerate() {
+            let index = (i + 1) as u8;
+            let worker_id = format!("{}-worker-{}", session_id, index);
+            let worker_role = worker_config.role.clone().unwrap_or_else(|| {
+                WorkerRole::new("general", "Worker", &worker_config.cli)
+            });
+            let worker_config =
+                Self::apply_worker_identity(index, &worker_role, worker_config.clone());
+            let (cmd, mut args) = Self::build_command(&worker_config);
+            let worker_branch = format!("hive/{}/worker-{}", session_id, index);
+            let (_, worker_cwd) = create_session_worktree(
                 &session_id,
-                "queen",
-                &format!("hive/{}/queen", session_id),
+                &format!("worker-{}", index),
+                &worker_branch,
                 "HEAD",
                 &project_path,
             )?;
+            self.emit_workspace_created(
+                &session_id,
+                PRIMARY_CELL_ID,
+                &worker_branch,
+                Some(&worker_cwd),
+            );
 
-            // Check if plan.md exists (from previous planning phase)
-            let plan_path = project_path.join(".hive-manager").join(&session_id).join("plan.md");
-            let has_plan = plan_path.exists();
+            // Write task file for this worker (STANDBY or with initial task)
+            Self::write_task_file(&project_path, &session_id, index, worker_config.initial_prompt.as_deref())?;
 
-            // Write Queen prompt to file and pass to CLI
-            let master_prompt = Self::build_queen_master_prompt(&config.queen_config.cli, &session_id, &config.workers, config.prompt.as_deref(), has_plan);
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+            // Write worker prompt to file and pass to CLI
+            let worker_prompt = Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
+            let filename = format!("worker-{}-prompt.md", index);
+            let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-            // Write tool documentation files
-            Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli)?;
+            tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, worker_cwd);
 
-            tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, queen_cwd);
-
-            pty_manager
-                .create_session(
-                    queen_id.clone(),
-                    AgentRole::Queen,
+            {
+                let pty_manager = self.pty_manager.read();
+                if let Err(e) = pty_manager.create_session(
+                    worker_id.clone(),
+                    AgentRole::Worker { index, parent: Some(queen_id.clone()) },
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(&queen_cwd),
+                    Some(&worker_cwd),
                     120,
                     30,
-                )
-                .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
+                ) {
+                    let _ = remove_session_worktree_cell(
+                        &project_path,
+                        &session_id,
+                        &format!("worker-{index}"),
+                    );
+                    return Err(format!("Failed to spawn Worker {}: {}", index, e));
+                }
+            }
 
             agents.push(AgentInfo {
-                id: queen_id.clone(),
-                role: AgentRole::Queen,
+                id: worker_id,
+                role: AgentRole::Worker { index, parent: Some(queen_id.clone()) },
                 status: AgentStatus::Running,
-                config: config.queen_config.clone(),
-                parent_id: None,
+                config: worker_config.clone(),
+                parent_id: Some(queen_id.clone()),
             });
-
-            // Create Worker agents
-            for (i, worker_config) in config.workers.iter().enumerate() {
-                let index = (i + 1) as u8;
-                let worker_id = format!("{}-worker-{}", session_id, index);
-                let worker_role = worker_config.role.clone().unwrap_or_else(|| {
-                    WorkerRole::new("general", "Worker", &worker_config.cli)
-                });
-                let worker_config =
-                    Self::apply_worker_identity(index, &worker_role, worker_config.clone());
-                let (cmd, mut args) = Self::build_command(&worker_config);
-                let (_, worker_cwd) = create_session_worktree(
-                    &session_id,
-                    &format!("worker-{}", index),
-                    &format!("hive/{}/worker-{}", session_id, index),
-                    "HEAD",
-                    &project_path,
-                )?;
-
-                // Write task file for this worker (STANDBY or with initial task)
-                Self::write_task_file(&project_path, &session_id, index, worker_config.initial_prompt.as_deref())?;
-
-                // Write worker prompt to file and pass to CLI
-                let worker_prompt = Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
-                let filename = format!("worker-{}-prompt.md", index);
-                let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
-                let prompt_path = prompt_file.to_string_lossy().to_string();
-                Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-                tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, worker_cwd);
-
-                pty_manager
-                    .create_session(
-                        worker_id.clone(),
-                        AgentRole::Worker { index, parent: Some(queen_id.clone()) },
-                        &cmd,
-                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                        Some(&worker_cwd),
-                        120,
-                        30,
-                    )
-                    .map_err(|e| format!("Failed to spawn Worker {}: {}", index, e))?;
-
-                agents.push(AgentInfo {
-                    id: worker_id,
-                    role: AgentRole::Worker { index, parent: Some(queen_id.clone()) },
-                    status: AgentStatus::Running,
-                    config: worker_config.clone(),
-                    parent_id: Some(queen_id.clone()),
-                });
-            }
         }
 
         let session = Session {
@@ -6542,6 +6728,42 @@ Last updated: {timestamp}
             qa_timeout_secs: persisted.qa_timeout_secs,
             auth_strategy,
         })
+    }
+
+    /// Minimal `Session` for `cleanup_session_worktrees` when no in-memory session exists.
+    fn session_shell_from_persisted_for_worktree_cleanup(
+        persisted: &crate::storage::PersistedSession,
+    ) -> Session {
+        let session_type = match &persisted.session_type {
+            crate::storage::SessionTypeInfo::Hive { worker_count } => SessionType::Hive {
+                worker_count: *worker_count,
+            },
+            crate::storage::SessionTypeInfo::Swarm { planner_count } => SessionType::Swarm {
+                planner_count: *planner_count,
+            },
+            crate::storage::SessionTypeInfo::Fusion { variants } => SessionType::Fusion {
+                variants: variants.clone(),
+            },
+            crate::storage::SessionTypeInfo::Solo { cli, model } => SessionType::Solo {
+                cli: cli.clone(),
+                model: model.clone(),
+            },
+        };
+        Session {
+            id: persisted.id.clone(),
+            name: persisted.name.clone(),
+            color: persisted.color.clone(),
+            session_type,
+            project_path: PathBuf::from(&persisted.project_path),
+            state: SessionState::Completed,
+            created_at: persisted.created_at,
+            agents: vec![],
+            default_cli: persisted.default_cli.clone(),
+            default_model: persisted.default_model.clone(),
+            max_qa_iterations: persisted.max_qa_iterations,
+            qa_timeout_secs: persisted.qa_timeout_secs,
+            auth_strategy: AuthStrategy::None,
+        }
     }
 
     /// Continue a Swarm session after planning phase
