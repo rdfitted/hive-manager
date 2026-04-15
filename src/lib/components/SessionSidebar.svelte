@@ -263,24 +263,21 @@
 <aside class="sidebar" class:collapsed={sidebarCollapsed}>
   <div class="sidebar-header" class:collapsed={sidebarCollapsed}>
     <nav class="view-toggle" class:collapsed={sidebarCollapsed} aria-label="View switcher">
-      <a
-        href="/"
-        class="view-link"
-        class:active={$page.url.pathname === '/'}
-        aria-current={$page.url.pathname === '/' ? 'page' : undefined}
-        title="Sessions"
-      >
-        <House size={18} weight="light" />
-      </a>
-      <a
-        href="/dashboard"
-        class="view-link"
-        class:active={$page.url.pathname === '/dashboard'}
-        aria-current={$page.url.pathname === '/dashboard' ? 'page' : undefined}
-        title="Dashboard"
-      >
-        <Kanban size={18} weight="light" />
-      </a>
+      {#each [
+        { path: '/', icon: House, label: 'Sessions' },
+        { path: '/dashboard', icon: Kanban, label: 'Dashboard' }
+      ] as { path, icon: Icon, label } (path)}
+        <a
+          href={path}
+          class="view-link"
+          class:active={$page.url.pathname === path}
+          aria-label={label}
+          aria-current={$page.url.pathname === path ? 'page' : undefined}
+          title={label}
+        >
+          <Icon size={18} weight="light" />
+        </a>
+      {/each}
     </nav>
     <button
       type="button"
