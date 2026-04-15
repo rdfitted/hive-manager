@@ -14,7 +14,7 @@
     switch (key) {
       case 'Planning':
       case 'PlanReady':
-        return 'preparing';
+        return 'queued';
       case 'Starting':
         return 'launching';
       case 'Running':
@@ -22,7 +22,7 @@
       case 'QaInProgress':
         return 'running';
       case 'QaPassed':
-        return 'summarizing';
+        return 'completed';
       case 'Paused':
       case 'QaFailed':
         return 'waiting_input';

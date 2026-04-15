@@ -71,6 +71,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
 }
 
 fn make_test_session(id: &str, project_path: &str) -> Session {
+    let now = chrono::Utc::now();
     Session {
         id: id.to_string(),
         name: None,
@@ -78,7 +79,8 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         session_type: SessionType::Hive { worker_count: 1 },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
-        created_at: chrono::Utc::now(),
+        created_at: now,
+        last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
@@ -103,6 +105,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
             parent_id: None,
         })
         .collect();
+    let now = chrono::Utc::now();
     Session {
         id: id.to_string(),
         name: None,
@@ -110,7 +113,8 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         session_type: SessionType::Hive { worker_count: 1 },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
-        created_at: chrono::Utc::now(),
+        created_at: now,
+        last_activity_at: now,
         agents,
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
@@ -223,6 +227,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         project_path: temp_dir.clone(),
         state: SessionState::Running,
         created_at: chrono::Utc::now(),
+        last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
@@ -271,6 +276,7 @@ async fn test_patch_session_null_clears_field() {
         project_path: temp_dir.clone(),
         state: SessionState::Running,
         created_at: chrono::Utc::now(),
+        last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
@@ -418,6 +424,7 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         session_type: SessionTypeInfo::Hive { worker_count: 1 },
         project_path: std::env::temp_dir().join("hive-test-persisted-update").to_string_lossy().to_string(),
         created_at: chrono::Utc::now(),
+        last_activity_at: None,
         agents: vec![],
         state: "Completed".to_string(),
         default_cli: "claude".to_string(),
@@ -2345,6 +2352,7 @@ fn test_persisted_session_serializes_default_cli() {
         session_type: SessionTypeInfo::Hive { worker_count: 2 },
         project_path: "/tmp/test".to_string(),
         created_at: chrono::Utc::now(),
+        last_activity_at: None,
         agents: vec![],
         state: "Running".to_string(),
         default_cli: "gemini".to_string(),
@@ -3071,6 +3079,7 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             session_type: SessionTypeInfo::Hive { worker_count: 1 },
             project_path: temp_dir.path().to_string_lossy().to_string(),
             created_at: chrono::Utc::now(),
+            last_activity_at: None,
             agents: vec![],
             state: "Completed".to_string(),
             default_cli: "claude".to_string(),
@@ -3736,6 +3745,7 @@ async fn test_stream_events_rejects_path_traversal_session_id() {
 // ── Resolver launch endpoint tests ──────────────────────────────────────
 
 fn make_fusion_session(id: &str, project_path: &str) -> Session {
+    let now = chrono::Utc::now();
     Session {
         id: id.to_string(),
         name: None,
@@ -3743,7 +3753,8 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         session_type: SessionType::Fusion { variants: vec!["variant-a".to_string(), "variant-b".to_string()] },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
-        created_at: chrono::Utc::now(),
+        created_at: now,
+        last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
