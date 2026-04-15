@@ -43,7 +43,7 @@ pub(crate) fn agent_in_cell(session: &Session, cell_id: &str, agent: &AgentInfo)
 
 pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
     match state {
-        SessionState::Planning | SessionState::PlanReady => CellStatus::Queued,
+        SessionState::Planning | SessionState::PlanReady => CellStatus::Preparing,
         SessionState::Starting
         | SessionState::SpawningWorker(_)
         | SessionState::SpawningPlanner(_)
@@ -57,8 +57,10 @@ pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
         | SessionState::MergingWinner
         | SessionState::QaInProgress { .. }
         | SessionState::Running => CellStatus::Running,
-        SessionState::AwaitingVerdictSelection | SessionState::Paused => CellStatus::WaitingInput,
-        SessionState::QaPassed | SessionState::Completed | SessionState::Closed => CellStatus::Completed,
+        SessionState::AwaitingVerdictSelection | SessionState::Paused | SessionState::QaPassed => {
+            CellStatus::WaitingInput
+        }
+        SessionState::Completed | SessionState::Closed => CellStatus::Completed,
         SessionState::QaFailed { .. } | SessionState::QaMaxRetriesExceeded | SessionState::Failed(_) => {
             CellStatus::Failed
         }
@@ -225,8 +227,10 @@ mod tests {
     use crate::session::AuthStrategy;
 
     use super::*;
+    use super::super::controller::DEFAULT_MAX_QA_ITERATIONS;
 
     fn test_session(state: SessionState, agent_statuses: Vec<AgentStatus>) -> Session {
+        let now = Utc::now();
         Session {
             id: "session-1".to_string(),
             name: None,
@@ -236,7 +240,8 @@ mod tests {
             },
             project_path: PathBuf::from("."),
             state,
-            created_at: Utc::now(),
+            created_at: now,
+            last_activity_at: now,
             agents: agent_statuses
                 .into_iter()
                 .enumerate()
@@ -252,7 +257,7 @@ mod tests {
                 .collect(),
             default_cli: "claude".to_string(),
             default_model: None,
-            max_qa_iterations: 3,
+            max_qa_iterations: DEFAULT_MAX_QA_ITERATIONS,
             qa_timeout_secs: 300,
             auth_strategy: AuthStrategy::None,
         }
@@ -284,6 +289,22 @@ mod tests {
         let session = test_session(SessionState::Completed, vec![AgentStatus::Running]);
 
         assert_eq!(aggregate_cell_status(&session, "variant:alpha"), CellStatus::Completed);
+    }
+
+    #[test]
+    fn planning_and_qa_passed_states_keep_pre_completion_distinctions() {
+        assert_eq!(
+            session_state_to_cell_status(&SessionState::Planning),
+            CellStatus::Preparing
+        );
+        assert_eq!(
+            session_state_to_cell_status(&SessionState::PlanReady),
+            CellStatus::Preparing
+        );
+        assert_eq!(
+            session_state_to_cell_status(&SessionState::QaPassed),
+            CellStatus::WaitingInput
+        );
     }
 
     #[test]

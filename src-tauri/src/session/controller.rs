@@ -26,6 +26,13 @@ use crate::workspace::git::{
     cleanup_session_worktrees, create_session_worktree, remove_session_worktree_cell,
 };
 
+/// Example `coordination.log` lines for Queen quality-reconciliation (quiescence-based; no iteration cap).
+const QUEEN_QUALITY_RECONCILIATION_LOG_LINES: &str = r#"[TIMESTAMP] QUEEN: Entering reconciliation loop for latest push
+[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments since latest push
+[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
+[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
     Hive { worker_count: u8 },
@@ -61,7 +68,7 @@ impl From<String> for SessionError {
     }
 }
 
-const DEFAULT_MAX_QA_ITERATIONS: u8 = 3;
+pub const DEFAULT_MAX_QA_ITERATIONS: u8 = 20;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
 const MAX_PRIMARY_CELL_BRANCHES: usize = 4;
 const MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN: usize = 4_096;
@@ -137,6 +144,14 @@ fn default_qa_timeout_secs() -> u64 {
     DEFAULT_QA_TIMEOUT_SECS
 }
 
+fn default_session_qa_settings() -> (u8, u64, AuthStrategy) {
+    (
+        default_max_qa_iterations(),
+        default_qa_timeout_secs(),
+        AuthStrategy::dev_bypass(),
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
     Planning,
@@ -174,6 +189,7 @@ impl SessionState {
                 | SessionState::WaitingForPlanner(_)
                 | SessionState::SpawningEvaluator
                 | SessionState::QaInProgress { .. }
+                | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
         )
     }
@@ -327,6 +343,8 @@ pub struct Session {
     pub project_path: PathBuf,
     pub state: SessionState,
     pub created_at: DateTime<Utc>,
+    /// Latest meaningful activity (state persistence, heartbeats, etc.) for dashboards.
+    pub last_activity_at: DateTime<Utc>,
     pub agents: Vec<AgentInfo>,
     pub default_cli: String,
     pub default_model: Option<String>,
@@ -633,6 +651,7 @@ impl SessionController {
             }
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name,
@@ -641,12 +660,13 @@ impl SessionController {
             project_path,
             state: SessionState::Running,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
             default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -677,22 +697,25 @@ impl SessionController {
         name: Option<Option<String>>,
         color: Option<Option<String>>,
     ) -> Result<Session, String> {
-        let updated = {
+        let had_in_memory = {
             let mut sessions = self.sessions.write();
-            sessions.get_mut(session_id).map(|session| {
-                if let Some(name) = name.clone() {
-                    session.name = name;
-                }
-                if let Some(color) = color.clone() {
-                    session.color = color;
-                }
-                session.clone()
-            })
+            sessions
+                .get_mut(session_id)
+                .map(|session| {
+                    if let Some(name) = name.clone() {
+                        session.name = name;
+                    }
+                    if let Some(color) = color.clone() {
+                        session.color = color;
+                    }
+                })
+                .is_some()
         };
 
-        let updated = if let Some(updated) = updated {
+        let updated = if had_in_memory {
             self.update_session_storage_checked(session_id)?;
-            updated
+            self.get_session(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?
         } else {
             let storage = self
                 .storage
@@ -708,6 +731,7 @@ impl SessionController {
             if let Some(color) = color {
                 persisted.color = color;
             }
+            persisted.last_activity_at = Some(Utc::now());
 
             storage
                 .save_session(&persisted)
@@ -733,7 +757,80 @@ impl SessionController {
 
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
-        sessions.values().cloned().collect()
+        let heartbeats = self.agent_heartbeats.read();
+        sessions
+            .values()
+            .cloned()
+            .map(|mut session| {
+                if let Some(map) = heartbeats.get(&session.id) {
+                    if let Some(max_hb) = map.values().map(|h| h.last_activity).max() {
+                        if max_hb > session.last_activity_at {
+                            session.last_activity_at = max_hb;
+                        }
+                    }
+                }
+                session
+            })
+            .collect()
+    }
+
+    fn session_requires_internal_evaluator(session: &Session) -> bool {
+        session.agents.iter().any(|agent| {
+            matches!(
+                agent.role,
+                AgentRole::Evaluator | AgentRole::QaWorker { .. }
+            )
+        })
+    }
+
+    fn state_allows_completion(session: &Session) -> bool {
+        if Self::session_requires_internal_evaluator(session) {
+            matches!(session.state, SessionState::QaPassed)
+        } else {
+            matches!(session.state, SessionState::Running | SessionState::QaPassed)
+        }
+    }
+
+    pub fn can_complete_session(&self, session_id: &str) -> Result<(), String> {
+        let session = if let Some(session) = self.get_session(session_id) {
+            session
+        } else {
+            let storage = self
+                .storage
+                .as_ref()
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            let persisted = storage
+                .load_session(session_id)
+                .map_err(|_| format!("Session not found: {}", session_id))?;
+            self.session_from_persisted(&persisted)?
+        };
+
+        if !Self::state_allows_completion(&session) {
+            let requirement = if Self::session_requires_internal_evaluator(&session) {
+                "session must remain in QaPassed after internal QA passes"
+            } else {
+                "session must be in a quiescent Running/QaPassed state"
+            };
+            return Err(format!(
+                "Session completion blocked: {} (current state: {:?})",
+                requirement, session.state
+            ));
+        }
+
+        let quiet_for = Utc::now() - session.last_activity_at;
+        if quiet_for < chrono::Duration::minutes(10) {
+            let remaining = (chrono::Duration::minutes(10) - quiet_for)
+                .num_seconds()
+                .max(0);
+            return Err(format!(
+                "Session completion blocked: session must remain quiescent for at least 10 minutes after the last activity ({}s remaining)",
+                remaining
+            ));
+        }
+
+        // External reviewer comments are not tracked server-side yet, so the completion gate enforces
+        // the internal quiescence conditions we can prove here: evaluator-aware state + 10-minute quiet period.
+        Ok(())
     }
 
     // --- Heartbeat / Stall Detection ---
@@ -761,6 +858,19 @@ impl SessionController {
             );
             prev
         };
+        let session_snapshot = {
+            let mut sessions = self.sessions.write();
+            sessions.get_mut(session_id).map(|session| {
+                if now > session.last_activity_at {
+                    session.last_activity_at = now;
+                }
+                session.clone()
+            })
+        };
+
+        if let (Some(storage), Some(session)) = (self.storage.as_ref(), session_snapshot.as_ref()) {
+            Self::persist_session_snapshot(storage, session, session_id)?;
+        }
         let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
         if status_changed {
             if let Some(ref app_handle) = self.app_handle {
@@ -1235,6 +1345,8 @@ impl SessionController {
     }
 
     pub fn mark_session_completed(&self, session_id: &str) -> Result<(), String> {
+        self.can_complete_session(session_id)?;
+
         let previous_state = {
             let mut sessions = self.sessions.write();
             sessions.get_mut(session_id).map(|session| {
@@ -2317,21 +2429,28 @@ After spawning the Judge, monitor the evaluation directory:
 After the Judge winner is selected and merge is complete:
 
 1. Push the PR branch — this triggers CodeRabbit and Gemini reviewers
-2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
-3. Collect ALL findings:
-   a. Evaluator QA verdicts (from queen conversation)
-   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+2. Track the latest push timestamp and the PR review baseline from that push forward
+3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for external review
+4. Collect ALL findings since the latest push:
+   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS` only when an Evaluator is attached
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
-4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
+5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
-6. Commit and push
-7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
-8. If NO new comments: exit quality loop and mark session complete
+6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+7. Commit and push, then restart this loop using the new push as the baseline
+8. Only finish when ALL of these are true at the same time:
+   a. If an Evaluator is attached, internal `QA_VERDICT: PASS` has been received
+   b. The latest push has been live for at least 10 minutes
+   c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
+9. When all three conditions are met, mark the session complete:
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/complete"
+   ```
 
 ## Status Reporting
 
@@ -2340,9 +2459,11 @@ Write status updates to `.hive-manager/{session_id}/coordination.log`:
 [TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
 [TIMESTAMP] QUEEN: All variants complete - spawning Judge
 [TIMESTAMP] QUEEN: Judge evaluation complete
-[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
-[TIMESTAMP] QUEEN: Found/No new PR comments
-[TIMESTAMP] QUEEN: Quality loop complete — session done
+[TIMESTAMP] QUEEN: Entering quality loop for latest push
+[TIMESTAMP] QUEEN: QA PASS received / waiting on QA PASS
+[TIMESTAMP] QUEEN: Latest push has / has not aged 10 minutes
+[TIMESTAMP] QUEEN: Found / no new unresolved PR comments since latest push
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed
 ```
 
 ## Learning Tools
@@ -2359,6 +2480,51 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
             task_files = task_files,
             task_file_glob = format!(".hive-manager/{}/tasks/fusion-variant-*-task.md", session_id),
             cli = cli,
+        )
+    }
+
+    fn build_qa_milestone_handoff(session_id: &str, completion_scope: &str) -> String {
+        format!(
+r#"## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
+
+When ALL {completion_scope} have completed, you MUST signal the Evaluator:
+
+1. **Write the milestone-ready file** (this is what the Evaluator polls for):
+   ```bash
+   mkdir -p .hive-manager/{session_id}/peer
+   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
+   # Milestone Ready
+
+   ## Status: MILESTONE_READY
+   ## Milestone: [name or "smoke-test"]
+   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
+   ## Scope: [brief description of what was implemented]
+   ## Risks: [known risks or "none"]
+   MILESTONE_EOF
+   ```
+
+2. **Also notify the Evaluator via conversation** (backup signal):
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
+     -H "Content-Type: application/json" \
+     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
+   ```
+
+3. For smoke tests: write a simple contract for the Evaluator to grade against:
+   ```bash
+   mkdir -p .hive-manager/{session_id}/contracts
+   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
+   # Smoke Test Contract
+
+   ## Criteria
+   1. All workers spawned and ran successfully
+   2. Heartbeat API exercised by all workers
+   3. Conversation API exercised (queen inbox + shared channel)
+   4. All task files transitioned to COMPLETED status
+   CONTRACT_EOF
+   ```"#,
+            session_id = session_id,
+            completion_scope = completion_scope,
         )
     }
 
@@ -3244,6 +3410,7 @@ git push -u origin feat/add-authentication
 
 Do NOT assign worker tasks until the branch exists!
 "#;
+        let qa_milestone_handoff = Self::build_qa_milestone_handoff(session_id, "workers");
 
         format!(
             r#"# Queen Agent - Hive Manager Session
@@ -3406,44 +3573,7 @@ Workers record learnings during task completion. Your curation responsibilities:
 - Before creating a PR
 - When learnings count exceeds 10
 
-## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
-
-When ALL workers have completed their tasks, you MUST signal the Evaluator:
-
-1. **Write the milestone-ready file** (this is what the Evaluator polls for):
-   ```bash
-   mkdir -p .hive-manager/{session_id}/peer
-   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
-   # Milestone Ready
-
-   ## Status: MILESTONE_READY
-   ## Milestone: [name or "smoke-test"]
-   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
-   ## Scope: [brief description of what was implemented]
-   ## Risks: [known risks or "none"]
-   MILESTONE_EOF
-   ```
-
-2. **Also notify the Evaluator via conversation** (backup signal):
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
-     -H "Content-Type: application/json" \
-     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
-   ```
-
-3. For smoke tests: write a simple contract for the Evaluator to grade against:
-   ```bash
-   mkdir -p .hive-manager/{session_id}/contracts
-   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
-   # Smoke Test Contract
-
-   ## Criteria
-   1. All workers spawned and ran successfully
-   2. Heartbeat API exercised by all workers
-   3. Conversation API exercised (queen inbox + shared channel)
-   4. All task files transitioned to COMPLETED status
-   CONTRACT_EOF
-   ```
+{qa_milestone_handoff}
 
 ## Coordination Protocol
 
@@ -3503,16 +3633,15 @@ c. Wait for workers to complete
 d. Review changes, commit, and push
 
 ### Step 5: Repeat or Complete
-1. If NEW comments arrive after the push: repeat from Step 2 (maximum 3 iterations)
-2. If NO new comments found: exit quality loop and mark session complete
+The loop is **quiescence-based** (no fixed iteration cap):
+
+1. Commit and push fixes, then use the new push as the review baseline. If NEW unresolved PR comments appear after that push, return to Step 2 and repeat until quiescent.
+2. Only exit when ALL are true at the same time: internal `QA_VERDICT: PASS` has been received if an Evaluator runs, the latest push has been live for at least 10 minutes, and `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since that push.
+3. When all conditions are met, mark the session complete (`POST .../complete`).
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
-[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
-[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
-[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
-[TIMESTAMP] QUEEN: Quality loop complete — session done
+{queen_quality_log}
 ```
 
 After your orchestration objective is complete, transition to `idle` heartbeat status and continue checking your conversation file on heartbeat cadence.
@@ -3526,6 +3655,8 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             cli = cli,
             plan_section = plan_section,
             worker_list = worker_list,
+            qa_milestone_handoff = qa_milestone_handoff,
+            queen_quality_log = QUEEN_QUALITY_RECONCILIATION_LOG_LINES,
             task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
         )
     }
@@ -3854,6 +3985,7 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
         } else {
             ""
         };
+        let qa_milestone_handoff = Self::build_qa_milestone_handoff(session_id, "workers/planners");
 
         format!(
 r#"# Queen Agent - Swarm Session
@@ -3960,44 +4092,7 @@ Workers and planners record learnings during task completion. Your curation resp
 - Before creating a PR
 - When learnings count exceeds 10
 
-## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
-
-When ALL workers/planners have completed, you MUST signal the Evaluator:
-
-1. **Write the milestone-ready file** (this is what the Evaluator polls for):
-   ```bash
-   mkdir -p .hive-manager/{session_id}/peer
-   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
-   # Milestone Ready
-
-   ## Status: MILESTONE_READY
-   ## Milestone: [name or "smoke-test"]
-   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
-   ## Scope: [brief description of what was implemented]
-   ## Risks: [known risks or "none"]
-   MILESTONE_EOF
-   ```
-
-2. **Also notify the Evaluator via conversation** (backup signal):
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
-     -H "Content-Type: application/json" \
-     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
-   ```
-
-3. For smoke tests: write a simple contract for the Evaluator to grade against:
-   ```bash
-   mkdir -p .hive-manager/{session_id}/contracts
-   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
-   # Smoke Test Contract
-
-   ## Criteria
-   1. All workers spawned and ran successfully
-   2. Heartbeat API exercised by all workers
-   3. Conversation API exercised (queen inbox + shared channel)
-   4. All task files transitioned to COMPLETED status
-   CONTRACT_EOF
-   ```
+{qa_milestone_handoff}
 
 ## SEQUENTIAL SPAWNING PROTOCOL WITH COMMITS (CRITICAL)
 
@@ -4048,29 +4143,32 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 After all planners complete, integration is done, and changes are pushed to the PR branch:
 
 1. Push triggers CodeRabbit and Gemini reviewers automatically
-2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
-3. Collect ALL findings:
-   a. Evaluator QA verdicts (from queen conversation)
-   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+2. Track the latest push timestamp and treat it as the baseline for new review activity
+3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for reviewers
+4. Collect ALL findings since the latest push:
+   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS` only when an Evaluator is attached
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
-4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
+5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
-6. Commit and push
-7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
-8. If NO new comments: exit quality loop and mark session complete
+6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+7. Commit and push, then restart this loop using the new push as the baseline
+8. Only finish when ALL of these are true at the same time:
+   a. If an Evaluator is attached, internal `QA_VERDICT: PASS` has been received
+   b. The latest push has been live for at least 10 minutes
+   c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
+9. When all three conditions are met, mark the session complete:
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/complete"
+   ```
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
-[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
-[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
-[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
-[TIMESTAMP] QUEEN: Quality loop complete — session done
+{queen_quality_log}
 ```
 
 ## Your Task
@@ -4081,6 +4179,8 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             cli = cli,
             planner_info = planner_info,
             planner_count = planner_count,
+            qa_milestone_handoff = qa_milestone_handoff,
+            queen_quality_log = QUEEN_QUALITY_RECONCILIATION_LOG_LINES,
             task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
         )
     }
@@ -4757,6 +4857,7 @@ Last updated: {timestamp}
             }
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name,
@@ -4768,6 +4869,7 @@ Last updated: {timestamp}
             },
             state: SessionState::Running,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
                 id: solo_id,
                 role: AgentRole::Worker { index: 1, parent: None },
@@ -4777,9 +4879,9 @@ Last updated: {timestamp}
             }],
             default_cli: cli,
             default_model: model,
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -4984,6 +5086,7 @@ Last updated: {timestamp}
             });
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -4992,12 +5095,13 @@ Last updated: {timestamp}
             project_path: project_path.clone(),
             state: SessionState::Running,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5101,6 +5205,7 @@ Last updated: {timestamp}
             });
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5111,12 +5216,13 @@ Last updated: {timestamp}
             project_path: project_path.clone(),
             state: SessionState::Starting,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents: Vec::new(),
             default_cli: default_cli.clone(),
             default_model: config.default_model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5358,6 +5464,7 @@ Last updated: {timestamp}
         std::fs::write(&pending_config_path, config_json)
             .map_err(|e| format!("Failed to write pending config: {}", e))?;
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5366,12 +5473,13 @@ Last updated: {timestamp}
             project_path,
             state: SessionState::Planning,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5449,6 +5557,7 @@ Last updated: {timestamp}
             .map_err(|e| format!("Failed to write pending config: {}", e))?;
 
         let variant_names: Vec<String> = config.variants.iter().map(|v| v.name.clone()).collect();
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5457,12 +5566,13 @@ Last updated: {timestamp}
             project_path: project_path.clone(),
             state: SessionState::Planning,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: if config.default_cli.trim().is_empty() { "claude".to_string() } else { config.default_cli.trim().to_string() },
             default_model: config.default_model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5811,6 +5921,7 @@ Last updated: {timestamp}
         std::fs::write(&pending_config_path, config_json)
             .map_err(|e| format!("Failed to write pending config: {}", e))?;
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5819,12 +5930,13 @@ Last updated: {timestamp}
             project_path,
             state: SessionState::Planning,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -6059,19 +6171,7 @@ Last updated: {timestamp}
                     self.emit_cell_status_changes(session_id, changes);
                 }
 
-                let running_changes = {
-                    let mut sessions = self.sessions.write();
-                    sessions
-                        .get_mut(session_id)
-                        .map(|session| self.set_session_state_with_events(session, SessionState::Running))
-                };
-                self.emit_session_update(session_id);
-                self.update_session_storage(session_id);
-                if let Some(changes) = running_changes {
-                    self.emit_cell_status_changes(session_id, changes);
-                }
-
-                Ok(SessionState::Running)
+                Ok(SessionState::QaPassed)
             }
             "FAIL" | "QA_VERDICT: FAIL" => {
                 let (next_state, changes) = {
@@ -6083,6 +6183,11 @@ Last updated: {timestamp}
                     let next_iteration = next_qa_failure_iteration(&session.state);
 
                     if next_iteration > session.max_qa_iterations {
+                        tracing::warn!(
+                            "Session {} exhausted the QA safety ceiling at {} failed verdicts",
+                            session_id,
+                            session.max_qa_iterations
+                        );
                         let changes =
                             self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                         session.auth_strategy = AuthStrategy::None;
@@ -6157,13 +6262,14 @@ Last updated: {timestamp}
             if is_qa {
                 tracing::warn!("QA timeout fired for session {} after {}s — auto-passing", sid, timeout_secs);
 
-                // Transition directly to Running (skip transient QaPassed to avoid race)
+                // A timeout auto-pass should leave the session in QaPassed so the server can enforce
+                // the same quiescence gate as an explicit evaluator PASS.
                 let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
                         let previous_state = session.state.clone();
-                        let changes = cell_status_changes_for_transition(session, &SessionState::Running);
-                        session.state = SessionState::Running;
+                        let changes = cell_status_changes_for_transition(session, &SessionState::QaPassed);
+                        session.state = SessionState::QaPassed;
                         Some((previous_state, changes, session.clone()))
                     } else {
                         None
@@ -6846,6 +6952,9 @@ Last updated: {timestamp}
             project_path: PathBuf::from(&persisted.project_path),
             state,
             created_at: persisted.created_at,
+            last_activity_at: persisted
+                .last_activity_at
+                .unwrap_or(persisted.created_at),
             agents,
             default_cli: persisted.default_cli.clone(),
             default_model: persisted.default_model.clone(),
@@ -7055,6 +7164,7 @@ Last updated: {timestamp}
         std::fs::write(&swarm_config_path, planners_json)
             .map_err(|e| format!("Failed to write planner config: {}", e))?;
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -7063,12 +7173,13 @@ Last updated: {timestamp}
             project_path,
             state: SessionState::Running,  // Queen will spawn planners sequentially
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -7670,6 +7781,7 @@ Last updated: {timestamp}
             session_type,
             project_path: session.project_path.to_string_lossy().to_string(),
             created_at: session.created_at,
+            last_activity_at: Some(session.last_activity_at),
             agents,
             state: state_str,
             default_cli: session.default_cli.clone(),
@@ -7773,13 +7885,18 @@ Last updated: {timestamp}
     fn update_session_storage_checked(&self, session_id: &str) -> Result<(), String> {
         if let Some(ref storage) = self.storage {
             let session = {
-                let sessions = self.sessions.read();
-                sessions.get(session_id).cloned()
+                let mut sessions = self.sessions.write();
+                let Some(session) = sessions.get_mut(session_id) else {
+                    return Ok(());
+                };
+                let now = Utc::now();
+                if now > session.last_activity_at {
+                    session.last_activity_at = now;
+                }
+                session.clone()
             };
 
-            if let Some(session) = session {
-                Self::persist_session_snapshot(storage, &session, session_id)?;
-            }
+            Self::persist_session_snapshot(storage, &session, session_id)?;
         }
 
         Ok(())
@@ -8027,8 +8144,15 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_persisted_session_state, serialize_session_state, AgentConfig, AuthStrategy, SessionController, SessionState};
+    use super::{
+        parse_persisted_session_state, serialize_session_state, AgentConfig, AgentInfo,
+        AuthStrategy, Session, SessionController, SessionState, SessionType,
+    };
+    use crate::pty::{AgentRole, AgentStatus, PtyManager};
+    use chrono::{Duration, Utc};
+    use parking_lot::RwLock;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn session_state_variants_exist() {
@@ -8139,6 +8263,120 @@ mod tests {
         assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
         assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
         assert!(!prompt.contains(r#""cli": "claude""#));
+    }
+
+    fn test_controller() -> SessionController {
+        SessionController::new(Arc::new(RwLock::new(PtyManager::new())))
+    }
+
+    fn test_completion_session(
+        id: &str,
+        state: SessionState,
+        last_activity_at: chrono::DateTime<Utc>,
+        with_evaluator: bool,
+    ) -> Session {
+        let mut agents = Vec::new();
+        if with_evaluator {
+            agents.push(AgentInfo {
+                id: format!("{id}-evaluator"),
+                role: AgentRole::Evaluator,
+                status: AgentStatus::Completed,
+                config: AgentConfig::default(),
+                parent_id: None,
+            });
+        }
+
+        Session {
+            id: id.to_string(),
+            name: None,
+            color: None,
+            session_type: if with_evaluator {
+                SessionType::Hive { worker_count: 1 }
+            } else {
+                SessionType::Fusion {
+                    variants: vec!["alpha".to_string()],
+                }
+            },
+            project_path: PathBuf::from("."),
+            state,
+            created_at: last_activity_at - Duration::minutes(1),
+            last_activity_at,
+            agents,
+            default_cli: "claude".to_string(),
+            default_model: None,
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+        }
+    }
+
+    #[test]
+    fn can_complete_session_allows_quiet_evaluator_backed_session() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "evaluator-ok",
+            SessionState::QaPassed,
+            Utc::now() - Duration::minutes(11),
+            true,
+        ));
+
+        assert!(controller.can_complete_session("evaluator-ok").is_ok());
+    }
+
+    #[test]
+    fn can_complete_session_rejects_non_quiet_or_missing_qa_pass() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "evaluator-blocked",
+            SessionState::Running,
+            Utc::now() - Duration::minutes(11),
+            true,
+        ));
+        controller.insert_test_session(test_completion_session(
+            "fusion-recent",
+            SessionState::Running,
+            Utc::now() - Duration::minutes(2),
+            false,
+        ));
+
+        let blocked = controller
+            .can_complete_session("evaluator-blocked")
+            .expect_err("evaluator-backed session should require QaPassed");
+        assert!(blocked.contains("QaPassed"));
+
+        let recent = controller
+            .can_complete_session("fusion-recent")
+            .expect_err("fusion session should still require quiet period");
+        assert!(recent.contains("10 minutes"));
+    }
+
+    #[test]
+    fn can_complete_session_rejects_recent_qa_passed_session() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "evaluator-recent-pass",
+            SessionState::QaPassed,
+            Utc::now() - Duration::minutes(5),
+            true,
+        ));
+
+        let blocked = controller
+            .can_complete_session("evaluator-recent-pass")
+            .expect_err("QaPassed session should still satisfy quiet period");
+        assert!(blocked.contains("10 minutes"));
+    }
+
+    #[test]
+    fn can_complete_session_allows_quiet_fusion_session_without_evaluator() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "fusion-ok",
+            SessionState::Running,
+            Utc::now() - Duration::minutes(11),
+            false,
+        ));
+
+        assert!(controller.can_complete_session("fusion-ok").is_ok());
     }
 }
 

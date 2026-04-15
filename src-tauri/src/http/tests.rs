@@ -10,11 +10,16 @@ use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
-use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy};
+use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy, DEFAULT_MAX_QA_ITERATIONS};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig};
 use crate::coordination::InjectionManager;
 use crate::events::EventBus;
 use parking_lot::RwLock;
+
+/// Helper to get the default max_qa_iterations for test fixtures
+fn test_default_max_qa_iterations() -> u8 {
+    DEFAULT_MAX_QA_ITERATIONS
+}
 
 async fn setup_test_app() -> axum::Router {
     let storage = Arc::new(SessionStorage::new().unwrap());
@@ -66,6 +71,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
 }
 
 fn make_test_session(id: &str, project_path: &str) -> Session {
+    let now = chrono::Utc::now();
     Session {
         id: id.to_string(),
         name: None,
@@ -73,11 +79,12 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         session_type: SessionType::Hive { worker_count: 1 },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
-        created_at: chrono::Utc::now(),
+        created_at: now,
+        last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     }
@@ -98,6 +105,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
             parent_id: None,
         })
         .collect();
+    let now = chrono::Utc::now();
     Session {
         id: id.to_string(),
         name: None,
@@ -105,14 +113,42 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         session_type: SessionType::Hive { worker_count: 1 },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
-        created_at: chrono::Utc::now(),
+        created_at: now,
+        last_activity_at: now,
         agents,
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     }
+}
+
+fn make_test_session_for_completion(
+    id: &str,
+    project_path: &str,
+    state: SessionState,
+    last_activity_at: chrono::DateTime<chrono::Utc>,
+    with_evaluator: bool,
+) -> Session {
+    let mut session = make_test_session(id, project_path);
+    session.state = state;
+    session.last_activity_at = last_activity_at;
+    session.created_at = last_activity_at - chrono::Duration::minutes(1);
+    if with_evaluator {
+        session.agents.push(AgentInfo {
+            id: format!("{id}-evaluator"),
+            role: AgentRole::Evaluator,
+            status: AgentStatus::Completed,
+            config: AgentConfig::default(),
+            parent_id: None,
+        });
+    } else {
+        session.session_type = SessionType::Fusion {
+            variants: vec!["variant-a".to_string()],
+        };
+    }
+    session
 }
 
 #[tokio::test]
@@ -218,10 +254,11 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         project_path: temp_dir.clone(),
         state: SessionState::Running,
         created_at: chrono::Utc::now(),
+        last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     });
@@ -266,10 +303,11 @@ async fn test_patch_session_null_clears_field() {
         project_path: temp_dir.clone(),
         state: SessionState::Running,
         created_at: chrono::Utc::now(),
+        last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     });
@@ -413,11 +451,12 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         session_type: SessionTypeInfo::Hive { worker_count: 1 },
         project_path: std::env::temp_dir().join("hive-test-persisted-update").to_string_lossy().to_string(),
         created_at: chrono::Utc::now(),
+        last_activity_at: None,
         agents: vec![],
         state: "Completed".to_string(),
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: String::new(),
     };
@@ -2340,11 +2379,12 @@ fn test_persisted_session_serializes_default_cli() {
         session_type: SessionTypeInfo::Hive { worker_count: 2 },
         project_path: "/tmp/test".to_string(),
         created_at: chrono::Utc::now(),
+        last_activity_at: None,
         agents: vec![],
         state: "Running".to_string(),
         default_cli: "gemini".to_string(),
         default_model: Some("gemini-2.5-pro".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: String::new(),
     };
@@ -2383,7 +2423,7 @@ fn test_persisted_session_legacy_json_defaults_to_claude() {
     );
     assert_eq!(session.name, None);
     assert_eq!(session.color, None);
-    assert_eq!(session.max_qa_iterations, 3);
+    assert_eq!(session.max_qa_iterations, DEFAULT_MAX_QA_ITERATIONS);
     assert_eq!(session.qa_timeout_secs, 300);
 }
 
@@ -3066,11 +3106,12 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             session_type: SessionTypeInfo::Hive { worker_count: 1 },
             project_path: temp_dir.path().to_string_lossy().to_string(),
             created_at: chrono::Utc::now(),
+            last_activity_at: None,
             agents: vec![],
             state: "Completed".to_string(),
             default_cli: "claude".to_string(),
             default_model: Some("opus-4-6".to_string()),
-            max_qa_iterations: 3,
+            max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
             auth_strategy: String::new(),
         })
@@ -3641,6 +3682,229 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_list_sessions_reflects_fresh_heartbeat_activity_and_persists_it() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let storage = SessionStorage::new().unwrap();
+    let session_id = format!("session-list-hb-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+
+    let before = chrono::Utc::now() - chrono::Duration::minutes(20);
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            &["worker-1"],
+        ));
+    {
+        let sessions = controller.write();
+        let session = sessions
+            .get_session(&session_id)
+            .expect("session inserted");
+        let mut updated = session.clone();
+        updated.last_activity_at = before;
+        updated.created_at = before - chrono::Duration::minutes(1);
+        sessions.insert_test_session(updated);
+    }
+
+    let heartbeat_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"worker-1","status":"working","summary":"fresh activity"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(heartbeat_response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let listed = response_json
+        .get("sessions")
+        .and_then(|sessions| sessions.as_array())
+        .and_then(|sessions| {
+            sessions
+                .iter()
+                .find(|session| session.get("id").and_then(|id| id.as_str()) == Some(session_id.as_str()))
+        })
+        .expect("session should be listed");
+
+    let listed_last_activity = listed
+        .get("last_activity_at")
+        .and_then(|value| value.as_str())
+        .expect("last_activity_at");
+    let listed_last_activity = chrono::DateTime::parse_from_rfc3339(listed_last_activity)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(listed_last_activity > before);
+
+    let persisted = storage.load_session(&session_id).unwrap();
+    assert_eq!(persisted.last_activity_at, Some(listed_last_activity));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+}
+
+#[tokio::test]
+async fn test_complete_session_returns_conflict_when_not_quiescent() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-blocked");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-blocked",
+        temp_dir.to_str().unwrap(),
+        SessionState::Running,
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+        true,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-blocked/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = response_json.get("error").and_then(|value| value.as_str()).unwrap();
+    assert!(error.contains("QaPassed"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_complete_session_returns_conflict_for_recent_qa_passed_session() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-recent-pass");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-recent-pass",
+        temp_dir.to_str().unwrap(),
+        SessionState::QaPassed,
+        chrono::Utc::now() - chrono::Duration::minutes(5),
+        true,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-recent-pass/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = response_json.get("error").and_then(|value| value.as_str()).unwrap();
+    assert!(error.contains("10 minutes"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_complete_session_allows_quiet_evaluator_backed_session() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-ok");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-ok",
+        temp_dir.to_str().unwrap(),
+        SessionState::QaPassed,
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+        true,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-ok/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = controller
+        .read()
+        .get_session("session-complete-ok")
+        .expect("session should remain loaded");
+    assert!(matches!(session.state, SessionState::Completed));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_complete_session_allows_quiet_fusion_session_without_evaluator() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-fusion");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-fusion",
+        temp_dir.to_str().unwrap(),
+        SessionState::Running,
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+        false,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-fusion/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = controller
+        .read()
+        .get_session("session-complete-fusion")
+        .expect("session should remain loaded");
+    assert!(matches!(session.state, SessionState::Completed));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 // --- SSE Event Endpoint Tests ---
 
 #[tokio::test]
@@ -3731,6 +3995,7 @@ async fn test_stream_events_rejects_path_traversal_session_id() {
 // ── Resolver launch endpoint tests ──────────────────────────────────────
 
 fn make_fusion_session(id: &str, project_path: &str) -> Session {
+    let now = chrono::Utc::now();
     Session {
         id: id.to_string(),
         name: None,
@@ -3738,11 +4003,12 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         session_type: SessionType::Fusion { variants: vec!["variant-a".to_string(), "variant-b".to_string()] },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
-        created_at: chrono::Utc::now(),
+        created_at: now,
+        last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     }

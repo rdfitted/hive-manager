@@ -5,4 +5,5 @@ mod controller;
 pub use controller::{
     Session, SessionController, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig,
     FusionVariantConfig, FusionVariantStatus, SessionType, AgentInfo, SessionState, AuthStrategy,
+    DEFAULT_MAX_QA_ITERATIONS,
 };

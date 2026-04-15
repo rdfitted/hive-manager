@@ -113,6 +113,9 @@ fn session_from_persisted(persisted: PersistedSession) -> Session {
         project_path: persisted.project_path.into(),
         state: session_state_from_persisted(&persisted.state),
         created_at: persisted.created_at,
+        last_activity_at: persisted
+            .last_activity_at
+            .unwrap_or(persisted.created_at),
         agents: vec![],
         default_cli: persisted.default_cli,
         default_model: persisted.default_model,

@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::coordination::CoordinationMessage;
 use crate::domain::{ArtifactBundle, ResolverOutput};
 use crate::session::cell_status::PRIMARY_CELL_ID;
+use crate::session::DEFAULT_MAX_QA_ITERATIONS;
 use crate::templates::SessionTemplate;
 
 /// Generate a deterministic ID for legacy learnings that lack one.
@@ -102,6 +103,8 @@ pub struct SessionSummary {
     pub session_type: String,
     pub project_path: String,
     pub created_at: DateTime<Utc>,
+    /// Best-known recent activity for dashboards (falls back to `created_at` when unset in storage).
+    pub last_activity_at: DateTime<Utc>,
     pub agent_count: usize,
     pub state: String,
 }
@@ -117,6 +120,8 @@ pub struct PersistedSession {
     pub session_type: SessionTypeInfo,
     pub project_path: String,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
     pub agents: Vec<PersistedAgentInfo>,
     pub state: String,
     #[serde(default = "default_cli")]
@@ -136,7 +141,7 @@ fn default_cli() -> String {
 }
 
 fn default_max_qa_iterations() -> u8 {
-    3
+    DEFAULT_MAX_QA_ITERATIONS
 }
 
 fn default_qa_timeout_secs() -> u64 {
@@ -341,6 +346,9 @@ impl SessionStorage {
                         session_type,
                         project_path: session.project_path,
                         created_at: session.created_at,
+                        last_activity_at: session
+                            .last_activity_at
+                            .unwrap_or(session.created_at),
                         agent_count: session.agents.len(),
                         state: session.state,
                     });

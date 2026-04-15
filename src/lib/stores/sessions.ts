@@ -1,6 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { CellStatus } from '$lib/types/domain';
 
 export type AgentRole =
   | 'MasterPlanner'
@@ -141,6 +142,46 @@ export function serdeEnumVariantName(value: unknown): string | undefined {
   return undefined;
 }
 
+export function sessionStateToCellStatus(state: SessionState | unknown): CellStatus {
+  const key = serdeEnumVariantName(state) ?? 'Unknown';
+
+  switch (key) {
+    case 'Planning':
+    case 'PlanReady':
+      return 'preparing';
+    case 'Starting':
+    case 'SpawningWorker':
+    case 'SpawningPlanner':
+    case 'SpawningFusionVariant':
+    case 'SpawningJudge':
+    case 'SpawningEvaluator':
+      return 'launching';
+    case 'WaitingForWorker':
+    case 'WaitingForPlanner':
+    case 'WaitingForFusionVariants':
+    case 'Judging':
+    case 'MergingWinner':
+    case 'QaInProgress':
+    case 'Running':
+      return 'running';
+    case 'AwaitingVerdictSelection':
+    case 'Paused':
+    case 'QaPassed':
+      return 'waiting_input';
+    case 'Completed':
+    case 'Closed':
+      return 'completed';
+    case 'QaFailed':
+    case 'QaMaxRetriesExceeded':
+    case 'Failed':
+      return 'failed';
+    case 'Closing':
+      return 'summarizing';
+    default:
+      return 'queued';
+  }
+}
+
 export interface Session {
   id: string;
   name?: string;
@@ -153,6 +194,8 @@ export interface Session {
   project_path: string;
   state: SessionState;
   created_at: string;
+  /** RFC3339; omitted on older persisted sessions — UI falls back to `created_at`. */
+  last_activity_at?: string;
   agents: AgentInfo[];
 }
 
