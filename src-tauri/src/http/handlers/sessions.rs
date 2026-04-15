@@ -79,6 +79,7 @@ pub struct SessionInfo {
     pub status: String,
     pub project_path: String,
     pub created_at: String,
+    pub last_activity_at: String,
 }
 
 #[derive(Serialize)]
@@ -362,6 +363,7 @@ pub async fn list_sessions(
         status: s.state,
         project_path: s.project_path,
         created_at: s.created_at.to_rfc3339(),
+        last_activity_at: s.last_activity_at.to_rfc3339(),
     }).collect();
 
     Ok(Json(SessionListResponse { sessions }))
@@ -389,6 +391,7 @@ pub async fn get_session(
             status: format!("{:?}", session.state),
             project_path: session.project_path.to_string_lossy().to_string(),
             created_at: session.created_at.to_rfc3339(),
+            last_activity_at: session.last_activity_at.to_rfc3339(),
         }));
     }
 
@@ -409,6 +412,10 @@ pub async fn get_session(
         status: persisted.state,
         project_path: persisted.project_path,
         created_at: persisted.created_at.to_rfc3339(),
+        last_activity_at: persisted
+            .last_activity_at
+            .unwrap_or(persisted.created_at)
+            .to_rfc3339(),
     }))
 }
 
@@ -654,6 +661,7 @@ pub async fn update_session(
         status: format!("{:?}", session.state),
         project_path: session.project_path.to_string_lossy().to_string(),
         created_at: session.created_at.to_rfc3339(),
+        last_activity_at: session.last_activity_at.to_rfc3339(),
     }))
 }
 

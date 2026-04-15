@@ -228,6 +228,7 @@ mod tests {
     use super::super::controller::DEFAULT_MAX_QA_ITERATIONS;
 
     fn test_session(state: SessionState, agent_statuses: Vec<AgentStatus>) -> Session {
+        let now = Utc::now();
         Session {
             id: "session-1".to_string(),
             name: None,
@@ -237,7 +238,8 @@ mod tests {
             },
             project_path: PathBuf::from("."),
             state,
-            created_at: Utc::now(),
+            created_at: now,
+            last_activity_at: now,
             agents: agent_statuses
                 .into_iter()
                 .enumerate()

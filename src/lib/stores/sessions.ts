@@ -153,6 +153,8 @@ export interface Session {
   project_path: string;
   state: SessionState;
   created_at: string;
+  /** RFC3339; omitted on older persisted sessions — UI falls back to `created_at`. */
+  last_activity_at?: string;
   agents: AgentInfo[];
 }
 

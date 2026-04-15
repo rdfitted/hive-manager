@@ -14,7 +14,7 @@
   let agentCount = $derived(session.agents?.length ?? 0);
   let StatusIcon = $derived(statusIconFor(status));
 
-  let lastActivity = $derived(session.created_at);
+  let lastActivity = $derived(session.last_activity_at ?? session.created_at);
 
   let lastActivityLabel = $derived.by(() => {
     if (!lastActivity) return '—';

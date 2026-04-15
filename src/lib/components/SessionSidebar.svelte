@@ -51,6 +51,7 @@
     session_type: string;
     project_path: string;
     created_at: string;
+    last_activity_at?: string;
     agent_count: number;
     state: string;
   }
@@ -359,7 +360,7 @@
                         {#if 'Solo' in session.session_type || ('Hive' in session.session_type && session.session_type.Hive.worker_count === 1 && session.agents.length === 1)}
                           <span class="type-tag solo">Solo</span>
                         {/if}
-                        {formatTimestamp(session.created_at)}
+                        {formatTimestamp(session.last_activity_at ?? session.created_at)}
                       </span>
                     {/if}
                   </div>
@@ -407,7 +408,7 @@
                     {#if session.session_type.startsWith('Solo') || (session.session_type === 'Hive (1)' && session.agent_count === 1)}
                       <span class="type-tag solo">Solo</span>
                     {/if}
-                    {formatTimestamp(session.created_at)}
+                    {formatTimestamp(session.last_activity_at ?? session.created_at)}
                   </span>
                 </div>
                 <button class="load-button" onclick={() => handleResumeSession(session.id)} title="Load Session" aria-label="Load session" type="button">

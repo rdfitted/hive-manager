@@ -26,6 +26,13 @@ use crate::workspace::git::{
     cleanup_session_worktrees, create_session_worktree, remove_session_worktree_cell,
 };
 
+/// Example `coordination.log` lines for Queen quality-reconciliation (quiescence-based; no iteration cap).
+const QUEEN_QUALITY_RECONCILIATION_LOG_LINES: &str = r#"[TIMESTAMP] QUEEN: Entering reconciliation loop for latest push
+[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments since latest push
+[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
+[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
     Hive { worker_count: u8 },
@@ -335,6 +342,8 @@ pub struct Session {
     pub project_path: PathBuf,
     pub state: SessionState,
     pub created_at: DateTime<Utc>,
+    /// Latest meaningful activity (state persistence, heartbeats, etc.) for dashboards.
+    pub last_activity_at: DateTime<Utc>,
     pub agents: Vec<AgentInfo>,
     pub default_cli: String,
     pub default_model: Option<String>,
@@ -650,6 +659,7 @@ impl SessionController {
             project_path,
             state: SessionState::Running,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
             default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
@@ -686,22 +696,25 @@ impl SessionController {
         name: Option<Option<String>>,
         color: Option<Option<String>>,
     ) -> Result<Session, String> {
-        let updated = {
+        let had_in_memory = {
             let mut sessions = self.sessions.write();
-            sessions.get_mut(session_id).map(|session| {
-                if let Some(name) = name.clone() {
-                    session.name = name;
-                }
-                if let Some(color) = color.clone() {
-                    session.color = color;
-                }
-                session.clone()
-            })
+            sessions
+                .get_mut(session_id)
+                .map(|session| {
+                    if let Some(name) = name.clone() {
+                        session.name = name;
+                    }
+                    if let Some(color) = color.clone() {
+                        session.color = color;
+                    }
+                })
+                .is_some()
         };
 
-        let updated = if let Some(updated) = updated {
+        let updated = if had_in_memory {
             self.update_session_storage_checked(session_id)?;
-            updated
+            self.get_session(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?
         } else {
             let storage = self
                 .storage
@@ -717,6 +730,7 @@ impl SessionController {
             if let Some(color) = color {
                 persisted.color = color;
             }
+            persisted.last_activity_at = Some(Utc::now());
 
             storage
                 .save_session(&persisted)
@@ -742,7 +756,21 @@ impl SessionController {
 
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
-        sessions.values().cloned().collect()
+        let heartbeats = self.agent_heartbeats.read();
+        sessions
+            .values()
+            .cloned()
+            .map(|mut session| {
+                if let Some(map) = heartbeats.get(&session.id) {
+                    if let Some(max_hb) = map.values().map(|h| h.last_activity).max() {
+                        if max_hb > session.last_activity_at {
+                            session.last_activity_at = max_hb;
+                        }
+                    }
+                }
+                session
+            })
+            .collect()
     }
 
     // --- Heartbeat / Stall Detection ---
@@ -770,6 +798,14 @@ impl SessionController {
             );
             prev
         };
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(session_id) {
+                if now > session.last_activity_at {
+                    session.last_activity_at = now;
+                }
+            }
+        }
         let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
         if status_changed {
             if let Some(ref app_handle) = self.app_handle {
@@ -3530,16 +3566,15 @@ c. Wait for workers to complete
 d. Review changes, commit, and push
 
 ### Step 5: Repeat or Complete
-1. If NEW comments arrive after the push: repeat from Step 2 (maximum 3 iterations)
-2. If NO new comments found: exit quality loop and mark session complete
+The loop is **quiescence-based** (no fixed iteration cap):
+
+1. Commit and push fixes, then use the new push as the review baseline. If NEW unresolved PR comments appear after that push, return to Step 2 and repeat until quiescent.
+2. Only exit when ALL are true at the same time: internal `QA_VERDICT: PASS` has been received (when an Evaluator runs), the latest push has been live for at least 10 minutes, and `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since that push.
+3. When all conditions are met, mark the session complete (`POST .../complete`).
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
-[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
-[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
-[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
-[TIMESTAMP] QUEEN: Quality loop complete — session done
+{queen_quality_log}
 ```
 
 After your orchestration objective is complete, transition to `idle` heartbeat status and continue checking your conversation file on heartbeat cadence.
@@ -3554,6 +3589,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             plan_section = plan_section,
             worker_list = worker_list,
             qa_milestone_handoff = qa_milestone_handoff,
+            queen_quality_log = QUEEN_QUALITY_RECONCILIATION_LOG_LINES,
             task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
         )
     }
@@ -4065,11 +4101,7 @@ After all planners complete, integration is done, and changes are pushed to the 
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering reconciliation loop for latest push
-[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments since latest push
-[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
-[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
-[TIMESTAMP] QUEEN: Quality loop complete - session marked completed
+{queen_quality_log}
 ```
 
 ## Your Task
@@ -4081,6 +4113,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             planner_info = planner_info,
             planner_count = planner_count,
             qa_milestone_handoff = qa_milestone_handoff,
+            queen_quality_log = QUEEN_QUALITY_RECONCILIATION_LOG_LINES,
             task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
         )
     }
@@ -4769,6 +4802,7 @@ Last updated: {timestamp}
             },
             state: SessionState::Running,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
                 id: solo_id,
                 role: AgentRole::Worker { index: 1, parent: None },
@@ -4994,6 +5028,7 @@ Last updated: {timestamp}
             project_path: project_path.clone(),
             state: SessionState::Running,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
@@ -5114,6 +5149,7 @@ Last updated: {timestamp}
             project_path: project_path.clone(),
             state: SessionState::Starting,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents: Vec::new(),
             default_cli: default_cli.clone(),
             default_model: config.default_model.clone(),
@@ -5370,6 +5406,7 @@ Last updated: {timestamp}
             project_path,
             state: SessionState::Planning,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
@@ -5462,6 +5499,7 @@ Last updated: {timestamp}
             project_path: project_path.clone(),
             state: SessionState::Planning,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: if config.default_cli.trim().is_empty() { "claude".to_string() } else { config.default_cli.trim().to_string() },
             default_model: config.default_model.clone(),
@@ -5825,6 +5863,7 @@ Last updated: {timestamp}
             project_path,
             state: SessionState::Planning,
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
@@ -6857,6 +6896,9 @@ Last updated: {timestamp}
             project_path: PathBuf::from(&persisted.project_path),
             state,
             created_at: persisted.created_at,
+            last_activity_at: persisted
+                .last_activity_at
+                .unwrap_or(persisted.created_at),
             agents,
             default_cli: persisted.default_cli.clone(),
             default_model: persisted.default_model.clone(),
@@ -7075,6 +7117,7 @@ Last updated: {timestamp}
             project_path,
             state: SessionState::Running,  // Queen will spawn planners sequentially
             created_at: Utc::now(),
+            last_activity_at: Utc::now(),
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
@@ -7682,6 +7725,7 @@ Last updated: {timestamp}
             session_type,
             project_path: session.project_path.to_string_lossy().to_string(),
             created_at: session.created_at,
+            last_activity_at: Some(session.last_activity_at),
             agents,
             state: state_str,
             default_cli: session.default_cli.clone(),
@@ -7785,13 +7829,18 @@ Last updated: {timestamp}
     fn update_session_storage_checked(&self, session_id: &str) -> Result<(), String> {
         if let Some(ref storage) = self.storage {
             let session = {
-                let sessions = self.sessions.read();
-                sessions.get(session_id).cloned()
+                let mut sessions = self.sessions.write();
+                let Some(session) = sessions.get_mut(session_id) else {
+                    return Ok(());
+                };
+                let now = Utc::now();
+                if now > session.last_activity_at {
+                    session.last_activity_at = now;
+                }
+                session.clone()
             };
 
-            if let Some(session) = session {
-                Self::persist_session_snapshot(storage, &session, session_id)?;
-            }
+            Self::persist_session_snapshot(storage, &session, session_id)?;
         }
 
         Ok(())
