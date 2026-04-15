@@ -40,6 +40,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/resolver/launch", post(resolver::launch_resolver))
         .route("/api/sessions/{id}/stop", post(sessions::stop_session))
         .route("/api/sessions/{id}/close", post(sessions::close_session))
+        .route("/api/sessions/{id}/complete", post(sessions::complete_session))
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))
         .route("/api/sessions/{id}/workers", post(workers::add_worker))

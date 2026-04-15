@@ -61,7 +61,7 @@ impl From<String> for SessionError {
     }
 }
 
-const DEFAULT_MAX_QA_ITERATIONS: u8 = 3;
+const DEFAULT_MAX_QA_ITERATIONS: u8 = 20;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
 const MAX_PRIMARY_CELL_BRANCHES: usize = 4;
 const MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN: usize = 4_096;
@@ -2317,21 +2317,28 @@ After spawning the Judge, monitor the evaluation directory:
 After the Judge winner is selected and merge is complete:
 
 1. Push the PR branch — this triggers CodeRabbit and Gemini reviewers
-2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
-3. Collect ALL findings:
-   a. Evaluator QA verdicts (from queen conversation)
-   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+2. Track the latest push timestamp and the PR review baseline from that push forward
+3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for external review
+4. Collect ALL findings since the latest push:
+   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS`
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
-4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
+5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
-6. Commit and push
-7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
-8. If NO new comments: exit quality loop and mark session complete
+6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+7. Commit and push, then restart this loop using the new push as the baseline
+8. Only finish when ALL of these are true at the same time:
+   a. Internal `QA_VERDICT: PASS` has been received
+   b. The latest push has been live for at least 10 minutes
+   c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
+9. When all three conditions are met, mark the session complete:
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/complete"
+   ```
 
 ## Status Reporting
 
@@ -2340,9 +2347,11 @@ Write status updates to `.hive-manager/{session_id}/coordination.log`:
 [TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
 [TIMESTAMP] QUEEN: All variants complete - spawning Judge
 [TIMESTAMP] QUEEN: Judge evaluation complete
-[TIMESTAMP] QUEEN: Entering quality loop (iteration N/3)
-[TIMESTAMP] QUEEN: Found/No new PR comments
-[TIMESTAMP] QUEEN: Quality loop complete — session done
+[TIMESTAMP] QUEEN: Entering quality loop for latest push
+[TIMESTAMP] QUEEN: QA PASS received / waiting on QA PASS
+[TIMESTAMP] QUEEN: Latest push has / has not aged 10 minutes
+[TIMESTAMP] QUEEN: Found / no new unresolved PR comments since latest push
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed
 ```
 
 ## Learning Tools
@@ -4048,29 +4057,36 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 After all planners complete, integration is done, and changes are pushed to the PR branch:
 
 1. Push triggers CodeRabbit and Gemini reviewers automatically
-2. WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
-3. Collect ALL findings:
-   a. Evaluator QA verdicts (from queen conversation)
-   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'`
+2. Track the latest push timestamp and treat it as the baseline for new review activity
+3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for reviewers
+4. Collect ALL findings since the latest push:
+   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS`
+   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
-4. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
+5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
    ```bash
    curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
      -H "Content-Type: application/json" \
      -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
    ```
-5. Read the reconciled fix list, spawn code-quality workers for the unified fixes
-6. Commit and push
-7. If NEW comments arrive: repeat from step 2 (maximum 3 iterations)
-8. If NO new comments: exit quality loop and mark session complete
+6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
+7. Commit and push, then restart this loop using the new push as the baseline
+8. Only finish when ALL of these are true at the same time:
+   a. Internal `QA_VERDICT: PASS` has been received
+   b. The latest push has been live for at least 10 minutes
+   c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
+9. When all three conditions are met, mark the session complete:
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/complete"
+   ```
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Entering reconciliation loop (iteration N/3)
-[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments
+[TIMESTAMP] QUEEN: Entering reconciliation loop for latest push
+[TIMESTAMP] QUEEN: Collected N evaluator findings, M external comments since latest push
 [TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
 [TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
-[TIMESTAMP] QUEEN: Quality loop complete — session done
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed
 ```
 
 ## Your Task
@@ -6083,6 +6099,11 @@ Last updated: {timestamp}
                     let next_iteration = next_qa_failure_iteration(&session.state);
 
                     if next_iteration > session.max_qa_iterations {
+                        tracing::warn!(
+                            "Session {} exhausted the QA safety ceiling at {} failed verdicts",
+                            session_id,
+                            session.max_qa_iterations
+                        );
                         let changes =
                             self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                         session.auth_strategy = AuthStrategy::None;
