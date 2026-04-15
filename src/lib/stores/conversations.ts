@@ -124,6 +124,7 @@ function createConversationStore() {
         selectedAgent: agentId,
         messages: [],
         loading: false,
+        error: null,
       }));
     },
 
@@ -135,6 +136,7 @@ function createConversationStore() {
         messages: [],
         selectedAgent: null,
         loading: false,
+        error: null,
       }));
     },
 
