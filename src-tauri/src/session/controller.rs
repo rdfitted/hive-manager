@@ -352,6 +352,11 @@ pub struct Session {
     pub qa_timeout_secs: u64,
     #[serde(default)]
     pub auth_strategy: AuthStrategy,
+    /// Primary git worktree path for this session (e.g. Queen or first Fusion variant), for UI.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -667,6 +672,8 @@ impl SessionController {
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -4882,6 +4889,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: Some(solo_cwd.clone()),
+            worktree_branch: Some(solo_branch.clone()),
         };
 
         {
@@ -5102,6 +5111,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: Some(queen_cwd.clone()),
+            worktree_branch: Some(queen_branch.clone()),
         };
 
         {
@@ -5223,6 +5234,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: variants.first().map(|v| v.worktree_path.clone()),
+            worktree_branch: variants.first().map(|v| v.branch.clone()),
         };
 
         {
@@ -5480,6 +5493,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -5573,6 +5588,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -5835,6 +5852,10 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 s.agents.extend(new_agents.clone());
+                if let Some(v) = variants.first() {
+                    s.worktree_path = Some(v.worktree_path.clone());
+                    s.worktree_branch = Some(v.branch.clone());
+                }
                 self.emit_agent_batch_launched(s, &new_agents);
                 let changes =
                     self.set_session_state_with_events(s, SessionState::WaitingForFusionVariants);
@@ -5937,6 +5958,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -6961,6 +6984,8 @@ Last updated: {timestamp}
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
             auth_strategy,
+            worktree_path: persisted.worktree_path.clone(),
+            worktree_branch: persisted.worktree_branch.clone(),
         })
     }
 
@@ -7180,6 +7205,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -7353,6 +7380,10 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
+                if session.worktree_path.is_none() {
+                    session.worktree_path = Some(worker_cwd.clone());
+                    session.worktree_branch = Some(worker_branch.clone());
+                }
                 self.emit_agent_launched(session, &agent_info);
             }
         }
@@ -7789,6 +7820,8 @@ Last updated: {timestamp}
             max_qa_iterations: session.max_qa_iterations,
             qa_timeout_secs: session.qa_timeout_secs,
             auth_strategy: auth_strategy.persist_value(),
+            worktree_path: session.worktree_path.clone(),
+            worktree_branch: session.worktree_branch.clone(),
         }
     }
 
@@ -8307,6 +8340,8 @@ mod tests {
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
             auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 

@@ -134,6 +134,10 @@ pub struct PersistedSession {
     pub qa_timeout_secs: u64,
     #[serde(default)]
     pub auth_strategy: String,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
 }
 
 fn default_cli() -> String {

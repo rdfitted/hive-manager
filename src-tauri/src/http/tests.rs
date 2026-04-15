@@ -87,6 +87,8 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
+        worktree_path: None,
+        worktree_branch: None,
     }
 }
 
@@ -121,6 +123,8 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
+        worktree_path: None,
+        worktree_branch: None,
     }
 }
 
@@ -261,6 +265,8 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
+        worktree_path: None,
+        worktree_branch: None,
     });
 
     let body = serde_json::json!({
@@ -310,6 +316,8 @@ async fn test_patch_session_null_clears_field() {
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
+        worktree_path: None,
+        worktree_branch: None,
     });
 
     let body = serde_json::json!({
@@ -459,6 +467,8 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: String::new(),
+        worktree_path: None,
+        worktree_branch: None,
     };
     storage.save_session(&persisted).unwrap();
 
@@ -2387,6 +2397,8 @@ fn test_persisted_session_serializes_default_cli() {
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: String::new(),
+        worktree_path: None,
+        worktree_branch: None,
     };
 
     let json = serde_json::to_string(&session).unwrap();
@@ -3114,6 +3126,8 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
             auth_strategy: String::new(),
+            worktree_path: None,
+            worktree_branch: None,
         })
         .unwrap();
     storage
@@ -4011,6 +4025,8 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
+        worktree_path: None,
+        worktree_branch: None,
     }
 }
 
