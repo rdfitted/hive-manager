@@ -1452,6 +1452,8 @@ impl SessionController {
                 }
                 let changes = self.set_session_state_with_events(session, SessionState::Closed);
                 session.auth_strategy = AuthStrategy::None;
+                session.worktree_path = None;
+                session.worktree_branch = None;
                 Some((session.clone(), completed_agents, changes))
             } else {
                 None
@@ -6672,6 +6674,8 @@ Last updated: {timestamp}
                 }
                 let changes = self.set_session_state_with_events(s, SessionState::Completed);
                 s.auth_strategy = AuthStrategy::None;
+                s.worktree_path = None;
+                s.worktree_branch = None;
                 Some((s.clone(), completed_agents, changes))
             } else {
                 None
