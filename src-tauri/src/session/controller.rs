@@ -7080,13 +7080,20 @@ Last updated: {timestamp}
 
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
+        let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
         let (_, worker_cwd) = create_session_worktree(
             session_id,
             &format!("worker-{}", worker_index),
-            &format!("hive/{}/worker-{}", session_id, worker_index),
+            &worker_branch,
             "HEAD",
             &session.project_path,
         )?;
+        self.emit_workspace_created(
+            session_id,
+            PRIMARY_CELL_ID,
+            &worker_branch,
+            Some(&worker_cwd),
+        );
 
         // Write task file for this worker (STANDBY or with initial task)
         Self::write_task_file(&session.project_path, session_id, worker_index, config_with_role.initial_prompt.as_deref())?;
@@ -7112,17 +7119,22 @@ Last updated: {timestamp}
         // Spawn PTY
         {
             let pty_manager = self.pty_manager.read();
-            pty_manager
-                .create_session(
-                    worker_id.clone(),
-                    worker_role.clone(),
-                    &cmd,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(&worker_cwd),
-                    120,
-                    30,
-                )
-                .map_err(|e| format!("Failed to spawn Worker {}: {}", worker_index, e))?;
+            if let Err(e) = pty_manager.create_session(
+                worker_id.clone(),
+                worker_role.clone(),
+                &cmd,
+                &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                Some(&worker_cwd),
+                120,
+                30,
+            ) {
+                let _ = remove_session_worktree_cell(
+                    &session.project_path,
+                    session_id,
+                    &format!("worker-{worker_index}"),
+                );
+                return Err(format!("Failed to spawn Worker {}: {}", worker_index, e));
+            }
         }
 
         // Create agent info with role

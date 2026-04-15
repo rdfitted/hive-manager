@@ -152,8 +152,19 @@ pub async fn add_worker_to_session(
 
     // Add worker through session controller
     let mut config = request.config;
-    config.name = request.name.or(config.name);
-    config.description = request.description.or(config.description);
+    let normalize_opt_str = |value: Option<String>| {
+        value.and_then(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    };
+    config.name = normalize_opt_str(request.name).or_else(|| normalize_opt_str(config.name));
+    config.description =
+        normalize_opt_str(request.description).or_else(|| normalize_opt_str(config.description));
 
     let agent_info = controller
         .add_worker(

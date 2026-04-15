@@ -73,7 +73,7 @@
       return;
     }
 
-    const trimmedName = workerName.trim() || `Worker (${roleLabel})`;
+    const explicitName = workerName.trim();
     const trimmedDescription = workerDescription.trim() || initialTask.trim() || `${roleLabel} tasks`;
 
     const role: WorkerRole = {
@@ -85,12 +85,12 @@
 
     const request: AddWorkerRequest = {
       session_id: $activeSession.id,
-      name: trimmedName,
+      ...(explicitName ? { name: explicitName } : {}),
       description: trimmedDescription,
       config: {
         cli: selectedCli,
         flags: [],
-        name: trimmedName,
+        ...(explicitName ? { name: explicitName } : {}),
         description: trimmedDescription,
         role,
         initial_prompt: initialTask || undefined,
