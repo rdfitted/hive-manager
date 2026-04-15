@@ -352,19 +352,58 @@ pub async fn launch_session(
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionListResponse>, ApiError> {
-    let summaries = state.storage.list_sessions()
+    let persisted = state.storage.list_sessions()
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    
-    let sessions = summaries.into_iter().map(|s| SessionInfo {
-        id: s.id,
-        name: s.name,
-        color: s.color,
-        session_type: s.session_type,
-        status: s.state,
-        project_path: s.project_path,
-        created_at: s.created_at.to_rfc3339(),
-        last_activity_at: s.last_activity_at.to_rfc3339(),
-    }).collect();
+
+    let active_sessions = state.session_controller.read().list_sessions();
+    let mut sessions = persisted
+        .into_iter()
+        .map(|s| {
+            (
+                s.id.clone(),
+                SessionInfo {
+                    id: s.id,
+                    name: s.name,
+                    color: s.color,
+                    session_type: s.session_type,
+                    status: s.state,
+                    project_path: s.project_path,
+                    created_at: s.created_at.to_rfc3339(),
+                    last_activity_at: s.last_activity_at.to_rfc3339(),
+                },
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for session in active_sessions {
+        sessions.insert(
+            session.id.clone(),
+            SessionInfo {
+                id: session.id.clone(),
+                name: session.name.clone(),
+                color: session.color.clone(),
+                session_type: match &session.session_type {
+                    crate::session::SessionType::Hive { worker_count } => {
+                        format!("Hive ({})", worker_count)
+                    }
+                    crate::session::SessionType::Swarm { planner_count } => {
+                        format!("Swarm ({})", planner_count)
+                    }
+                    crate::session::SessionType::Fusion { variants } => {
+                        format!("Fusion ({})", variants.len())
+                    }
+                    crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
+                },
+                status: format!("{:?}", session.state),
+                project_path: session.project_path.to_string_lossy().to_string(),
+                created_at: session.created_at.to_rfc3339(),
+                last_activity_at: session.last_activity_at.to_rfc3339(),
+            },
+        );
+    }
+
+    let mut sessions = sessions.into_values().collect::<Vec<_>>();
+    sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     Ok(Json(SessionListResponse { sessions }))
 }
@@ -794,6 +833,8 @@ pub async fn complete_session(
         .map_err(|e| {
             if e.starts_with("Session not found") {
                 ApiError::not_found(e)
+            } else if e.starts_with("Session completion blocked:") {
+                ApiError::new(StatusCode::CONFLICT, e)
             } else {
                 ApiError::internal(e)
             }
