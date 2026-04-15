@@ -136,7 +136,7 @@ fn default_cli() -> String {
 }
 
 fn default_max_qa_iterations() -> u8 {
-    3
+    20
 }
 
 fn default_qa_timeout_secs() -> u64 {

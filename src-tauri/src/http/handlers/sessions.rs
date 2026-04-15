@@ -771,3 +771,27 @@ pub async fn close_session(
         "message": format!("Session {} closed", id)
     })))
 }
+
+/// POST /api/sessions/{id}/complete - Mark a session as completed
+pub async fn complete_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_session_id(&id)?;
+
+    state
+        .session_controller
+        .read()
+        .mark_session_completed(&id)
+        .map_err(|e| {
+            if e.starts_with("Session not found") {
+                ApiError::not_found(e)
+            } else {
+                ApiError::internal(e)
+            }
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "message": format!("Session {} marked completed", id)
+    })))
+}
