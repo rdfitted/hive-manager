@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { CaretDown, CaretRight, Check, ClipboardText, PencilSimple } from 'phosphor-svelte';
+  import { CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
+  import { page } from '$app/stores';
   import { sessions, activeSession, serdeEnumVariantName, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
@@ -260,14 +261,41 @@
 </script>
 
 <aside class="sidebar" class:collapsed={sidebarCollapsed}>
-  <button class="sidebar-header" onclick={() => sidebarCollapsed = !sidebarCollapsed} title={sidebarCollapsed ? "Expand Sessions" : "Collapse Sessions"}>
-    <span class="sidebar-icon">
-      <ClipboardText size={18} weight="light" />
-    </span>
-    {#if !sidebarCollapsed}
-      <h2>Sessions</h2>
-    {/if}
-  </button>
+  <div class="sidebar-header" class:collapsed={sidebarCollapsed}>
+    <nav class="view-toggle" class:collapsed={sidebarCollapsed} aria-label="View switcher">
+      <a
+        href="/"
+        class="view-link"
+        class:active={$page.url.pathname === '/'}
+        aria-current={$page.url.pathname === '/' ? 'page' : undefined}
+        title="Sessions"
+      >
+        <House size={18} weight="light" />
+      </a>
+      <a
+        href="/dashboard"
+        class="view-link"
+        class:active={$page.url.pathname === '/dashboard'}
+        aria-current={$page.url.pathname === '/dashboard' ? 'page' : undefined}
+        title="Dashboard"
+      >
+        <Kanban size={18} weight="light" />
+      </a>
+    </nav>
+    <button
+      type="button"
+      class="collapse-chevron"
+      onclick={() => sidebarCollapsed = !sidebarCollapsed}
+      title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+    >
+      {#if sidebarCollapsed}
+        <CaretRight size={14} weight="light" />
+      {:else}
+        <CaretLeft size={14} weight="light" />
+      {/if}
+    </button>
+  </div>
 
   {#if !sidebarCollapsed}
   <div class="sidebar-content">
@@ -478,38 +506,70 @@
   .sidebar-header {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 16px;
+    gap: 8px;
+    padding: 8px;
     border-bottom: 1px solid var(--border-structural);
-    background: none;
-    border-left: none;
-    border-right: none;
-    border-top: none;
-    cursor: pointer;
     width: 100%;
-    text-align: left;
   }
 
-  .sidebar-header:hover {
-    background: var(--bg-elevated);
+  .sidebar-header.collapsed {
+    flex-direction: column;
+    gap: 6px;
   }
 
-  .sidebar-icon {
+  .view-toggle {
     display: flex;
+    flex-direction: row;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .view-toggle.collapsed {
+    flex-direction: column;
+    flex: none;
+  }
+
+  .view-link {
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-sm, 2px);
+    color: var(--text-muted);
+    text-decoration: none;
+    border: 1px solid transparent;
+    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  }
+
+  .view-link:hover {
     color: var(--accent-cyan);
   }
 
-  .sidebar-header h2 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
+  .view-link.active {
+    color: var(--accent-cyan);
+    background: var(--bg-elevated);
+    border-color: var(--border-structural);
+  }
+
+  .collapse-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm, 2px);
+    flex-shrink: 0;
+  }
+
+  .collapse-chevron:hover {
+    background: var(--bg-elevated);
+    color: var(--accent-cyan);
   }
 
   .sidebar-content {
