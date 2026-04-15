@@ -6,6 +6,13 @@
 
   onMount(() => {
     sessions.loadSessions();
+    const intervalId = window.setInterval(() => {
+      sessions.loadSessions();
+    }, 5000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
   });
 </script>
 
