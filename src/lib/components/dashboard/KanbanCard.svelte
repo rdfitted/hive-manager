@@ -2,13 +2,17 @@
   import { Eye, Users } from 'phosphor-svelte';
   import { goto } from '$app/navigation';
   import { sessions, type Session } from '$lib/stores/sessions';
+  import type { CellStatus } from '$lib/types/domain';
+  import { statusIconFor, statusIconWeight } from '$lib/components/cell/statusIcon';
 
   interface Props {
     session: Session;
+    status: CellStatus;
   }
-  let { session }: Props = $props();
+  let { session, status }: Props = $props();
 
   let agentCount = $derived(session.agents?.length ?? 0);
+  let StatusIcon = $derived(statusIconFor(status));
 
   let lastActivity = $derived(session.created_at);
 
@@ -36,7 +40,12 @@
 
 <article class="card" aria-label={title}>
   <header class="card-head">
-    <h3 class="title" title={title}>{title}</h3>
+    <div class="title-wrap">
+      <div class="status-icon" title={status} aria-hidden="true">
+        <StatusIcon size={14} weight={statusIconWeight(status)} />
+      </div>
+      <h3 class="title" title={title}>{title}</h3>
+    </div>
     <button class="eye" aria-label="Open session" title="Open session" onclick={openSession}>
       <Eye size={16} weight="light" />
     </button>
@@ -72,6 +81,24 @@
     justify-content: space-between;
     gap: var(--space-2);
   }
+  .title-wrap {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    flex: 1;
+  }
+  .status-icon {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text-secondary);
+    flex: 0 0 auto;
+  }
   .title {
     margin: 0;
     font-family: var(--font-display);
@@ -82,6 +109,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+    flex: 1;
   }
   .eye {
     background: none;

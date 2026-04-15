@@ -137,6 +137,14 @@ fn default_qa_timeout_secs() -> u64 {
     DEFAULT_QA_TIMEOUT_SECS
 }
 
+fn default_session_qa_settings() -> (u8, u64, AuthStrategy) {
+    (
+        default_max_qa_iterations(),
+        default_qa_timeout_secs(),
+        AuthStrategy::dev_bypass(),
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
     Planning,
@@ -633,6 +641,7 @@ impl SessionController {
             }
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name,
@@ -644,9 +653,9 @@ impl SessionController {
             agents,
             default_cli: cmd.to_string(),
             default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -2371,6 +2380,51 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
         )
     }
 
+    fn build_qa_milestone_handoff(session_id: &str, completion_scope: &str) -> String {
+        format!(
+r#"## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
+
+When ALL {completion_scope} have completed, you MUST signal the Evaluator:
+
+1. **Write the milestone-ready file** (this is what the Evaluator polls for):
+   ```bash
+   mkdir -p .hive-manager/{session_id}/peer
+   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
+   # Milestone Ready
+
+   ## Status: MILESTONE_READY
+   ## Milestone: [name or "smoke-test"]
+   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
+   ## Scope: [brief description of what was implemented]
+   ## Risks: [known risks or "none"]
+   MILESTONE_EOF
+   ```
+
+2. **Also notify the Evaluator via conversation** (backup signal):
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
+     -H "Content-Type: application/json" \
+     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
+   ```
+
+3. For smoke tests: write a simple contract for the Evaluator to grade against:
+   ```bash
+   mkdir -p .hive-manager/{session_id}/contracts
+   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
+   # Smoke Test Contract
+
+   ## Criteria
+   1. All workers spawned and ran successfully
+   2. Heartbeat API exercised by all workers
+   3. Conversation API exercised (queen inbox + shared channel)
+   4. All task files transitioned to COMPLETED status
+   CONTRACT_EOF
+   ```"#,
+            session_id = session_id,
+            completion_scope = completion_scope,
+        )
+    }
+
     /// Build the Master Planner's prompt for initial planning phase
     fn build_master_planner_prompt(session_id: &str, user_prompt: &str, workers: &[AgentConfig]) -> String {
         // Build worker info section
@@ -3253,6 +3307,7 @@ git push -u origin feat/add-authentication
 
 Do NOT assign worker tasks until the branch exists!
 "#;
+        let qa_milestone_handoff = Self::build_qa_milestone_handoff(session_id, "workers");
 
         format!(
             r#"# Queen Agent - Hive Manager Session
@@ -3415,44 +3470,7 @@ Workers record learnings during task completion. Your curation responsibilities:
 - Before creating a PR
 - When learnings count exceeds 10
 
-## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
-
-When ALL workers have completed their tasks, you MUST signal the Evaluator:
-
-1. **Write the milestone-ready file** (this is what the Evaluator polls for):
-   ```bash
-   mkdir -p .hive-manager/{session_id}/peer
-   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
-   # Milestone Ready
-
-   ## Status: MILESTONE_READY
-   ## Milestone: [name or "smoke-test"]
-   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
-   ## Scope: [brief description of what was implemented]
-   ## Risks: [known risks or "none"]
-   MILESTONE_EOF
-   ```
-
-2. **Also notify the Evaluator via conversation** (backup signal):
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
-     -H "Content-Type: application/json" \
-     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
-   ```
-
-3. For smoke tests: write a simple contract for the Evaluator to grade against:
-   ```bash
-   mkdir -p .hive-manager/{session_id}/contracts
-   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
-   # Smoke Test Contract
-
-   ## Criteria
-   1. All workers spawned and ran successfully
-   2. Heartbeat API exercised by all workers
-   3. Conversation API exercised (queen inbox + shared channel)
-   4. All task files transitioned to COMPLETED status
-   CONTRACT_EOF
-   ```
+{qa_milestone_handoff}
 
 ## Coordination Protocol
 
@@ -3535,6 +3553,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             cli = cli,
             plan_section = plan_section,
             worker_list = worker_list,
+            qa_milestone_handoff = qa_milestone_handoff,
             task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
         )
     }
@@ -3863,6 +3882,7 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
         } else {
             ""
         };
+        let qa_milestone_handoff = Self::build_qa_milestone_handoff(session_id, "workers/planners");
 
         format!(
 r#"# Queen Agent - Swarm Session
@@ -3969,44 +3989,7 @@ Workers and planners record learnings during task completion. Your curation resp
 - Before creating a PR
 - When learnings count exceeds 10
 
-## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
-
-When ALL workers/planners have completed, you MUST signal the Evaluator:
-
-1. **Write the milestone-ready file** (this is what the Evaluator polls for):
-   ```bash
-   mkdir -p .hive-manager/{session_id}/peer
-   cat > .hive-manager/{session_id}/peer/milestone-ready.md << 'MILESTONE_EOF'
-   # Milestone Ready
-
-   ## Status: MILESTONE_READY
-   ## Milestone: [name or "smoke-test"]
-   ## Contract: .hive-manager/{session_id}/contracts/milestone-1.md
-   ## Scope: [brief description of what was implemented]
-   ## Risks: [known risks or "none"]
-   MILESTONE_EOF
-   ```
-
-2. **Also notify the Evaluator via conversation** (backup signal):
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
-     -H "Content-Type: application/json" \
-     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
-   ```
-
-3. For smoke tests: write a simple contract for the Evaluator to grade against:
-   ```bash
-   mkdir -p .hive-manager/{session_id}/contracts
-   cat > .hive-manager/{session_id}/contracts/milestone-1.md << 'CONTRACT_EOF'
-   # Smoke Test Contract
-
-   ## Criteria
-   1. All workers spawned and ran successfully
-   2. Heartbeat API exercised by all workers
-   3. Conversation API exercised (queen inbox + shared channel)
-   4. All task files transitioned to COMPLETED status
-   CONTRACT_EOF
-   ```
+{qa_milestone_handoff}
 
 ## SEQUENTIAL SPAWNING PROTOCOL WITH COMMITS (CRITICAL)
 
@@ -4097,6 +4080,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             cli = cli,
             planner_info = planner_info,
             planner_count = planner_count,
+            qa_milestone_handoff = qa_milestone_handoff,
             task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
         )
     }
@@ -4773,6 +4757,7 @@ Last updated: {timestamp}
             }
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name,
@@ -4793,9 +4778,9 @@ Last updated: {timestamp}
             }],
             default_cli: cli,
             default_model: model,
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5000,6 +4985,7 @@ Last updated: {timestamp}
             });
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5011,9 +4997,9 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5117,6 +5103,7 @@ Last updated: {timestamp}
             });
         }
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5130,9 +5117,9 @@ Last updated: {timestamp}
             agents: Vec::new(),
             default_cli: default_cli.clone(),
             default_model: config.default_model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5374,6 +5361,7 @@ Last updated: {timestamp}
         std::fs::write(&pending_config_path, config_json)
             .map_err(|e| format!("Failed to write pending config: {}", e))?;
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5385,9 +5373,9 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5465,6 +5453,7 @@ Last updated: {timestamp}
             .map_err(|e| format!("Failed to write pending config: {}", e))?;
 
         let variant_names: Vec<String> = config.variants.iter().map(|v| v.name.clone()).collect();
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5476,9 +5465,9 @@ Last updated: {timestamp}
             agents,
             default_cli: if config.default_cli.trim().is_empty() { "claude".to_string() } else { config.default_cli.trim().to_string() },
             default_model: config.default_model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -5827,6 +5816,7 @@ Last updated: {timestamp}
         std::fs::write(&pending_config_path, config_json)
             .map_err(|e| format!("Failed to write pending config: {}", e))?;
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -5838,9 +5828,9 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {
@@ -7076,6 +7066,7 @@ Last updated: {timestamp}
         std::fs::write(&swarm_config_path, planners_json)
             .map_err(|e| format!("Failed to write planner config: {}", e))?;
 
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
             name: config.name.clone(),
@@ -7087,9 +7078,9 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
-            max_qa_iterations: default_max_qa_iterations(),
-            qa_timeout_secs: default_qa_timeout_secs(),
-            auth_strategy: AuthStrategy::dev_bypass(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
         };
 
         {

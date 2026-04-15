@@ -68,6 +68,7 @@
     {#each PRIMARY_COLUMNS as col (col.status)}
       <KanbanColumn
         label={col.label}
+        status={col.status}
         accent={col.accent}
         sessions={groups.get(col.status) ?? []}
       />
@@ -92,11 +93,13 @@
       <div class="columns">
         <KanbanColumn
           label="Failed"
+          status="failed"
           accent="var(--status-error)"
           sessions={groups.get('failed') ?? []}
         />
         <KanbanColumn
           label="Killed"
+          status="killed"
           accent="var(--status-blocked)"
           sessions={groups.get('killed') ?? []}
         />
