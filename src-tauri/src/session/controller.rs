@@ -3600,9 +3600,9 @@ Workers run in isolated git worktrees. Each worker has its own worktree + branch
    - `git -C <worktree> diff <feature-branch>...<branch>`
 
 2. **CHOOSE** integration method per worker:
-   - **Preferred — cherry-pick** (from the main checkout): `git cherry-pick hive/{session_id}/worker-N` — preserves worker commit, clean history.
+   - **Preferred — cherry-pick the full branch range**: `git rev-list --reverse <feature-branch>..<branch> | xargs -n1 git cherry-pick` — preserves the worker's full commit history.
    - **Squash merge**: `git merge --squash <branch> && git commit -m '...'` — use when the worker made noisy WIP commits.
-   - **Diff-apply**: `git -C <worktree> diff HEAD | git apply` then Queen commits — use when the worker did not commit at all.
+   - **Patch apply**: only use this when the worker has no commits and has staged/tracked all files first; otherwise newly created untracked files will be missed.
 
 3. **ORDER integration** to minimize conflicts. Integrate disjoint-file tasks first. For tasks that touch overlapping files, integrate one, then rebase the next worker branch onto the updated tip before picking.
 
@@ -7402,10 +7402,8 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
-                if session.worktree_path.is_none() {
-                    session.worktree_path = Some(worker_cwd.clone());
-                    session.worktree_branch = Some(worker_branch.clone());
-                }
+                // Don't promote ephemeral worker worktrees to session-level metadata.
+                // Only persist long-lived primary worktrees here.
                 self.emit_agent_launched(session, &agent_info);
             }
         }
