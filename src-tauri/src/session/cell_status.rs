@@ -225,6 +225,7 @@ mod tests {
     use crate::session::AuthStrategy;
 
     use super::*;
+    use super::super::controller::DEFAULT_MAX_QA_ITERATIONS;
 
     fn test_session(state: SessionState, agent_statuses: Vec<AgentStatus>) -> Session {
         Session {
@@ -252,7 +253,7 @@ mod tests {
                 .collect(),
             default_cli: "claude".to_string(),
             default_model: None,
-            max_qa_iterations: 3,
+            max_qa_iterations: DEFAULT_MAX_QA_ITERATIONS,
             qa_timeout_secs: 300,
             auth_strategy: AuthStrategy::None,
         }

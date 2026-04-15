@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::coordination::CoordinationMessage;
 use crate::domain::{ArtifactBundle, ResolverOutput};
 use crate::session::cell_status::PRIMARY_CELL_ID;
+use crate::session::DEFAULT_MAX_QA_ITERATIONS;
 use crate::templates::SessionTemplate;
 
 /// Generate a deterministic ID for legacy learnings that lack one.
@@ -136,7 +137,7 @@ fn default_cli() -> String {
 }
 
 fn default_max_qa_iterations() -> u8 {
-    20
+    DEFAULT_MAX_QA_ITERATIONS
 }
 
 fn default_qa_timeout_secs() -> u64 {

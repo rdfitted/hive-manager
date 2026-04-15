@@ -10,11 +10,16 @@ use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
-use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy};
+use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy, DEFAULT_MAX_QA_ITERATIONS};
 use crate::pty::{AgentRole, AgentStatus, AgentConfig};
 use crate::coordination::InjectionManager;
 use crate::events::EventBus;
 use parking_lot::RwLock;
+
+/// Helper to get the default max_qa_iterations for test fixtures
+fn test_default_max_qa_iterations() -> u8 {
+    DEFAULT_MAX_QA_ITERATIONS
+}
 
 async fn setup_test_app() -> axum::Router {
     let storage = Arc::new(SessionStorage::new().unwrap());
@@ -77,7 +82,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     }
@@ -109,7 +114,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         agents,
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     }
@@ -221,7 +226,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     });
@@ -269,7 +274,7 @@ async fn test_patch_session_null_clears_field() {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     });
@@ -417,7 +422,7 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         state: "Completed".to_string(),
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: String::new(),
     };
@@ -2344,7 +2349,7 @@ fn test_persisted_session_serializes_default_cli() {
         state: "Running".to_string(),
         default_cli: "gemini".to_string(),
         default_model: Some("gemini-2.5-pro".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: String::new(),
     };
@@ -2383,7 +2388,7 @@ fn test_persisted_session_legacy_json_defaults_to_claude() {
     );
     assert_eq!(session.name, None);
     assert_eq!(session.color, None);
-    assert_eq!(session.max_qa_iterations, 3);
+    assert_eq!(session.max_qa_iterations, DEFAULT_MAX_QA_ITERATIONS);
     assert_eq!(session.qa_timeout_secs, 300);
 }
 
@@ -3070,7 +3075,7 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             state: "Completed".to_string(),
             default_cli: "claude".to_string(),
             default_model: Some("opus-4-6".to_string()),
-            max_qa_iterations: 3,
+            max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
             auth_strategy: String::new(),
         })
@@ -3742,7 +3747,7 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus-4-6".to_string()),
-        max_qa_iterations: 3,
+        max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
         auth_strategy: AuthStrategy::default(),
     }

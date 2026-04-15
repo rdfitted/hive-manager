@@ -61,7 +61,7 @@ impl From<String> for SessionError {
     }
 }
 
-const DEFAULT_MAX_QA_ITERATIONS: u8 = 20;
+pub const DEFAULT_MAX_QA_ITERATIONS: u8 = 20;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
 const MAX_PRIMARY_CELL_BRANCHES: usize = 4;
 const MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN: usize = 4_096;
