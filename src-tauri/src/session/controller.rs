@@ -3590,6 +3590,28 @@ Workers record learnings during task completion. Your curation responsibilities:
 4. **Monitor progress** - Watch for workers to mark tasks COMPLETED
 5. **Spawn next worker** - When a task completes, spawn the next worker if needed
 6. **Review & integrate** - Review worker output and coordinate integration
+
+## Worktree Integration Protocol
+
+Workers run in isolated git worktrees. Each worker has its own worktree + branch created by the backend at `.hive-manager/worktrees/{session_id}/worker-N` on branch `hive/{session_id}/worker-N`. Integrate them back into the feature branch as follows:
+
+1. **LOCATE** each worker's worktree at `.hive-manager/worktrees/{session_id}/worker-N` on branch `hive/{session_id}/worker-N`. Inspect changes via:
+   - `git -C <worktree> log <branch> ^<feature-branch>`
+   - `git -C <worktree> diff <feature-branch>...<branch>`
+
+2. **CHOOSE** integration method per worker:
+   - **Preferred — cherry-pick** (from the main checkout): `git cherry-pick hive/{session_id}/worker-N` — preserves worker commit, clean history.
+   - **Squash merge**: `git merge --squash <branch> && git commit -m '...'` — use when the worker made noisy WIP commits.
+   - **Diff-apply**: `git -C <worktree> diff HEAD | git apply` then Queen commits — use when the worker did not commit at all.
+
+3. **ORDER integration** to minimize conflicts. Integrate disjoint-file tasks first. For tasks that touch overlapping files, integrate one, then rebase the next worker branch onto the updated tip before picking.
+
+4. **COMMIT CADENCE**: one separate commit per worker on the feature branch; push after each commit to give external reviewers (CodeRabbit/Gemini) incremental surface.
+
+5. **CLEANUP** after successful integration: `git worktree remove <path>` and `git branch -D hive/{session_id}/worker-N`. (Backend also cleans on session completion — safe to leave if unsure.)
+
+6. **CONFLICTS**: resolve in the main checkout, re-run `cargo check --tests` to confirm integrity, then commit the resolution.
+
 7. **Commit & push** - You handle final commits (workers don't push)
 8. **Signal Evaluator** - Once all tasks are done, write milestone-ready (see above)
 
