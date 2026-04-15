@@ -1,9 +1,24 @@
 <script lang="ts">
+    import { GitBranch } from 'phosphor-svelte';
     import { activeSession, serdeEnumVariantName } from '../../stores/sessions';
 
     $: session = $activeSession;
     $: mode = session ? serdeEnumVariantName(session.session_type)?.toLowerCase() ?? 'session' : 'session';
     $: status = session ? serdeEnumVariantName(session.state)?.toLowerCase() ?? 'unknown' : 'unknown';
+
+    function truncatePath(path: string, maxLen = 44): string {
+        const p = path.trim();
+        if (p.length <= maxLen) return p;
+        const head = Math.floor(maxLen / 2) - 1;
+        const tail = maxLen - head - 1;
+        return `${p.slice(0, Math.max(head, 1))}…${p.slice(-Math.max(tail, 1))}`;
+    }
+
+    $: wtPath = session?.worktree_path?.trim() ?? '';
+    $: wtBranch = session?.worktree_branch?.trim() ?? '';
+    $: worktreeTooltip = [wtBranch && `Branch: ${wtBranch}`, wtPath && `Path: ${wtPath}`].filter(Boolean).join('\n');
+    $: worktreeChipLabel = wtBranch || (wtPath ? truncatePath(wtPath) : '');
+    $: showWorktreeChip = Boolean(wtBranch || wtPath);
 </script>
 
 <div class="session-header">
@@ -13,6 +28,12 @@
                 <span class="mode-badge {mode}">{mode}</span>
                 <h1 class="session-name">{session.name || session.id}</h1>
                 <span class="status-badge {status}">{status.replaceAll('_', ' ')}</span>
+                {#if showWorktreeChip}
+                    <span class="worktree-chip" title={worktreeTooltip}>
+                        <GitBranch size={14} weight="light" aria-hidden="true" />
+                        <span class="worktree-label">{worktreeChipLabel}</span>
+                    </span>
+                {/if}
             </div>
             <p class="objective">Session ID: {session.id}</p>
         </div>
@@ -91,6 +112,32 @@
     }
 
     .status-badge.running { color: var(--status-running); border-color: var(--status-running); background: color-mix(in srgb, var(--status-running) 5%, transparent); }
+
+    .worktree-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        max-width: min(240px, 38vw);
+        padding: 2px 8px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-structural);
+        background: var(--bg-elevated);
+        color: var(--text-muted);
+        font-size: 11px;
+        font-family: var(--font-mono);
+        white-space: nowrap;
+    }
+
+    .worktree-chip :global(svg) {
+        flex-shrink: 0;
+        color: var(--accent-cyan);
+    }
+
+    .worktree-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+    }
 
     .objective {
         margin: 0;

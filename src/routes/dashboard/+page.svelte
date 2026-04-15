@@ -5,7 +5,23 @@
   import { sessions } from '$lib/stores/sessions';
 
   onMount(() => {
-    sessions.loadSessions();
+    let pollInFlight = false;
+    const poll = async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        await sessions.loadSessions();
+      } finally {
+        pollInFlight = false;
+      }
+    };
+
+    poll();
+    const intervalId = window.setInterval(poll, 5000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
   });
 </script>
 
