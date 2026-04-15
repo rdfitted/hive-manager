@@ -43,7 +43,7 @@ pub(crate) fn agent_in_cell(session: &Session, cell_id: &str, agent: &AgentInfo)
 
 pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
     match state {
-        SessionState::Planning | SessionState::PlanReady => CellStatus::Queued,
+        SessionState::Planning | SessionState::PlanReady => CellStatus::Preparing,
         SessionState::Starting
         | SessionState::SpawningWorker(_)
         | SessionState::SpawningPlanner(_)
@@ -57,8 +57,10 @@ pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
         | SessionState::MergingWinner
         | SessionState::QaInProgress { .. }
         | SessionState::Running => CellStatus::Running,
-        SessionState::AwaitingVerdictSelection | SessionState::Paused => CellStatus::WaitingInput,
-        SessionState::QaPassed | SessionState::Completed | SessionState::Closed => CellStatus::Completed,
+        SessionState::AwaitingVerdictSelection | SessionState::Paused | SessionState::QaPassed => {
+            CellStatus::WaitingInput
+        }
+        SessionState::Completed | SessionState::Closed => CellStatus::Completed,
         SessionState::QaFailed { .. } | SessionState::QaMaxRetriesExceeded | SessionState::Failed(_) => {
             CellStatus::Failed
         }
@@ -287,6 +289,22 @@ mod tests {
         let session = test_session(SessionState::Completed, vec![AgentStatus::Running]);
 
         assert_eq!(aggregate_cell_status(&session, "variant:alpha"), CellStatus::Completed);
+    }
+
+    #[test]
+    fn planning_and_qa_passed_states_keep_pre_completion_distinctions() {
+        assert_eq!(
+            session_state_to_cell_status(&SessionState::Planning),
+            CellStatus::Preparing
+        );
+        assert_eq!(
+            session_state_to_cell_status(&SessionState::PlanReady),
+            CellStatus::Preparing
+        );
+        assert_eq!(
+            session_state_to_cell_status(&SessionState::QaPassed),
+            CellStatus::WaitingInput
+        );
     }
 
     #[test]

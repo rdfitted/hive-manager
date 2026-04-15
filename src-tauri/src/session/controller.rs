@@ -2444,7 +2444,7 @@ After the Judge winner is selected and merge is complete:
 6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
 7. Commit and push, then restart this loop using the new push as the baseline
 8. Only finish when ALL of these are true at the same time:
-   a. Internal `QA_VERDICT: PASS` has been received
+   a. If an Evaluator is attached, internal `QA_VERDICT: PASS` has been received
    b. The latest push has been live for at least 10 minutes
    c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
 9. When all three conditions are met, mark the session complete:
@@ -4158,7 +4158,7 @@ After all planners complete, integration is done, and changes are pushed to the 
 6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
 7. Commit and push, then restart this loop using the new push as the baseline
 8. Only finish when ALL of these are true at the same time:
-   a. Internal `QA_VERDICT: PASS` has been received
+   a. If an Evaluator is attached, internal `QA_VERDICT: PASS` has been received
    b. The latest push has been live for at least 10 minutes
    c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
 9. When all three conditions are met, mark the session complete:
@@ -8348,6 +8348,22 @@ mod tests {
             .can_complete_session("fusion-recent")
             .expect_err("fusion session should still require quiet period");
         assert!(recent.contains("10 minutes"));
+    }
+
+    #[test]
+    fn can_complete_session_rejects_recent_qa_passed_session() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "evaluator-recent-pass",
+            SessionState::QaPassed,
+            Utc::now() - Duration::minutes(5),
+            true,
+        ));
+
+        let blocked = controller
+            .can_complete_session("evaluator-recent-pass")
+            .expect_err("QaPassed session should still satisfy quiet period");
+        assert!(blocked.contains("10 minutes"));
     }
 
     #[test]

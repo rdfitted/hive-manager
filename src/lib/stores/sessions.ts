@@ -148,7 +148,7 @@ export function sessionStateToCellStatus(state: SessionState | unknown): CellSta
   switch (key) {
     case 'Planning':
     case 'PlanReady':
-      return 'queued';
+      return 'preparing';
     case 'Starting':
     case 'SpawningWorker':
     case 'SpawningPlanner':
@@ -166,8 +166,8 @@ export function sessionStateToCellStatus(state: SessionState | unknown): CellSta
       return 'running';
     case 'AwaitingVerdictSelection':
     case 'Paused':
-      return 'waiting_input';
     case 'QaPassed':
+      return 'waiting_input';
     case 'Completed':
     case 'Closed':
       return 'completed';

@@ -3801,6 +3801,41 @@ async fn test_complete_session_returns_conflict_when_not_quiescent() {
 }
 
 #[tokio::test]
+async fn test_complete_session_returns_conflict_for_recent_qa_passed_session() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-recent-pass");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-recent-pass",
+        temp_dir.to_str().unwrap(),
+        SessionState::QaPassed,
+        chrono::Utc::now() - chrono::Duration::minutes(5),
+        true,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-recent-pass/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = response_json.get("error").and_then(|value| value.as_str()).unwrap();
+    assert!(error.contains("10 minutes"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_complete_session_allows_quiet_evaluator_backed_session() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = std::env::temp_dir().join("hive-test-complete-ok");
