@@ -1,13 +1,15 @@
 <script lang="ts">
   import type { Session } from '$lib/stores/sessions';
+  import type { CellStatus } from '$lib/types/domain';
   import KanbanCard from './KanbanCard.svelte';
 
   interface Props {
     label: string;
     sessions: Session[];
+    status?: CellStatus;
     accent?: string;
   }
-  let { label, sessions: items, accent = 'var(--text-secondary)' }: Props = $props();
+  let { label, sessions: items, status = 'queued', accent = 'var(--text-secondary)' }: Props = $props();
 </script>
 
 <section class="column" style="--col-accent: {accent};" aria-label={label}>
@@ -18,7 +20,7 @@
   </header>
   <div class="col-body">
     {#each items as s (s.id)}
-      <KanbanCard session={s} />
+      <KanbanCard session={s} status={status} />
     {/each}
     {#if items.length === 0}
       <div class="empty">—</div>

@@ -3,7 +3,8 @@
     import WorkspaceBadge from './WorkspaceBadge.svelte';
     import AgentList from '../agent/AgentList.svelte';
     import { ui } from '../../stores/ui';
-    import { Hourglass, Wrench, Rocket, Lightning, NotePencil, CheckCircle, Question, XCircle, Skull, Users } from 'phosphor-svelte';
+    import { Question, Users } from 'phosphor-svelte';
+    import { statusIconFor, statusIconWeight } from './statusIcon';
 
     export let cell: Cell;
 
@@ -27,17 +28,6 @@
         toggleSelection();
     }
 
-    const statusIcons: Record<string, any> = {
-        'queued': Hourglass,
-        'preparing': Wrench,
-        'launching': Rocket,
-        'running': Lightning,
-        'summarizing': NotePencil,
-        'completed': CheckCircle,
-        'waiting_input': Question,
-        'failed': XCircle,
-        'killed': Skull
-    };
 </script>
 
 <div 
@@ -54,9 +44,9 @@
     <div class="header">
         <div class="status-icon" title={cell.status} aria-hidden="true">
             <svelte:component 
-                this={statusIcons[cell.status] || Question} 
+                this={statusIconFor(cell.status) || Question} 
                 size={isCollapsed ? 14 : 18}
-                weight={cell.status === 'completed' || cell.status === 'failed' ? 'fill' : 'light'}
+                weight={statusIconWeight(cell.status)}
             />
         </div>
         <div class="name-box">
