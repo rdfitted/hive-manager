@@ -82,6 +82,7 @@ function mergeConversationMessages(
 }
 
 function createConversationStore() {
+  let activeConversationRequest = 0;
   const { subscribe, update } = writable<ConversationState>({
     messages: [],
     loading: false,
@@ -116,19 +117,28 @@ function createConversationStore() {
     subscribe,
 
     selectAgent(agentId: string | null) {
-      update((state) => ({ ...state, selectedAgent: agentId, messages: [] }));
+      activeConversationRequest += 1;
+      update((state) => ({
+        ...state,
+        selectedAgent: agentId,
+        messages: [],
+        loading: false,
+      }));
     },
 
     setSessionId(sessionId: string | null) {
+      activeConversationRequest += 1;
       update((state) => ({
         ...state,
         sessionId,
         messages: [],
         selectedAgent: null,
+        loading: false,
       }));
     },
 
     async loadConversation(sessionId: string, agentId: string, since?: string) {
+      const requestToken = ++activeConversationRequest;
       update((state) => ({ ...state, loading: true, error: null }));
       try {
         let url = apiUrl(`/api/sessions/${sessionId}/conversations/${agentId}`);
@@ -139,6 +149,14 @@ function createConversationStore() {
         const messages: ConversationMessage[] = data.messages ?? [];
         
         update((state) => {
+          if (requestToken !== activeConversationRequest) {
+            return state;
+          }
+
+          if (state.sessionId !== sessionId || state.selectedAgent !== agentId) {
+            return { ...state, loading: false };
+          }
+
           const newMessages = since
             ? mergeConversationMessages(state.messages, messages)
             : dedupeConversationMessages(messages);
@@ -152,7 +170,13 @@ function createConversationStore() {
           };
         });
       } catch (err) {
-        update((state) => ({ ...state, loading: false, error: String(err) }));
+        update((state) => {
+          if (requestToken !== activeConversationRequest) {
+            return state;
+          }
+
+          return { ...state, loading: false, error: String(err) };
+        });
       }
     },
 
@@ -167,7 +191,7 @@ function createConversationStore() {
           }
         );
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        // No need to reload - Tauri event will push it (and poll will catch up if missed)
+        await this.pollMessages();
       } catch (err) {
         update((state) => ({ ...state, error: String(err) }));
       }

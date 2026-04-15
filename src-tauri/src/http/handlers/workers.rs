@@ -41,6 +41,7 @@ pub struct AddWorkerRequest {
     #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     pub name: Option<String>,
     /// One-line task summary used for deterministic labels
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     pub description: Option<String>,
     /// CLI to use: claude, gemini, cursor, droid, qwen, etc. Defaults to "claude"
     pub cli: Option<String>,

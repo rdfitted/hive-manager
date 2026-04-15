@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::coordination::CoordinationMessage;
 use crate::domain::{ArtifactBundle, ResolverOutput};
+use crate::session::cell_status::PRIMARY_CELL_ID;
 use crate::templates::SessionTemplate;
 
 /// Generate a deterministic ID for legacy learnings that lack one.
@@ -897,7 +898,14 @@ impl SessionStorage {
     ) -> Result<(), StorageError> {
         let artifact_dir = self.artifact_dir(session_id);
         fs::create_dir_all(&artifact_dir)?;
-        self.atomic_write_json(&self.artifact_file_path(session_id, cell_id), artifact)
+
+        if cell_id == PRIMARY_CELL_ID {
+            let lock = self.artifact_lock(session_id, cell_id);
+            let _guard = lock.lock();
+            self.atomic_write_json(&self.artifact_file_path(session_id, cell_id), artifact)
+        } else {
+            self.atomic_write_json(&self.artifact_file_path(session_id, cell_id), artifact)
+        }
     }
 
     pub fn load_artifact(
@@ -1135,6 +1143,9 @@ pub struct RoleDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn create_test_storage() -> (SessionStorage, TempDir) {
@@ -1373,5 +1384,58 @@ invalid json line
         assert_eq!(learnings[0].id, "valid-1");
         assert_eq!(learnings[1].id, "valid-2");
         assert_eq!(learnings[2].id, "valid-3");
+    }
+
+    #[test]
+    fn test_primary_cell_save_artifact_waits_for_existing_lock() {
+        let (storage, _temp_dir) = create_test_storage();
+        let storage = Arc::new(storage);
+        let session_id = "test-session-primary-artifact-lock";
+
+        storage.create_session_dir(session_id).unwrap();
+
+        let artifact = ArtifactBundle {
+            summary: Some("summary".to_string()),
+            changed_files: vec!["src/main.rs".to_string()],
+            commits: vec!["abc123".to_string()],
+            branch: "feature/primary-lock".to_string(),
+            test_results: None,
+            diff_summary: None,
+            unresolved_issues: vec![],
+            confidence: Some(0.9),
+            recommended_next_step: None,
+        };
+
+        let lock = storage.artifact_lock(session_id, PRIMARY_CELL_ID);
+        let guard = lock.lock();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let storage_clone = Arc::clone(&storage);
+        let artifact_clone = artifact.clone();
+
+        let save_thread = thread::spawn(move || {
+            storage_clone
+                .save_artifact(session_id, PRIMARY_CELL_ID, &artifact_clone)
+                .unwrap();
+            done_tx.send(()).unwrap();
+        });
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "save_artifact should wait while the primary cell lock is held"
+        );
+
+        drop(guard);
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("save_artifact should complete after the primary cell lock is released");
+        save_thread.join().unwrap();
+
+        let saved = storage
+            .load_artifact(session_id, PRIMARY_CELL_ID)
+            .unwrap()
+            .expect("artifact should be persisted");
+        assert_eq!(saved.branch, artifact.branch);
     }
 }

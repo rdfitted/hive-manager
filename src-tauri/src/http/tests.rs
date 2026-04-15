@@ -2106,6 +2106,28 @@ fn test_add_worker_request_blank_name_deserializes_to_none() {
 }
 
 #[test]
+fn test_add_worker_request_blank_description_deserializes_to_none() {
+    for raw_description in ["", "   "] {
+        let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
+            serde_json::json!({
+                "role_type": "frontend",
+                "cli": "codex",
+                "name": "Worker 2 (Frontend)",
+                "description": raw_description,
+                "initial_task": "Handle SSE lagged events"
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            request.description.is_none(),
+            "expected blank description {:?} to deserialize as None",
+            raw_description
+        );
+    }
+}
+
+#[test]
 fn test_persisted_agent_config_round_trips_name_and_description_fields() {
     let config = crate::storage::PersistedAgentConfig {
         cli: "codex".to_string(),
