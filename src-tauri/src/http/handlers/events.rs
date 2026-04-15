@@ -9,6 +9,7 @@ use futures::stream::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::domain::event::Event as DomainEvent;
 use crate::http::error::ApiError;
@@ -74,9 +75,13 @@ pub async fn stream_events(
                             .data(json)))
                     }
                     Ok(_) => None, // Filtered out (different session)
-                    Err(e) => {
-                        tracing::warn!("SSE client lagged, events may have been dropped: {e:?}");
-                        None
+                    Err(BroadcastStreamRecvError::Lagged(n)) => {
+                        // Emit synthetic SSE frame for lagged clients
+                        // CONTRACT: frontend expects event name 'lagged' and JSON {"dropped": N}
+                        tracing::warn!("SSE client lagged, dropped {} events", n);
+                        Some(Ok(Event::default()
+                            .event("lagged")
+                            .data(format!(r#"{{"dropped":{}}}"#, n))))
                     }
                 }
             }

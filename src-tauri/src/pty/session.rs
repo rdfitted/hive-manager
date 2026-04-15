@@ -61,6 +61,10 @@ pub struct AgentConfig {
     #[serde(default)]
     pub flags: Vec<String>,       // Additional CLI flags
     pub label: Option<String>,    // Display name
+    #[serde(default)]
+    pub name: Option<String>,     // Stable agent name
+    #[serde(default)]
+    pub description: Option<String>, // One-line task summary
     pub role: Option<WorkerRole>, // Worker role assignment
     pub initial_prompt: Option<String>, // Prompt to inject on spawn
 }
@@ -76,6 +80,8 @@ impl Default for AgentConfig {
             model: None,
             flags: vec![],
             label: None,
+            name: None,
+            description: None,
             role: None,
             initial_prompt: None,
         }

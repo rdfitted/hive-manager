@@ -111,13 +111,15 @@ export type EventType =
     | 'session_status_changed'
     | 'cell_created'
     | 'cell_status_changed'
+    | 'conversation_message'
     | 'workspace_created'
     | 'agent_launched'
     | 'agent_completed'
     | 'agent_waiting_input'
     | 'agent_failed'
     | 'artifact_updated'
-    | 'resolver_selected_candidate';
+    | 'resolver_selected_candidate'
+    | 'lagged';
 
 export type Severity = 'info' | 'warning' | 'error';
 

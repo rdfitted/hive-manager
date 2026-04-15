@@ -13,6 +13,23 @@ use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
 use super::{validate_session_id, validate_cli};
 
+fn deserialize_optional_trimmed_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }))
+}
+
 /// Request to add a worker to a session
 #[derive(Debug, Clone, Deserialize)]
 pub struct AddWorkerRequest {
@@ -20,6 +37,12 @@ pub struct AddWorkerRequest {
     pub role_type: String,
     /// Optional custom label for the worker
     pub label: Option<String>,
+    /// Stable worker name
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    pub name: Option<String>,
+    /// One-line task summary used for deterministic labels
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    pub description: Option<String>,
     /// CLI to use: claude, gemini, cursor, droid, qwen, etc. Defaults to "claude"
     pub cli: Option<String>,
     /// Model to use (optional)
@@ -79,6 +102,8 @@ pub async fn add_worker(
         model: req.model,
         flags: vec![],
         label: Some(role_label.clone()),
+        name: req.name,
+        description: req.description,
         role: Some(role.clone()),
         initial_prompt: req.initial_task.clone(),
     };

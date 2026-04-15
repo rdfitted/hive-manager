@@ -27,7 +27,6 @@ async fn setup_test_app() -> axum::Router {
         SessionStorage::new().unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
-
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -35,6 +34,7 @@ async fn setup_test_app() -> axum::Router {
         injection_manager,
         storage,
         event_bus,
+        None,
     ));
 
     create_router(state)
@@ -52,7 +52,6 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         SessionStorage::new().unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
-
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -60,6 +59,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         injection_manager,
         storage,
         event_bus,
+        None,
     ));
 
     (create_router(state), session_controller)
@@ -2061,6 +2061,126 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_add_worker_request_accepts_name_and_description_fields() {
+    let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
+        serde_json::json!({
+            "role_type": "frontend",
+            "cli": "codex",
+            "name": "Worker 2 (Frontend)",
+            "description": "SSE resync + chat/timeline event handling",
+            "initial_task": "Handle SSE lagged events"
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(request.name.as_deref(), Some("Worker 2 (Frontend)"));
+    assert_eq!(
+        request.description.as_deref(),
+        Some("SSE resync + chat/timeline event handling")
+    );
+}
+
+#[test]
+fn test_add_worker_request_blank_name_deserializes_to_none() {
+    for raw_name in ["", "   "] {
+        let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
+            serde_json::json!({
+                "role_type": "frontend",
+                "cli": "codex",
+                "name": raw_name,
+                "description": "SSE resync + chat/timeline event handling",
+                "initial_task": "Handle SSE lagged events"
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            request.name.is_none(),
+            "expected blank name {:?} to deserialize as None",
+            raw_name
+        );
+    }
+}
+
+#[test]
+fn test_add_worker_request_blank_description_deserializes_to_none() {
+    for raw_description in ["", "   "] {
+        let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
+            serde_json::json!({
+                "role_type": "frontend",
+                "cli": "codex",
+                "name": "Worker 2 (Frontend)",
+                "description": raw_description,
+                "initial_task": "Handle SSE lagged events"
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            request.description.is_none(),
+            "expected blank description {:?} to deserialize as None",
+            raw_description
+        );
+    }
+}
+
+#[test]
+fn test_persisted_agent_config_round_trips_name_and_description_fields() {
+    let config = crate::storage::PersistedAgentConfig {
+        cli: "codex".to_string(),
+        model: Some("gpt-5.4".to_string()),
+        flags: vec![],
+        label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
+        name: Some("Worker 2 (Frontend)".to_string()),
+        description: Some("SSE resync + chat/timeline event handling".to_string()),
+        role_type: Some("frontend".to_string()),
+        initial_prompt: Some("Handle SSE lagged events".to_string()),
+    };
+
+    let encoded = serde_json::to_string(&config).unwrap();
+    let decoded: crate::storage::PersistedAgentConfig = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(decoded.name.as_deref(), Some("Worker 2 (Frontend)"));
+    assert_eq!(
+        decoded.description.as_deref(),
+        Some("SSE resync + chat/timeline event handling")
+    );
+    assert_eq!(
+        decoded.label.as_deref(),
+        Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling")
+    );
+}
+
+#[test]
+fn test_persisted_agent_config_blank_name_round_trip_uses_indexed_default_behavior() {
+    for raw_name in ["", "   "] {
+        let config = crate::storage::PersistedAgentConfig {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            flags: vec![],
+            label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
+            name: Some(raw_name.to_string()),
+            description: Some("SSE resync + chat/timeline event handling".to_string()),
+            role_type: Some("frontend".to_string()),
+            initial_prompt: Some("Handle SSE lagged events".to_string()),
+        };
+
+        let encoded = serde_json::to_string(&config).unwrap();
+        let decoded: crate::storage::PersistedAgentConfig = serde_json::from_str(&encoded).unwrap();
+
+        assert!(
+            decoded.name.is_none(),
+            "expected blank persisted name {:?} to deserialize as None",
+            raw_name
+        );
+        assert_eq!(
+            decoded.description.as_deref(),
+            Some("SSE resync + chat/timeline event handling")
+        );
+    }
 }
 
 #[tokio::test]

@@ -94,6 +94,7 @@ mod tests {
         assert_enum_round_trip(EventType::SessionStatusChanged, "\"session_status_changed\"");
         assert_enum_round_trip(EventType::CellCreated, "\"cell_created\"");
         assert_enum_round_trip(EventType::CellStatusChanged, "\"cell_status_changed\"");
+        assert_enum_round_trip(EventType::ConversationMessage, "\"conversation_message\"");
         assert_enum_round_trip(EventType::WorkspaceCreated, "\"workspace_created\"");
         assert_enum_round_trip(EventType::AgentLaunched, "\"agent_launched\"");
         assert_enum_round_trip(EventType::AgentCompleted, "\"agent_completed\"");

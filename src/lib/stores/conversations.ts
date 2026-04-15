@@ -3,9 +3,12 @@ import { listen } from '@tauri-apps/api/event';
 import { apiUrl } from '$lib/config';
 
 export interface ConversationMessage {
+  id?: string;
   timestamp: string;
   from: string;
   content: string;
+  agent_id?: string;
+  session_id?: string;
 }
 
 export interface HeartbeatInfo {
@@ -32,7 +35,55 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function hashContent(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+
+  return hash.toString(16);
+}
+
+function conversationMessageSignature(message: ConversationMessage): string {
+  return [
+    message.timestamp,
+    message.from,
+    message.agent_id ?? '',
+    hashContent(message.content),
+  ].join('|');
+}
+
+function dedupeConversationMessages(messages: ConversationMessage[]): ConversationMessage[] {
+  const seenIds = new Set<string>();
+  const seenSignatures = new Set<string>();
+  const deduped: ConversationMessage[] = [];
+
+  for (const message of messages) {
+    const signature = conversationMessageSignature(message);
+    const id = message.id;
+    if ((id && seenIds.has(id)) || seenSignatures.has(signature)) {
+      continue;
+    }
+
+    if (id) {
+      seenIds.add(id);
+    }
+    seenSignatures.add(signature);
+    deduped.push(message);
+  }
+
+  return deduped;
+}
+
+function mergeConversationMessages(
+  existing: ConversationMessage[],
+  incoming: ConversationMessage[],
+): ConversationMessage[] {
+  return dedupeConversationMessages([...existing, ...incoming]);
+}
+
 function createConversationStore() {
+  let activeConversationRequest = 0;
   const { subscribe, update } = writable<ConversationState>({
     messages: [],
     loading: false,
@@ -43,29 +94,54 @@ function createConversationStore() {
 
   // Listen for real-time conversation messages from Tauri
   listen<ConversationMessage>('conversation-message', (event) => {
-    update((state) => ({
-      ...state,
-      messages: [...state.messages, event.payload],
-    }));
+    update((state) => {
+      if (!state.sessionId || !state.selectedAgent) {
+        return state;
+      }
+
+      if (event.payload.session_id !== state.sessionId) {
+        return state;
+      }
+
+      if (event.payload.agent_id !== state.selectedAgent) {
+        return state;
+      }
+
+      return {
+        ...state,
+        messages: mergeConversationMessages(state.messages, [event.payload]),
+      };
+    });
   });
 
   return {
     subscribe,
 
     selectAgent(agentId: string | null) {
-      update((state) => ({ ...state, selectedAgent: agentId, messages: [] }));
+      activeConversationRequest += 1;
+      update((state) => ({
+        ...state,
+        selectedAgent: agentId,
+        messages: [],
+        loading: false,
+        error: null,
+      }));
     },
 
     setSessionId(sessionId: string | null) {
+      activeConversationRequest += 1;
       update((state) => ({
         ...state,
         sessionId,
         messages: [],
         selectedAgent: null,
+        loading: false,
+        error: null,
       }));
     },
 
     async loadConversation(sessionId: string, agentId: string, since?: string) {
+      const requestToken = ++activeConversationRequest;
       update((state) => ({ ...state, loading: true, error: null }));
       try {
         let url = apiUrl(`/api/sessions/${sessionId}/conversations/${agentId}`);
@@ -74,15 +150,36 @@ function createConversationStore() {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         const messages: ConversationMessage[] = data.messages ?? [];
-        update((state) => ({
-          ...state,
-          messages,
-          loading: false,
-          sessionId,
-          selectedAgent: agentId,
-        }));
+        
+        update((state) => {
+          if (requestToken !== activeConversationRequest) {
+            return state;
+          }
+
+          if (state.sessionId !== sessionId || state.selectedAgent !== agentId) {
+            return { ...state, loading: false };
+          }
+
+          const newMessages = since
+            ? mergeConversationMessages(state.messages, messages)
+            : dedupeConversationMessages(messages);
+
+          return {
+            ...state,
+            messages: newMessages,
+            loading: false,
+            sessionId,
+            selectedAgent: agentId,
+          };
+        });
       } catch (err) {
-        update((state) => ({ ...state, loading: false, error: String(err) }));
+        update((state) => {
+          if (requestToken !== activeConversationRequest) {
+            return state;
+          }
+
+          return { ...state, loading: false, error: String(err) };
+        });
       }
     },
 
@@ -97,14 +194,21 @@ function createConversationStore() {
           }
         );
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        // Reload to get the appended message
-        const state = getState();
-        if (state.sessionId && state.selectedAgent) {
-          await this.loadConversation(state.sessionId, state.selectedAgent);
-        }
+        await this.pollMessages();
       } catch (err) {
         update((state) => ({ ...state, error: String(err) }));
       }
+    },
+
+    // CONTRACT: Fallback poll in case Tauri event is lost
+    async pollMessages() {
+      const state = getState();
+      if (!state.sessionId || !state.selectedAgent) return;
+      
+      const lastMsg = state.messages[state.messages.length - 1];
+      const since = lastMsg?.timestamp;
+      
+      await this.loadConversation(state.sessionId, state.selectedAgent, since);
     },
 
     clearError() {

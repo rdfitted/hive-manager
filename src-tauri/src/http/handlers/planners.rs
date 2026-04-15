@@ -78,6 +78,8 @@ pub async fn add_planner(
         model,
         flags: vec![],
         label: req.label.clone().or_else(|| Some(format!("{} Planner", req.domain))),
+        name: None,
+        description: None,
         role: None,
         initial_prompt: None,
     };
@@ -91,6 +93,8 @@ pub async fn add_planner(
                 model: None,
                 flags: vec![],
                 label: w.label.clone(),
+                name: None,
+                description: None,
                 role: Some(crate::pty::WorkerRole {
                     role_type: w.role_type.clone(),
                     label: w.label.clone().unwrap_or_else(|| w.role_type.clone()),
@@ -109,6 +113,8 @@ pub async fn add_planner(
                 model: None,
                 flags: vec![],
                 label: Some(format!("Worker {}", i + 1)),
+                name: None,
+                description: None,
                 role: Some(crate::pty::WorkerRole {
                     role_type: "general".to_string(),
                     label: format!("Worker {}", i + 1),

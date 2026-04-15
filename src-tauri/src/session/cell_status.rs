@@ -150,12 +150,24 @@ fn agent_in_cell_with_variant_cache(
 ) -> bool {
     match &session.session_type {
         SessionType::Fusion { .. } if cell_id == RESOLVER_CELL_ID => {
+            // Resolver cell contains all NON-Fusion agents (judge, planner, evaluator, QA)
             !matches!(&agent.role, AgentRole::Fusion { .. })
         }
         SessionType::Fusion { .. } if cell_id != PRIMARY_CELL_ID => {
+            // Variant cells contain only Fusion agents matching that variant
             fusion_agent_matches_cell(cell_id, agent, variant_cell_cache)
         }
-        _ => true,
+        SessionType::Fusion { variants } if variants.is_empty() => {
+            cell_id == PRIMARY_CELL_ID
+        }
+        SessionType::Fusion { .. } => {
+            // PRIMARY_CELL_ID is not used in Fusion sessions
+            false
+        }
+        _ => {
+            // Non-Fusion sessions: all agents go to primary cell
+            cell_id == PRIMARY_CELL_ID
+        }
     }
 }
 
@@ -299,5 +311,105 @@ mod tests {
         let session = test_session(SessionState::Running, vec![]);
 
         assert_eq!(aggregate_cell_status(&session, RESOLVER_CELL_ID), CellStatus::Queued);
+    }
+
+    #[test]
+    fn non_fusion_primary_cell_contains_all_agents() {
+        // Non-Fusion sessions: all agents go to primary cell
+        let session = Session {
+            session_type: SessionType::Hive { worker_count: 1 },
+            ..test_session(SessionState::Running, vec![AgentStatus::Running])
+        };
+
+        assert!(agent_in_cell(&session, PRIMARY_CELL_ID, &session.agents[0]));
+    }
+
+    #[test]
+    fn fusion_primary_cell_contains_no_agents() {
+        // Fusion sessions do NOT use primary cell
+        let session = test_session(SessionState::Running, vec![AgentStatus::Running]);
+
+        assert!(!agent_in_cell(&session, PRIMARY_CELL_ID, &session.agents[0]));
+    }
+
+    #[test]
+    fn empty_variant_fusion_uses_primary_cell() {
+        let session = Session {
+            session_type: SessionType::Fusion { variants: vec![] },
+            ..test_session(SessionState::Running, vec![AgentStatus::Running])
+        };
+
+        assert_eq!(
+            session_cell_ids(&session),
+            vec![PRIMARY_CELL_ID.to_string()]
+        );
+        assert!(agent_in_cell(&session, PRIMARY_CELL_ID, &session.agents[0]));
+        assert_eq!(aggregate_cell_status(&session, PRIMARY_CELL_ID), CellStatus::Running);
+    }
+
+    #[test]
+    fn fusion_variant_cell_only_matches_fusion_agents() {
+        // Fusion variant cells contain only Fusion agents matching that variant
+        let fusion_agent = AgentInfo {
+            id: "fusion-agent".to_string(),
+            role: AgentRole::Fusion {
+                variant: "Alpha".to_string(),
+            },
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+        };
+        let judge_agent = AgentInfo {
+            id: "judge-agent".to_string(),
+            role: AgentRole::Judge {
+                session_id: "session-1".to_string(),
+            },
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+        };
+
+        let session = Session {
+            agents: vec![fusion_agent.clone(), judge_agent.clone()],
+            ..test_session(SessionState::Running, vec![])
+        };
+
+        // Fusion agent matches variant:alpha
+        assert!(agent_in_cell(&session, "variant:alpha", &fusion_agent));
+        // Judge agent does NOT match variant:alpha
+        assert!(!agent_in_cell(&session, "variant:alpha", &judge_agent));
+    }
+
+    #[test]
+    fn fusion_resolver_cell_contains_non_fusion_agents() {
+        // Resolver cell contains non-Fusion agents (judge, planner, evaluator, QA)
+        let fusion_agent = AgentInfo {
+            id: "fusion-agent".to_string(),
+            role: AgentRole::Fusion {
+                variant: "Alpha".to_string(),
+            },
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+        };
+        let judge_agent = AgentInfo {
+            id: "judge-agent".to_string(),
+            role: AgentRole::Judge {
+                session_id: "session-1".to_string(),
+            },
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+        };
+
+        let session = Session {
+            agents: vec![fusion_agent.clone(), judge_agent.clone()],
+            ..test_session(SessionState::Running, vec![])
+        };
+
+        // Fusion agent does NOT go to resolver
+        assert!(!agent_in_cell(&session, RESOLVER_CELL_ID, &fusion_agent));
+        // Judge agent goes to resolver
+        assert!(agent_in_cell(&session, RESOLVER_CELL_ID, &judge_agent));
     }
 }

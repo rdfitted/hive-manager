@@ -654,7 +654,7 @@ Branch: {{branch}}
 {{task}}
 
 ## Rules
-- Work ONLY within your worktree directory
+- Work ONLY within the provided working directory
 - Commit all changes to your branch
 - Do NOT interact with other variants
 - When complete, update your task file status to COMPLETED

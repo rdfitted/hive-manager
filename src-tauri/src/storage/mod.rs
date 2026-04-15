@@ -3,13 +3,16 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::coordination::CoordinationMessage;
 use crate::domain::{ArtifactBundle, ResolverOutput};
+use crate::session::cell_status::PRIMARY_CELL_ID;
 use crate::templates::SessionTemplate;
 
 /// Generate a deterministic ID for legacy learnings that lack one.
@@ -37,6 +40,23 @@ fn stable_learning_id(learning: &Learning) -> String {
         learning.files_touched.join(","),
     );
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, content.as_bytes()).to_string()
+}
+
+fn deserialize_optional_trimmed_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +165,9 @@ pub struct PersistedAgentConfig {
     pub model: Option<String>,
     pub flags: Vec<String>,
     pub label: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub role_type: Option<String>,
     pub initial_prompt: Option<String>,
 }
@@ -152,6 +175,7 @@ pub struct PersistedAgentConfig {
 /// Manages session storage in %APPDATA%/hive-manager
 pub struct SessionStorage {
     base_dir: PathBuf,
+    artifact_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl SessionStorage {
@@ -174,7 +198,10 @@ impl SessionStorage {
             fs::write(&config_path, serde_json::to_string_pretty(&default_config)?)?;
         }
 
-        Ok(Self { base_dir })
+        Ok(Self {
+            base_dir,
+            artifact_locks: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Get the app data directory path
@@ -559,15 +586,20 @@ impl SessionStorage {
         agent_id: &str,
         from: &str,
         content: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<ConversationMessage, StorageError> {
         let conversations_dir = self.session_dir(session_id).join("conversations");
         fs::create_dir_all(&conversations_dir)?;
         let path = self.conversation_file_path(session_id, agent_id);
+        let message = ConversationMessage {
+            timestamp: Utc::now(),
+            from: from.to_string(),
+            content: content.to_string(),
+        };
         let entry = format!(
             "---\n[{}] from @{}\n{}\n\n",
-            Utc::now().to_rfc3339(),
-            from,
-            content
+            message.timestamp.to_rfc3339(),
+            message.from,
+            message.content
         );
 
         tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
@@ -576,7 +608,9 @@ impl SessionStorage {
             Ok(())
         })
         .await
-        .map_err(|e| StorageError::InvalidPath(format!("Join error in append conversation: {}", e)))?
+        .map_err(|e| StorageError::InvalidPath(format!("Join error in append conversation: {}", e)))??;
+
+        Ok(message)
     }
 
     /// Read conversation messages with optional since filter.
@@ -615,6 +649,15 @@ impl SessionStorage {
 
     fn artifact_file_path(&self, session_id: &str, cell_id: &str) -> PathBuf {
         self.artifact_dir(session_id).join(format!("{}.json", cell_id))
+    }
+
+    fn artifact_lock(&self, session_id: &str, cell_id: &str) -> Arc<Mutex<()>> {
+        let key = format!("{session_id}:{cell_id}");
+        let mut locks = self.artifact_locks.lock();
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     fn resolver_output_path(&self, session_id: &str) -> PathBuf {
@@ -855,7 +898,14 @@ impl SessionStorage {
     ) -> Result<(), StorageError> {
         let artifact_dir = self.artifact_dir(session_id);
         fs::create_dir_all(&artifact_dir)?;
-        self.atomic_write_json(&self.artifact_file_path(session_id, cell_id), artifact)
+
+        if cell_id == PRIMARY_CELL_ID {
+            let lock = self.artifact_lock(session_id, cell_id);
+            let _guard = lock.lock();
+            self.atomic_write_json(&self.artifact_file_path(session_id, cell_id), artifact)
+        } else {
+            self.atomic_write_json(&self.artifact_file_path(session_id, cell_id), artifact)
+        }
     }
 
     pub fn load_artifact(
@@ -865,6 +915,28 @@ impl SessionStorage {
     ) -> Result<Option<ArtifactBundle>, StorageError> {
         let path = self.artifact_file_path(session_id, cell_id);
         self.read_optional_json(&path)
+    }
+
+    pub fn atomic_update_artifact<F>(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        update: F,
+    ) -> Result<ArtifactBundle, StorageError>
+    where
+        F: FnOnce(Option<ArtifactBundle>) -> ArtifactBundle,
+    {
+        let artifact_dir = self.artifact_dir(session_id);
+        fs::create_dir_all(&artifact_dir)?;
+
+        let lock = self.artifact_lock(session_id, cell_id);
+        let _guard = lock.lock();
+
+        let path = self.artifact_file_path(session_id, cell_id);
+        let current = self.read_optional_json(&path)?;
+        let updated = update(current);
+        self.atomic_write_json(&path, &updated)?;
+        Ok(updated)
     }
 
     pub fn save_resolver_output(
@@ -1071,6 +1143,9 @@ pub struct RoleDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn create_test_storage() -> (SessionStorage, TempDir) {
@@ -1309,5 +1384,58 @@ invalid json line
         assert_eq!(learnings[0].id, "valid-1");
         assert_eq!(learnings[1].id, "valid-2");
         assert_eq!(learnings[2].id, "valid-3");
+    }
+
+    #[test]
+    fn test_primary_cell_save_artifact_waits_for_existing_lock() {
+        let (storage, _temp_dir) = create_test_storage();
+        let storage = Arc::new(storage);
+        let session_id = "test-session-primary-artifact-lock";
+
+        storage.create_session_dir(session_id).unwrap();
+
+        let artifact = ArtifactBundle {
+            summary: Some("summary".to_string()),
+            changed_files: vec!["src/main.rs".to_string()],
+            commits: vec!["abc123".to_string()],
+            branch: "feature/primary-lock".to_string(),
+            test_results: None,
+            diff_summary: None,
+            unresolved_issues: vec![],
+            confidence: Some(0.9),
+            recommended_next_step: None,
+        };
+
+        let lock = storage.artifact_lock(session_id, PRIMARY_CELL_ID);
+        let guard = lock.lock();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let storage_clone = Arc::clone(&storage);
+        let artifact_clone = artifact.clone();
+
+        let save_thread = thread::spawn(move || {
+            storage_clone
+                .save_artifact(session_id, PRIMARY_CELL_ID, &artifact_clone)
+                .unwrap();
+            done_tx.send(()).unwrap();
+        });
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "save_artifact should wait while the primary cell lock is held"
+        );
+
+        drop(guard);
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("save_artifact should complete after the primary cell lock is released");
+        save_thread.join().unwrap();
+
+        let saved = storage
+            .load_artifact(session_id, PRIMARY_CELL_ID)
+            .unwrap()
+            .expect("artifact should be persisted");
+        assert_eq!(saved.branch, artifact.branch);
     }
 }

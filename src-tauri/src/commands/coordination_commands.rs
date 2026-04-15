@@ -32,6 +32,8 @@ pub struct AddWorkerRequest {
     pub session_id: String,
     pub config: AgentConfig,
     pub role: WorkerRole,
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub parent_id: Option<String>,
 }
 
@@ -149,10 +151,25 @@ pub async fn add_worker_to_session(
     let controller = session_state.0.write();
 
     // Add worker through session controller
+    let mut config = request.config;
+    let normalize_opt_str = |value: Option<String>| {
+        value.and_then(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    };
+    config.name = normalize_opt_str(request.name).or_else(|| normalize_opt_str(config.name));
+    config.description =
+        normalize_opt_str(request.description).or_else(|| normalize_opt_str(config.description));
+
     let agent_info = controller
         .add_worker(
             &request.session_id,
-            request.config,
+            config,
             request.role.clone(),
             request.parent_id,
         )

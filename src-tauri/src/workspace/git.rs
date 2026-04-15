@@ -3,7 +3,7 @@
 //! Provides branch naming conventions and dirty state detection
 //! for cell-based worktree operations.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(windows)]
@@ -13,6 +13,8 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 use crate::domain::{CellType, SessionMode};
+use crate::runtime::WorktreeManager;
+use crate::session::{Session, SessionType};
 
 /// Generate a branch name for a cell based on session mode and cell type.
 ///
@@ -88,6 +90,114 @@ pub fn branch_exists(worktree_path: &Path, branch_name: &str) -> Result<bool, St
     }
 }
 
+pub fn create_session_worktree(
+    session_id: &str,
+    cell_id: &str,
+    branch: &str,
+    base_branch: &str,
+    project_path: &Path,
+) -> Result<(PathBuf, String), String> {
+    let worktree_path = project_path
+        .join(".hive-manager")
+        .join("worktrees")
+        .join(session_id)
+        .join(cell_id);
+
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create worktree parent dir: {}", e))?;
+    }
+
+    let manager = WorktreeManager::new(project_path);
+    manager
+        .prune_worktrees()
+        .map_err(|err| format!("worktree prune: {}", err.message))?;
+
+    let worktree_str = worktree_path.to_string_lossy().to_string();
+    if branch_exists(project_path, branch)? {
+        run_git(project_path, &["worktree", "add", &worktree_str, branch])?;
+    } else {
+        run_git(
+            project_path,
+            &["worktree", "add", &worktree_str, "-b", branch, base_branch],
+        )?;
+    }
+
+    Ok((worktree_path, worktree_str))
+}
+
+/// Remove a single session worktree under `.hive-manager/worktrees/{session}/{cell_id}`.
+/// Used when PTY spawn fails after `create_session_worktree` so branches/worktrees are not left behind.
+pub fn remove_session_worktree_cell(
+    project_path: &Path,
+    session_id: &str,
+    cell_id: &str,
+) -> Result<(), String> {
+    let worktree_path = project_path
+        .join(".hive-manager")
+        .join("worktrees")
+        .join(session_id)
+        .join(cell_id);
+    let manager = WorktreeManager::new(project_path);
+    let _ = manager.prune_worktrees();
+    if !worktree_path.exists() {
+        return Ok(());
+    }
+
+    if let Err(err) = manager.remove_worktree(&worktree_path, true) {
+        if !is_missing_worktree_error(&err.message) {
+            return Err(err.message);
+        }
+    }
+    let _ = manager.prune_worktrees();
+    Ok(())
+}
+
+pub fn cleanup_session_worktrees(session: &Session) -> Result<(), String> {
+    let manager = WorktreeManager::new(&session.project_path);
+    let worktrees = manager
+        .list_worktrees()
+        .map_err(|e| format!("worktree list: {}", e.message))?;
+
+    let session_prefixes = match &session.session_type {
+        SessionType::Fusion { .. } => vec![session.project_path.join(".hive-fusion").join(&session.id)],
+        _ => vec![session
+            .project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(&session.id)],
+    };
+
+    let mut cleanup_errors = Vec::new();
+    for worktree in worktrees {
+        if !session_prefixes.iter().any(|prefix| worktree.path.starts_with(prefix)) {
+            continue;
+        }
+
+        if let Err(err) = manager.remove_worktree(&worktree.path, true) {
+            if is_missing_worktree_error(&err.message) {
+                tracing::debug!(
+                    "Ignoring missing worktree during cleanup: {} ({})",
+                    worktree.path.display(),
+                    err.message
+                );
+            } else {
+                cleanup_errors.push(format!("{}: {}", worktree.path.display(), err.message));
+            }
+        }
+    }
+
+    if let Err(err) = manager.prune_worktrees() {
+        cleanup_errors.push(format!("worktree prune: {}", err.message));
+    }
+
+    if cleanup_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(cleanup_errors.join(" | "))
+    }
+}
+
 /// Run a git command in the specified directory.
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
@@ -115,6 +225,15 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn is_missing_worktree_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("is not a working tree")
+        || lower.contains("is not a git repository")
+        || lower.contains("could not remove reference")
+        || lower.contains("no such file or directory")
+        || lower.contains("cannot find the path specified")
 }
 
 #[cfg(test)]

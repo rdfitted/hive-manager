@@ -116,6 +116,8 @@ pub async fn add_evaluator(
         model: req.model,
         flags: vec![],
         label: req.label.clone().or_else(|| Some("Evaluator".to_string())),
+        name: None,
+        description: None,
         role: None,
         initial_prompt: req.initial_task,
     };
@@ -203,6 +205,8 @@ pub async fn add_qa_worker(
             .label
             .clone()
             .or_else(|| Some(qa_specialization_label(&req.specialization).to_string())),
+        name: None,
+        description: None,
         role: None,
         initial_prompt: req.initial_task,
     };

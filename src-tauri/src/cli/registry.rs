@@ -226,6 +226,8 @@ mod tests {
             model: Some("sonnet".to_string()),
             flags: vec![],
             label: None,
+            name: None,
+            description: None,
             role: None,
             initial_prompt: None,
         };
@@ -245,6 +247,8 @@ mod tests {
             model: None,
             flags: vec![],
             label: None,
+            name: None,
+            description: None,
             role: None,
             initial_prompt: None,
         };
@@ -262,6 +266,8 @@ mod tests {
             model: None,
             flags: vec![],
             label: None,
+            name: None,
+            description: None,
             role: None,
             initial_prompt: None,
         };
@@ -279,6 +285,8 @@ mod tests {
             model: Some("glm-4.7".to_string()),
             flags: vec![],
             label: None,
+            name: None,
+            description: None,
             role: None,
             initial_prompt: None,
         };
@@ -298,6 +306,8 @@ mod tests {
             model: None,
             flags: vec![],
             label: None,
+            name: None,
+            description: None,
             role: None,
             initial_prompt: None,
         };
