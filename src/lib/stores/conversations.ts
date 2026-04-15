@@ -44,11 +44,7 @@ function hashContent(value: string): string {
   return hash.toString(16);
 }
 
-function conversationMessageKey(message: ConversationMessage): string {
-  if (message.id) {
-    return message.id;
-  }
-
+function conversationMessageSignature(message: ConversationMessage): string {
   return [
     message.timestamp,
     message.from,
@@ -58,16 +54,21 @@ function conversationMessageKey(message: ConversationMessage): string {
 }
 
 function dedupeConversationMessages(messages: ConversationMessage[]): ConversationMessage[] {
-  const seen = new Set<string>();
+  const seenIds = new Set<string>();
+  const seenSignatures = new Set<string>();
   const deduped: ConversationMessage[] = [];
 
   for (const message of messages) {
-    const key = conversationMessageKey(message);
-    if (seen.has(key)) {
+    const signature = conversationMessageSignature(message);
+    const id = message.id;
+    if ((id && seenIds.has(id)) || seenSignatures.has(signature)) {
       continue;
     }
 
-    seen.add(key);
+    if (id) {
+      seenIds.add(id);
+    }
+    seenSignatures.add(signature);
     deduped.push(message);
   }
 
