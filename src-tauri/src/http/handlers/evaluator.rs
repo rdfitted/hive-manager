@@ -327,7 +327,7 @@ pub async fn force_pass(
     Ok(Json(json!({
         "session_id": session_id,
         "action": "force-pass",
-        "new_state": "Running"
+        "new_state": "QaPassed"
     })))
 }
 

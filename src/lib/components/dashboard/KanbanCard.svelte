@@ -21,7 +21,8 @@
     const d = new Date(lastActivity);
     if (Number.isNaN(d.getTime())) return '—';
     const diffMs = Date.now() - d.getTime();
-    const sec = Math.floor(diffMs / 1000);
+    const sec = Math.max(0, Math.floor(diffMs / 1000));
+    if (sec === 0) return 'just now';
     if (sec < 60) return `${sec}s ago`;
     const min = Math.floor(sec / 60);
     if (min < 60) return `${min}m ago`;

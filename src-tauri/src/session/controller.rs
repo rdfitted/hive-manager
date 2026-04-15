@@ -189,6 +189,7 @@ impl SessionState {
                 | SessionState::WaitingForPlanner(_)
                 | SessionState::SpawningEvaluator
                 | SessionState::QaInProgress { .. }
+                | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
         )
     }
@@ -773,6 +774,65 @@ impl SessionController {
             .collect()
     }
 
+    fn session_requires_internal_evaluator(session: &Session) -> bool {
+        session.agents.iter().any(|agent| {
+            matches!(
+                agent.role,
+                AgentRole::Evaluator | AgentRole::QaWorker { .. }
+            )
+        })
+    }
+
+    fn state_allows_completion(session: &Session) -> bool {
+        if Self::session_requires_internal_evaluator(session) {
+            matches!(session.state, SessionState::QaPassed)
+        } else {
+            matches!(session.state, SessionState::Running | SessionState::QaPassed)
+        }
+    }
+
+    pub fn can_complete_session(&self, session_id: &str) -> Result<(), String> {
+        let session = if let Some(session) = self.get_session(session_id) {
+            session
+        } else {
+            let storage = self
+                .storage
+                .as_ref()
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            let persisted = storage
+                .load_session(session_id)
+                .map_err(|_| format!("Session not found: {}", session_id))?;
+            self.session_from_persisted(&persisted)?
+        };
+
+        if !Self::state_allows_completion(&session) {
+            let requirement = if Self::session_requires_internal_evaluator(&session) {
+                "session must remain in QaPassed after internal QA passes"
+            } else {
+                "session must be in a quiescent Running/QaPassed state"
+            };
+            return Err(format!(
+                "Session completion blocked: {} (current state: {:?})",
+                requirement, session.state
+            ));
+        }
+
+        let quiet_for = Utc::now() - session.last_activity_at;
+        if quiet_for < chrono::Duration::minutes(10) {
+            let remaining = (chrono::Duration::minutes(10) - quiet_for)
+                .num_seconds()
+                .max(0);
+            return Err(format!(
+                "Session completion blocked: session must remain quiescent for at least 10 minutes after the last activity ({}s remaining)",
+                remaining
+            ));
+        }
+
+        // External reviewer comments are not tracked server-side yet, so the completion gate enforces
+        // the internal quiescence conditions we can prove here: evaluator-aware state + 10-minute quiet period.
+        Ok(())
+    }
+
     // --- Heartbeat / Stall Detection ---
 
     /// Update heartbeat for an agent. Emits Tauri event if status changed.
@@ -798,13 +858,18 @@ impl SessionController {
             );
             prev
         };
-        {
+        let session_snapshot = {
             let mut sessions = self.sessions.write();
-            if let Some(session) = sessions.get_mut(session_id) {
+            sessions.get_mut(session_id).map(|session| {
                 if now > session.last_activity_at {
                     session.last_activity_at = now;
                 }
-            }
+                session.clone()
+            })
+        };
+
+        if let (Some(storage), Some(session)) = (self.storage.as_ref(), session_snapshot.as_ref()) {
+            Self::persist_session_snapshot(storage, session, session_id)?;
         }
         let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
         if status_changed {
@@ -1280,6 +1345,8 @@ impl SessionController {
     }
 
     pub fn mark_session_completed(&self, session_id: &str) -> Result<(), String> {
+        self.can_complete_session(session_id)?;
+
         let previous_state = {
             let mut sessions = self.sessions.write();
             sessions.get_mut(session_id).map(|session| {
@@ -2365,7 +2432,7 @@ After the Judge winner is selected and merge is complete:
 2. Track the latest push timestamp and the PR review baseline from that push forward
 3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for external review
 4. Collect ALL findings since the latest push:
-   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS`
+   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS` only when an Evaluator is attached
    b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
 5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
@@ -3569,7 +3636,7 @@ d. Review changes, commit, and push
 The loop is **quiescence-based** (no fixed iteration cap):
 
 1. Commit and push fixes, then use the new push as the review baseline. If NEW unresolved PR comments appear after that push, return to Step 2 and repeat until quiescent.
-2. Only exit when ALL are true at the same time: internal `QA_VERDICT: PASS` has been received (when an Evaluator runs), the latest push has been live for at least 10 minutes, and `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since that push.
+2. Only exit when ALL are true at the same time: internal `QA_VERDICT: PASS` has been received if an Evaluator runs, the latest push has been live for at least 10 minutes, and `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since that push.
 3. When all conditions are met, mark the session complete (`POST .../complete`).
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
@@ -4079,7 +4146,7 @@ After all planners complete, integration is done, and changes are pushed to the 
 2. Track the latest push timestamp and treat it as the baseline for new review activity
 3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for reviewers
 4. Collect ALL findings since the latest push:
-   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS`
+   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS` only when an Evaluator is attached
    b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
 5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
@@ -6104,19 +6171,7 @@ Last updated: {timestamp}
                     self.emit_cell_status_changes(session_id, changes);
                 }
 
-                let running_changes = {
-                    let mut sessions = self.sessions.write();
-                    sessions
-                        .get_mut(session_id)
-                        .map(|session| self.set_session_state_with_events(session, SessionState::Running))
-                };
-                self.emit_session_update(session_id);
-                self.update_session_storage(session_id);
-                if let Some(changes) = running_changes {
-                    self.emit_cell_status_changes(session_id, changes);
-                }
-
-                Ok(SessionState::Running)
+                Ok(SessionState::QaPassed)
             }
             "FAIL" | "QA_VERDICT: FAIL" => {
                 let (next_state, changes) = {
@@ -6207,13 +6262,14 @@ Last updated: {timestamp}
             if is_qa {
                 tracing::warn!("QA timeout fired for session {} after {}s — auto-passing", sid, timeout_secs);
 
-                // Transition directly to Running (skip transient QaPassed to avoid race)
+                // A timeout auto-pass should leave the session in QaPassed so the server can enforce
+                // the same quiescence gate as an explicit evaluator PASS.
                 let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
                         let previous_state = session.state.clone();
-                        let changes = cell_status_changes_for_transition(session, &SessionState::Running);
-                        session.state = SessionState::Running;
+                        let changes = cell_status_changes_for_transition(session, &SessionState::QaPassed);
+                        session.state = SessionState::QaPassed;
                         Some((previous_state, changes, session.clone()))
                     } else {
                         None
@@ -8088,8 +8144,15 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_persisted_session_state, serialize_session_state, AgentConfig, AuthStrategy, SessionController, SessionState};
+    use super::{
+        parse_persisted_session_state, serialize_session_state, AgentConfig, AgentInfo,
+        AuthStrategy, Session, SessionController, SessionState, SessionType,
+    };
+    use crate::pty::{AgentRole, AgentStatus, PtyManager};
+    use chrono::{Duration, Utc};
+    use parking_lot::RwLock;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn session_state_variants_exist() {
@@ -8200,6 +8263,104 @@ mod tests {
         assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
         assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
         assert!(!prompt.contains(r#""cli": "claude""#));
+    }
+
+    fn test_controller() -> SessionController {
+        SessionController::new(Arc::new(RwLock::new(PtyManager::new())))
+    }
+
+    fn test_completion_session(
+        id: &str,
+        state: SessionState,
+        last_activity_at: chrono::DateTime<Utc>,
+        with_evaluator: bool,
+    ) -> Session {
+        let mut agents = Vec::new();
+        if with_evaluator {
+            agents.push(AgentInfo {
+                id: format!("{id}-evaluator"),
+                role: AgentRole::Evaluator,
+                status: AgentStatus::Completed,
+                config: AgentConfig::default(),
+                parent_id: None,
+            });
+        }
+
+        Session {
+            id: id.to_string(),
+            name: None,
+            color: None,
+            session_type: if with_evaluator {
+                SessionType::Hive { worker_count: 1 }
+            } else {
+                SessionType::Fusion {
+                    variants: vec!["alpha".to_string()],
+                }
+            },
+            project_path: PathBuf::from("."),
+            state,
+            created_at: last_activity_at - Duration::minutes(1),
+            last_activity_at,
+            agents,
+            default_cli: "claude".to_string(),
+            default_model: None,
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+        }
+    }
+
+    #[test]
+    fn can_complete_session_allows_quiet_evaluator_backed_session() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "evaluator-ok",
+            SessionState::QaPassed,
+            Utc::now() - Duration::minutes(11),
+            true,
+        ));
+
+        assert!(controller.can_complete_session("evaluator-ok").is_ok());
+    }
+
+    #[test]
+    fn can_complete_session_rejects_non_quiet_or_missing_qa_pass() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "evaluator-blocked",
+            SessionState::Running,
+            Utc::now() - Duration::minutes(11),
+            true,
+        ));
+        controller.insert_test_session(test_completion_session(
+            "fusion-recent",
+            SessionState::Running,
+            Utc::now() - Duration::minutes(2),
+            false,
+        ));
+
+        let blocked = controller
+            .can_complete_session("evaluator-blocked")
+            .expect_err("evaluator-backed session should require QaPassed");
+        assert!(blocked.contains("QaPassed"));
+
+        let recent = controller
+            .can_complete_session("fusion-recent")
+            .expect_err("fusion session should still require quiet period");
+        assert!(recent.contains("10 minutes"));
+    }
+
+    #[test]
+    fn can_complete_session_allows_quiet_fusion_session_without_evaluator() {
+        let controller = test_controller();
+        controller.insert_test_session(test_completion_session(
+            "fusion-ok",
+            SessionState::Running,
+            Utc::now() - Duration::minutes(11),
+            false,
+        ));
+
+        assert!(controller.can_complete_session("fusion-ok").is_ok());
     }
 }
 

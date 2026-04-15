@@ -124,6 +124,33 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
     }
 }
 
+fn make_test_session_for_completion(
+    id: &str,
+    project_path: &str,
+    state: SessionState,
+    last_activity_at: chrono::DateTime<chrono::Utc>,
+    with_evaluator: bool,
+) -> Session {
+    let mut session = make_test_session(id, project_path);
+    session.state = state;
+    session.last_activity_at = last_activity_at;
+    session.created_at = last_activity_at - chrono::Duration::minutes(1);
+    if with_evaluator {
+        session.agents.push(AgentInfo {
+            id: format!("{id}-evaluator"),
+            role: AgentRole::Evaluator,
+            status: AgentStatus::Completed,
+            config: AgentConfig::default(),
+            parent_id: None,
+        });
+    } else {
+        session.session_type = SessionType::Fusion {
+            variants: vec!["variant-a".to_string()],
+        };
+    }
+    session
+}
+
 #[tokio::test]
 async fn test_health_check() {
     let app = setup_test_app().await;
@@ -3651,6 +3678,194 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
     assert!(agents[0].get("last_activity").unwrap().as_str().is_some());
     assert_eq!(agents[0].get("status").unwrap().as_str().unwrap(), "working");
     assert_eq!(agents[0].get("summary").unwrap().as_str().unwrap(), "2/3 done");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_list_sessions_reflects_fresh_heartbeat_activity_and_persists_it() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let storage = SessionStorage::new().unwrap();
+    let session_id = format!("session-list-hb-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+
+    let before = chrono::Utc::now() - chrono::Duration::minutes(20);
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            &["worker-1"],
+        ));
+    {
+        let sessions = controller.write();
+        let session = sessions
+            .get_session(&session_id)
+            .expect("session inserted");
+        let mut updated = session.clone();
+        updated.last_activity_at = before;
+        updated.created_at = before - chrono::Duration::minutes(1);
+        sessions.insert_test_session(updated);
+    }
+
+    let heartbeat_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"worker-1","status":"working","summary":"fresh activity"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(heartbeat_response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let listed = response_json
+        .get("sessions")
+        .and_then(|sessions| sessions.as_array())
+        .and_then(|sessions| {
+            sessions
+                .iter()
+                .find(|session| session.get("id").and_then(|id| id.as_str()) == Some(session_id.as_str()))
+        })
+        .expect("session should be listed");
+
+    let listed_last_activity = listed
+        .get("last_activity_at")
+        .and_then(|value| value.as_str())
+        .expect("last_activity_at");
+    let listed_last_activity = chrono::DateTime::parse_from_rfc3339(listed_last_activity)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(listed_last_activity > before);
+
+    let persisted = storage.load_session(&session_id).unwrap();
+    assert_eq!(persisted.last_activity_at, Some(listed_last_activity));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+}
+
+#[tokio::test]
+async fn test_complete_session_returns_conflict_when_not_quiescent() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-blocked");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-blocked",
+        temp_dir.to_str().unwrap(),
+        SessionState::Running,
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+        true,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-blocked/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let error = response_json.get("error").and_then(|value| value.as_str()).unwrap();
+    assert!(error.contains("QaPassed"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_complete_session_allows_quiet_evaluator_backed_session() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-ok");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-ok",
+        temp_dir.to_str().unwrap(),
+        SessionState::QaPassed,
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+        true,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-ok/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = controller
+        .read()
+        .get_session("session-complete-ok")
+        .expect("session should remain loaded");
+    assert!(matches!(session.state, SessionState::Completed));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_complete_session_allows_quiet_fusion_session_without_evaluator() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-complete-fusion");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session_for_completion(
+        "session-complete-fusion",
+        temp_dir.to_str().unwrap(),
+        SessionState::Running,
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+        false,
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-complete-fusion/complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = controller
+        .read()
+        .get_session("session-complete-fusion")
+        .expect("session should remain loaded");
+    assert!(matches!(session.state, SessionState::Completed));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

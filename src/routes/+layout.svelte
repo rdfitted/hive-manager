@@ -6,11 +6,11 @@
 </script>
 
 <nav class="top-nav" aria-label="Primary">
-  <a href="/" class="nav-link" class:active={$page.url.pathname === '/'} title="Session view">
+  <a href="/" class="nav-link" class:active={$page.url.pathname === '/'} aria-current={$page.url.pathname === '/' ? 'page' : undefined} title="Session view">
     <House size={14} weight="light" />
     <span>Session</span>
   </a>
-  <a href="/dashboard" class="nav-link" class:active={$page.url.pathname === '/dashboard'} title="Dashboard">
+  <a href="/dashboard" class="nav-link" class:active={$page.url.pathname === '/dashboard'} aria-current={$page.url.pathname === '/dashboard' ? 'page' : undefined} title="Dashboard">
     <Kanban size={14} weight="light" />
     <span>Dashboard</span>
   </a>

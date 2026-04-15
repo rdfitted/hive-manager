@@ -1,6 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { CellStatus } from '$lib/types/domain';
 
 export type AgentRole =
   | 'MasterPlanner'
@@ -139,6 +140,46 @@ export function serdeEnumVariantName(value: unknown): string | undefined {
     if (keys.length === 1) return keys[0];
   }
   return undefined;
+}
+
+export function sessionStateToCellStatus(state: SessionState | unknown): CellStatus {
+  const key = serdeEnumVariantName(state) ?? 'Unknown';
+
+  switch (key) {
+    case 'Planning':
+    case 'PlanReady':
+      return 'queued';
+    case 'Starting':
+    case 'SpawningWorker':
+    case 'SpawningPlanner':
+    case 'SpawningFusionVariant':
+    case 'SpawningJudge':
+    case 'SpawningEvaluator':
+      return 'launching';
+    case 'WaitingForWorker':
+    case 'WaitingForPlanner':
+    case 'WaitingForFusionVariants':
+    case 'Judging':
+    case 'MergingWinner':
+    case 'QaInProgress':
+    case 'Running':
+      return 'running';
+    case 'AwaitingVerdictSelection':
+    case 'Paused':
+      return 'waiting_input';
+    case 'QaPassed':
+    case 'Completed':
+    case 'Closed':
+      return 'completed';
+    case 'QaFailed':
+    case 'QaMaxRetriesExceeded':
+    case 'Failed':
+      return 'failed';
+    case 'Closing':
+      return 'summarizing';
+    default:
+      return 'queued';
+  }
 }
 
 export interface Session {
