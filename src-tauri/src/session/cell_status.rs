@@ -157,6 +157,9 @@ fn agent_in_cell_with_variant_cache(
             // Variant cells contain only Fusion agents matching that variant
             fusion_agent_matches_cell(cell_id, agent, variant_cell_cache)
         }
+        SessionType::Fusion { variants } if variants.is_empty() => {
+            cell_id == PRIMARY_CELL_ID
+        }
         SessionType::Fusion { .. } => {
             // PRIMARY_CELL_ID is not used in Fusion sessions
             false
@@ -327,6 +330,21 @@ mod tests {
         let session = test_session(SessionState::Running, vec![AgentStatus::Running]);
 
         assert!(!agent_in_cell(&session, PRIMARY_CELL_ID, &session.agents[0]));
+    }
+
+    #[test]
+    fn empty_variant_fusion_uses_primary_cell() {
+        let session = Session {
+            session_type: SessionType::Fusion { variants: vec![] },
+            ..test_session(SessionState::Running, vec![AgentStatus::Running])
+        };
+
+        assert_eq!(
+            session_cell_ids(&session),
+            vec![PRIMARY_CELL_ID.to_string()]
+        );
+        assert!(agent_in_cell(&session, PRIMARY_CELL_ID, &session.agents[0]));
+        assert_eq!(aggregate_cell_status(&session, PRIMARY_CELL_ID), CellStatus::Running);
     }
 
     #[test]

@@ -3,10 +3,12 @@ import { listen } from '@tauri-apps/api/event';
 import { apiUrl } from '$lib/config';
 
 export interface ConversationMessage {
+  id?: string;
   timestamp: string;
   from: string;
   content: string;
   agent_id?: string;
+  session_id?: string;
 }
 
 export interface HeartbeatInfo {
@@ -33,6 +35,52 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function hashContent(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+
+  return hash.toString(16);
+}
+
+function conversationMessageKey(message: ConversationMessage): string {
+  if (message.id) {
+    return message.id;
+  }
+
+  return [
+    message.timestamp,
+    message.from,
+    message.agent_id ?? '',
+    hashContent(message.content),
+  ].join('|');
+}
+
+function dedupeConversationMessages(messages: ConversationMessage[]): ConversationMessage[] {
+  const seen = new Set<string>();
+  const deduped: ConversationMessage[] = [];
+
+  for (const message of messages) {
+    const key = conversationMessageKey(message);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(message);
+  }
+
+  return deduped;
+}
+
+function mergeConversationMessages(
+  existing: ConversationMessage[],
+  incoming: ConversationMessage[],
+): ConversationMessage[] {
+  return dedupeConversationMessages([...existing, ...incoming]);
+}
+
 function createConversationStore() {
   const { subscribe, update } = writable<ConversationState>({
     messages: [],
@@ -45,13 +93,21 @@ function createConversationStore() {
   // Listen for real-time conversation messages from Tauri
   listen<ConversationMessage>('conversation-message', (event) => {
     update((state) => {
-      // CONTRACT: only push if it belongs to selected agent (or no agent_id in payload, but we fixed that)
-      if (event.payload.agent_id && state.selectedAgent !== event.payload.agent_id) {
+      if (!state.sessionId || !state.selectedAgent) {
         return state;
       }
+
+      if (event.payload.session_id !== state.sessionId) {
+        return state;
+      }
+
+      if (event.payload.agent_id !== state.selectedAgent) {
+        return state;
+      }
+
       return {
         ...state,
-        messages: [...state.messages, event.payload],
+        messages: mergeConversationMessages(state.messages, [event.payload]),
       };
     });
   });
@@ -83,17 +139,17 @@ function createConversationStore() {
         const messages: ConversationMessage[] = data.messages ?? [];
         
         update((state) => {
-           // If we are appending (using 'since'), don't overwrite
-           const newMessages = since 
-             ? [...state.messages, ...messages] 
-             : messages;
-           return {
-             ...state,
-             messages: newMessages,
-             loading: false,
-             sessionId,
-             selectedAgent: agentId,
-           };
+          const newMessages = since
+            ? mergeConversationMessages(state.messages, messages)
+            : dedupeConversationMessages(messages);
+
+          return {
+            ...state,
+            messages: newMessages,
+            loading: false,
+            sessionId,
+            selectedAgent: agentId,
+          };
         });
       } catch (err) {
         update((state) => ({ ...state, loading: false, error: String(err) }));

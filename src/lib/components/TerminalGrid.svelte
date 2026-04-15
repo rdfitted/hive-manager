@@ -51,13 +51,14 @@
 >
   {#each agents as agent (agent.id)}
     {@const status = serdeEnumVariantName(agent.status)}
+    {@const roleLabel = getRoleLabel(agent)}
     <div 
       class="terminal-item" 
       class:focused={agent.id === focusedAgentId}
       onclick={() => onSelect(agent.id)}
     >
       <div class="terminal-header" style:border-top-color={$activeSession?.color || 'transparent'} style:border-top-width={$activeSession?.color ? '3px' : '0'}>
-        <span class="role-label">{getRoleLabel(agent)}</span>
+        <span class="role-label" title={roleLabel}>{roleLabel}</span>
         <div class="terminal-meta">
           <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
           <span class="status-indicator" 
@@ -121,6 +122,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 6px 10px;
     background: var(--bg-surface);
     border-bottom: 1px solid var(--border-structural);
@@ -128,6 +130,11 @@
   }
 
   .role-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 11px;
     font-weight: 600;
     color: var(--text-primary);

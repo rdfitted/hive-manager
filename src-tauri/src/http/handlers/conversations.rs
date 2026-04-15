@@ -80,10 +80,17 @@ pub async fn append_conversation(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to append conversation message: {}", e)))?;
 
-    state
+    if let Err(error) = state
         .emit_conversation_message(&session_id, &agent_id, &message)
         .await
-        .map_err(ApiError::internal)?;
+    {
+        tracing::warn!(
+            "Failed to emit conversation message for session {} agent {}: {}",
+            session_id,
+            agent_id,
+            error
+        );
+    }
 
     Ok((
         StatusCode::CREATED,

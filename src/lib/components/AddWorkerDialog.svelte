@@ -74,7 +74,7 @@
     }
 
     const explicitName = workerName.trim();
-    const trimmedDescription = workerDescription.trim() || initialTask.trim() || `${roleLabel} tasks`;
+    const trimmedDescription = workerDescription.trim() || `${roleLabel} tasks`;
 
     const role: WorkerRole = {
       role_type: roleType,

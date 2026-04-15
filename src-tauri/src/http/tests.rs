@@ -2084,6 +2084,28 @@ fn test_add_worker_request_accepts_name_and_description_fields() {
 }
 
 #[test]
+fn test_add_worker_request_blank_name_deserializes_to_none() {
+    for raw_name in ["", "   "] {
+        let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
+            serde_json::json!({
+                "role_type": "frontend",
+                "cli": "codex",
+                "name": raw_name,
+                "description": "SSE resync + chat/timeline event handling",
+                "initial_task": "Handle SSE lagged events"
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            request.name.is_none(),
+            "expected blank name {:?} to deserialize as None",
+            raw_name
+        );
+    }
+}
+
+#[test]
 fn test_persisted_agent_config_round_trips_name_and_description_fields() {
     let config = crate::storage::PersistedAgentConfig {
         cli: "codex".to_string(),
@@ -2108,6 +2130,35 @@ fn test_persisted_agent_config_round_trips_name_and_description_fields() {
         decoded.label.as_deref(),
         Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling")
     );
+}
+
+#[test]
+fn test_persisted_agent_config_blank_name_round_trip_uses_indexed_default_behavior() {
+    for raw_name in ["", "   "] {
+        let config = crate::storage::PersistedAgentConfig {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            flags: vec![],
+            label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
+            name: Some(raw_name.to_string()),
+            description: Some("SSE resync + chat/timeline event handling".to_string()),
+            role_type: Some("frontend".to_string()),
+            initial_prompt: Some("Handle SSE lagged events".to_string()),
+        };
+
+        let encoded = serde_json::to_string(&config).unwrap();
+        let decoded: crate::storage::PersistedAgentConfig = serde_json::from_str(&encoded).unwrap();
+
+        assert!(
+            decoded.name.is_none(),
+            "expected blank persisted name {:?} to deserialize as None",
+            raw_name
+        );
+        assert_eq!(
+            decoded.description.as_deref(),
+            Some("SSE resync + chat/timeline event handling")
+        );
+    }
 }
 
 #[tokio::test]

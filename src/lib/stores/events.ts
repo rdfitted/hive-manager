@@ -23,8 +23,22 @@ interface EventsState {
     error: string | null;
 }
 
+function sortEventsNewestFirst(events: SessionEvent[]): SessionEvent[] {
+    return [...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
+function mergeEventsById(existing: SessionEvent[], incoming: SessionEvent[]): SessionEvent[] {
+    const merged = new Map<string, SessionEvent>();
+
+    for (const event of [...existing, ...incoming]) {
+        merged.set(event.id, event);
+    }
+
+    return sortEventsNewestFirst(Array.from(merged.values())).slice(0, 1000);
+}
+
 function createEventsStore() {
-    const { subscribe, set, update } = writable<EventsState>({
+    const { subscribe, update } = writable<EventsState>({
         events: [],
         loading: false,
         error: null,
@@ -43,7 +57,7 @@ function createEventsStore() {
             const event: SessionEvent = JSON.parse(raw.data);
             update(state => ({
                 ...state,
-                events: [event, ...state.events].slice(0, 1000),
+                events: mergeEventsById(state.events, [event]),
             }));
         } catch (err) {
             console.error('Failed to parse event:', err);
@@ -68,7 +82,7 @@ function createEventsStore() {
 
             update(state => ({
                 ...state,
-                events: [syntheticEvent, ...state.events].slice(0, 1000),
+                events: mergeEventsById(state.events, [syntheticEvent]),
             }));
 
             // CONTRACT: resync after lag
@@ -156,10 +170,11 @@ function createEventsStore() {
                 const response = await fetch(apiUrl(`/api/sessions/${sessionId}/events`));
                 if (!response.ok) throw new Error(`Failed to fetch events: ${response.statusText}`);
                 const events: SessionEvent[] = await response.json();
+                const normalizedEvents = sortEventsNewestFirst(events);
                 
                 update(state => ({
                     ...state,
-                    events: [...events].reverse(), // Show newest first
+                    events: mergeEventsById(state.events, normalizedEvents),
                     loading: false
                 }));
             } catch (err) {

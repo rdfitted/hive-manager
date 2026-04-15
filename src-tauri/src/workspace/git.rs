@@ -108,11 +108,20 @@ pub fn create_session_worktree(
             .map_err(|e| format!("Failed to create worktree parent dir: {}", e))?;
     }
 
+    let manager = WorktreeManager::new(project_path);
+    manager
+        .prune_worktrees()
+        .map_err(|err| format!("worktree prune: {}", err.message))?;
+
     let worktree_str = worktree_path.to_string_lossy().to_string();
-    run_git(
-        project_path,
-        &["worktree", "add", &worktree_str, "-b", branch, base_branch],
-    )?;
+    if branch_exists(project_path, branch)? {
+        run_git(project_path, &["worktree", "add", &worktree_str, branch])?;
+    } else {
+        run_git(
+            project_path,
+            &["worktree", "add", &worktree_str, "-b", branch, base_branch],
+        )?;
+    }
 
     Ok((worktree_path, worktree_str))
 }
@@ -129,11 +138,12 @@ pub fn remove_session_worktree_cell(
         .join("worktrees")
         .join(session_id)
         .join(cell_id);
+    let manager = WorktreeManager::new(project_path);
+    let _ = manager.prune_worktrees();
     if !worktree_path.exists() {
         return Ok(());
     }
 
-    let manager = WorktreeManager::new(project_path);
     if let Err(err) = manager.remove_worktree(&worktree_path, true) {
         if !is_missing_worktree_error(&err.message) {
             return Err(err.message);

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -63,6 +63,8 @@ impl From<String> for SessionError {
 
 const DEFAULT_MAX_QA_ITERATIONS: u8 = 3;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
+const MAX_PRIMARY_CELL_BRANCHES: usize = 4;
+const MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN: usize = 4_096;
 
 /// Authentication strategy for QA workers accessing the session
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -863,15 +865,7 @@ impl SessionController {
                 changed_files.push(f);
             }
         }
-        let branch = if existing.branch.trim().is_empty() {
-            incoming.branch
-        } else if incoming.branch.trim().is_empty() {
-            existing.branch
-        } else if existing.branch == incoming.branch {
-            existing.branch
-        } else {
-            format!("{} | {}", existing.branch, incoming.branch)
-        };
+        let branch = Self::merge_primary_cell_branch_labels([existing.branch.clone(), incoming.branch.clone()]);
         let summary = match (existing.summary, incoming.summary) {
             (Some(a), Some(b)) if a != b => Some(format!("{} · {}", a, b)),
             (Some(a), _) => Some(a),
@@ -879,10 +873,8 @@ impl SessionController {
             _ => None,
         };
         let test_results = incoming.test_results.or(existing.test_results);
-        let diff_summary = match (existing.diff_summary, incoming.diff_summary) {
-            (Some(a), Some(b)) => Some(format!("{}\n---\n{}", a, b)),
-            (a, b) => a.or(b),
-        };
+        let diff_summary =
+            Self::merge_primary_cell_diff_summaries(existing.diff_summary, incoming.diff_summary);
         let mut unresolved_issues = existing.unresolved_issues;
         unresolved_issues.extend(incoming.unresolved_issues);
         let confidence = match (existing.confidence, incoming.confidence) {
@@ -905,6 +897,67 @@ impl SessionController {
             confidence,
             recommended_next_step,
         }
+    }
+
+    fn merge_primary_cell_branch_labels(branches: [String; 2]) -> String {
+        let unique = branches
+            .into_iter()
+            .filter_map(|branch| {
+                let trimmed = branch.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+            .fold(Vec::new(), |mut acc, branch| {
+                if !acc.contains(&branch) {
+                    acc.push(branch);
+                }
+                acc
+            });
+
+        match unique.len() {
+            0 => String::new(),
+            1 => unique.into_iter().next().unwrap_or_default(),
+            len if len > MAX_PRIMARY_CELL_BRANCHES => {
+                let mut limited = unique.into_iter().take(MAX_PRIMARY_CELL_BRANCHES).collect::<Vec<_>>();
+                limited.push(format!("+{} more", len - MAX_PRIMARY_CELL_BRANCHES));
+                limited.join(" | ")
+            }
+            _ => unique.join(" | "),
+        }
+    }
+
+    fn merge_primary_cell_diff_summaries(
+        existing: Option<String>,
+        incoming: Option<String>,
+    ) -> Option<String> {
+        let mut unique = Vec::new();
+        for summary in [existing, incoming].into_iter().flatten() {
+            let trimmed = summary.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !unique.iter().any(|value: &String| value == trimmed) {
+                unique.push(trimmed.to_string());
+            }
+        }
+
+        if unique.is_empty() {
+            return None;
+        }
+
+        let merged = unique.join("\n---\n");
+        if merged.chars().count() <= MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN {
+            return Some(merged);
+        }
+
+        let truncated = merged
+            .chars()
+            .take(MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN.saturating_sub(16))
+            .collect::<String>();
+        Some(format!("{truncated}\n...[truncated]"))
     }
 
     fn agent_git_worktree_path_for_artifacts(session: &Session, agent: &AgentInfo) -> Option<PathBuf> {
@@ -963,22 +1016,31 @@ impl SessionController {
         };
         let cell_id = agent_cell_id(session, agent);
         let session_id = session.id.as_str();
-        let bundle = if cell_id == PRIMARY_CELL_ID {
-            match storage.load_artifact(session_id, &cell_id) {
-                Ok(Some(existing)) => Self::merge_primary_cell_artifact_bundles(existing, bundle),
-                _ => bundle,
+        if cell_id == PRIMARY_CELL_ID {
+            let incoming_bundle = bundle;
+            if let Err(err) = storage.atomic_update_artifact(session_id, &cell_id, move |existing| {
+                existing.map_or(incoming_bundle.clone(), |existing_bundle| {
+                    Self::merge_primary_cell_artifact_bundles(existing_bundle, incoming_bundle)
+                })
+            }) {
+                tracing::warn!(
+                    "Failed to persist artifacts for session {} cell {}: {}",
+                    session_id,
+                    cell_id,
+                    err
+                );
+                return;
             }
         } else {
-            bundle
-        };
-        if let Err(err) = storage.save_artifact(session_id, &cell_id, &bundle) {
-            tracing::warn!(
-                "Failed to persist artifacts for session {} cell {}: {}",
-                session_id,
-                cell_id,
-                err
-            );
-            return;
+            if let Err(err) = storage.save_artifact(session_id, &cell_id, &bundle) {
+                tracing::warn!(
+                    "Failed to persist artifacts for session {} cell {}: {}",
+                    session_id,
+                    cell_id,
+                    err
+                );
+                return;
+            }
         }
         self.emit_artifact_updated_for_cell(session_id, &cell_id, Some(agent.id.as_str()));
     }
@@ -1195,15 +1257,6 @@ impl SessionController {
 
             self.emit_cell_status_changes(session_id, changes);
             self.emit_session_update(session_id);
-            if let Some(session) = self.get_session(session_id) {
-                if let Err(err) = cleanup_session_worktrees(&session) {
-                    tracing::warn!(
-                        "Session {} worktree cleanup after mark_session_completed: {}",
-                        session_id,
-                        err
-                    );
-                }
-            }
             return Ok(());
         }
 
@@ -1222,15 +1275,6 @@ impl SessionController {
         storage
             .save_session(&persisted)
             .map_err(|e| format!("Failed to persist session completion: {}", e))?;
-
-        let session_shell = Self::session_shell_from_persisted_for_worktree_cleanup(&persisted);
-        if let Err(err) = cleanup_session_worktrees(&session_shell) {
-            tracing::warn!(
-                "Session {} worktree cleanup after persisted mark_session_completed: {}",
-                session_id,
-                err
-            );
-        }
 
         Ok(())
     }
@@ -1307,6 +1351,42 @@ impl SessionController {
             tracing::warn!("Session {} closed with PTY kill errors: {}", id, kill_errors.join(" | "));
         }
         Ok(())
+    }
+
+    fn rollback_launch_allocations(
+        &self,
+        project_path: &PathBuf,
+        session_id: &str,
+        created_cells: &[String],
+        spawned_agent_ids: &[String],
+    ) {
+        let mut seen_agent_ids = HashSet::new();
+        {
+            let pty_manager = self.pty_manager.read();
+            for agent_id in spawned_agent_ids.iter().rev() {
+                if !seen_agent_ids.insert(agent_id.clone()) {
+                    continue;
+                }
+                if let Err(err) = pty_manager.kill(agent_id) {
+                    tracing::warn!("Launch rollback failed to kill agent {}: {}", agent_id, err);
+                }
+            }
+        }
+
+        let mut seen_cells = HashSet::new();
+        for cell_id in created_cells.iter().rev() {
+            if !seen_cells.insert(cell_id.clone()) {
+                continue;
+            }
+            if let Err(err) = remove_session_worktree_cell(project_path, session_id, cell_id) {
+                tracing::warn!(
+                    "Launch rollback failed to remove worktree for session {} cell {}: {}",
+                    session_id,
+                    cell_id,
+                    err
+                );
+            }
+        }
     }
 
     pub fn stop_agent(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
@@ -4727,7 +4807,7 @@ Last updated: {timestamp}
             .or_else(|| config.queen_config.initial_prompt.clone());
 
         self.launch_solo_internal(
-            project_path,
+            project_path.clone(),
             task_description,
             config.name.clone(),
             config.color.clone(),
@@ -4741,6 +4821,8 @@ Last updated: {timestamp}
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
         let project_path = PathBuf::from(&config.project_path);
+        let mut created_cells = Vec::new();
+        let mut spawned_agent_ids = Vec::new();
 
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
@@ -4763,6 +4845,7 @@ Last updated: {timestamp}
             "HEAD",
             &project_path,
         )?;
+        created_cells.push("queen".to_string());
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -4776,12 +4859,21 @@ Last updated: {timestamp}
 
         // Write Queen prompt to file and pass to CLI
         let master_prompt = Self::build_queen_master_prompt(&config.queen_config.cli, &session_id, &config.workers, config.prompt.as_deref(), has_plan);
-        let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+        let prompt_file = match Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt) {
+            Ok(prompt_file) => prompt_file,
+            Err(err) => {
+                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                return Err(err);
+            }
+        };
         let prompt_path = prompt_file.to_string_lossy().to_string();
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         // Write tool documentation files
-        Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli)?;
+        if let Err(err) = Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli) {
+            self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+            return Err(err);
+        }
 
         tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, queen_cwd);
 
@@ -4796,10 +4888,11 @@ Last updated: {timestamp}
                 120,
                 30,
             ) {
-                let _ = remove_session_worktree_cell(&project_path, &session_id, "queen");
+                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
                 return Err(format!("Failed to spawn Queen: {}", e));
             }
         }
+        spawned_agent_ids.push(queen_id.clone());
 
         agents.push(AgentInfo {
             id: queen_id.clone(),
@@ -4820,13 +4913,21 @@ Last updated: {timestamp}
                 Self::apply_worker_identity(index, &worker_role, worker_config.clone());
             let (cmd, mut args) = Self::build_command(&worker_config);
             let worker_branch = format!("hive/{}/worker-{}", session_id, index);
-            let (_, worker_cwd) = create_session_worktree(
+            let worker_cell_id = format!("worker-{}", index);
+            let (_, worker_cwd) = match create_session_worktree(
                 &session_id,
-                &format!("worker-{}", index),
+                &worker_cell_id,
                 &worker_branch,
                 "HEAD",
                 &project_path,
-            )?;
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                    return Err(err);
+                }
+            };
+            created_cells.push(worker_cell_id.clone());
             self.emit_workspace_created(
                 &session_id,
                 PRIMARY_CELL_ID,
@@ -4835,12 +4936,23 @@ Last updated: {timestamp}
             );
 
             // Write task file for this worker (STANDBY or with initial task)
-            Self::write_task_file(&project_path, &session_id, index, worker_config.initial_prompt.as_deref())?;
+            if let Err(err) =
+                Self::write_task_file(&project_path, &session_id, index, worker_config.initial_prompt.as_deref())
+            {
+                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                return Err(err);
+            }
 
             // Write worker prompt to file and pass to CLI
             let worker_prompt = Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
             let filename = format!("worker-{}-prompt.md", index);
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt)?;
+            let prompt_file = match Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt) {
+                Ok(prompt_file) => prompt_file,
+                Err(err) => {
+                    self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                    return Err(err);
+                }
+            };
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -4857,14 +4969,11 @@ Last updated: {timestamp}
                     120,
                     30,
                 ) {
-                    let _ = remove_session_worktree_cell(
-                        &project_path,
-                        &session_id,
-                        &format!("worker-{index}"),
-                    );
+                    self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
                     return Err(format!("Failed to spawn Worker {}: {}", index, e));
                 }
             }
+            spawned_agent_ids.push(worker_id.clone());
 
             agents.push(AgentInfo {
                 id: worker_id,
@@ -4880,7 +4989,7 @@ Last updated: {timestamp}
             name: config.name.clone(),
             color: config.color.clone(),
             session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
-            project_path,
+            project_path: project_path.clone(),
             state: SessionState::Running,
             created_at: Utc::now(),
             agents,
@@ -4913,7 +5022,23 @@ Last updated: {timestamp}
             config.evaluator_config.clone(),
             config.qa_workers.as_deref(),
             config.smoke_test,
-        )?;
+        )
+        .map_err(|err| {
+            {
+                let mut watchers = self.task_watchers.lock();
+                let _ = watchers.remove(&session.id);
+            }
+            {
+                let mut heartbeats = self.agent_heartbeats.write();
+                heartbeats.remove(&session.id);
+            }
+            {
+                let mut sessions = self.sessions.write();
+                sessions.remove(&session.id);
+            }
+            self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+            err
+        })?;
 
         Ok(session)
     }
@@ -6728,42 +6853,6 @@ Last updated: {timestamp}
             qa_timeout_secs: persisted.qa_timeout_secs,
             auth_strategy,
         })
-    }
-
-    /// Minimal `Session` for `cleanup_session_worktrees` when no in-memory session exists.
-    fn session_shell_from_persisted_for_worktree_cleanup(
-        persisted: &crate::storage::PersistedSession,
-    ) -> Session {
-        let session_type = match &persisted.session_type {
-            crate::storage::SessionTypeInfo::Hive { worker_count } => SessionType::Hive {
-                worker_count: *worker_count,
-            },
-            crate::storage::SessionTypeInfo::Swarm { planner_count } => SessionType::Swarm {
-                planner_count: *planner_count,
-            },
-            crate::storage::SessionTypeInfo::Fusion { variants } => SessionType::Fusion {
-                variants: variants.clone(),
-            },
-            crate::storage::SessionTypeInfo::Solo { cli, model } => SessionType::Solo {
-                cli: cli.clone(),
-                model: model.clone(),
-            },
-        };
-        Session {
-            id: persisted.id.clone(),
-            name: persisted.name.clone(),
-            color: persisted.color.clone(),
-            session_type,
-            project_path: PathBuf::from(&persisted.project_path),
-            state: SessionState::Completed,
-            created_at: persisted.created_at,
-            agents: vec![],
-            default_cli: persisted.default_cli.clone(),
-            default_model: persisted.default_model.clone(),
-            max_qa_iterations: persisted.max_qa_iterations,
-            qa_timeout_secs: persisted.qa_timeout_secs,
-            auth_strategy: AuthStrategy::None,
-        }
     }
 
     /// Continue a Swarm session after planning phase

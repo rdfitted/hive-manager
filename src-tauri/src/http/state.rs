@@ -52,6 +52,7 @@ impl AppState {
         if let Some(app_handle) = self.app_handle.as_ref() {
             app_handle
                 .emit("conversation-message", serde_json::json!({
+                    "session_id": session_id,
                     "agent_id": agent_id,
                     "timestamp": message.timestamp,
                     "from": message.from,

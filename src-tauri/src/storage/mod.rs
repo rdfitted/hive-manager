@@ -3,8 +3,10 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -37,6 +39,23 @@ fn stable_learning_id(learning: &Learning) -> String {
         learning.files_touched.join(","),
     );
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, content.as_bytes()).to_string()
+}
+
+fn deserialize_optional_trimmed_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +164,7 @@ pub struct PersistedAgentConfig {
     pub model: Option<String>,
     pub flags: Vec<String>,
     pub label: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     pub name: Option<String>,
     pub description: Option<String>,
     pub role_type: Option<String>,
@@ -154,6 +174,7 @@ pub struct PersistedAgentConfig {
 /// Manages session storage in %APPDATA%/hive-manager
 pub struct SessionStorage {
     base_dir: PathBuf,
+    artifact_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl SessionStorage {
@@ -176,7 +197,10 @@ impl SessionStorage {
             fs::write(&config_path, serde_json::to_string_pretty(&default_config)?)?;
         }
 
-        Ok(Self { base_dir })
+        Ok(Self {
+            base_dir,
+            artifact_locks: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Get the app data directory path
@@ -626,6 +650,15 @@ impl SessionStorage {
         self.artifact_dir(session_id).join(format!("{}.json", cell_id))
     }
 
+    fn artifact_lock(&self, session_id: &str, cell_id: &str) -> Arc<Mutex<()>> {
+        let key = format!("{session_id}:{cell_id}");
+        let mut locks = self.artifact_locks.lock();
+        locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     fn resolver_output_path(&self, session_id: &str) -> PathBuf {
         self.session_dir(session_id).join("resolver_output.json")
     }
@@ -874,6 +907,28 @@ impl SessionStorage {
     ) -> Result<Option<ArtifactBundle>, StorageError> {
         let path = self.artifact_file_path(session_id, cell_id);
         self.read_optional_json(&path)
+    }
+
+    pub fn atomic_update_artifact<F>(
+        &self,
+        session_id: &str,
+        cell_id: &str,
+        update: F,
+    ) -> Result<ArtifactBundle, StorageError>
+    where
+        F: FnOnce(Option<ArtifactBundle>) -> ArtifactBundle,
+    {
+        let artifact_dir = self.artifact_dir(session_id);
+        fs::create_dir_all(&artifact_dir)?;
+
+        let lock = self.artifact_lock(session_id, cell_id);
+        let _guard = lock.lock();
+
+        let path = self.artifact_file_path(session_id, cell_id);
+        let current = self.read_optional_json(&path)?;
+        let updated = update(current);
+        self.atomic_write_json(&path, &updated)?;
+        Ok(updated)
     }
 
     pub fn save_resolver_output(
