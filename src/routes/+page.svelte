@@ -121,6 +121,7 @@
 
   function handleAgentSelect(e: CustomEvent<string>) {
     ui.setFocusedAgent(e.detail);
+    ui.setSelectedAgent(e.detail);
   }
 
   // Keyboard shortcuts
@@ -149,6 +150,7 @@
           ? Math.max(0, currentIndex - 1)
           : Math.min($activeAgents.length - 1, currentIndex + 1);
         ui.setFocusedAgent($activeAgents[nextIndex].id);
+        ui.setSelectedAgent($activeAgents[nextIndex].id);
       }
     }
   }
