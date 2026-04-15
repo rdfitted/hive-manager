@@ -3610,7 +3610,7 @@ Workers run in isolated git worktrees. Each worker has its own worktree + branch
 
 5. **CLEANUP** after successful integration: `git worktree remove <path>` and `git branch -D hive/{session_id}/worker-N`. (Backend also cleans on session completion — safe to leave if unsure.)
 
-6. **CONFLICTS**: resolve in the main checkout, re-run `cargo check --tests` to confirm integrity, then commit the resolution.
+6. **CONFLICTS**: resolve in the main checkout, re-run the repository's relevant verification commands (from the plan, project DNA, and touched package/tooling) to confirm integrity, then commit the resolution.
 
 7. **Commit & push** - You handle final commits (workers don't push)
 8. **Signal Evaluator** - Once all tasks are done, write milestone-ready (see above)

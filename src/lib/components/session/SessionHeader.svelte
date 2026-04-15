@@ -10,7 +10,7 @@
         const p = path.trim();
         if (p.length <= maxLen) return p;
         const head = Math.floor(maxLen / 2) - 1;
-        const tail = maxLen - head - 3;
+        const tail = maxLen - head - 1;
         return `${p.slice(0, Math.max(head, 1))}…${p.slice(-Math.max(tail, 1))}`;
     }
 
