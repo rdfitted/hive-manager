@@ -7885,17 +7885,41 @@ Last updated: {timestamp}
             Some(&worker_cwd),
         );
 
+        let worker_cell_name = format!("worker-{worker_index}");
+        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), worker_index as usize);
+
         // Write task file for this worker (STANDBY or with initial task)
-        Self::write_task_file(
+        let _task_file = match Self::write_task_file(
             Path::new(&worker_cwd),
             worker_index,
             config_with_role.initial_prompt.as_deref(),
-        )?;
+        ) {
+            Ok(task_file) => task_file,
+            Err(err) => {
+                let _ = std::fs::remove_file(&task_file_path);
+                let _ = remove_session_worktree_cell(&session.project_path, session_id, &worker_cell_name);
+                return Err(err);
+            }
+        };
 
         // Write worker prompt to file and add to args
         let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
         let filename = format!("worker-{}-prompt.md", worker_index);
-        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+        let prompt_file_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("prompts")
+            .join(&filename);
+        let prompt_file = match Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt) {
+            Ok(prompt_file) => prompt_file,
+            Err(err) => {
+                let _ = std::fs::remove_file(&prompt_file_path);
+                let _ = std::fs::remove_file(&task_file_path);
+                let _ = remove_session_worktree_cell(&session.project_path, session_id, &worker_cell_name);
+                return Err(err);
+            }
+        };
         let prompt_path = prompt_file.to_string_lossy().to_string();
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -7922,11 +7946,9 @@ Last updated: {timestamp}
                 120,
                 30,
             ) {
-                let _ = remove_session_worktree_cell(
-                    &session.project_path,
-                    session_id,
-                    &format!("worker-{worker_index}"),
-                );
+                let _ = std::fs::remove_file(&prompt_file);
+                let _ = std::fs::remove_file(&task_file_path);
+                let _ = remove_session_worktree_cell(&session.project_path, session_id, &worker_cell_name);
                 return Err(format!("Failed to spawn Worker {}: {}", worker_index, e));
             }
         }
