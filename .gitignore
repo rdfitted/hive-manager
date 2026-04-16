@@ -35,3 +35,4 @@ nul
 # Local planning docs (not shipped)
 PLANNING DOCS/
 dist-local/
+.claude/scheduled_tasks.lock
