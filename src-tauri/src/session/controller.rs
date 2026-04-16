@@ -2506,13 +2506,17 @@ Write the plan in this structure:
             task_files.push_str(&format!("- Variant {} ({}): `{}`\n", v.index, v.name, v.task_file));
         }
         let task_file_glob = variants
-            .first()
-            .and_then(|variant| {
-                PathBuf::from(&variant.task_file)
-                    .parent()
-                    .map(|dir| dir.join("fusion-variant-*-task.md").to_string_lossy().to_string())
+            .iter()
+            .map(|variant| {
+                let q = variant.task_file.trim();
+                if q.contains(' ') {
+                    format!("\"{}\"", q)
+                } else {
+                    q.to_string()
+                }
             })
-            .unwrap_or_else(|| ".hive-manager/tasks/fusion-variant-*-task.md".to_string());
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let hardening = if CliRegistry::needs_role_hardening(cli) {
             r#"
@@ -4275,7 +4279,7 @@ Awaiting task assignment from the Queen."#,
     }
 
     /// Build the Queen's master prompt for Swarm mode with sequential planner spawning
-    fn build_swarm_queen_prompt(cli: &str, session_id: &str, planners: &[PlannerConfig], user_prompt: Option<&str>) -> String {
+    fn build_swarm_queen_prompt(cli: &str, project_path: &Path, session_id: &str, planners: &[PlannerConfig], user_prompt: Option<&str>) -> String {
         let planner_count = planners.len();
 
         // Build planner info section (what Queen will spawn)
@@ -4313,7 +4317,7 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
         };
         let qa_milestone_handoff = Self::build_qa_milestone_handoff(
             session_id,
-            &Self::session_root_path(Path::new("."), session_id),
+            &Self::session_root_path(project_path, session_id),
             "workers/planners",
         );
 
@@ -4553,7 +4557,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             .join("worker-N-task.md")
             .to_string_lossy()
             .to_string();
-        let qa_task_file_example = ".hive-manager/tasks/qa-worker-N-task.md";
+        let qa_task_file_example = format!(".hive-manager/{}/tasks/qa-worker-N-task.md", session_id);
         let worker_one_task_file_example = project_path
             .join(".hive-manager")
             .join("worktrees")
@@ -7415,7 +7419,7 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Write Queen prompt with sequential planner spawning protocol
-            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, session_id, &planners, config.prompt.as_deref());
+            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, &session.project_path, session_id, &planners, config.prompt.as_deref());
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -7526,7 +7530,7 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Write Queen prompt to file and pass to CLI
-            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, &session_id, &planners, config.prompt.as_deref());
+            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, &project_path, &session_id, &planners, config.prompt.as_deref());
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);

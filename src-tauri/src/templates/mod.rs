@@ -471,7 +471,7 @@ curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
 
 - Available specializations: `ui`, `api`, `a11y`
 - QA workers default to parent `{{session_id}}-evaluator`
-- Each QA worker receives a task file at `.hive-manager/tasks/qa-worker-N-task.md`
+- Each QA worker receives a task file at `.hive-manager/{{session_id}}/tasks/qa-worker-N-task.md`
 
 ### Check Worker Status
 
