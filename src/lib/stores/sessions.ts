@@ -119,6 +119,9 @@ export interface SoloLaunchConfig {
   taskDescription?: string;
   cli: string;
   model?: string;
+  with_evaluator?: boolean;
+  evaluator_config?: AgentConfig;
+  qa_workers?: QaWorkerConfig[];
 }
 
 export type SessionState =
@@ -287,6 +290,9 @@ function createSessionsStore() {
           workers: [], // Empty workers list triggers solo mode in backend
           prompt: config.taskDescription,
           with_planning: false,
+          with_evaluator: config.with_evaluator,
+          evaluator_config: config.evaluator_config,
+          qa_workers: config.qa_workers,
         };
         
         const session = await invoke<Session>('launch_hive_v2', { config: hiveConfig });
