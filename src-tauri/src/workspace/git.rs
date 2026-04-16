@@ -97,55 +97,67 @@ pub fn fetch_origin_branch(project_path: &Path, branch: &str) -> Result<(), Stri
         .map(|_| ())
 }
 
-/// Advance the local ref for a branch to match origin, without checking it out.
-/// Uses `git update-ref` so it works even when the branch is checked out in the
-/// main worktree (as long as nothing else holds a lock).
-pub fn advance_local_ref_to_origin(project_path: &Path, branch: &str) -> Result<(), String> {
-    let remote_ref = format!("refs/remotes/origin/{}", branch);
-    let local_ref = format!("refs/heads/{}", branch);
-    // Resolve origin/<branch> to a SHA
-    let sha = run_git(project_path, &["rev-parse", &remote_ref])?;
-    let sha = sha.trim();
-    if sha.is_empty() {
-        return Err(format!("Could not resolve {}", remote_ref));
-    }
-    run_git(project_path, &["update-ref", &local_ref, sha])
-        .map(|_| ())
-}
-
 /// Determine the best base ref for creating a new worktree.
-/// Tries to fetch origin and use `origin/main` (or `origin/master`), falling
-/// back to `"HEAD"` if there is no remote or the fetch fails.
+/// Tries to fetch origin and use `origin/<default>`, falling back to `"HEAD"`
+/// if there is no remote or the fetch fails. Emits a tracing warning on
+/// fallback so operators can see when fresh-base resolution has degraded.
+///
+/// Does NOT mutate local branch refs — worktrees branch directly from the
+/// remote tracking ref, so the local `main` pointer is left untouched to avoid
+/// corrupting the main checkout or orphaning local-only commits.
 pub fn resolve_fresh_base(project_path: &Path) -> String {
-    // Detect main branch name
     let main_branch = detect_main_branch(project_path);
 
-    // Try to fetch the latest from origin
+    // Try to fetch the latest from origin and use the remote tracking ref
+    // directly as the base. No local ref mutation needed — `git worktree add`
+    // accepts remote tracking branches as the base.
     if fetch_origin_branch(project_path, &main_branch).is_ok() {
-        // Advance local ref so future `git worktree add -b ... HEAD` would also
-        // be up-to-date, and return the remote tracking ref for precision.
-        let _ = advance_local_ref_to_origin(project_path, &main_branch);
         let remote_ref = format!("origin/{}", main_branch);
-        // Verify the remote ref exists
-        if run_git(project_path, &["rev-parse", "--verify", &format!("refs/remotes/{}", remote_ref)]).is_ok() {
+        if run_git(
+            project_path,
+            &["rev-parse", "--verify", &format!("refs/remotes/{}", remote_ref)],
+        )
+        .is_ok()
+        {
             return remote_ref;
         }
     }
 
-    // Fallback: use whatever HEAD points at
+    // Fallback: use whatever local HEAD points at. This can reintroduce the
+    // stale-base problem silently, so warn loudly.
+    tracing::warn!(
+        project_path = %project_path.display(),
+        main_branch = %main_branch,
+        "resolve_fresh_base: falling back to local HEAD — fetch failed or no remote. \
+         Worktrees may branch from stale state."
+    );
     "HEAD".to_string()
 }
 
-/// Detect the main branch name (main or master).
+/// Detect the main branch name. Prefers the remote default (via
+/// `git symbolic-ref refs/remotes/origin/HEAD`) over local heuristics so that
+/// repos with non-standard defaults (e.g. `develop`, `trunk`) are handled
+/// correctly. Falls back to local `main` / `master`, then to `"main"`.
 fn detect_main_branch(project_path: &Path) -> String {
-    // Check if 'main' branch exists
+    // 1. Preferred: ask git what the remote default is.
+    if let Ok(output) = run_git(project_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
+        let trimmed = output.trim();
+        if let Some(name) = trimmed.strip_prefix("refs/remotes/origin/") {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+
+    // 2. Fallback: check local branches.
     if branch_exists(project_path, "main").unwrap_or(false) {
         return "main".to_string();
     }
     if branch_exists(project_path, "master").unwrap_or(false) {
         return "master".to_string();
     }
-    // Default to main
+
+    // 3. Last resort.
     "main".to_string()
 }
 
