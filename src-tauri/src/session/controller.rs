@@ -1514,6 +1514,41 @@ impl SessionController {
         }
     }
 
+    fn remove_worker_launch_file(session_id: &str, worker_cell_name: &str, file_path: &Path) {
+        if let Err(err) = std::fs::remove_file(file_path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "Worker launch rollback failed to remove file {} for session {} cell {}: {}",
+                    file_path.display(),
+                    session_id,
+                    worker_cell_name,
+                    err
+                );
+            }
+        }
+    }
+
+    fn rollback_worker_launch_artifacts(
+        project_path: &Path,
+        session_id: &str,
+        worker_cell_name: &str,
+        task_file_path: &Path,
+        prompt_file_path: Option<&Path>,
+    ) {
+        if let Some(prompt_file_path) = prompt_file_path {
+            Self::remove_worker_launch_file(session_id, worker_cell_name, prompt_file_path);
+        }
+        Self::remove_worker_launch_file(session_id, worker_cell_name, task_file_path);
+        if let Err(err) = remove_session_worktree_cell(project_path, session_id, worker_cell_name) {
+            tracing::warn!(
+                "Worker launch rollback failed to remove worktree for session {} cell {}: {}",
+                session_id,
+                worker_cell_name,
+                err
+            );
+        }
+    }
+
     pub fn stop_agent(&self, session_id: &str, agent_id: &str) -> Result<(), String> {
         let pty_manager = self.pty_manager.read();
         pty_manager.kill(agent_id).map_err(|e| e.to_string())?;
@@ -6437,6 +6472,15 @@ Last updated: {timestamp}
         );
 
         let worker_id = format!("{}-worker-{}", session_id, index);
+        let worker_cell_name = format!("worker-{index}");
+        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), index as usize);
+        let filename = format!("worker-{}-prompt.md", index);
+        let prompt_file_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("prompts")
+            .join(&filename);
 
         // 2. Write task file (Status: ACTIVE since it's their turn)
         Self::write_task_file_with_status(
@@ -6444,12 +6488,32 @@ Last updated: {timestamp}
             index,
             worker_config.initial_prompt.as_deref(),
             "ACTIVE",
-        )?;
+        )
+        .map_err(|err| {
+            Self::rollback_worker_launch_artifacts(
+                &session.project_path,
+                session_id,
+                &worker_cell_name,
+                &task_file_path,
+                None,
+            );
+            SessionError::ConfigError(err)
+        })?;
 
         // 3. Write worker prompt to file
         let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
-        let filename = format!("worker-{}-prompt.md", index);
-        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+        let prompt_file =
+            Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)
+                .map_err(|err| {
+                    Self::rollback_worker_launch_artifacts(
+                        &session.project_path,
+                        session_id,
+                        &worker_cell_name,
+                        &task_file_path,
+                        Some(&prompt_file_path),
+                    );
+                    SessionError::ConfigError(err)
+                })?;
         let prompt_path = prompt_file.to_string_lossy().to_string();
 
         // 4. Build command with prompt
@@ -6468,7 +6532,16 @@ Last updated: {timestamp}
                 120,
                 30,
             )
-            .map_err(|e| SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e)))?;
+            .map_err(|e| {
+                Self::rollback_worker_launch_artifacts(
+                    &session.project_path,
+                    session_id,
+                    &worker_cell_name,
+                    &task_file_path,
+                    Some(&prompt_file_path),
+                );
+                SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e))
+            })?;
 
         // 5. Add worker to session
         let waiting_changes = {
@@ -7826,8 +7899,13 @@ Last updated: {timestamp}
         ) {
             Ok(task_file) => task_file,
             Err(err) => {
-                let _ = std::fs::remove_file(&task_file_path);
-                let _ = remove_session_worktree_cell(&session.project_path, session_id, &worker_cell_name);
+                Self::rollback_worker_launch_artifacts(
+                    &session.project_path,
+                    session_id,
+                    &worker_cell_name,
+                    &task_file_path,
+                    None,
+                );
                 return Err(err);
             }
         };
@@ -7844,9 +7922,13 @@ Last updated: {timestamp}
         let prompt_file = match Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
-                let _ = std::fs::remove_file(&prompt_file_path);
-                let _ = std::fs::remove_file(&task_file_path);
-                let _ = remove_session_worktree_cell(&session.project_path, session_id, &worker_cell_name);
+                Self::rollback_worker_launch_artifacts(
+                    &session.project_path,
+                    session_id,
+                    &worker_cell_name,
+                    &task_file_path,
+                    Some(&prompt_file_path),
+                );
                 return Err(err);
             }
         };
@@ -7876,9 +7958,13 @@ Last updated: {timestamp}
                 120,
                 30,
             ) {
-                let _ = std::fs::remove_file(&prompt_file);
-                let _ = std::fs::remove_file(&task_file_path);
-                let _ = remove_session_worktree_cell(&session.project_path, session_id, &worker_cell_name);
+                Self::rollback_worker_launch_artifacts(
+                    &session.project_path,
+                    session_id,
+                    &worker_cell_name,
+                    &task_file_path,
+                    Some(&prompt_file),
+                );
                 return Err(format!("Failed to spawn Worker {}: {}", worker_index, e));
             }
         }
