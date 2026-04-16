@@ -24,7 +24,7 @@ use crate::artifacts::collector::ArtifactCollector;
 use crate::domain::ArtifactBundle;
 use crate::workspace::git::{
     cleanup_session_worktrees, create_session_worktree, remove_session_worktree_cell,
-    resolve_fresh_base,
+    current_head, resolve_fresh_base,
 };
 
 /// Example `coordination.log` lines for Queen quality-reconciliation (quiescence-based; no iteration cap).
@@ -7689,42 +7689,72 @@ Last updated: {timestamp}
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
-        // For late-spawned workers: branch from session worktree HEAD if present,
-        // otherwise fall back to resolve_fresh_base (origin/<default> or HEAD)
-        let base_ref = if let Some(ref wt_path) = session.worktree_path {
-            // Use HEAD from the session's primary worktree to get the most recent state
-            let wt_path = std::path::Path::new(wt_path);
-            match crate::workspace::git::current_head(wt_path) {
+        // Late-spawned workers should branch from the most recent session-integrated commit when possible.
+        let base_ref = if let Some(worktree_path) = session.worktree_path.as_ref() {
+            match current_head(PathBuf::from(worktree_path).as_path()) {
                 Ok(sha) => {
                     tracing::info!(
-                        session_id = %session_id,
-                        worker_index = worker_index,
-                        worktree_path = %wt_path.display(),
-                        base_ref = %sha,
-                        "add_worker: branching from session worktree HEAD"
+                        "add_worker: using session worktree HEAD {} as base for worker {} in session {}",
+                        sha,
+                        worker_index,
+                        session_id
                     );
                     sha
                 }
-                Err(e) => {
+                Err(err) => {
                     tracing::warn!(
-                        session_id = %session_id,
-                        worker_index = worker_index,
-                        worktree_path = %wt_path.display(),
-                        error = %e,
-                        "add_worker: failed to get worktree HEAD, falling back to resolve_fresh_base"
+                        "add_worker: failed to read session worktree HEAD at {} for session {}: {}; falling back to project HEAD",
+                        worktree_path,
+                        session_id,
+                        err
                     );
-                    resolve_fresh_base(&session.project_path)
+                    match current_head(&session.project_path) {
+                        Ok(sha) => {
+                            tracing::info!(
+                                "add_worker: using project HEAD {} as base for worker {} in session {}",
+                                sha,
+                                worker_index,
+                                session_id
+                            );
+                            sha
+                        }
+                        Err(project_err) => {
+                            let fresh_base = resolve_fresh_base(&session.project_path);
+                            tracing::info!(
+                                "add_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
+                                fresh_base,
+                                worker_index,
+                                session_id,
+                                project_err
+                            );
+                            fresh_base
+                        }
+                    }
                 }
             }
         } else {
-            let base = resolve_fresh_base(&session.project_path);
-            tracing::info!(
-                session_id = %session_id,
-                worker_index = worker_index,
-                base_ref = %base,
-                "add_worker: no session worktree, branching from resolve_fresh_base"
-            );
-            base
+            match current_head(&session.project_path) {
+                Ok(sha) => {
+                    tracing::info!(
+                        "add_worker: using project HEAD {} as base for worker {} in session {}",
+                        sha,
+                        worker_index,
+                        session_id
+                    );
+                    sha
+                }
+                Err(err) => {
+                    let fresh_base = resolve_fresh_base(&session.project_path);
+                    tracing::info!(
+                        "add_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
+                        fresh_base,
+                        worker_index,
+                        session_id,
+                        err
+                    );
+                    fresh_base
+                }
+            }
         };
         let (_, worker_cwd) = create_session_worktree(
             session_id,
