@@ -5152,10 +5152,14 @@ Last updated: {timestamp}
         cli: String,
         model: Option<String>,
         flags: Vec<String>,
+        with_evaluator: bool,
+        evaluator_config: Option<AgentConfig>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let base_ref = resolve_fresh_base(&project_path);
         let solo_branch = format!("solo/{}/worker-1", session_id);
+        let mut created_cells = Vec::new();
+        let mut spawned_agent_ids = Vec::new();
         let (_, solo_cwd) = create_session_worktree(
             &session_id,
             "worker-1",
@@ -5163,6 +5167,7 @@ Last updated: {timestamp}
             &base_ref,
             &project_path,
         )?;
+        created_cells.push("worker-1".to_string());
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -5196,10 +5201,16 @@ Last updated: {timestamp}
                 120,
                 30,
             ) {
-                let _ = remove_session_worktree_cell(&project_path, &session_id, "worker-1");
+                self.rollback_launch_allocations(
+                    &project_path,
+                    &session_id,
+                    &created_cells,
+                    &spawned_agent_ids,
+                );
                 return Err(format!("Failed to spawn solo agent: {}", e));
             }
         }
+        spawned_agent_ids.push(solo_id.clone());
 
         let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
@@ -5245,6 +5256,31 @@ Last updated: {timestamp}
         }
 
         self.init_session_storage(&session);
+        self.spawn_launch_evaluator_agents(
+            &session.id,
+            with_evaluator,
+            evaluator_config,
+            None,
+            false,
+        )
+        .map_err(|err| {
+            {
+                let mut heartbeats = self.agent_heartbeats.write();
+                heartbeats.remove(&session.id);
+            }
+            {
+                let mut sessions = self.sessions.write();
+                sessions.remove(&session.id);
+            }
+            self.rollback_launch_allocations(
+                &project_path,
+                &session_id,
+                &created_cells,
+                &spawned_agent_ids,
+            );
+            err
+        })?;
+
         Ok(session)
     }
 
@@ -5263,6 +5299,8 @@ Last updated: {timestamp}
             config.queen_config.cli.clone(),
             config.queen_config.model.clone(),
             config.queen_config.flags.clone(),
+            config.with_evaluator,
+            config.evaluator_config.clone(),
         )
     }
 

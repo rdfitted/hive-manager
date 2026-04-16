@@ -2477,6 +2477,67 @@ async fn test_launch_fusion_success() {
 }
 
 #[tokio::test]
+async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate evaluator wiring",
+        "cli": "claude",
+        "model": "opus-4-6",
+        "evaluator_cli": "codex"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let session_id = launch_response
+        .get("session_id")
+        .and_then(|value| value.as_str())
+        .unwrap();
+
+    let session = controller.read().get_session(session_id).unwrap();
+    match &session.session_type {
+        SessionType::Solo { cli, model } => {
+            assert_eq!(cli, "claude");
+            assert_eq!(model.as_deref(), Some("opus-4-6"));
+        }
+        other => panic!("expected solo session type, got {:?}", other),
+    }
+    assert_eq!(
+        session.state,
+        SessionState::QaInProgress { iteration: None }
+    );
+    assert_eq!(session.agents.len(), 2);
+
+    let evaluator = session
+        .agents
+        .iter()
+        .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+        .unwrap();
+    assert_eq!(evaluator.config.cli, "codex");
+    assert_eq!(evaluator.config.model.as_deref(), Some("opus-4-6"));
+
+    controller.write().close_session(session_id).unwrap();
+}
+
+#[tokio::test]
 async fn test_launch_fusion_empty_variants() {
     let app = setup_test_app().await;
 
