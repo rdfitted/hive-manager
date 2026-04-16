@@ -7,6 +7,7 @@
   import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
   import { templates, selectedTemplate } from '$lib/stores/templates';
+  import { cliOptions } from '$lib/config/clis';
 
   export let show: boolean = false;
 
@@ -323,11 +324,18 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   let withPlanning = true;
   let withEvaluator = true;
+  let evaluatorCli = 'claude';
+  let evaluatorModel = '';
   let evaluatorConfig: AgentConfig = {
     cli: 'claude',
     flags: [],
     label: 'Evaluator',
   };
+
+  $: {
+    evaluatorConfig.cli = evaluatorCli;
+    evaluatorConfig.model = evaluatorModel || undefined;
+  }
 
   let qaWorkers: QaWorkerConfig[] = [
     { specialization: 'ui', cli: 'claude', flags: [] },
@@ -373,6 +381,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           with_planning: withPlanning,
           smoke_test: smokeTest,
           with_evaluator: withEvaluator,
+          evaluator_cli: withEvaluator ? evaluatorCli : undefined,
+          evaluator_model: withEvaluator && evaluatorModel ? evaluatorModel : undefined,
           evaluator_config: withEvaluator ? evaluatorConfig : undefined,
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
@@ -398,6 +408,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           with_planning: true, // Planning is always enabled
           smoke_test: smokeTest,
           with_evaluator: withEvaluator,
+          evaluator_cli: withEvaluator ? evaluatorCli : undefined,
+          evaluator_model: withEvaluator && evaluatorModel ? evaluatorModel : undefined,
           evaluator_config: withEvaluator ? evaluatorConfig : undefined,
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
@@ -597,6 +609,27 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             {#if withEvaluator}
               <div class="evaluator-config subsection">
                 <h4>Evaluator Configuration</h4>
+                <div class="field">
+                  <label for="evaluator-cli">Evaluator CLI</label>
+                  <select
+                    id="evaluator-cli"
+                    bind:value={evaluatorCli}
+                    class="role-select"
+                  >
+                    {#each cliOptions as cli}
+                      <option value={cli.value} title={cli.description}>{cli.label}</option>
+                    {#/each}
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="evaluator-model">Evaluator Model (optional)</label>
+                  <input
+                    id="evaluator-model"
+                    type="text"
+                    bind:value={evaluatorModel}
+                    placeholder="e.g. claude-opus-4-6"
+                  />
+                </div>
                 <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />
               </div>
 
