@@ -1510,6 +1510,8 @@ impl SessionController {
                     cell_id,
                     err
                 );
+            } else {
+                Self::delete_hive_cell_branch(project_path, session_id, cell_id);
             }
         }
     }
@@ -1546,6 +1548,73 @@ impl SessionController {
                 worker_cell_name,
                 err
             );
+        } else {
+            Self::delete_hive_cell_branch(project_path, session_id, worker_cell_name);
+        }
+    }
+
+    fn delete_hive_cell_branch(project_path: &Path, session_id: &str, cell_id: &str) {
+        let branch_name = format!("hive/{session_id}/{cell_id}");
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(project_path)
+            .arg("branch")
+            .arg("-D")
+            .arg(&branch_name);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match cmd.output() {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let message = if !stderr.is_empty() { stderr } else { stdout };
+                tracing::warn!(
+                    "Rollback failed to delete branch {} for session {} cell {}: {}",
+                    branch_name,
+                    session_id,
+                    cell_id,
+                    if message.is_empty() { "git branch -D failed".to_string() } else { message }
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Rollback failed to delete branch {} for session {} cell {}: {}",
+                    branch_name,
+                    session_id,
+                    cell_id,
+                    err
+                );
+            }
+        }
+    }
+
+    fn restore_session_state_after_worker_spawn_failure(
+        &self,
+        session_id: &str,
+        previous_state: &SessionState,
+    ) {
+        let changes = {
+            let mut sessions = self.sessions.write();
+            sessions.get_mut(session_id).map(|session| {
+                self.set_session_state_with_events(session, previous_state.clone())
+            })
+        };
+
+        if let Some(changes) = changes {
+            if let Err(err) = self.persist_then_emit_session_update(session_id, changes) {
+                tracing::warn!(
+                    "Failed to restore session {} state after worker spawn failure: {}",
+                    session_id,
+                    err
+                );
+            }
         }
     }
 
@@ -6436,6 +6505,12 @@ Last updated: {timestamp}
         let worker_config = &config.workers[worker_index];
         let index = (worker_index + 1) as u8;
         let worker_branch = format!("hive/{}/worker-{}", session_id, index);
+        let previous_state = self
+            .sessions
+            .read()
+            .get(session_id)
+            .map(|s| s.state.clone())
+            .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
 
         // Update state to spawning this worker
         let spawning_changes = {
@@ -6463,7 +6538,11 @@ Last updated: {timestamp}
             &worker_branch,
             &base_ref,
             &session.project_path,
-        )?;
+        )
+        .map_err(|err| {
+            self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
+            SessionError::ConfigError(err)
+        })?;
         self.emit_workspace_created(
             session_id,
             PRIMARY_CELL_ID,
@@ -6497,6 +6576,7 @@ Last updated: {timestamp}
                 &task_file_path,
                 None,
             );
+            self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
             SessionError::ConfigError(err)
         })?;
 
@@ -6512,6 +6592,7 @@ Last updated: {timestamp}
                         &task_file_path,
                         Some(&prompt_file_path),
                     );
+                    self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
                     SessionError::ConfigError(err)
                 })?;
         let prompt_path = prompt_file.to_string_lossy().to_string();
@@ -6540,6 +6621,7 @@ Last updated: {timestamp}
                     &task_file_path,
                     Some(&prompt_file_path),
                 );
+                self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
                 SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e))
             })?;
 
