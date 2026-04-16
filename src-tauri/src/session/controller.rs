@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1932,13 +1932,12 @@ impl SessionController {
     }
 
     fn write_fusion_variant_task_file(
-        project_path: &PathBuf,
-        session_id: &str,
+        worktree_path: &Path,
         variant_index: u8,
         variant_name: &str,
         task_description: &str,
     ) -> Result<PathBuf, String> {
-        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+        let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
@@ -1981,6 +1980,49 @@ Last updated: {timestamp}
         std::fs::write(&file_path, content)
             .map_err(|e| format!("Failed to write fusion task file: {}", e))?;
         Ok(file_path)
+    }
+
+    fn fusion_variant_task_file_path(worktree_path: &Path, variant_index: usize) -> PathBuf {
+        worktree_path
+            .join(".hive-manager")
+            .join("tasks")
+            .join(format!("fusion-variant-{}-task.md", variant_index))
+    }
+
+    fn qa_task_file_path(project_path: &Path, session_id: &str, worker_index: usize) -> PathBuf {
+        project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("tasks")
+            .join(format!("qa-worker-{}-task.md", worker_index))
+    }
+
+    fn task_file_path_for_worker(worktree_path: &Path, worker_index: usize) -> PathBuf {
+        worktree_path
+            .join(".hive-manager")
+            .join("tasks")
+            .join(format!("worker-{}-task.md", worker_index))
+    }
+
+    pub(crate) fn absolute_task_file_path_for_worker(
+        project_path: &Path,
+        session_id: &str,
+        worker_index: usize,
+    ) -> PathBuf {
+        let worktree_path = project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join(format!("worker-{}", worker_index));
+        Self::task_file_path_for_worker(&worktree_path, worker_index)
+    }
+
+    pub(crate) fn absolute_task_file_path_for_qa_worker(
+        project_path: &Path,
+        session_id: &str,
+        worker_index: usize,
+    ) -> PathBuf {
+        Self::qa_task_file_path(project_path, session_id, worker_index)
     }
 
     fn build_fusion_worker_prompt(
@@ -4715,13 +4757,12 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
     }
 
     /// Write a task file for a worker (STANDBY by default)
-    fn write_task_file(project_path: &PathBuf, session_id: &str, worker_index: u8, initial_task: Option<&str>) -> Result<PathBuf, String> {
-        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+    fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>) -> Result<PathBuf, String> {
+        let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
-        let filename = format!("worker-{}-task.md", worker_index);
-        let file_path = tasks_dir.join(&filename);
+        let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
 
         let (status, task_content) = if let Some(task) = initial_task {
             ("ACTIVE", task.to_string())
@@ -4769,13 +4810,12 @@ Last updated: {timestamp}
     }
 
     /// Write a task file with a specific status (used for sequential spawning)
-    fn write_task_file_with_status(project_path: &PathBuf, session_id: &str, worker_index: u8, initial_task: Option<&str>, status: &str) -> Result<PathBuf, String> {
-        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+    fn write_task_file_with_status(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>, status: &str) -> Result<PathBuf, String> {
+        let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
-        let filename = format!("worker-{}-task.md", worker_index);
-        let file_path = tasks_dir.join(&filename);
+        let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
 
         let task_content = if let Some(task) = initial_task {
             task.to_string()
@@ -5127,7 +5167,7 @@ Last updated: {timestamp}
 
             // Write task file for this worker (STANDBY or with initial task)
             if let Err(err) =
-                Self::write_task_file(&project_path, &session_id, index, worker_config.initial_prompt.as_deref())
+                Self::write_task_file(Path::new(&worker_cwd), index, worker_config.initial_prompt.as_deref())
             {
                 self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
                 return Err(err);
@@ -5276,13 +5316,12 @@ Last updated: {timestamp}
                 .join(format!("variant-{}", slug))
                 .to_string_lossy()
                 .to_string();
-            let task_file = project_path
-                .join(".hive-manager")
-                .join(&session_id)
-                .join("tasks")
-                .join(format!("fusion-variant-{}-task.md", index))
-                .to_string_lossy()
-                .to_string();
+            let task_file = Self::fusion_variant_task_file_path(
+                Path::new(&worktree_path),
+                index as usize,
+            )
+            .to_string_lossy()
+            .to_string();
 
             variants.push(FusionVariantMetadata {
                 index,
@@ -5369,8 +5408,7 @@ Last updated: {timestamp}
             );
 
             Self::write_fusion_variant_task_file(
-                &project_path,
-                &session_id,
+                Path::new(&variant.worktree_path),
                 variant.index,
                 &variant.name,
                 &config.task_description,
@@ -5739,13 +5777,12 @@ Last updated: {timestamp}
                 .join(format!("variant-{}", slug))
                 .to_string_lossy()
                 .to_string();
-            let task_file = session.project_path
-                .join(".hive-manager")
-                .join(session_id)
-                .join("tasks")
-                .join(format!("fusion-variant-{}-task.md", index))
-                .to_string_lossy()
-                .to_string();
+            let task_file = Self::fusion_variant_task_file_path(
+                Path::new(&worktree_path),
+                index as usize,
+            )
+            .to_string_lossy()
+            .to_string();
 
             variants.push(FusionVariantMetadata {
                 index,
@@ -5834,8 +5871,7 @@ Last updated: {timestamp}
             );
 
             Self::write_fusion_variant_task_file(
-                &session.project_path,
-                session_id,
+                Path::new(&variant.worktree_path),
                 variant.index,
                 &variant.name,
                 &config.task_description,
@@ -6083,6 +6119,12 @@ Last updated: {timestamp}
         let worker_config = &config.workers[worker_index];
         let index = (worker_index + 1) as u8;
         let cwd = session.project_path.to_str().unwrap_or(".");
+        let worker_worktree_path = session
+            .project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join(format!("worker-{}", index));
 
         // Update state to spawning this worker
         let spawning_changes = {
@@ -6105,7 +6147,12 @@ Last updated: {timestamp}
         let worker_id = format!("{}-worker-{}", session_id, index);
 
         // 1. Write task file FIRST (Status: ACTIVE since it's their turn)
-        Self::write_task_file_with_status(&session.project_path, session_id, index, worker_config.initial_prompt.as_deref(), "ACTIVE")?;
+        Self::write_task_file_with_status(
+            &worker_worktree_path,
+            index,
+            worker_config.initial_prompt.as_deref(),
+            "ACTIVE",
+        )?;
 
         // 2. Write worker prompt to file
         let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
@@ -7408,7 +7455,11 @@ Last updated: {timestamp}
         );
 
         // Write task file for this worker (STANDBY or with initial task)
-        Self::write_task_file(&session.project_path, session_id, worker_index, config_with_role.initial_prompt.as_deref())?;
+        Self::write_task_file(
+            Path::new(&worker_cwd),
+            worker_index,
+            config_with_role.initial_prompt.as_deref(),
+        )?;
 
         // Write worker prompt to file and add to args
         let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
@@ -7976,12 +8027,19 @@ Last updated: {timestamp}
         }
 
         let session_path = project_path.join(".hive-manager").join(session_id);
-        let tasks_path = session_path.join("tasks");
-        if !tasks_path.exists() {
-            return;
-        }
+        let worktrees_path = project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id);
+        let fusion_worktrees_path = project_path.join(".hive-fusion").join(session_id);
 
-        match TaskFileWatcher::new(&session_path, session_id, app_handle) {
+        match TaskFileWatcher::new(
+            &session_path,
+            &worktrees_path,
+            &fusion_worktrees_path,
+            session_id,
+            app_handle,
+        ) {
             Ok(watcher) => {
                 watchers.insert(session_id.to_string(), watcher);
             }
@@ -8267,7 +8325,7 @@ mod tests {
     use crate::pty::{AgentRole, AgentStatus, PtyManager};
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     #[test]
@@ -8340,6 +8398,37 @@ mod tests {
         assert!(prompt.contains("Accessibility Tester"));
         assert!(prompt.contains("axe-core"));
         assert!(!prompt.contains("UI Tester"));
+    }
+
+    #[test]
+    fn worker_task_file_path_uses_worktree_local_hive_manager_dir() {
+        let path = SessionController::task_file_path_for_worker(
+            Path::new("/repo/.hive-manager/worktrees/session-123/worker-2"),
+            2,
+        );
+
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/repo/.hive-manager/worktrees/session-123/worker-2/.hive-manager/tasks/worker-2-task.md"
+            )
+        );
+    }
+
+    #[test]
+    fn absolute_worker_task_file_path_matches_worktree_convention() {
+        let path = SessionController::absolute_task_file_path_for_worker(
+            Path::new("/repo"),
+            "session-123",
+            4,
+        );
+
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/repo/.hive-manager/worktrees/session-123/worker-4/.hive-manager/tasks/worker-4-task.md"
+            )
+        );
     }
 
     #[test]

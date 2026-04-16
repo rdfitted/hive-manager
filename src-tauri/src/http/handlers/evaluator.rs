@@ -239,7 +239,19 @@ pub async fn add_qa_worker(
             role: qa_specialization_label(&req.specialization).to_string(),
             cli,
             status: "Running".to_string(),
-            task_file: format!(".hive-manager/{}/tasks/qa-worker-{}-task.md", session_id, index),
+            task_file: {
+                let controller = state.session_controller.read();
+                let session = controller
+                    .get_session(&session_id)
+                    .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+                SessionController::absolute_task_file_path_for_qa_worker(
+                    &session.project_path,
+                    &session_id,
+                    index as usize,
+                )
+                .to_string_lossy()
+                .to_string()
+            },
         }),
     ))
 }
