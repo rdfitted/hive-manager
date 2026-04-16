@@ -51,6 +51,7 @@
             const queen = $activeAgents.find(a => a.role === 'Queen' || a.id.endsWith('-queen'));
             if (queen) {
               ui.setFocusedAgent(queen.id);
+              ui.setSelectedAgent(queen.id);
             }
             isTransitioning = false;
           });
@@ -71,12 +72,15 @@
     // Auto-select first agent when agents are added and nothing is selected
     if (agents.length > 0 && !currentFocusId) {
       ui.setFocusedAgent(agents[0].id);
+      ui.setSelectedAgent(agents[0].id);
       return;
     }
 
     // Reset if focused agent no longer exists
     if (currentFocusId && !agents.find(a => a.id === currentFocusId)) {
-      ui.setFocusedAgent(agents[0]?.id ?? null);
+      const nextId = agents[0]?.id ?? null;
+      ui.setFocusedAgent(nextId);
+      ui.setSelectedAgent(nextId);
       return;
     }
 
@@ -84,6 +88,7 @@
     const waitingAgent = agents.find(a => typeof a.status === 'object' && 'WaitingForInput' in a.status);
     if (waitingAgent && currentFocusId !== waitingAgent.id) {
       ui.setFocusedAgent(waitingAgent.id);
+      ui.setSelectedAgent(waitingAgent.id);
     }
   });
 
@@ -121,6 +126,7 @@
 
   function handleAgentSelect(e: CustomEvent<string>) {
     ui.setFocusedAgent(e.detail);
+    ui.setSelectedAgent(e.detail);
   }
 
   // Keyboard shortcuts
@@ -140,8 +146,17 @@
       event.preventDefault();
       // Focus the new session button - handled by SessionSidebar
     }
-    // Navigate agents with arrow keys when tree is focused
-    if ($activeAgents.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+    // Navigate agents with arrow keys — skip when user is typing in inputs, textareas,
+    // contenteditable regions, or terminal panes so we don't hijack their keystrokes.
+    const target = event.target as HTMLElement | null;
+    const inTypingContext = !!target && (
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.tagName === 'SELECT' ||
+      target.isContentEditable ||
+      !!target.closest('.xterm, .terminal, [data-terminal], [contenteditable="true"]')
+    );
+    if (!inTypingContext && $activeAgents.length > 0 && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
       const currentIndex = $activeAgents.findIndex(a => a.id === focusedAgentId);
       if (currentIndex !== -1) {
         event.preventDefault();
@@ -149,6 +164,7 @@
           ? Math.max(0, currentIndex - 1)
           : Math.min($activeAgents.length - 1, currentIndex + 1);
         ui.setFocusedAgent($activeAgents[nextIndex].id);
+        ui.setSelectedAgent($activeAgents[nextIndex].id);
       }
     }
   }

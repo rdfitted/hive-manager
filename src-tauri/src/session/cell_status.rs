@@ -260,6 +260,8 @@ mod tests {
             max_qa_iterations: DEFAULT_MAX_QA_ITERATIONS,
             qa_timeout_secs: 300,
             auth_strategy: AuthStrategy::None,
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 

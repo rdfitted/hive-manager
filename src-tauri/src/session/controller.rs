@@ -353,6 +353,11 @@ pub struct Session {
     pub qa_timeout_secs: u64,
     #[serde(default)]
     pub auth_strategy: AuthStrategy,
+    /// Primary git worktree path for this session (e.g. Queen or first Fusion variant), for UI.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -668,6 +673,8 @@ impl SessionController {
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -1446,6 +1453,8 @@ impl SessionController {
                 }
                 let changes = self.set_session_state_with_events(session, SessionState::Closed);
                 session.auth_strategy = AuthStrategy::None;
+                session.worktree_path = None;
+                session.worktree_branch = None;
                 Some((session.clone(), completed_agents, changes))
             } else {
                 None
@@ -3584,6 +3593,77 @@ Workers record learnings during task completion. Your curation responsibilities:
 4. **Monitor progress** - Watch for workers to mark tasks COMPLETED
 5. **Spawn next worker** - When a task completes, spawn the next worker if needed
 6. **Review & integrate** - Review worker output and coordinate integration
+
+## Worktree Awareness (READ THIS FIRST)
+
+⚠️ **You are running in your OWN worktree**, separate from where the workers are working. This means:
+
+- `git status` / `git diff` in your CWD **will NOT show worker changes** — your worktree only sees your own commits.
+- `ls`, Read, Glob in your CWD will show the repo as it existed when your worktree was created, NOT the workers' live edits.
+- **Never assume "no diff = no work done."** Workers commit into `hive/{session_id}/worker-N` branches inside their own worktree paths.
+
+### How to actually see worker progress
+
+Always target the worker's worktree path or branch explicitly. For every worker `N`:
+
+```bash
+WT=.hive-manager/worktrees/{session_id}/worker-N
+BR=hive/{session_id}/worker-N
+
+# Has the worker committed anything yet?
+git -C "$WT" log --oneline "$BR" ^<feature-branch>
+
+# What's changed (committed)?
+git -C "$WT" diff --stat <feature-branch>...$BR
+git -C "$WT" diff <feature-branch>...$BR -- <path>
+
+# What's in-flight (staged + unstaged + untracked)?
+git -C "$WT" status --short
+git -C "$WT" diff            # unstaged
+git -C "$WT" diff --cached   # staged
+
+# Read a file as the worker currently has it on disk:
+cat "$WT/<relative/path>"
+# Or as committed on their branch:
+git -C "$WT" show "$BR:<relative/path>"
+```
+
+If a worker's task file says COMPLETED but `git log` on their branch is empty, check `git status` in their worktree — they may have forgotten to commit. Prompt them to commit rather than assuming failure.
+
+### Monitoring cadence
+
+When polling for worker progress, iterate over every worker worktree and run the commands above — do NOT rely on your own CWD's `git status`. A quick sweep:
+
+```bash
+for WT in .hive-manager/worktrees/{session_id}/worker-*; do
+  BR="hive/{session_id}/$(basename "$WT")"
+  echo "=== $BR ==="
+  git -C "$WT" log --oneline "$BR" ^<feature-branch> 2>/dev/null | head -5
+  git -C "$WT" status --short
+done
+```
+
+## Worktree Integration Protocol
+
+Workers run in isolated git worktrees. Each worker has its own worktree + branch created by the backend at `.hive-manager/worktrees/{session_id}/worker-N` on branch `hive/{session_id}/worker-N`. Integrate them back into the feature branch as follows:
+
+1. **LOCATE** each worker's worktree at `.hive-manager/worktrees/{session_id}/worker-N` on branch `hive/{session_id}/worker-N`. Inspect changes via:
+   - `git -C <worktree> log <branch> ^<feature-branch>`
+   - `git -C <worktree> diff <feature-branch>...<branch>`
+
+2. **CHOOSE** integration method per worker:
+   - **Preferred — cherry-pick the full branch range**: `git rev-list --reverse <feature-branch>..<branch> | xargs -n1 git cherry-pick` — preserves the worker's full commit history.
+   - **Squash merge**: `git merge --squash <branch> && git commit -m '...'` — use when the worker made noisy WIP commits.
+   - **Patch apply**: only use this when the worker has no commits and has staged/tracked all files first; otherwise newly created untracked files will be missed.
+
+3. **ORDER integration** to minimize conflicts. Integrate disjoint-file tasks first. For tasks that touch overlapping files, integrate one, then rebase the next worker branch onto the updated tip before picking.
+
+4. **COMMIT CADENCE**: one separate commit per worker on the feature branch; push after each commit to give external reviewers (CodeRabbit/Gemini) incremental surface.
+
+5. **CLEANUP** after successful integration: `git worktree remove <path>` and `git branch -D hive/{session_id}/worker-N`. (Backend also cleans on session completion — safe to leave if unsure.)
+
+6. **CONFLICTS**: resolve in the main checkout, re-run the repository's relevant verification commands (from the plan, project DNA, and touched package/tooling) to confirm integrity, then commit the resolution.
+
 7. **Commit & push** - You handle final commits (workers don't push)
 8. **Signal Evaluator** - Once all tasks are done, write milestone-ready (see above)
 
@@ -4884,6 +4964,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: Some(solo_cwd.clone()),
+            worktree_branch: Some(solo_branch.clone()),
         };
 
         {
@@ -5108,6 +5190,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: Some(queen_cwd.clone()),
+            worktree_branch: Some(queen_branch.clone()),
         };
 
         {
@@ -5229,6 +5313,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: variants.first().map(|v| v.worktree_path.clone()),
+            worktree_branch: variants.first().map(|v| v.branch.clone()),
         };
 
         {
@@ -5487,6 +5573,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -5580,6 +5668,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -5843,6 +5933,10 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 s.agents.extend(new_agents.clone());
+                if let Some(v) = variants.first() {
+                    s.worktree_path = Some(v.worktree_path.clone());
+                    s.worktree_branch = Some(v.branch.clone());
+                }
                 self.emit_agent_batch_launched(s, &new_agents);
                 let changes =
                     self.set_session_state_with_events(s, SessionState::WaitingForFusionVariants);
@@ -5945,6 +6039,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -6635,6 +6731,8 @@ Last updated: {timestamp}
                 }
                 let changes = self.set_session_state_with_events(s, SessionState::Completed);
                 s.auth_strategy = AuthStrategy::None;
+                s.worktree_path = None;
+                s.worktree_branch = None;
                 Some((s.clone(), completed_agents, changes))
             } else {
                 None
@@ -6969,6 +7067,8 @@ Last updated: {timestamp}
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
             auth_strategy,
+            worktree_path: persisted.worktree_path.clone(),
+            worktree_branch: persisted.worktree_branch.clone(),
         })
     }
 
@@ -7188,6 +7288,8 @@ Last updated: {timestamp}
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
         };
 
         {
@@ -7363,6 +7465,8 @@ Last updated: {timestamp}
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
+                // Don't promote ephemeral worker worktrees to session-level metadata.
+                // Only persist long-lived primary worktrees here.
                 self.emit_agent_launched(session, &agent_info);
             }
         }
@@ -7799,6 +7903,8 @@ Last updated: {timestamp}
             max_qa_iterations: session.max_qa_iterations,
             qa_timeout_secs: session.qa_timeout_secs,
             auth_strategy: auth_strategy.persist_value(),
+            worktree_path: session.worktree_path.clone(),
+            worktree_branch: session.worktree_branch.clone(),
         }
     }
 
@@ -8317,6 +8423,8 @@ mod tests {
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
             auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
         }
     }
 

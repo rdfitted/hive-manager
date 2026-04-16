@@ -197,6 +197,9 @@ export interface Session {
   /** RFC3339; omitted on older persisted sessions — UI falls back to `created_at`. */
   last_activity_at?: string;
   agents: AgentInfo[];
+  /** Git worktree path for the session primary workspace (Tauri Session), when set. */
+  worktree_path?: string | null;
+  worktree_branch?: string | null;
 }
 
 interface SessionsState {

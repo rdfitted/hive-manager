@@ -107,6 +107,8 @@
         overflow: hidden;
         display: flex;
         flex-direction: column;
+        min-height: 0;
+        max-height: 100%;
     }
 
     .cell-card:hover {
@@ -195,6 +197,9 @@
         display: flex;
         flex-direction: column;
         gap: 16px;
+        overflow-y: auto;
+        min-height: 0;
+        flex: 1 1 auto;
     }
 
     .objective {
