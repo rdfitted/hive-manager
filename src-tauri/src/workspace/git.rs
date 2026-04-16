@@ -90,6 +90,65 @@ pub fn branch_exists(worktree_path: &Path, branch_name: &str) -> Result<bool, St
     }
 }
 
+/// Fetch the latest state of a branch from origin.
+/// Returns Ok(()) on success, Err on failure (e.g. no remote, network issues).
+pub fn fetch_origin_branch(project_path: &Path, branch: &str) -> Result<(), String> {
+    run_git(project_path, &["fetch", "origin", branch])
+        .map(|_| ())
+}
+
+/// Advance the local ref for a branch to match origin, without checking it out.
+/// Uses `git update-ref` so it works even when the branch is checked out in the
+/// main worktree (as long as nothing else holds a lock).
+pub fn advance_local_ref_to_origin(project_path: &Path, branch: &str) -> Result<(), String> {
+    let remote_ref = format!("refs/remotes/origin/{}", branch);
+    let local_ref = format!("refs/heads/{}", branch);
+    // Resolve origin/<branch> to a SHA
+    let sha = run_git(project_path, &["rev-parse", &remote_ref])?;
+    let sha = sha.trim();
+    if sha.is_empty() {
+        return Err(format!("Could not resolve {}", remote_ref));
+    }
+    run_git(project_path, &["update-ref", &local_ref, sha])
+        .map(|_| ())
+}
+
+/// Determine the best base ref for creating a new worktree.
+/// Tries to fetch origin and use `origin/main` (or `origin/master`), falling
+/// back to `"HEAD"` if there is no remote or the fetch fails.
+pub fn resolve_fresh_base(project_path: &Path) -> String {
+    // Detect main branch name
+    let main_branch = detect_main_branch(project_path);
+
+    // Try to fetch the latest from origin
+    if fetch_origin_branch(project_path, &main_branch).is_ok() {
+        // Advance local ref so future `git worktree add -b ... HEAD` would also
+        // be up-to-date, and return the remote tracking ref for precision.
+        let _ = advance_local_ref_to_origin(project_path, &main_branch);
+        let remote_ref = format!("origin/{}", main_branch);
+        // Verify the remote ref exists
+        if run_git(project_path, &["rev-parse", "--verify", &format!("refs/remotes/{}", remote_ref)]).is_ok() {
+            return remote_ref;
+        }
+    }
+
+    // Fallback: use whatever HEAD points at
+    "HEAD".to_string()
+}
+
+/// Detect the main branch name (main or master).
+fn detect_main_branch(project_path: &Path) -> String {
+    // Check if 'main' branch exists
+    if branch_exists(project_path, "main").unwrap_or(false) {
+        return "main".to_string();
+    }
+    if branch_exists(project_path, "master").unwrap_or(false) {
+        return "master".to_string();
+    }
+    // Default to main
+    "main".to_string()
+}
+
 pub fn create_session_worktree(
     session_id: &str,
     cell_id: &str,
