@@ -5281,7 +5281,8 @@ Last updated: {timestamp}
             err
         })?;
 
-        Ok(session)
+        self.get_session(&session_id)
+            .ok_or_else(|| format!("Session disappeared after evaluator launch: {}", session_id))
     }
 
     pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
@@ -6410,73 +6411,7 @@ Last updated: {timestamp}
                 .map_err(SessionError::ConfigError)?;
         }
 
-        // Resolve base ref using three-tier ladder (mirror add_worker pattern)
-        let base_ref = if let Some(worktree_path) = session.worktree_path.as_ref() {
-            match current_head(PathBuf::from(worktree_path).as_path()) {
-                Ok(sha) => {
-                    tracing::info!(
-                        "spawn_next_worker: using session worktree HEAD {} as base for worker {} in session {}",
-                        sha,
-                        index,
-                        session_id
-                    );
-                    sha
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "spawn_next_worker: failed to read session worktree HEAD at {} for session {}: {}; falling back to project HEAD",
-                        worktree_path,
-                        session_id,
-                        err
-                    );
-                    match current_head(&session.project_path) {
-                        Ok(sha) => {
-                            tracing::info!(
-                                "spawn_next_worker: using project HEAD {} as base for worker {} in session {}",
-                                sha,
-                                index,
-                                session_id
-                            );
-                            sha
-                        }
-                        Err(project_err) => {
-                            let fresh_base = resolve_fresh_base(&session.project_path);
-                            tracing::info!(
-                                "spawn_next_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
-                                fresh_base,
-                                index,
-                                session_id,
-                                project_err
-                            );
-                            fresh_base
-                        }
-                    }
-                }
-            }
-        } else {
-            match current_head(&session.project_path) {
-                Ok(sha) => {
-                    tracing::info!(
-                        "spawn_next_worker: using project HEAD {} as base for worker {} in session {}",
-                        sha,
-                        index,
-                        session_id
-                    );
-                    sha
-                }
-                Err(err) => {
-                    let fresh_base = resolve_fresh_base(&session.project_path);
-                    tracing::info!(
-                        "spawn_next_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
-                        fresh_base,
-                        index,
-                        session_id,
-                        err
-                    );
-                    fresh_base
-                }
-            }
-        };
+        let base_ref = Self::resolve_worker_base_ref(&session, "spawn_next_worker", index);
 
         // 1. Create worker worktree FIRST (before writing task/prompt files)
         let (_, worker_cwd) = create_session_worktree(
@@ -6554,6 +6489,58 @@ Last updated: {timestamp}
         }
 
         Ok(())
+    }
+
+    fn resolve_worker_base_ref(session: &Session, log_context: &str, worker_index: u8) -> String {
+        let maybe_worktree_head = session.worktree_path.as_ref().and_then(|worktree_path| {
+            match current_head(Path::new(worktree_path)) {
+                Ok(sha) => {
+                    tracing::info!(
+                        "{}: using session worktree HEAD {} as base for worker {} in session {}",
+                        log_context,
+                        sha,
+                        worker_index,
+                        session.id
+                    );
+                    Some(sha)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "{}: failed to read session worktree HEAD at {} for session {}: {}; falling back to project HEAD",
+                        log_context,
+                        worktree_path,
+                        session.id,
+                        err
+                    );
+                    None
+                }
+            }
+        });
+
+        maybe_worktree_head.unwrap_or_else(|| match current_head(&session.project_path) {
+            Ok(sha) => {
+                tracing::info!(
+                    "{}: using project HEAD {} as base for worker {} in session {}",
+                    log_context,
+                    sha,
+                    worker_index,
+                    session.id
+                );
+                sha
+            }
+            Err(err) => {
+                let fresh_base = resolve_fresh_base(&session.project_path);
+                tracing::info!(
+                    "{}: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
+                    log_context,
+                    fresh_base,
+                    worker_index,
+                    session.id,
+                    err
+                );
+                fresh_base
+            }
+        })
     }
 
     /// Called when worker-completed event received
@@ -7805,72 +7792,7 @@ Last updated: {timestamp}
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
         // Late-spawned workers should branch from the most recent session-integrated commit when possible.
-        let base_ref = if let Some(worktree_path) = session.worktree_path.as_ref() {
-            match current_head(PathBuf::from(worktree_path).as_path()) {
-                Ok(sha) => {
-                    tracing::info!(
-                        "add_worker: using session worktree HEAD {} as base for worker {} in session {}",
-                        sha,
-                        worker_index,
-                        session_id
-                    );
-                    sha
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "add_worker: failed to read session worktree HEAD at {} for session {}: {}; falling back to project HEAD",
-                        worktree_path,
-                        session_id,
-                        err
-                    );
-                    match current_head(&session.project_path) {
-                        Ok(sha) => {
-                            tracing::info!(
-                                "add_worker: using project HEAD {} as base for worker {} in session {}",
-                                sha,
-                                worker_index,
-                                session_id
-                            );
-                            sha
-                        }
-                        Err(project_err) => {
-                            let fresh_base = resolve_fresh_base(&session.project_path);
-                            tracing::info!(
-                                "add_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
-                                fresh_base,
-                                worker_index,
-                                session_id,
-                                project_err
-                            );
-                            fresh_base
-                        }
-                    }
-                }
-            }
-        } else {
-            match current_head(&session.project_path) {
-                Ok(sha) => {
-                    tracing::info!(
-                        "add_worker: using project HEAD {} as base for worker {} in session {}",
-                        sha,
-                        worker_index,
-                        session_id
-                    );
-                    sha
-                }
-                Err(err) => {
-                    let fresh_base = resolve_fresh_base(&session.project_path);
-                    tracing::info!(
-                        "add_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
-                        fresh_base,
-                        worker_index,
-                        session_id,
-                        err
-                    );
-                    fresh_base
-                }
-            }
-        };
+        let base_ref = Self::resolve_worker_base_ref(&session, "add_worker", worker_index);
         let (_, worker_cwd) = create_session_worktree(
             session_id,
             &format!("worker-{}", worker_index),
@@ -8785,6 +8707,7 @@ mod tests {
         AuthStrategy, QaWorkerConfig, Session, SessionController, SessionState, SessionType,
     };
     use crate::pty::{AgentRole, AgentStatus, PtyManager};
+    use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
     use std::path::{Path, PathBuf};
@@ -9082,13 +9005,40 @@ mod tests {
     /// fallback for planning/swarm late spawns.
     #[test]
     fn planning_swarm_session_uses_project_head_as_base_when_no_session_worktree() {
-        // Create a session with worktree_path: None (typical for planning/swarm)
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let repo_path = temp_dir.path();
+
+        for args in [
+            ["init", "-b", "main"].as_slice(),
+            ["config", "user.name", "Hive Test"].as_slice(),
+            ["config", "user.email", "hive@example.com"].as_slice(),
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("run git command");
+            assert!(status.success(), "git {:?} should succeed", args);
+        }
+
+        std::fs::write(repo_path.join("README.md"), "base commit\n").expect("write file");
+        for args in [["add", "README.md"].as_slice(), ["commit", "-m", "initial commit"].as_slice()] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("run git command");
+            assert!(status.success(), "git {:?} should succeed", args);
+        }
+
+        let expected_head = current_head(repo_path).expect("project HEAD");
+
         let session = Session {
             id: "planning-session-123".to_string(),
             name: None,
             color: None,
             session_type: SessionType::Swarm { planner_count: 2 },
-            project_path: PathBuf::from("."),
+            project_path: repo_path.to_path_buf(),
             state: SessionState::Planning,
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
@@ -9103,17 +9053,14 @@ mod tests {
             worktree_branch: None,
         };
 
-        // Verify the session has no worktree_path (planning/swarm characteristic)
         assert!(session.worktree_path.is_none());
+        let base_ref = SessionController::resolve_worker_base_ref(
+            &session,
+            "spawn_next_worker",
+            2,
+        );
 
-        // The base_ref resolution logic in add_worker and spawn_next_worker
-        // should fall through to the None-branch and try:
-        // 1. current_head(&session.project_path) -> if this fails
-        // 2. resolve_fresh_base(&session.project_path)
-        //
-        // This test documents the expected behavior: planning/swarm sessions
-        // should use project HEAD as the base for late-spawned workers,
-        // inheriting already-integrated session commits.
+        assert_eq!(base_ref, expected_head);
     }
 }
 

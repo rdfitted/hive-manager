@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { sessions } from './sessions';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -13,6 +13,14 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 describe('sessions store', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (invoke as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 'session-test-id',
+      agents: [],
+    });
+  });
+
   describe('launchSolo', () => {
     it('sends with_evaluator and evaluator_config correctly in the payload', async () => {
       const config = {
