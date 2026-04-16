@@ -3954,6 +3954,34 @@ done
 
 Workers run in isolated git worktrees. Each worker has its own worktree + branch created by the backend at `{worker_worktree_root}/worker-N` on branch `hive/{session_id}/worker-N`. Integrate them back into the feature branch as follows:
 
+### Step 0 — Learning Consolidation (MANDATORY, before any cherry-pick)
+
+Worker worktrees are ephemeral. Any learnings a worker wrote directly into `.ai-docs/learnings.jsonl` inside its worktree will be lost when the worktree is cleaned up — the HTTP API is the only durable path. Before integrating, consolidate into the main repo's `.ai-docs/learnings.jsonl`:
+
+**a. Primary — flush the session-scoped store (deterministic):**
+```bash
+curl -s "http://localhost:18800/api/sessions/{session_id}/learnings" \
+  | jq -c '.learnings[]? // .[]?' \
+  >> .ai-docs/learnings.jsonl
+```
+Deduplicate against existing lines (e.g., by `task` + `insight`) before appending.
+
+**b. Fallback sweep — scan worker worktrees for any direct file writes:**
+```bash
+for WT in "{worker_worktree_root}"/*; do
+  f="$WT/.ai-docs/learnings.jsonl"
+  [ -f "$f" ] || continue
+  # Append only lines not already present in root
+  comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
+done
+# Also scoop session-scoped files
+for f in .hive-manager/{session_id}/learnings*.json .hive-manager/{session_id}/learning-submission.json; do
+  [ -f "$f" ] && echo "Review and merge: $f"
+done
+```
+
+**c. Stage the updated learnings file into your integration commit** so consolidation is visible in the PR.
+
 1. **LOCATE** each worker's worktree at `{worker_worktree_root}/worker-N` on branch `hive/{session_id}/worker-N`. Inspect changes via:
    - `git -C <worktree> log <branch> ^<feature-branch>`
    - `git -C <worktree> diff <feature-branch>...<branch>`
@@ -4188,7 +4216,7 @@ Always try the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
-Before marking your task COMPLETED, submit what you learned:
+Before marking your task COMPLETED, submit what you learned **via the HTTP API only**:
 
 ```bash
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
@@ -4204,6 +4232,8 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 ```
 
 Even if you learned nothing notable, submit with insight "No significant learnings for this task."
+
+⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
 
 ## Project Context
 
