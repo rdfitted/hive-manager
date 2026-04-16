@@ -1482,7 +1482,7 @@ impl SessionController {
         &self,
         project_path: &PathBuf,
         session_id: &str,
-        created_cells: &[String],
+        created_cells: &[(String, String)],
         spawned_agent_ids: &[String],
     ) {
         let mut seen_agent_ids = HashSet::new();
@@ -1499,7 +1499,7 @@ impl SessionController {
         }
 
         let mut seen_cells = HashSet::new();
-        for cell_id in created_cells.iter().rev() {
+        for (cell_id, branch_name) in created_cells.iter().rev() {
             if !seen_cells.insert(cell_id.clone()) {
                 continue;
             }
@@ -1511,7 +1511,7 @@ impl SessionController {
                     err
                 );
             } else {
-                Self::delete_hive_cell_branch(project_path, session_id, cell_id);
+                Self::delete_branch(project_path, branch_name);
             }
         }
     }
@@ -1549,12 +1549,12 @@ impl SessionController {
                 err
             );
         } else {
-            Self::delete_hive_cell_branch(project_path, session_id, worker_cell_name);
+            let branch_name = format!("hive/{session_id}/{worker_cell_name}");
+            Self::delete_branch(project_path, &branch_name);
         }
     }
 
-    fn delete_hive_cell_branch(project_path: &Path, session_id: &str, cell_id: &str) {
-        let branch_name = format!("hive/{session_id}/{cell_id}");
+    fn delete_branch(project_path: &Path, branch_name: &str) {
         let mut cmd = Command::new("git");
         cmd.arg("-C")
             .arg(project_path)
@@ -1576,19 +1576,15 @@ impl SessionController {
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let message = if !stderr.is_empty() { stderr } else { stdout };
                 tracing::warn!(
-                    "Rollback failed to delete branch {} for session {} cell {}: {}",
+                    "Rollback failed to delete branch {}: {}",
                     branch_name,
-                    session_id,
-                    cell_id,
                     if message.is_empty() { "git branch -D failed".to_string() } else { message }
                 );
             }
             Err(err) => {
                 tracing::warn!(
-                    "Rollback failed to delete branch {} for session {} cell {}: {}",
+                    "Rollback failed to delete branch {}: {}",
                     branch_name,
-                    session_id,
-                    cell_id,
                     err
                 );
             }
@@ -5258,6 +5254,8 @@ Last updated: {timestamp}
         flags: Vec<String>,
         with_evaluator: bool,
         evaluator_config: Option<AgentConfig>,
+        qa_workers: Option<Vec<QaWorkerConfig>>,
+        smoke_test: bool,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let base_ref = resolve_fresh_base(&project_path);
@@ -5271,7 +5269,7 @@ Last updated: {timestamp}
             &base_ref,
             &project_path,
         )?;
-        created_cells.push("worker-1".to_string());
+        created_cells.push(("worker-1".to_string(), solo_branch.clone()));
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -5338,7 +5336,7 @@ Last updated: {timestamp}
             }],
             default_cli: cli,
             default_model: model,
-            qa_workers: Vec::new(),
+            qa_workers: qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
@@ -5364,8 +5362,8 @@ Last updated: {timestamp}
             &session.id,
             with_evaluator,
             evaluator_config,
-            None,
-            false,
+            qa_workers.as_deref(),
+            smoke_test,
         )
         .map_err(|err| {
             {
@@ -5414,6 +5412,8 @@ Last updated: {timestamp}
             config.queen_config.flags.clone(),
             config.with_evaluator,
             config.evaluator_config.clone(),
+            config.qa_workers.clone(),
+            config.smoke_test,
         )
     }
 
@@ -5449,7 +5449,7 @@ Last updated: {timestamp}
             &base_ref,
             &project_path,
         )?;
-        created_cells.push("queen".to_string());
+        created_cells.push(("queen".to_string(), queen_branch.clone()));
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -5538,7 +5538,7 @@ Last updated: {timestamp}
                     return Err(err);
                 }
             };
-            created_cells.push(worker_cell_id.clone());
+            created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
             self.emit_workspace_created(
                 &session_id,
                 PRIMARY_CELL_ID,
