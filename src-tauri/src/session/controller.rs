@@ -2182,19 +2182,18 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
                 .label
                 .as_deref()
                 .unwrap_or(Self::qa_worker_label(&worker.specialization));
-            let model_fragment = worker
-                .model
-                .as_deref()
-                .map(|model| format!(r#", "model": "{}""#, model))
-                .unwrap_or_default();
+            let payload = serde_json::to_string(worker)
+                .unwrap_or_else(|_| format!(
+                    r#"{{"specialization":"{}","cli":"{}"}}"#,
+                    worker.specialization, worker.cli
+                ))
+                .replace('\'', "'\\''");
 
             command_block.push_str(&format!(
-                "   # {}. {} worker\n   curl -X POST \"{{{{api_base_url}}}}/api/sessions/{{{{session_id}}}}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{{\"specialization\": \"{}\", \"cli\": \"{}\"{}}}'\n\n",
+                "   # {}. {} worker\n   curl -X POST \"{{{{api_base_url}}}}/api/sessions/{{{{session_id}}}}/qa-workers\" \\\n     -H \"Content-Type: application/json\" \\\n     -d '{}'\n\n",
                 index + 1,
                 label,
-                worker.specialization,
-                worker.cli,
-                model_fragment,
+                payload,
             ));
         }
 
@@ -2507,14 +2506,7 @@ Write the plan in this structure:
         }
         let task_file_glob = variants
             .iter()
-            .map(|variant| {
-                let q = variant.task_file.trim();
-                if q.contains(' ') {
-                    format!("\"{}\"", q)
-                } else {
-                    q.to_string()
-                }
-            })
+            .map(|variant| format!("\"{}\"", Self::prompt_path(Path::new(&variant.task_file))))
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -2670,8 +2662,8 @@ When ALL {completion_scope} have completed, you MUST signal the Evaluator:
 
 1. **Write the milestone-ready file** (this is what the Evaluator polls for):
    ```bash
-   mkdir -p {peer_dir}
-   cat > {milestone_ready_path} << 'MILESTONE_EOF'
+   mkdir -p "{peer_dir}"
+   cat > "{milestone_ready_path}" << 'MILESTONE_EOF'
    # Milestone Ready
 
    ## Status: MILESTONE_READY
@@ -2691,8 +2683,8 @@ When ALL {completion_scope} have completed, you MUST signal the Evaluator:
 
 3. For smoke tests: write a simple contract for the Evaluator to grade against:
    ```bash
-   mkdir -p {contracts_dir}
-   cat > {contract_path} << 'CONTRACT_EOF'
+   mkdir -p "{contracts_dir}"
+   cat > "{contract_path}" << 'CONTRACT_EOF'
    # Smoke Test Contract
 
    ## Criteria
