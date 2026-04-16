@@ -2026,7 +2026,7 @@ Last updated: {timestamp}
     }
 
     fn build_fusion_worker_prompt(
-        session_id: &str,
+        _session_id: &str,
         variant_index: u8,
         variant_name: &str,
         branch: &str,
@@ -2034,7 +2034,7 @@ Last updated: {timestamp}
         task_description: &str,
         cli: &str,
     ) -> String {
-        let task_file = format!(".hive-manager/{}/tasks/fusion-variant-{}-task.md", session_id, variant_index);
+        let task_file = format!(".hive-manager/tasks/fusion-variant-{}-task.md", variant_index);
         let polling_instructions = get_polling_instructions(cli, &task_file, None);
 
         format!(
@@ -2399,6 +2399,14 @@ Write the plan in this structure:
             variant_info.push_str(&format!("| {} | {} | {} | {} |\n", v.index, v.name, v.branch, v.worktree_path));
             task_files.push_str(&format!("- Variant {} ({}): `{}`\n", v.index, v.name, v.task_file));
         }
+        let task_file_glob = variants
+            .first()
+            .and_then(|variant| {
+                PathBuf::from(&variant.task_file)
+                    .parent()
+                    .map(|dir| dir.join("fusion-variant-*-task.md").to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| ".hive-manager/tasks/fusion-variant-*-task.md".to_string());
 
         let hardening = if CliRegistry::needs_role_hardening(cli) {
             r#"
@@ -2530,7 +2538,7 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
             task_description = task_description,
             variant_info = variant_info,
             task_files = task_files,
-            task_file_glob = format!(".hive-manager/{}/tasks/fusion-variant-*-task.md", session_id),
+            task_file_glob = task_file_glob,
             cli = cli,
         )
     }
@@ -3384,7 +3392,14 @@ This tests that:
     }
 
     /// Build the Queen's master prompt with worker information
-    fn build_queen_master_prompt(cli: &str, session_id: &str, workers: &[AgentConfig], user_prompt: Option<&str>, has_plan: bool) -> String {
+    fn build_queen_master_prompt(
+        project_path: &PathBuf,
+        cli: &str,
+        session_id: &str,
+        workers: &[AgentConfig],
+        user_prompt: Option<&str>,
+        has_plan: bool,
+    ) -> String {
         let mut worker_list = String::new();
         for (i, worker_config) in workers.iter().enumerate() {
             let index = i + 1;
@@ -3395,6 +3410,22 @@ This tests that:
             worker_list.push_str(&format!("| {} | {} | {} |\n", worker_id, role_label, worker_config.cli));
         }
 
+        let worker_worktrees_dir = project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .to_string_lossy()
+            .to_string();
+        let worker_task_file_example = project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join("worker-N")
+            .join(".hive-manager")
+            .join("tasks")
+            .join("worker-N-task.md")
+            .to_string_lossy()
+            .to_string();
         let plan_section = if has_plan {
             format!(
 r#"## Implementation Plan
@@ -3473,7 +3504,7 @@ You are the **Queen** orchestrating a multi-agent Hive session. You have full Cl
 ## Session Info
 - **Session ID**: {session_id}
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
-- **Tasks Directory**: `.hive-manager/{session_id}/tasks/`
+- **Worker Task Files**: each worker keeps `.hive-manager/tasks/worker-N-task.md` inside its own worktree under `{worker_worktrees_dir}`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
 - **Conversation Files**: `.hive-manager/{session_id}/conversations/queen.md`, `.hive-manager/{session_id}/conversations/shared.md`, `.hive-manager/{session_id}/conversations/worker-N.md`
 
@@ -3527,7 +3558,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 To assign tasks to existing workers, update their task files:
 
 ```
-Edit: .hive-manager/{session_id}/tasks/worker-N-task.md
+Edit: {worker_task_file_example}
 Change Status: STANDBY -> ACTIVE
 Add task instructions
 ```
@@ -3780,6 +3811,8 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             worker_list = worker_list,
             qa_milestone_handoff = qa_milestone_handoff,
             queen_quality_log = QUEEN_QUALITY_RECONCILIATION_LOG_LINES,
+            worker_worktrees_dir = worker_worktrees_dir,
+            worker_task_file_example = worker_task_file_example,
             task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
         )
     }
@@ -3806,7 +3839,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             })
             .unwrap_or("General development tasks as assigned.");
 
-        let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index);
+        let task_file = format!(".hive-manager/tasks/worker-{}-task.md", index);
         let polling_instructions = get_polling_instructions(
             &config.cli,
             &task_file,
@@ -3948,7 +3981,14 @@ After completing your task, transition to IDLE state. Continue checking your con
     }
 
     /// Build a planner's prompt with HTTP API for spawning workers sequentially
-    fn build_planner_prompt_with_http(cli: &str, index: u8, config: &PlannerConfig, queen_id: &str, session_id: &str) -> String {
+    fn build_planner_prompt_with_http(
+        project_path: &PathBuf,
+        cli: &str,
+        index: u8,
+        config: &PlannerConfig,
+        queen_id: &str,
+        session_id: &str,
+    ) -> String {
         let worker_count = config.workers.len();
 
         // Build worker info section
@@ -3961,6 +4001,16 @@ After completing your task, transition to IDLE state. Continue checking your con
             let cli_name = &worker_config.cli;
             worker_info.push_str(&format!("| {} | {} | {} |\n", worker_index, role_label, cli_name));
         }
+        let worker_task_file_example = project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join("worker-N")
+            .join(".hive-manager")
+            .join("tasks")
+            .join("worker-N-task.md")
+            .to_string_lossy()
+            .to_string();
 
         let hardening = if CliRegistry::needs_role_hardening(cli) {
             r#"
@@ -4037,10 +4087,11 @@ You MUST spawn workers ONE AT A TIME and wait for completion:
 
 ### Monitoring Worker Completion
 
-Check worker task files for status:
+Each worker's own task file path inside its worktree is `.hive-manager/tasks/worker-N-task.md`.
+When checking from your terminal, use the absolute path for that worker's worktree, for example:
 ```bash
 # Read worker task file to check status
-cat .hive-manager/{session_id}/tasks/worker-N-task.md | grep "Status:"
+cat "{worker_task_file_example}" | grep "Status:"
 ```
 
 Look for:
@@ -4067,7 +4118,8 @@ Awaiting task assignment from the Queen."#,
             hardening = hardening,
             worker_info = worker_info,
             worker_count = worker_count,
-            queen_id = queen_id
+            queen_id = queen_id,
+            worker_task_file_example = worker_task_file_example
         )
     }
 
@@ -4336,6 +4388,28 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 
     /// Write all standard tool documentation files for a session
     fn write_tool_files(project_path: &PathBuf, session_id: &str, default_cli: &str) -> Result<(), String> {
+        let worker_task_file_example = project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join("worker-N")
+            .join(".hive-manager")
+            .join("tasks")
+            .join("worker-N-task.md")
+            .to_string_lossy()
+            .to_string();
+        let qa_task_file_example = ".hive-manager/tasks/qa-worker-N-task.md";
+        let worker_one_task_file_example = project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join("worker-1")
+            .join(".hive-manager")
+            .join("tasks")
+            .join("worker-1-task.md")
+            .to_string_lossy()
+            .to_string();
+
         // Spawn Worker tool
         let spawn_worker_tool = format!(r#"# Spawn Worker Tool
 
@@ -4400,17 +4474,17 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   "role": "Backend",
   "cli": "{default_cli}",
   "status": "Running",
-  "task_file": ".hive-manager/{session_id}/tasks/worker-N-task.md"
+  "task_file": "{worker_task_file_example}"
 }}
 ```
 
 ## Notes
 
 - Workers spawn in a new Windows Terminal tab (visible window)
-- Each worker gets a task file you can update to assign work
+- Each worker's own task file lives at `.hive-manager/tasks/worker-N-task.md` inside that worker's worktree
 - Workers poll their task files for ACTIVE status
 - Use this to spawn workers sequentially as tasks complete
-"#, session_id = session_id, default_cli = default_cli);
+"#, session_id = session_id, default_cli = default_cli, worker_task_file_example = worker_task_file_example);
 
         Self::write_tool_file(project_path, session_id, "spawn-worker.md", &spawn_worker_tool)?;
 
@@ -4467,10 +4541,10 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/qa-workers" \
   "role": "UI QA",
   "cli": "{default_cli}",
   "status": "Running",
-  "task_file": ".hive-manager/{session_id}/tasks/qa-worker-N-task.md"
+  "task_file": "{qa_task_file_example}"
 }}
 ```
-"#, session_id = session_id, default_cli = default_cli);
+"#, session_id = session_id, default_cli = default_cli, qa_task_file_example = qa_task_file_example);
 
         Self::write_tool_file(project_path, session_id, "spawn-qa-worker.md", &spawn_qa_worker_tool)?;
 
@@ -4500,13 +4574,13 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
       "role": "Backend",
       "cli": "{default_cli}",
       "status": "Running",
-      "task_file": ".hive-manager/{session_id}/tasks/worker-1-task.md"
+      "task_file": "{worker_one_task_file_example}"
     }}
   ],
   "count": 1
 }}
 ```
-"#, session_id = session_id, default_cli = default_cli);
+"#, session_id = session_id, default_cli = default_cli, worker_one_task_file_example = worker_one_task_file_example);
 
         Self::write_tool_file(project_path, session_id, "list-workers.md", &list_workers_tool)?;
 
@@ -5088,7 +5162,14 @@ Last updated: {timestamp}
         let has_plan = plan_path.exists();
 
         // Write Queen prompt to file and pass to CLI
-        let master_prompt = Self::build_queen_master_prompt(&config.queen_config.cli, &session_id, &config.workers, config.prompt.as_deref(), has_plan);
+        let master_prompt = Self::build_queen_master_prompt(
+            &project_path,
+            &config.queen_config.cli,
+            &session_id,
+            &config.workers,
+            config.prompt.as_deref(),
+            has_plan,
+        );
         let prompt_file = match Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
@@ -6902,7 +6983,14 @@ Last updated: {timestamp}
             let has_plan = session.project_path.join(".hive-manager").join(session_id).join("plan.md").exists();
 
             // Write Queen prompt with plan reference
-            let master_prompt = Self::build_queen_master_prompt(&config.queen_config.cli, session_id, &config.workers, config.prompt.as_deref(), has_plan);
+            let master_prompt = Self::build_queen_master_prompt(
+                &session.project_path,
+                &config.queen_config.cli,
+                session_id,
+                &config.workers,
+                config.prompt.as_deref(),
+                has_plan,
+            );
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -7835,7 +7923,14 @@ Last updated: {timestamp}
         };
 
         // Write planner prompt to file and add to args
-        let planner_prompt = Self::build_planner_prompt_with_http(&config.cli, planner_index, &planner_config, &queen_id, session_id);
+        let planner_prompt = Self::build_planner_prompt_with_http(
+            &session.project_path,
+            &config.cli,
+            planner_index,
+            &planner_config,
+            &queen_id,
+            session_id,
+        );
         let filename = format!("planner-{}-prompt.md", planner_index);
         let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &planner_prompt)?;
         let prompt_path = prompt_file.to_string_lossy().to_string();
