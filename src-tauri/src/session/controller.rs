@@ -5272,6 +5272,14 @@ Last updated: {timestamp}
                 let mut sessions = self.sessions.write();
                 sessions.remove(&session.id);
             }
+            if let Some(storage) = self.storage.as_ref() {
+                if let Err(delete_err) = storage.delete_session(&session_id) {
+                    eprintln!(
+                        "Failed to delete persisted session {} after evaluator launch error: {}",
+                        session_id, delete_err
+                    );
+                }
+            }
             self.rollback_launch_allocations(
                 &project_path,
                 &session_id,
