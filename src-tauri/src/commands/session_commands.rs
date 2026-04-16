@@ -66,6 +66,68 @@ fn is_valid_hex_session_color(color: &str) -> bool {
         && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
 }
 
+fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(), String> {
+    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
+    validate_session_name(config.name.as_deref())?;
+    validate_session_color(config.color.as_deref())?;
+    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
+
+    for worker in &config.workers {
+        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
+    }
+
+    if let Some(evaluator_config) = &config.evaluator_config {
+        if evaluator_config.cli.trim().is_empty() {
+            // Empty nested CLI means "inherit session default"; only validate explicit overrides.
+        } else {
+        validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    if let Some(qa_workers) = &config.qa_workers {
+        for qa_worker in qa_workers {
+            validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_swarm_launch_config(config: &SwarmLaunchConfig) -> Result<(), String> {
+    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
+    validate_session_name(config.name.as_deref())?;
+    validate_session_color(config.color.as_deref())?;
+    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
+    validate_cli(&config.planner_config.cli).map_err(|e| e.message.clone())?;
+
+    for worker in &config.workers_per_planner {
+        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
+    }
+
+    for planner in &config.planners {
+        validate_cli(&planner.config.cli).map_err(|e| e.message.clone())?;
+        for worker in &planner.workers {
+            validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    if let Some(evaluator_config) = &config.evaluator_config {
+        if evaluator_config.cli.trim().is_empty() {
+            // Empty nested CLI means "inherit session default"; only validate explicit overrides.
+        } else {
+        validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    if let Some(qa_workers) = &config.qa_workers {
+        for qa_worker in qa_workers {
+            validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn launch_hive(
     state: State<'_, SessionControllerState>,
@@ -135,6 +197,7 @@ pub async fn launch_hive_v2(
     state: State<'_, SessionControllerState>,
     config: HiveLaunchConfig,
 ) -> Result<Session, String> {
+    validate_hive_launch_config(&config)?;
     let controller = state.0.read();
     controller.launch_hive_v2(config)
 }
@@ -144,6 +207,7 @@ pub async fn launch_swarm(
     state: State<'_, SessionControllerState>,
     config: SwarmLaunchConfig,
 ) -> Result<Session, String> {
+    validate_swarm_launch_config(&config)?;
     let controller = state.0.read();
     controller.launch_swarm(config)
 }

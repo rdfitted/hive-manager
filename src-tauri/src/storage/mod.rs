@@ -128,6 +128,8 @@ pub struct PersistedSession {
     pub default_cli: String,
     #[serde(default)]
     pub default_model: Option<String>,
+    #[serde(default)]
+    pub qa_workers: Vec<crate::session::QaWorkerConfig>,
     #[serde(default = "default_max_qa_iterations")]
     pub max_qa_iterations: u8,
     #[serde(default = "default_qa_timeout_secs")]

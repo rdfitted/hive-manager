@@ -119,6 +119,7 @@ fn session_from_persisted(persisted: PersistedSession) -> Session {
         agents: vec![],
         default_cli: persisted.default_cli,
         default_model: persisted.default_model,
+        qa_workers: persisted.qa_workers,
         max_qa_iterations: persisted.max_qa_iterations,
         qa_timeout_secs: persisted.qa_timeout_secs,
         auth_strategy: AuthStrategy::default(),
