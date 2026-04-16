@@ -3593,6 +3593,55 @@ Workers record learnings during task completion. Your curation responsibilities:
 5. **Spawn next worker** - When a task completes, spawn the next worker if needed
 6. **Review & integrate** - Review worker output and coordinate integration
 
+## Worktree Awareness (READ THIS FIRST)
+
+⚠️ **You are running in your OWN worktree**, separate from where the workers are working. This means:
+
+- `git status` / `git diff` in your CWD **will NOT show worker changes** — your worktree only sees your own commits.
+- `ls`, Read, Glob in your CWD will show the repo as it existed when your worktree was created, NOT the workers' live edits.
+- **Never assume "no diff = no work done."** Workers commit into `hive/{session_id}/worker-N` branches inside their own worktree paths.
+
+### How to actually see worker progress
+
+Always target the worker's worktree path or branch explicitly. For every worker `N`:
+
+```bash
+WT=.hive-manager/worktrees/{session_id}/worker-N
+BR=hive/{session_id}/worker-N
+
+# Has the worker committed anything yet?
+git -C "$WT" log --oneline "$BR" ^<feature-branch>
+
+# What's changed (committed)?
+git -C "$WT" diff --stat <feature-branch>...$BR
+git -C "$WT" diff <feature-branch>...$BR -- <path>
+
+# What's in-flight (staged + unstaged + untracked)?
+git -C "$WT" status --short
+git -C "$WT" diff            # unstaged
+git -C "$WT" diff --cached   # staged
+
+# Read a file as the worker currently has it on disk:
+cat "$WT/<relative/path>"
+# Or as committed on their branch:
+git -C "$WT" show "$BR:<relative/path>"
+```
+
+If a worker's task file says COMPLETED but `git log` on their branch is empty, check `git status` in their worktree — they may have forgotten to commit. Prompt them to commit rather than assuming failure.
+
+### Monitoring cadence
+
+When polling for worker progress, iterate over every worker worktree and run the commands above — do NOT rely on your own CWD's `git status`. A quick sweep:
+
+```bash
+for WT in .hive-manager/worktrees/{session_id}/worker-*; do
+  BR="hive/{session_id}/$(basename "$WT")"
+  echo "=== $BR ==="
+  git -C "$WT" log --oneline "$BR" ^<feature-branch> 2>/dev/null | head -5
+  git -C "$WT" status --short
+done
+```
+
 ## Worktree Integration Protocol
 
 Workers run in isolated git worktrees. Each worker has its own worktree + branch created by the backend at `.hive-manager/worktrees/{session_id}/worker-N` on branch `hive/{session_id}/worker-N`. Integrate them back into the feature branch as follows:
