@@ -62,12 +62,10 @@ impl TaskFileWatcher {
         let tasks_path = session_path.join("tasks");
         std::fs::create_dir_all(&tasks_path).ok();
         watcher.watch(&tasks_path, RecursiveMode::NonRecursive)?;
-        if worktrees_path.exists() {
-            watcher.watch(worktrees_path, RecursiveMode::Recursive)?;
-        }
-        if fusion_worktrees_path.exists() {
-            watcher.watch(fusion_worktrees_path, RecursiveMode::Recursive)?;
-        }
+        std::fs::create_dir_all(worktrees_path).ok();
+        watcher.watch(worktrees_path, RecursiveMode::Recursive)?;
+        std::fs::create_dir_all(fusion_worktrees_path).ok();
+        watcher.watch(fusion_worktrees_path, RecursiveMode::Recursive)?;
         let peer_path = session_path.join("peer");
         std::fs::create_dir_all(&peer_path).ok();
         watcher.watch(&peer_path, RecursiveMode::NonRecursive)?;

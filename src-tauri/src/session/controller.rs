@@ -3525,7 +3525,7 @@ This tests that:
     ) -> String {
         let session_root = Self::session_root_path(project_path, session_id);
         let prompts_dir = Self::prompt_path(&session_root.join("prompts"));
-        let tasks_dir = Self::prompt_path(&session_root.join("tasks"));
+        let _tasks_dir = Self::prompt_path(&session_root.join("tasks"));
         let tools_dir = Self::prompt_path(&session_root.join("tools"));
         let conversations_dir = session_root.join("conversations");
         let queen_conversation = Self::prompt_path(&conversations_dir.join("queen.md"));
@@ -3554,22 +3554,19 @@ This tests that:
             ));
         }
 
-        let worker_worktrees_dir = project_path
-            .join(".hive-manager")
-            .join("worktrees")
-            .join(session_id)
-            .to_string_lossy()
-            .to_string();
-        let worker_task_file_example = project_path
-            .join(".hive-manager")
-            .join("worktrees")
-            .join(session_id)
-            .join("worker-N")
-            .join(".hive-manager")
-            .join("tasks")
-            .join("worker-N-task.md")
-            .to_string_lossy()
-            .to_string();
+        let worker_worktrees_dir = Self::prompt_path(
+            &project_path.join(".hive-manager").join("worktrees").join(session_id),
+        );
+        let worker_task_file_example = Self::prompt_path(
+            &project_path
+                .join(".hive-manager")
+                .join("worktrees")
+                .join(session_id)
+                .join("worker-N")
+                .join(".hive-manager")
+                .join("tasks")
+                .join("worker-N-task.md"),
+        );
         let plan_section = if has_plan {
             format!(
                 r#"## Implementation Plan
@@ -3825,7 +3822,7 @@ Workers record learnings during task completion. Your curation responsibilities:
 Always target the worker's worktree path or branch explicitly. For every worker `N`:
 
 ```bash
-WT={worker_worktree_root}/worker-N
+WT="{worker_worktree_root}/worker-N"
 BR=hive/{session_id}/worker-N
 
 # Has the worker committed anything yet?
@@ -3853,7 +3850,7 @@ If a worker's task file says COMPLETED but `git log` on their branch is empty, c
 When polling for worker progress, iterate over every worker worktree and run the commands above — do NOT rely on your own CWD's `git status`. A quick sweep:
 
 ```bash
-for WT in {worker_worktree_root}/worker-*; do
+for WT in "{worker_worktree_root}"/worker-*; do
   BR="hive/{session_id}/$(basename "$WT")"
   echo "=== $BR ==="
   git -C "$WT" log --oneline "$BR" ^<feature-branch> 2>/dev/null | head -5

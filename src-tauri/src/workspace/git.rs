@@ -198,8 +198,14 @@ pub fn create_session_worktree(
     }
 
     let task_dir = worktree_path.join(".hive-manager").join("tasks");
-    std::fs::create_dir_all(&task_dir)
-        .map_err(|e| format!("Failed to create worktree task dir: {}", e))?;
+    if let Err(e) = std::fs::create_dir_all(&task_dir) {
+        let _ = run_git(
+            project_path,
+            &["worktree", "remove", "--force", &worktree_str],
+        );
+        let _ = manager.prune_worktrees();
+        return Err(format!("Failed to create worktree task dir: {}", e));
+    }
 
     Ok((worktree_path, worktree_str))
 }

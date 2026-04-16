@@ -95,8 +95,8 @@ pub struct LaunchHiveRequest {
     pub worker_count: Option<u8>,
     pub project_path: String,
     pub command: Option<String>,
-    pub evaluator_cli: Option<String>,
-    pub evaluator_model: Option<String>,
+    // NOTE: evaluator_cli/model intentionally omitted - /api/sessions/hive does not
+    // support evaluator launches; use POST /api/sessions with with_evaluator=true instead.
     pub name: Option<String>,
     pub color: Option<String>,
 }
@@ -269,7 +269,7 @@ pub async fn create_session(
                 // Backward compat: if with_evaluator is true but no evaluator_cli, use default_cli silently
                 Some(AgentConfig {
                     cli: default_cli,
-                    model: None,
+                    model: req.evaluator_model.clone(),
                     flags: vec![],
                     label: Some("Evaluator".to_string()),
                     name: None,

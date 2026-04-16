@@ -87,6 +87,15 @@ fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(), String> 
     if let Some(qa_workers) = &config.qa_workers {
         for qa_worker in qa_workers {
             validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
+            match qa_worker.specialization.as_str() {
+                "ui" | "api" | "a11y" => {}
+                other => {
+                    return Err(format!(
+                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
+                        other
+                    ));
+                }
+            }
         }
     }
 
@@ -122,6 +131,15 @@ fn validate_swarm_launch_config(config: &SwarmLaunchConfig) -> Result<(), String
     if let Some(qa_workers) = &config.qa_workers {
         for qa_worker in qa_workers {
             validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
+            match qa_worker.specialization.as_str() {
+                "ui" | "api" | "a11y" => {}
+                other => {
+                    return Err(format!(
+                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
+                        other
+                    ));
+                }
+            }
         }
     }
 
