@@ -111,25 +111,28 @@ pub fn resolve_fresh_base(project_path: &Path) -> String {
     // Try to fetch the latest from origin and use the remote tracking ref
     // directly as the base. No local ref mutation needed — `git worktree add`
     // accepts remote tracking branches as the base.
-    if fetch_origin_branch(project_path, &main_branch).is_ok() {
-        let remote_ref = format!("origin/{}", main_branch);
-        if run_git(
-            project_path,
-            &["rev-parse", "--verify", &format!("refs/remotes/{}", remote_ref)],
-        )
-        .is_ok()
-        {
-            return remote_ref;
+    let remote_ref = format!("origin/{}", main_branch);
+    let failure_cause: String = match fetch_origin_branch(project_path, &main_branch) {
+        Ok(()) => {
+            match run_git(
+                project_path,
+                &["rev-parse", "--verify", &format!("refs/remotes/{}", remote_ref)],
+            ) {
+                Ok(_) => return remote_ref,
+                Err(err) => format!("fetched but remote tracking ref verify failed: {}", err),
+            }
         }
-    }
+        Err(err) => format!("fetch failed: {}", err),
+    };
 
     // Fallback: use whatever local HEAD points at. This can reintroduce the
-    // stale-base problem silently, so warn loudly.
+    // stale-base problem silently, so warn loudly with the concrete cause so
+    // operators can distinguish offline vs auth vs missing-branch.
     tracing::warn!(
         project_path = %project_path.display(),
         main_branch = %main_branch,
-        "resolve_fresh_base: falling back to local HEAD — fetch failed or no remote. \
-         Worktrees may branch from stale state."
+        cause = %failure_cause,
+        "resolve_fresh_base: falling back to local HEAD. Worktrees may branch from stale state."
     );
     "HEAD".to_string()
 }
