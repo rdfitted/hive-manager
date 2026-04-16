@@ -41,7 +41,13 @@ pub struct TaskFileWatcher {
 }
 
 impl TaskFileWatcher {
-    pub fn new(session_path: &Path, session_id: &str, app_handle: AppHandle) -> Result<Self, notify::Error> {
+    pub fn new(
+        session_path: &Path,
+        worktrees_path: &Path,
+        fusion_worktrees_path: &Path,
+        session_id: &str,
+        app_handle: AppHandle,
+    ) -> Result<Self, notify::Error> {
         let (tx, rx) = channel();
         let debounce = Duration::from_millis(500);
         let last_emit = Arc::new(Mutex::new(Instant::now() - debounce));
@@ -54,7 +60,12 @@ impl TaskFileWatcher {
 
         // Watch the tasks directory
         let tasks_path = session_path.join("tasks");
+        std::fs::create_dir_all(&tasks_path).ok();
         watcher.watch(&tasks_path, RecursiveMode::NonRecursive)?;
+        std::fs::create_dir_all(worktrees_path).ok();
+        watcher.watch(worktrees_path, RecursiveMode::Recursive)?;
+        std::fs::create_dir_all(fusion_worktrees_path).ok();
+        watcher.watch(fusion_worktrees_path, RecursiveMode::Recursive)?;
         let peer_path = session_path.join("peer");
         std::fs::create_dir_all(&peer_path).ok();
         watcher.watch(&peer_path, RecursiveMode::NonRecursive)?;

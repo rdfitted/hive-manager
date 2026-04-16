@@ -55,6 +55,8 @@ export interface HiveLaunchConfig {
   prompt?: string;
   with_planning?: boolean;
   with_evaluator?: boolean;
+  evaluator_cli?: string;
+  evaluator_model?: string;
   evaluator_config?: AgentConfig;
   qa_workers?: QaWorkerConfig[];
   smoke_test?: boolean;
@@ -103,6 +105,8 @@ export interface SwarmLaunchConfig {
   prompt?: string;
   with_planning?: boolean;
   with_evaluator?: boolean;
+  evaluator_cli?: string;
+  evaluator_model?: string;
   evaluator_config?: AgentConfig;
   qa_workers?: QaWorkerConfig[];
   smoke_test?: boolean;

@@ -30,6 +30,8 @@ export interface LaunchConfig {
     variant_count?: number;
     with_planning: boolean;
     with_evaluator: boolean;
+    evaluator_cli?: string;
+    evaluator_model?: string;
     smoke_test: boolean;
 }
 

@@ -257,6 +257,7 @@ mod tests {
                 .collect(),
             default_cli: "claude".to_string(),
             default_model: None,
+            qa_workers: Vec::new(),
             max_qa_iterations: DEFAULT_MAX_QA_ITERATIONS,
             qa_timeout_secs: 300,
             auth_strategy: AuthStrategy::None,

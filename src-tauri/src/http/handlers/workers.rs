@@ -11,6 +11,7 @@ use crate::coordination::{StateManager, WorkerStateInfo};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
+use crate::session::SessionController;
 use super::{validate_session_id, validate_cli};
 
 fn deserialize_optional_trimmed_string<'de, D>(
@@ -171,7 +172,19 @@ pub async fn add_worker(
         &worker_state,
     );
 
-    let task_file = format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, worker_index);
+    let task_file = {
+        let controller = state.session_controller.read();
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+        SessionController::absolute_task_file_path_for_worker(
+            &session.project_path,
+            &session_id,
+            worker_index as usize,
+        )
+        .to_string_lossy()
+        .to_string()
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -204,12 +217,19 @@ pub async fn list_workers(
         .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
         .map(|a| {
             let index = a.id.rsplit('-').next().unwrap_or("0");
+            let task_file = SessionController::absolute_task_file_path_for_worker(
+                &session.project_path,
+                &session_id,
+                index.parse::<usize>().unwrap_or(0),
+            )
+            .to_string_lossy()
+            .to_string();
             json!({
                 "id": a.id,
                 "role": a.config.role.as_ref().map(|r| &r.label).unwrap_or(&"Worker".to_string()),
                 "cli": a.config.cli,
                 "status": format!("{:?}", a.status),
-                "task_file": format!(".hive-manager/{}/tasks/worker-{}-task.md", session_id, index)
+                "task_file": task_file
             })
         })
         .collect();

@@ -412,7 +412,7 @@ Once activated:
 
 ## Phase 3: QA Execution
 
-You start with NO QA workers — you MUST spawn all three specializations.
+{{qa_worker_intro}}
 
 **You are a coordinator, not a tester.** Your job is to spawn workers, collect their evidence, and grade.
 
@@ -421,26 +421,10 @@ You start with NO QA workers — you MUST spawn all three specializations.
 This session uses CLI: {{default_cli}}{{default_model_suffix}}.
 Use these defaults when spawning QA workers unless the plan specifies otherwise.
 
-1. **Spawn all 3 QA workers** — one at a time, in this order:
-   ```bash
-   # 1. API QA worker
-   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
-     -H "Content-Type: application/json" \
-     -d '{"specialization": "api", {{default_model_field}}"cli": "{{default_cli}}"}'
-
-   # 2. UI QA worker (spawns with --chrome automatically)
-   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
-     -H "Content-Type: application/json" \
-     -d '{"specialization": "ui", {{default_model_field}}"cli": "{{default_cli}}"}'
-
-   # 3. A11Y QA worker
-   curl -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa-workers" \
-     -H "Content-Type: application/json" \
-     -d '{"specialization": "a11y", {{default_model_field}}"cli": "{{default_cli}}"}'
-   ```
+{{qa_worker_spawn_plan}}
 2. **Poll worker results every {{active_poll_interval}}** (`sleep {{active_poll_secs}}`) — read each worker's task file for COMPLETED status
-3. Wait for ALL 3 workers to complete before rendering your verdict
-4. Do NOT skip any specialization — every milestone gets full coverage
+3. Wait for ALL {{qa_worker_count}} workers to complete before rendering your verdict
+4. {{qa_worker_coverage_rule}}
 
 ## Verdict Rules
 

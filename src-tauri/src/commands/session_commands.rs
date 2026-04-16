@@ -66,6 +66,86 @@ fn is_valid_hex_session_color(color: &str) -> bool {
         && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
 }
 
+fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(), String> {
+    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
+    validate_session_name(config.name.as_deref())?;
+    validate_session_color(config.color.as_deref())?;
+    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
+
+    for worker in &config.workers {
+        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
+    }
+
+    if let Some(evaluator_config) = &config.evaluator_config {
+        if evaluator_config.cli.trim().is_empty() {
+            // Empty nested CLI means "inherit session default"; only validate explicit overrides.
+        } else {
+        validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    if let Some(qa_workers) = &config.qa_workers {
+        for qa_worker in qa_workers {
+            validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
+            match qa_worker.specialization.as_str() {
+                "ui" | "api" | "a11y" => {}
+                other => {
+                    return Err(format!(
+                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
+                        other
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_swarm_launch_config(config: &SwarmLaunchConfig) -> Result<(), String> {
+    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
+    validate_session_name(config.name.as_deref())?;
+    validate_session_color(config.color.as_deref())?;
+    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
+    validate_cli(&config.planner_config.cli).map_err(|e| e.message.clone())?;
+
+    for worker in &config.workers_per_planner {
+        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
+    }
+
+    for planner in &config.planners {
+        validate_cli(&planner.config.cli).map_err(|e| e.message.clone())?;
+        for worker in &planner.workers {
+            validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    if let Some(evaluator_config) = &config.evaluator_config {
+        if evaluator_config.cli.trim().is_empty() {
+            // Empty nested CLI means "inherit session default"; only validate explicit overrides.
+        } else {
+        validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
+        }
+    }
+
+    if let Some(qa_workers) = &config.qa_workers {
+        for qa_worker in qa_workers {
+            validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
+            match qa_worker.specialization.as_str() {
+                "ui" | "api" | "a11y" => {}
+                other => {
+                    return Err(format!(
+                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
+                        other
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn launch_hive(
     state: State<'_, SessionControllerState>,
@@ -135,6 +215,7 @@ pub async fn launch_hive_v2(
     state: State<'_, SessionControllerState>,
     config: HiveLaunchConfig,
 ) -> Result<Session, String> {
+    validate_hive_launch_config(&config)?;
     let controller = state.0.read();
     controller.launch_hive_v2(config)
 }
@@ -144,6 +225,7 @@ pub async fn launch_swarm(
     state: State<'_, SessionControllerState>,
     config: SwarmLaunchConfig,
 ) -> Result<Session, String> {
+    validate_swarm_launch_config(&config)?;
     let controller = state.0.read();
     controller.launch_swarm(config)
 }
@@ -156,12 +238,14 @@ pub async fn launch_solo(
     cli: String,
     model: Option<String>,
     flags: Option<Vec<String>>,
+    evaluator_cli: Option<String>,
+    evaluator_model: Option<String>,
 ) -> Result<Session, String> {
     validate_project_path(&project_path).map_err(|e| e.message.clone())?;
     validate_cli(&cli).map_err(|e| e.message.clone())?;
 
     let agent_config = AgentConfig {
-        cli,
+        cli: cli.clone(),
         model,
         flags: flags.unwrap_or_default(),
         label: None,
@@ -171,6 +255,24 @@ pub async fn launch_solo(
         initial_prompt: None,
     };
 
+    // Build evaluator_config: validate if provided, else fall back to cli silently
+    let evaluator_config = if let Some(ref eval_cli) = evaluator_cli {
+        validate_cli(eval_cli).map_err(|e| e.message.clone())?;
+        Some(AgentConfig {
+            cli: eval_cli.clone(),
+            model: evaluator_model,
+            flags: vec![],
+            label: Some("Evaluator".to_string()),
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        })
+    } else {
+        None
+    };
+    let with_evaluator = evaluator_config.is_some();
+
     let config = HiveLaunchConfig {
         project_path,
         name: None,
@@ -179,8 +281,8 @@ pub async fn launch_solo(
         workers: vec![],
         prompt: task_description.filter(|t| !t.trim().is_empty()),
         with_planning: false,
-        with_evaluator: false,
-        evaluator_config: None,
+        with_evaluator,
+        evaluator_config,
         qa_workers: None,
         smoke_test: false,
     };
