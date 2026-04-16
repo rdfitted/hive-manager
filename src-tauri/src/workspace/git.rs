@@ -90,6 +90,80 @@ pub fn branch_exists(worktree_path: &Path, branch_name: &str) -> Result<bool, St
     }
 }
 
+/// Fetch the latest state of a branch from origin.
+/// Returns Ok(()) on success, Err on failure (e.g. no remote, network issues).
+pub fn fetch_origin_branch(project_path: &Path, branch: &str) -> Result<(), String> {
+    run_git(project_path, &["fetch", "origin", branch])
+        .map(|_| ())
+}
+
+/// Determine the best base ref for creating a new worktree.
+/// Tries to fetch origin and use `origin/<default>`, falling back to `"HEAD"`
+/// if there is no remote or the fetch fails. Emits a tracing warning on
+/// fallback so operators can see when fresh-base resolution has degraded.
+///
+/// Does NOT mutate local branch refs — worktrees branch directly from the
+/// remote tracking ref, so the local `main` pointer is left untouched to avoid
+/// corrupting the main checkout or orphaning local-only commits.
+pub fn resolve_fresh_base(project_path: &Path) -> String {
+    let main_branch = detect_main_branch(project_path);
+
+    // Try to fetch the latest from origin and use the remote tracking ref
+    // directly as the base. No local ref mutation needed — `git worktree add`
+    // accepts remote tracking branches as the base.
+    let remote_ref = format!("origin/{}", main_branch);
+    let failure_cause: String = match fetch_origin_branch(project_path, &main_branch) {
+        Ok(()) => {
+            match run_git(
+                project_path,
+                &["rev-parse", "--verify", &format!("refs/remotes/{}", remote_ref)],
+            ) {
+                Ok(_) => return remote_ref,
+                Err(err) => format!("fetched but remote tracking ref verify failed: {}", err),
+            }
+        }
+        Err(err) => format!("fetch failed: {}", err),
+    };
+
+    // Fallback: use whatever local HEAD points at. This can reintroduce the
+    // stale-base problem silently, so warn loudly with the concrete cause so
+    // operators can distinguish offline vs auth vs missing-branch.
+    tracing::warn!(
+        project_path = %project_path.display(),
+        main_branch = %main_branch,
+        cause = %failure_cause,
+        "resolve_fresh_base: falling back to local HEAD. Worktrees may branch from stale state."
+    );
+    "HEAD".to_string()
+}
+
+/// Detect the main branch name. Prefers the remote default (via
+/// `git symbolic-ref refs/remotes/origin/HEAD`) over local heuristics so that
+/// repos with non-standard defaults (e.g. `develop`, `trunk`) are handled
+/// correctly. Falls back to local `main` / `master`, then to `"main"`.
+fn detect_main_branch(project_path: &Path) -> String {
+    // 1. Preferred: ask git what the remote default is.
+    if let Ok(output) = run_git(project_path, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
+        let trimmed = output.trim();
+        if let Some(name) = trimmed.strip_prefix("refs/remotes/origin/") {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+
+    // 2. Fallback: check local branches.
+    if branch_exists(project_path, "main").unwrap_or(false) {
+        return "main".to_string();
+    }
+    if branch_exists(project_path, "master").unwrap_or(false) {
+        return "master".to_string();
+    }
+
+    // 3. Last resort.
+    "main".to_string()
+}
+
 pub fn create_session_worktree(
     session_id: &str,
     cell_id: &str,

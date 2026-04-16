@@ -24,6 +24,7 @@ use crate::artifacts::collector::ArtifactCollector;
 use crate::domain::ArtifactBundle;
 use crate::workspace::git::{
     cleanup_session_worktrees, create_session_worktree, remove_session_worktree_cell,
+    resolve_fresh_base,
 };
 
 /// Example `coordination.log` lines for Queen quality-reconciliation (quiescence-based; no iteration cap).
@@ -4891,12 +4892,13 @@ Last updated: {timestamp}
         flags: Vec<String>,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
+        let base_ref = resolve_fresh_base(&project_path);
         let solo_branch = format!("solo/{}/worker-1", session_id);
         let (_, solo_cwd) = create_session_worktree(
             &session_id,
             "worker-1",
             &solo_branch,
-            "HEAD",
+            &base_ref,
             &project_path,
         )?;
         self.emit_workspace_created(
@@ -5018,6 +5020,10 @@ Last updated: {timestamp}
             return self.launch_solo(config);
         }
 
+        // Fetch latest from origin so all worktrees branch from the most
+        // recent remote state, avoiding stale-base divergence.
+        let base_ref = resolve_fresh_base(&project_path);
+
         // Create Queen agent
         let queen_id = format!("{}-queen", session_id);
         let (cmd, mut args) = Self::build_command(&config.queen_config);
@@ -5026,7 +5032,7 @@ Last updated: {timestamp}
             &session_id,
             "queen",
             &queen_branch,
-            "HEAD",
+            &base_ref,
             &project_path,
         )?;
         created_cells.push("queen".to_string());
@@ -5102,7 +5108,7 @@ Last updated: {timestamp}
                 &session_id,
                 &worker_cell_id,
                 &worker_branch,
-                "HEAD",
+                &base_ref,
                 &project_path,
             ) {
                 Ok(result) => result,
@@ -5317,8 +5323,9 @@ Last updated: {timestamp}
         }
         self.emit_session_update(&session_id);
 
+        let fresh_base = resolve_fresh_base(&project_path);
         let base_branch = format!("fusion/{}/base", session_id);
-        Self::run_git_in_dir(&project_path, &["branch", &base_branch, "HEAD"])?;
+        Self::run_git_in_dir(&project_path, &["branch", &base_branch, &fresh_base])?;
 
         for (variant_idx, variant) in variants.iter().enumerate() {
             let spawning_changes = {
@@ -5752,8 +5759,9 @@ Last updated: {timestamp}
         }
 
         // Create git base branch and worktrees
+        let fresh_base = resolve_fresh_base(&session.project_path);
         let base_branch = format!("fusion/{}/base", session_id);
-        Self::run_git_in_dir(&session.project_path, &["branch", &base_branch, "HEAD"])?;
+        Self::run_git_in_dir(&session.project_path, &["branch", &base_branch, &fresh_base])?;
 
         let mut new_agents = Vec::new();
 
@@ -7383,11 +7391,13 @@ Last updated: {timestamp}
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
+        // Fetch latest so late-spawned workers start from the most recent state
+        let base_ref = resolve_fresh_base(&session.project_path);
         let (_, worker_cwd) = create_session_worktree(
             session_id,
             &format!("worker-{}", worker_index),
             &worker_branch,
-            "HEAD",
+            &base_ref,
             &session.project_path,
         )?;
         self.emit_workspace_created(
