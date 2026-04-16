@@ -7438,8 +7438,43 @@ Last updated: {timestamp}
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
-        // Fetch latest so late-spawned workers start from the most recent state
-        let base_ref = resolve_fresh_base(&session.project_path);
+        // For late-spawned workers: branch from session worktree HEAD if present,
+        // otherwise fall back to resolve_fresh_base (origin/<default> or HEAD)
+        let base_ref = if let Some(ref wt_path) = session.worktree_path {
+            // Use HEAD from the session's primary worktree to get the most recent state
+            let wt_path = std::path::Path::new(wt_path);
+            match crate::workspace::git::current_head(wt_path) {
+                Ok(sha) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        worker_index = worker_index,
+                        worktree_path = %wt_path.display(),
+                        base_ref = %sha,
+                        "add_worker: branching from session worktree HEAD"
+                    );
+                    sha
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        worker_index = worker_index,
+                        worktree_path = %wt_path.display(),
+                        error = %e,
+                        "add_worker: failed to get worktree HEAD, falling back to resolve_fresh_base"
+                    );
+                    resolve_fresh_base(&session.project_path)
+                }
+            }
+        } else {
+            let base = resolve_fresh_base(&session.project_path);
+            tracing::info!(
+                session_id = %session_id,
+                worker_index = worker_index,
+                base_ref = %base,
+                "add_worker: no session worktree, branching from resolve_fresh_base"
+            );
+            base
+        };
         let (_, worker_cwd) = create_session_worktree(
             session_id,
             &format!("worker-{}", worker_index),

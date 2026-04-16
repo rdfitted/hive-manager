@@ -156,12 +156,14 @@ pub async fn launch_solo(
     cli: String,
     model: Option<String>,
     flags: Option<Vec<String>>,
+    evaluator_cli: Option<String>,
+    evaluator_model: Option<String>,
 ) -> Result<Session, String> {
     validate_project_path(&project_path).map_err(|e| e.message.clone())?;
     validate_cli(&cli).map_err(|e| e.message.clone())?;
 
     let agent_config = AgentConfig {
-        cli,
+        cli: cli.clone(),
         model,
         flags: flags.unwrap_or_default(),
         label: None,
@@ -171,6 +173,24 @@ pub async fn launch_solo(
         initial_prompt: None,
     };
 
+    // Build evaluator_config: validate if provided, else fall back to cli silently
+    let evaluator_config = if let Some(ref eval_cli) = evaluator_cli {
+        validate_cli(eval_cli).map_err(|e| e.message.clone())?;
+        Some(AgentConfig {
+            cli: eval_cli.clone(),
+            model: evaluator_model,
+            flags: vec![],
+            label: Some("Evaluator".to_string()),
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        })
+    } else {
+        None
+    };
+    let with_evaluator = evaluator_config.is_some();
+
     let config = HiveLaunchConfig {
         project_path,
         name: None,
@@ -179,8 +199,8 @@ pub async fn launch_solo(
         workers: vec![],
         prompt: task_description.filter(|t| !t.trim().is_empty()),
         with_planning: false,
-        with_evaluator: false,
-        evaluator_config: None,
+        with_evaluator,
+        evaluator_config,
         qa_workers: None,
         smoke_test: false,
     };
