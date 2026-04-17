@@ -422,6 +422,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           taskDescription: soloTask.trim() || undefined,
           cli: soloConfig.cli,
           model: soloConfig.model || undefined,
+          with_evaluator: withEvaluator,
+          evaluator_config: withEvaluator ? evaluatorConfig : undefined,
+          qa_workers: withEvaluator ? qaWorkers : undefined,
         };
         dispatch('launchSolo', config);
       } else {
@@ -585,9 +588,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <h3>Queen Configuration</h3>
             <AgentConfigEditor bind:config={queenConfig} showLabel={true} />
           </div>
+        {/if}
 
-          <div class="form-section">
-            <h3>Orchestration Options</h3>
+        <div class="form-section">
+          <h3>Orchestration Options</h3>
+          {#if mode !== 'solo'}
             <div class="checkbox-group">
               <label class="checkbox-label">
                 <input type="checkbox" bind:checked={withPlanning} />
@@ -597,82 +602,82 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 </div>
               </label>
             </div>
-            <div class="checkbox-group">
-              <label class="checkbox-label">
-                <input type="checkbox" bind:checked={withEvaluator} />
-                <div class="checkbox-text">
-                  <span class="checkbox-title">Enable Evaluator Peer</span>
-                  <span class="checkbox-description">Independent agent that verifies milestone completion and manages QA workers.</span>
-                </div>
-              </label>
-            </div>
-            {#if withEvaluator}
-              <div class="evaluator-config subsection">
-                <h4>Evaluator Configuration</h4>
-                <div class="field">
-                  <label for="evaluator-cli">Evaluator CLI</label>
-                  <select
-                    id="evaluator-cli"
-                    bind:value={evaluatorCli}
-                    class="role-select"
-                  >
-                    {#each cliOptions as cli}
-                      <option value={cli.value} title={cli.description}>{cli.label}</option>
-                    {#/each}
-                  </select>
-                </div>
-                <div class="field">
-                  <label for="evaluator-model">Evaluator Model (optional)</label>
-                  <input
-                    id="evaluator-model"
-                    type="text"
-                    bind:value={evaluatorModel}
-                    placeholder="e.g. claude-opus-4-6"
-                  />
-                </div>
-                <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />
+          {/if}
+          <div class="checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" bind:checked={withEvaluator} />
+              <div class="checkbox-text">
+                <span class="checkbox-title">Enable Evaluator Peer</span>
+                <span class="checkbox-description">Independent agent that verifies milestone completion and manages QA workers.</span>
               </div>
-
-              <div class="qa-workers-config subsection">
-                <div class="section-header">
-                  <h4>QA Workers ({qaWorkers.length})</h4>
-                  <button type="button" class="add-button small" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>
-                    + Add
-                  </button>
-                </div>
-                <div class="workers-list">
-                  {#each qaWorkers as worker, i (i)}
-                    <div class="worker-card qa-worker-card">
-                      <div class="card-header">
-                        <span class="card-title">QA Worker {i + 1}</span>
-                        <button
-                          type="button"
-                          class="remove-button small"
-                          on:click={() => removeQaWorker(i)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                      <div class="role-selector small">
-                        <label for="qa-spec-{i}">Specialization</label>
-                        <select
-                          id="qa-spec-{i}"
-                          bind:value={worker.specialization}
-                          class="role-select"
-                        >
-                          <option value="ui">UI Tester</option>
-                          <option value="api">API Tester</option>
-                          <option value="a11y">A11Y Tester</option>
-                        </select>
-                      </div>
-                      <AgentConfigEditor bind:config={worker} showLabel={false} />
-                    </div>
-                  {/each}
-                </div>
-              </div>
-            {/if}
+            </label>
           </div>
-        {/if}
+          {#if withEvaluator}
+            <div class="evaluator-config subsection">
+              <h4>Evaluator Configuration</h4>
+              <div class="field">
+                <label for="evaluator-cli">Evaluator CLI</label>
+                <select
+                  id="evaluator-cli"
+                  bind:value={evaluatorCli}
+                  class="role-select"
+                >
+                  {#each cliOptions as cli}
+                    <option value={cli.value} title={cli.description}>{cli.label}</option>
+                  {/each}
+                </select>
+              </div>
+              <div class="field">
+                <label for="evaluator-model">Evaluator Model (optional)</label>
+                <input
+                  id="evaluator-model"
+                  type="text"
+                  bind:value={evaluatorModel}
+                  placeholder="e.g. claude-opus-4-6"
+                />
+              </div>
+              <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />
+            </div>
+
+            <div class="qa-workers-config subsection">
+              <div class="section-header">
+                <h4>QA Workers ({qaWorkers.length})</h4>
+                <button type="button" class="add-button small" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>
+                  + Add
+                </button>
+              </div>
+              <div class="workers-list">
+                {#each qaWorkers as worker, i (i)}
+                  <div class="worker-card qa-worker-card">
+                    <div class="card-header">
+                      <span class="card-title">QA Worker {i + 1}</span>
+                      <button
+                        type="button"
+                        class="remove-button small"
+                        on:click={() => removeQaWorker(i)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div class="role-selector small">
+                      <label for="qa-spec-{i}">Specialization</label>
+                      <select
+                        id="qa-spec-{i}"
+                        bind:value={worker.specialization}
+                        class="role-select"
+                      >
+                        <option value="ui">UI Tester</option>
+                        <option value="api">API Tester</option>
+                        <option value="a11y">A11Y Tester</option>
+                      </select>
+                    </div>
+                    <AgentConfigEditor bind:config={worker} showLabel={false} />
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
 
         {#if mode === 'hive'}
           <div class="form-section">

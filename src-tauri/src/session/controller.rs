@@ -1482,7 +1482,7 @@ impl SessionController {
         &self,
         project_path: &PathBuf,
         session_id: &str,
-        created_cells: &[String],
+        created_cells: &[(String, String)],
         spawned_agent_ids: &[String],
     ) {
         let mut seen_agent_ids = HashSet::new();
@@ -1499,7 +1499,7 @@ impl SessionController {
         }
 
         let mut seen_cells = HashSet::new();
-        for cell_id in created_cells.iter().rev() {
+        for (cell_id, branch_name) in created_cells.iter().rev() {
             if !seen_cells.insert(cell_id.clone()) {
                 continue;
             }
@@ -1508,6 +1508,106 @@ impl SessionController {
                     "Launch rollback failed to remove worktree for session {} cell {}: {}",
                     session_id,
                     cell_id,
+                    err
+                );
+            } else {
+                Self::delete_branch(project_path, branch_name);
+            }
+        }
+    }
+
+    fn remove_worker_launch_file(session_id: &str, worker_cell_name: &str, file_path: &Path) {
+        if let Err(err) = std::fs::remove_file(file_path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "Worker launch rollback failed to remove file {} for session {} cell {}: {}",
+                    file_path.display(),
+                    session_id,
+                    worker_cell_name,
+                    err
+                );
+            }
+        }
+    }
+
+    fn rollback_worker_launch_artifacts(
+        project_path: &Path,
+        session_id: &str,
+        worker_cell_name: &str,
+        task_file_path: &Path,
+        prompt_file_path: Option<&Path>,
+    ) {
+        if let Some(prompt_file_path) = prompt_file_path {
+            Self::remove_worker_launch_file(session_id, worker_cell_name, prompt_file_path);
+        }
+        Self::remove_worker_launch_file(session_id, worker_cell_name, task_file_path);
+        if let Err(err) = remove_session_worktree_cell(project_path, session_id, worker_cell_name) {
+            tracing::warn!(
+                "Worker launch rollback failed to remove worktree for session {} cell {}: {}",
+                session_id,
+                worker_cell_name,
+                err
+            );
+        } else {
+            let branch_name = format!("hive/{session_id}/{worker_cell_name}");
+            Self::delete_branch(project_path, &branch_name);
+        }
+    }
+
+    fn delete_branch(project_path: &Path, branch_name: &str) {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(project_path)
+            .arg("branch")
+            .arg("-D")
+            .arg(&branch_name);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match cmd.output() {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let message = if !stderr.is_empty() { stderr } else { stdout };
+                tracing::warn!(
+                    "Rollback failed to delete branch {}: {}",
+                    branch_name,
+                    if message.is_empty() { "git branch -D failed".to_string() } else { message }
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Rollback failed to delete branch {}: {}",
+                    branch_name,
+                    err
+                );
+            }
+        }
+    }
+
+    fn restore_session_state_after_worker_spawn_failure(
+        &self,
+        session_id: &str,
+        previous_state: &SessionState,
+    ) {
+        let changes = {
+            let mut sessions = self.sessions.write();
+            sessions.get_mut(session_id).map(|session| {
+                self.set_session_state_with_events(session, previous_state.clone())
+            })
+        };
+
+        if let Some(changes) = changes {
+            if let Err(err) = self.persist_then_emit_session_update(session_id, changes) {
+                tracing::warn!(
+                    "Failed to restore session {} state after worker spawn failure: {}",
+                    session_id,
                     err
                 );
             }
@@ -3854,6 +3954,34 @@ done
 
 Workers run in isolated git worktrees. Each worker has its own worktree + branch created by the backend at `{worker_worktree_root}/worker-N` on branch `hive/{session_id}/worker-N`. Integrate them back into the feature branch as follows:
 
+### Step 0 — Learning Consolidation (MANDATORY, before any cherry-pick)
+
+Worker worktrees are ephemeral. Any learnings a worker wrote directly into `.ai-docs/learnings.jsonl` inside its worktree will be lost when the worktree is cleaned up — the HTTP API is the only durable path. Before integrating, consolidate into the main repo's `.ai-docs/learnings.jsonl`:
+
+**a. Primary — flush the session-scoped store (deterministic):**
+```bash
+curl -s "http://localhost:18800/api/sessions/{session_id}/learnings" \
+  | jq -c '.learnings[]? // .[]?' \
+  >> .ai-docs/learnings.jsonl
+```
+Deduplicate against existing lines (e.g., by `task` + `insight`) before appending.
+
+**b. Fallback sweep — scan worker worktrees for any direct file writes:**
+```bash
+for WT in "{worker_worktree_root}"/*; do
+  f="$WT/.ai-docs/learnings.jsonl"
+  [ -f "$f" ] || continue
+  # Append only lines not already present in root
+  comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
+done
+# Also scoop session-scoped files
+for f in .hive-manager/{session_id}/learnings*.json .hive-manager/{session_id}/learning-submission.json; do
+  [ -f "$f" ] && echo "Review and merge: $f"
+done
+```
+
+**c. Stage the updated learnings file into your integration commit** so consolidation is visible in the PR.
+
 1. **LOCATE** each worker's worktree at `{worker_worktree_root}/worker-N` on branch `hive/{session_id}/worker-N`. Inspect changes via:
    - `git -C <worktree> log <branch> ^<feature-branch>`
    - `git -C <worktree> diff <feature-branch>...<branch>`
@@ -4088,7 +4216,7 @@ Always try the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
-Before marking your task COMPLETED, submit what you learned:
+Before marking your task COMPLETED, submit what you learned **via the HTTP API only**:
 
 ```bash
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
@@ -4104,6 +4232,8 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 ```
 
 Even if you learned nothing notable, submit with insight "No significant learnings for this task."
+
+⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
 
 ## Project Context
 
@@ -5152,10 +5282,16 @@ Last updated: {timestamp}
         cli: String,
         model: Option<String>,
         flags: Vec<String>,
+        with_evaluator: bool,
+        evaluator_config: Option<AgentConfig>,
+        qa_workers: Option<Vec<QaWorkerConfig>>,
+        smoke_test: bool,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let base_ref = resolve_fresh_base(&project_path);
         let solo_branch = format!("solo/{}/worker-1", session_id);
+        let mut created_cells = Vec::new();
+        let mut spawned_agent_ids = Vec::new();
         let (_, solo_cwd) = create_session_worktree(
             &session_id,
             "worker-1",
@@ -5163,6 +5299,7 @@ Last updated: {timestamp}
             &base_ref,
             &project_path,
         )?;
+        created_cells.push(("worker-1".to_string(), solo_branch.clone()));
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -5196,10 +5333,16 @@ Last updated: {timestamp}
                 120,
                 30,
             ) {
-                let _ = remove_session_worktree_cell(&project_path, &session_id, "worker-1");
+                self.rollback_launch_allocations(
+                    &project_path,
+                    &session_id,
+                    &created_cells,
+                    &spawned_agent_ids,
+                );
                 return Err(format!("Failed to spawn solo agent: {}", e));
             }
         }
+        spawned_agent_ids.push(solo_id.clone());
 
         let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
@@ -5223,7 +5366,7 @@ Last updated: {timestamp}
             }],
             default_cli: cli,
             default_model: model,
-            qa_workers: Vec::new(),
+            qa_workers: qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
@@ -5245,7 +5388,41 @@ Last updated: {timestamp}
         }
 
         self.init_session_storage(&session);
-        Ok(session)
+        self.spawn_launch_evaluator_agents(
+            &session.id,
+            with_evaluator,
+            evaluator_config,
+            qa_workers.as_deref(),
+            smoke_test,
+        )
+        .map_err(|err| {
+            {
+                let mut heartbeats = self.agent_heartbeats.write();
+                heartbeats.remove(&session.id);
+            }
+            {
+                let mut sessions = self.sessions.write();
+                sessions.remove(&session.id);
+            }
+            if let Some(storage) = self.storage.as_ref() {
+                if let Err(delete_err) = storage.delete_session(&session_id) {
+                    eprintln!(
+                        "Failed to delete persisted session {} after evaluator launch error: {}",
+                        session_id, delete_err
+                    );
+                }
+            }
+            self.rollback_launch_allocations(
+                &project_path,
+                &session_id,
+                &created_cells,
+                &spawned_agent_ids,
+            );
+            err
+        })?;
+
+        self.get_session(&session_id)
+            .ok_or_else(|| format!("Session disappeared after evaluator launch: {}", session_id))
     }
 
     pub fn launch_solo(&self, config: HiveLaunchConfig) -> Result<Session, String> {
@@ -5263,6 +5440,10 @@ Last updated: {timestamp}
             config.queen_config.cli.clone(),
             config.queen_config.model.clone(),
             config.queen_config.flags.clone(),
+            config.with_evaluator,
+            config.evaluator_config.clone(),
+            config.qa_workers.clone(),
+            config.smoke_test,
         )
     }
 
@@ -5298,7 +5479,7 @@ Last updated: {timestamp}
             &base_ref,
             &project_path,
         )?;
-        created_cells.push("queen".to_string());
+        created_cells.push(("queen".to_string(), queen_branch.clone()));
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -5387,7 +5568,7 @@ Last updated: {timestamp}
                     return Err(err);
                 }
             };
-            created_cells.push(worker_cell_id.clone());
+            created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
             self.emit_workspace_created(
                 &session_id,
                 PRIMARY_CELL_ID,
@@ -6353,13 +6534,13 @@ Last updated: {timestamp}
 
         let worker_config = &config.workers[worker_index];
         let index = (worker_index + 1) as u8;
-        let cwd = session.project_path.to_str().unwrap_or(".");
-        let worker_worktree_path = session
-            .project_path
-            .join(".hive-manager")
-            .join("worktrees")
-            .join(session_id)
-            .join(format!("worker-{}", index));
+        let worker_branch = format!("hive/{}/worker-{}", session_id, index);
+        let previous_state = self
+            .sessions
+            .read()
+            .get(session_id)
+            .map(|s| s.state.clone())
+            .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
 
         // Update state to spawning this worker
         let spawning_changes = {
@@ -6378,39 +6559,101 @@ Last updated: {timestamp}
                 .map_err(SessionError::ConfigError)?;
         }
 
-        let pty_manager = self.pty_manager.read();
-        let worker_id = format!("{}-worker-{}", session_id, index);
+        let base_ref = Self::resolve_worker_base_ref(&session, "spawn_next_worker", index);
 
-        // 1. Write task file FIRST (Status: ACTIVE since it's their turn)
+        // 1. Create worker worktree FIRST (before writing task/prompt files)
+        let (_, worker_cwd) = create_session_worktree(
+            session_id,
+            &format!("worker-{}", index),
+            &worker_branch,
+            &base_ref,
+            &session.project_path,
+        )
+        .map_err(|err| {
+            self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
+            SessionError::ConfigError(err)
+        })?;
+        self.emit_workspace_created(
+            session_id,
+            PRIMARY_CELL_ID,
+            &worker_branch,
+            Some(&worker_cwd),
+        );
+
+        let worker_id = format!("{}-worker-{}", session_id, index);
+        let worker_cell_name = format!("worker-{index}");
+        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), index as usize);
+        let filename = format!("worker-{}-prompt.md", index);
+        let prompt_file_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("prompts")
+            .join(&filename);
+
+        // 2. Write task file (Status: ACTIVE since it's their turn)
         Self::write_task_file_with_status(
-            &worker_worktree_path,
+            Path::new(&worker_cwd),
             index,
             worker_config.initial_prompt.as_deref(),
             "ACTIVE",
-        )?;
+        )
+        .map_err(|err| {
+            Self::rollback_worker_launch_artifacts(
+                &session.project_path,
+                session_id,
+                &worker_cell_name,
+                &task_file_path,
+                None,
+            );
+            self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
+            SessionError::ConfigError(err)
+        })?;
 
-        // 2. Write worker prompt to file
+        // 3. Write worker prompt to file
         let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
-        let filename = format!("worker-{}-prompt.md", index);
-        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+        let prompt_file =
+            Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)
+                .map_err(|err| {
+                    Self::rollback_worker_launch_artifacts(
+                        &session.project_path,
+                        session_id,
+                        &worker_cell_name,
+                        &task_file_path,
+                        Some(&prompt_file_path),
+                    );
+                    self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
+                    SessionError::ConfigError(err)
+                })?;
         let prompt_path = prompt_file.to_string_lossy().to_string();
 
-        // 3. Build command with prompt
+        // 4. Build command with prompt
         let (cmd, mut args) = Self::build_command(worker_config);
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-        // 4. Spawn the worker
+        // 5. Spawn the worker (use worker_cwd as PTY cwd)
+        let pty_manager = self.pty_manager.read();
         pty_manager
             .create_session(
                 worker_id.clone(),
                 AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
                 &cmd,
                 &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                Some(cwd),
+                Some(&worker_cwd),
                 120,
                 30,
             )
-            .map_err(|e| SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e)))?;
+            .map_err(|e| {
+                Self::rollback_worker_launch_artifacts(
+                    &session.project_path,
+                    session_id,
+                    &worker_cell_name,
+                    &task_file_path,
+                    Some(&prompt_file_path),
+                );
+                self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
+                SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e))
+            })?;
 
         // 5. Add worker to session
         let waiting_changes = {
@@ -6439,6 +6682,58 @@ Last updated: {timestamp}
         }
 
         Ok(())
+    }
+
+    fn resolve_worker_base_ref(session: &Session, log_context: &str, worker_index: u8) -> String {
+        let maybe_worktree_head = session.worktree_path.as_ref().and_then(|worktree_path| {
+            match current_head(Path::new(worktree_path)) {
+                Ok(sha) => {
+                    tracing::info!(
+                        "{}: using session worktree HEAD {} as base for worker {} in session {}",
+                        log_context,
+                        sha,
+                        worker_index,
+                        session.id
+                    );
+                    Some(sha)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "{}: failed to read session worktree HEAD at {} for session {}: {}; falling back to project HEAD",
+                        log_context,
+                        worktree_path,
+                        session.id,
+                        err
+                    );
+                    None
+                }
+            }
+        });
+
+        maybe_worktree_head.unwrap_or_else(|| match current_head(&session.project_path) {
+            Ok(sha) => {
+                tracing::info!(
+                    "{}: using project HEAD {} as base for worker {} in session {}",
+                    log_context,
+                    sha,
+                    worker_index,
+                    session.id
+                );
+                sha
+            }
+            Err(err) => {
+                let fresh_base = resolve_fresh_base(&session.project_path);
+                tracing::info!(
+                    "{}: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
+                    log_context,
+                    fresh_base,
+                    worker_index,
+                    session.id,
+                    err
+                );
+                fresh_base
+            }
+        })
     }
 
     /// Called when worker-completed event received
@@ -7690,72 +7985,7 @@ Last updated: {timestamp}
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
         // Late-spawned workers should branch from the most recent session-integrated commit when possible.
-        let base_ref = if let Some(worktree_path) = session.worktree_path.as_ref() {
-            match current_head(PathBuf::from(worktree_path).as_path()) {
-                Ok(sha) => {
-                    tracing::info!(
-                        "add_worker: using session worktree HEAD {} as base for worker {} in session {}",
-                        sha,
-                        worker_index,
-                        session_id
-                    );
-                    sha
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "add_worker: failed to read session worktree HEAD at {} for session {}: {}; falling back to project HEAD",
-                        worktree_path,
-                        session_id,
-                        err
-                    );
-                    match current_head(&session.project_path) {
-                        Ok(sha) => {
-                            tracing::info!(
-                                "add_worker: using project HEAD {} as base for worker {} in session {}",
-                                sha,
-                                worker_index,
-                                session_id
-                            );
-                            sha
-                        }
-                        Err(project_err) => {
-                            let fresh_base = resolve_fresh_base(&session.project_path);
-                            tracing::info!(
-                                "add_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
-                                fresh_base,
-                                worker_index,
-                                session_id,
-                                project_err
-                            );
-                            fresh_base
-                        }
-                    }
-                }
-            }
-        } else {
-            match current_head(&session.project_path) {
-                Ok(sha) => {
-                    tracing::info!(
-                        "add_worker: using project HEAD {} as base for worker {} in session {}",
-                        sha,
-                        worker_index,
-                        session_id
-                    );
-                    sha
-                }
-                Err(err) => {
-                    let fresh_base = resolve_fresh_base(&session.project_path);
-                    tracing::info!(
-                        "add_worker: using resolve_fresh_base {} for worker {} in session {} after project HEAD lookup failed: {}",
-                        fresh_base,
-                        worker_index,
-                        session_id,
-                        err
-                    );
-                    fresh_base
-                }
-            }
-        };
+        let base_ref = Self::resolve_worker_base_ref(&session, "add_worker", worker_index);
         let (_, worker_cwd) = create_session_worktree(
             session_id,
             &format!("worker-{}", worker_index),
@@ -7770,17 +8000,50 @@ Last updated: {timestamp}
             Some(&worker_cwd),
         );
 
+        let worker_cell_name = format!("worker-{worker_index}");
+        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), worker_index as usize);
+
         // Write task file for this worker (STANDBY or with initial task)
-        Self::write_task_file(
+        let _task_file = match Self::write_task_file(
             Path::new(&worker_cwd),
             worker_index,
             config_with_role.initial_prompt.as_deref(),
-        )?;
+        ) {
+            Ok(task_file) => task_file,
+            Err(err) => {
+                Self::rollback_worker_launch_artifacts(
+                    &session.project_path,
+                    session_id,
+                    &worker_cell_name,
+                    &task_file_path,
+                    None,
+                );
+                return Err(err);
+            }
+        };
 
         // Write worker prompt to file and add to args
         let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
         let filename = format!("worker-{}-prompt.md", worker_index);
-        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)?;
+        let prompt_file_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("prompts")
+            .join(&filename);
+        let prompt_file = match Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt) {
+            Ok(prompt_file) => prompt_file,
+            Err(err) => {
+                Self::rollback_worker_launch_artifacts(
+                    &session.project_path,
+                    session_id,
+                    &worker_cell_name,
+                    &task_file_path,
+                    Some(&prompt_file_path),
+                );
+                return Err(err);
+            }
+        };
         let prompt_path = prompt_file.to_string_lossy().to_string();
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -7807,10 +8070,12 @@ Last updated: {timestamp}
                 120,
                 30,
             ) {
-                let _ = remove_session_worktree_cell(
+                Self::rollback_worker_launch_artifacts(
                     &session.project_path,
                     session_id,
-                    &format!("worker-{worker_index}"),
+                    &worker_cell_name,
+                    &task_file_path,
+                    Some(&prompt_file),
                 );
                 return Err(format!("Failed to spawn Worker {}: {}", worker_index, e));
             }
@@ -8648,6 +8913,7 @@ mod tests {
         AuthStrategy, QaWorkerConfig, Session, SessionController, SessionState, SessionType,
     };
     use crate::pty::{AgentRole, AgentStatus, PtyManager};
+    use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
     use std::path::{Path, PathBuf};
@@ -8935,6 +9201,72 @@ mod tests {
         ));
 
         assert!(controller.can_complete_session("fusion-ok").is_ok());
+    }
+
+    /// Verifies that planning/swarm sessions (which never populate session.worktree_path)
+    /// can still resolve a valid base_ref for late-spawned workers via the three-tier
+    /// fallback ladder: session worktree HEAD -> project HEAD -> resolve_fresh_base.
+    ///
+    /// This test validates the fix from commit 21cce96 which added the current_head
+    /// fallback for planning/swarm late spawns.
+    #[test]
+    fn planning_swarm_session_uses_project_head_as_base_when_no_session_worktree() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let repo_path = temp_dir.path();
+
+        for args in [
+            ["init", "-b", "main"].as_slice(),
+            ["config", "user.name", "Hive Test"].as_slice(),
+            ["config", "user.email", "hive@example.com"].as_slice(),
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("run git command");
+            assert!(status.success(), "git {:?} should succeed", args);
+        }
+
+        std::fs::write(repo_path.join("README.md"), "base commit\n").expect("write file");
+        for args in [["add", "README.md"].as_slice(), ["commit", "-m", "initial commit"].as_slice()] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .status()
+                .expect("run git command");
+            assert!(status.success(), "git {:?} should succeed", args);
+        }
+
+        let expected_head = current_head(repo_path).expect("project HEAD");
+
+        let session = Session {
+            id: "planning-session-123".to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Swarm { planner_count: 2 },
+            project_path: repo_path.to_path_buf(),
+            state: SessionState::Planning,
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents: vec![],
+            default_cli: "claude".to_string(),
+            default_model: None,
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None, // Key: no session worktree for planning/swarm
+            worktree_branch: None,
+        };
+
+        assert!(session.worktree_path.is_none());
+        let base_ref = SessionController::resolve_worker_base_ref(
+            &session,
+            "spawn_next_worker",
+            2,
+        );
+
+        assert_eq!(base_ref, expected_head);
     }
 }
 
