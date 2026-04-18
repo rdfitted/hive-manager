@@ -280,24 +280,25 @@ function createHeartbeatStore() {
         }
 
         const data = await resp.json();
-        // Extract agent heartbeats for this session
-        const session = Array.isArray(data)
-          ? data.find((s: { id: string }) => s.id === sessionId)
-          : data;
+        // Backend returns { sessions: [...] }; pick matching session (or first if only one).
+        const sessions: Array<{ id: string; agents?: Array<{ id?: string; agent_id?: string; status?: string; summary?: string; last_activity?: string }> }> =
+          Array.isArray(data?.sessions) ? data.sessions : [];
+        const session = sessions.find((s) => s.id === sessionId) ?? (sessions.length === 1 ? sessions[0] : undefined);
         if (session?.agents) {
           const agents: Record<string, HeartbeatInfo> = {};
           const staleAgents = new Set<string>();
           for (const agent of session.agents) {
-            const id = agent.agent_id || agent.id;
-            const timestamp = agent.timestamp || agent.last_update || new Date().toISOString();
+            const id = agent.id || agent.agent_id;
+            if (!id) continue;
+            const timestamp = agent.last_activity ?? '';
             agents[id] = {
               agent_id: id,
               status: agent.status || 'unknown',
               summary: agent.summary || '',
               timestamp,
             };
-            // Compute staleness from timestamp (>3min = stale)
-            if (isHeartbeatStale(timestamp)) {
+            // Staleness: missing last_activity or >3min old = stale.
+            if (!timestamp || isHeartbeatStale(timestamp)) {
               staleAgents.add(id);
             }
           }
