@@ -4,6 +4,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -183,10 +184,17 @@ pub struct PersistedAgentConfig {
     pub initial_prompt: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct SessionSyncState {
+    modified_at: Option<SystemTime>,
+    serialized: String,
+}
+
 /// Manages session storage in %APPDATA%/hive-manager
 pub struct SessionStorage {
     base_dir: PathBuf,
     artifact_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    session_sync: Mutex<HashMap<String, SessionSyncState>>,
 }
 
 impl SessionStorage {
@@ -212,6 +220,7 @@ impl SessionStorage {
         Ok(Self {
             base_dir,
             artifact_locks: Mutex::new(HashMap::new()),
+            session_sync: Mutex::new(HashMap::new()),
         })
     }
 
@@ -304,16 +313,16 @@ impl SessionStorage {
             self.create_session_dir(&session.id)?;
         }
 
-        let session_file = session_dir.join("session.json");
-        let json = serde_json::to_string_pretty(session)?;
-        fs::write(session_file, json)?;
+        let session_file = self.session_file_path(&session.id);
+        self.atomic_write_json(&session_file, session)?;
+        self.mark_session_synced(&session.id, session)?;
 
         Ok(())
     }
 
     /// Load session metadata from disk
     pub fn load_session(&self, session_id: &str) -> Result<PersistedSession, StorageError> {
-        let session_file = self.session_dir(session_id).join("session.json");
+        let session_file = self.session_file_path(session_id);
         if !session_file.exists() {
             return Err(StorageError::SessionNotFound(session_id.to_string()));
         }
@@ -322,6 +331,51 @@ impl SessionStorage {
         let session: PersistedSession = serde_json::from_str(&json)?;
 
         Ok(session)
+    }
+
+    pub fn mark_session_synced(
+        &self,
+        session_id: &str,
+        session: &PersistedSession,
+    ) -> Result<(), StorageError> {
+        let sync_state = SessionSyncState {
+            modified_at: self.session_file_modified_at(session_id)?,
+            serialized: serde_json::to_string(session)?,
+        };
+        self.session_sync
+            .lock()
+            .insert(session_id.to_string(), sync_state);
+        Ok(())
+    }
+
+    pub fn load_session_if_newer_and_clean(
+        &self,
+        session_id: &str,
+        current_in_memory: &PersistedSession,
+    ) -> Result<Option<PersistedSession>, StorageError> {
+        let sync_state = {
+            let sync = self.session_sync.lock();
+            sync.get(session_id).cloned()
+        };
+        let Some(sync_state) = sync_state else {
+            return Ok(None);
+        };
+
+        let current_file_mtime = self.session_file_modified_at(session_id)?;
+        let Some(current_file_mtime) = current_file_mtime else {
+            return Ok(None);
+        };
+        if sync_state.modified_at == Some(current_file_mtime) {
+            return Ok(None);
+        }
+
+        if serde_json::to_string(current_in_memory)? != sync_state.serialized {
+            return Ok(None);
+        }
+
+        let persisted = self.load_session(session_id)?;
+        self.mark_session_synced(session_id, &persisted)?;
+        Ok(Some(persisted))
     }
 
     /// List all stored sessions
@@ -1057,6 +1111,22 @@ impl SessionStorage {
 
         let value = serde_json::from_str(&fs::read_to_string(path)?)?;
         Ok(Some(value))
+    }
+
+    fn session_file_path(&self, session_id: &str) -> PathBuf {
+        self.session_dir(session_id).join("session.json")
+    }
+
+    fn session_file_modified_at(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SystemTime>, StorageError> {
+        let path = self.session_file_path(session_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        Ok(fs::metadata(path)?.modified().ok())
     }
 }
 

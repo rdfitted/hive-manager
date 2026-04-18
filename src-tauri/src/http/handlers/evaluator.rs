@@ -321,25 +321,62 @@ fn append_operator_log(state: &AppState, session_id: &str, action: &str, detail:
     let _ = state.storage.append_coordination_log(session_id, &msg);
 }
 
+fn override_log_details(verdict: &str) -> Result<(&'static str, &'static str), ApiError> {
+    let normalized = verdict.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "PASS" | "QA_VERDICT: PASS" => Ok(("FORCE-PASS", "QA pass")),
+        "FAIL" | "QA_VERDICT: FAIL" => Ok(("FORCE-FAIL", "QA fail")),
+        _ => Err(ApiError::bad_request(format!(
+            "Unsupported QA verdict '{}'",
+            verdict
+        ))),
+    }
+}
+
+pub(crate) fn apply_verdict(
+    state: &AppState,
+    session_id: &str,
+    verdict: &str,
+    is_override: bool,
+) -> Result<SessionState, ApiError> {
+    let action = if is_override {
+        let (action, _) = override_log_details(verdict)?;
+        match action {
+            "FORCE-PASS" => "force-pass",
+            "FORCE-FAIL" => "force-fail",
+            _ => unreachable!("override verdicts are normalized before logging"),
+        }
+    } else {
+        "qa-verdict"
+    };
+
+    let controller = state.session_controller.read();
+    require_qa_in_progress(&controller, session_id, action)?;
+    let new_state = controller
+        .on_qa_verdict(session_id, verdict)
+        .map_err(ApiError::internal)?;
+    drop(controller);
+
+    if is_override {
+        let (log_action, detail) = override_log_details(verdict)?;
+        append_operator_log(state, session_id, log_action, detail);
+    }
+
+    Ok(new_state)
+}
+
 pub async fn force_pass(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
-    let controller = state.session_controller.read();
-    require_qa_in_progress(&controller, &session_id, "force-pass")?;
-    controller
-        .on_qa_verdict(&session_id, "QA_VERDICT: PASS")
-        .map_err(ApiError::internal)?;
-    drop(controller);
-
-    append_operator_log(&state, &session_id, "FORCE-PASS", "QA pass");
+    let new_state = apply_verdict(&state, &session_id, "QA_VERDICT: PASS", true)?;
 
     Ok(Json(json!({
         "session_id": session_id,
         "action": "force-pass",
-        "new_state": "QaPassed"
+        "new_state": format!("{:?}", new_state)
     })))
 }
 
@@ -349,14 +386,7 @@ pub async fn force_fail(
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
-    let controller = state.session_controller.read();
-    require_qa_in_progress(&controller, &session_id, "force-fail")?;
-    let new_state = controller
-        .on_qa_verdict(&session_id, "QA_VERDICT: FAIL")
-        .map_err(ApiError::internal)?;
-    drop(controller);
-
-    append_operator_log(&state, &session_id, "FORCE-FAIL", "QA fail");
+    let new_state = apply_verdict(&state, &session_id, "QA_VERDICT: FAIL", true)?;
 
     Ok(Json(json!({
         "session_id": session_id,

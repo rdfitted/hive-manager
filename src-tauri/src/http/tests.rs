@@ -8,6 +8,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
+use crate::coordination::{PeerMessageRecord, StateManager};
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
 use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy, DEFAULT_MAX_QA_ITERATIONS};
@@ -3005,6 +3006,96 @@ impl Drop for TestPathCleanup {
             let _ = std::fs::remove_dir_all(path);
         }
     }
+}
+
+#[tokio::test]
+async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let external_storage = SessionStorage::new().unwrap();
+    let session_id = format!("qa-verdict-reload-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![external_storage.session_dir(&session_id)]);
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress {
+        iteration: Some(1),
+    };
+    controller.write().insert_test_session(session);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let persisted = external_storage.load_session(&session_id).unwrap();
+    assert_eq!(persisted.state, "QaPassed");
+
+    let mut disk_override = persisted.clone();
+    disk_override.name = Some("Reloaded From Disk".to_string());
+    external_storage.save_session(&disk_override).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json.get("name").and_then(|value| value.as_str()),
+        Some("Reloaded From Disk")
+    );
+
+    let refreshed = controller.read().get_session(&session_id).unwrap();
+    assert_eq!(refreshed.id, disk_override.id);
+    assert_eq!(refreshed.name, disk_override.name);
+    assert_eq!(refreshed.color, disk_override.color);
+    assert_eq!(
+        refreshed.project_path.to_string_lossy(),
+        disk_override.project_path
+    );
+    assert_eq!(format!("{:?}", refreshed.state), disk_override.state);
+    assert_eq!(refreshed.default_cli, disk_override.default_cli);
+    assert_eq!(refreshed.default_model, disk_override.default_model);
+    assert_eq!(refreshed.max_qa_iterations, disk_override.max_qa_iterations);
+    assert_eq!(refreshed.qa_timeout_secs, disk_override.qa_timeout_secs);
+    assert_eq!(refreshed.worktree_path, disk_override.worktree_path);
+    assert_eq!(refreshed.worktree_branch, disk_override.worktree_branch);
+}
+
+#[test]
+fn test_peer_message_record_commit_sha_round_trips_through_peer_json() {
+    let temp_dir = TempDir::new().unwrap();
+    let manager = StateManager::new(temp_dir.path().to_path_buf());
+
+    manager
+        .write_qa_verdict("session-evaluator", "session-queen", "QA_VERDICT: PASS", Some("abc123def"))
+        .unwrap();
+
+    let record: PeerMessageRecord = serde_json::from_str(
+        &std::fs::read_to_string(temp_dir.path().join("peer").join("qa-verdict.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(record.kind, "qa-verdict");
+    assert_eq!(record.commit_sha.as_deref(), Some("abc123def"));
 }
 
 #[tokio::test]

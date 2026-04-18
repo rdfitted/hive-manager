@@ -698,8 +698,53 @@ impl SessionController {
     }
 
     pub fn get_session(&self, id: &str) -> Option<Session> {
+        self.refresh_session_from_storage_if_clean(id);
         let sessions = self.sessions.read();
         sessions.get(id).cloned()
+    }
+
+    fn refresh_session_from_storage_if_clean(&self, session_id: &str) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+
+        let current_session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        };
+        let Some(current_session) = current_session else {
+            return;
+        };
+
+        let current_persisted = Self::session_to_persisted_snapshot(&current_session);
+        let persisted = match storage.load_session_if_newer_and_clean(session_id, &current_persisted)
+        {
+            Ok(Some(persisted)) => persisted,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to check session.json freshness for {}: {}",
+                    session_id,
+                    err
+                );
+                return;
+            }
+        };
+
+        let refreshed = match self.session_from_persisted(&persisted) {
+            Ok(session) => session,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to hot-reload session {} from session.json: {}",
+                    session_id,
+                    err
+                );
+                return;
+            }
+        };
+
+        let mut sessions = self.sessions.write();
+        sessions.insert(session_id.to_string(), refreshed);
     }
 
     pub fn update_session_metadata(
@@ -767,6 +812,14 @@ impl SessionController {
     }
 
     pub fn list_sessions(&self) -> Vec<Session> {
+        let session_ids: Vec<String> = {
+            let sessions = self.sessions.read();
+            sessions.keys().cloned().collect()
+        };
+        for session_id in &session_ids {
+            self.refresh_session_from_storage_if_clean(session_id);
+        }
+
         let sessions = self.sessions.read();
         let heartbeats = self.agent_heartbeats.read();
         sessions
@@ -7550,10 +7603,19 @@ Last updated: {timestamp}
         }
 
         // Load session from storage
-        let storage = SessionStorage::new()
-            .map_err(|e| format!("Failed to initialize storage: {}", e))?;
+        let storage = if let Some(storage) = self.storage.clone() {
+            storage
+        } else {
+            Arc::new(
+                SessionStorage::new()
+                    .map_err(|e| format!("Failed to initialize storage: {}", e))?,
+            )
+        };
         let persisted = storage.load_session(session_id)
             .map_err(|e| format!("Failed to load session from storage: {}", e))?;
+        storage
+            .mark_session_synced(session_id, &persisted)
+            .map_err(|e| format!("Failed to track session storage state: {}", e))?;
 
         // Convert persisted session to active session
         let session = self.session_from_persisted(&persisted)?;

@@ -66,6 +66,8 @@ pub struct PeerMessageRecord {
     pub to: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -262,6 +264,7 @@ impl StateManager {
                 to: to.to_string(),
                 content: content.to_string(),
                 timestamp: Utc::now(),
+                commit_sha: None,
             },
         )
     }
@@ -271,6 +274,7 @@ impl StateManager {
         from: &str,
         to: &str,
         content: &str,
+        commit_sha: Option<&str>,
     ) -> Result<(), StateError> {
         self.write_peer_record(
             "qa-verdict.json",
@@ -280,6 +284,7 @@ impl StateManager {
                 to: to.to_string(),
                 content: content.to_string(),
                 timestamp: Utc::now(),
+                commit_sha: commit_sha.map(str::to_string),
             },
         )
     }
@@ -298,6 +303,7 @@ impl StateManager {
                 to: to.to_string(),
                 content: content.to_string(),
                 timestamp: Utc::now(),
+                commit_sha: None,
             },
         )
     }

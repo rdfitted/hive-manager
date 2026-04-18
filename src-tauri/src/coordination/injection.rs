@@ -152,7 +152,7 @@ impl InjectionManager {
 
         if target_is_queen {
             self.write_session_peer_message(session_id, |state| {
-                state.write_qa_verdict(evaluator_id, target_agent_id, message)
+                state.write_qa_verdict(evaluator_id, target_agent_id, message, None)
             })?;
         } else {
             self.write_session_peer_message(session_id, |state| {
