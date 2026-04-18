@@ -29,6 +29,7 @@ interface ConversationState {
 interface HeartbeatState {
   agents: Record<string, HeartbeatInfo>;
   stalledAgents: Set<string>;
+  staleAgents: Set<string>; // Agents with heartbeat >3min old
 }
 
 function delay(ms: number): Promise<void> {
@@ -229,10 +230,21 @@ function createConversationStore() {
   }
 }
 
+// Staleness threshold: 3 minutes in milliseconds
+const STALENESS_THRESHOLD_MS = 3 * 60 * 1000;
+
+function isHeartbeatStale(timestamp: string): boolean {
+  if (!timestamp) return true;
+  const hbTime = new Date(timestamp).getTime();
+  if (isNaN(hbTime)) return true;
+  return Date.now() - hbTime > STALENESS_THRESHOLD_MS;
+}
+
 function createHeartbeatStore() {
   const { subscribe, update } = writable<HeartbeatState>({
     agents: {},
     stalledAgents: new Set(),
+    staleAgents: new Set(),
   });
 
   // Listen for stall/recovery events
@@ -274,15 +286,22 @@ function createHeartbeatStore() {
           : data;
         if (session?.agents) {
           const agents: Record<string, HeartbeatInfo> = {};
+          const staleAgents = new Set<string>();
           for (const agent of session.agents) {
-            agents[agent.agent_id || agent.id] = {
-              agent_id: agent.agent_id || agent.id,
+            const id = agent.agent_id || agent.id;
+            const timestamp = agent.timestamp || agent.last_update || new Date().toISOString();
+            agents[id] = {
+              agent_id: id,
               status: agent.status || 'unknown',
               summary: agent.summary || '',
-              timestamp: agent.timestamp || agent.last_update || new Date().toISOString(),
+              timestamp,
             };
+            // Compute staleness from timestamp (>3min = stale)
+            if (isHeartbeatStale(timestamp)) {
+              staleAgents.add(id);
+            }
           }
-          update((state) => ({ ...state, agents }));
+          update((state) => ({ ...state, agents, staleAgents }));
         }
       } catch {
         // Silently ignore heartbeat fetch errors
