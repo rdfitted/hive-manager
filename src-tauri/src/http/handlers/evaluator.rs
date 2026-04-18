@@ -359,16 +359,16 @@ fn build_verdict_content(
     rationale: Option<&str>,
     commit_sha: Option<&str>,
 ) -> String {
-    let mut content = format!("QA_VERDICT: {verdict}");
+    let mut content = serde_json::Map::new();
+    content.insert("kind".to_string(), json!("qa-verdict"));
+    content.insert("verdict".to_string(), json!(verdict));
     if let Some(rationale) = rationale {
-        content.push_str("\nRationale: ");
-        content.push_str(rationale);
+        content.insert("rationale".to_string(), json!(rationale));
     }
     if let Some(commit_sha) = commit_sha {
-        content.push_str("\nCommit-SHA: ");
-        content.push_str(commit_sha);
+        content.insert("commit_sha".to_string(), json!(commit_sha));
     }
-    content
+    Value::Object(content).to_string()
 }
 
 pub(crate) fn apply_verdict(
@@ -422,11 +422,10 @@ pub async fn post_verdict(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    let new_state = apply_verdict(&state, &session_id, verdict, false)?;
-
     let verdict_content = build_verdict_content(verdict, rationale, commit_sha);
-    let (project_path, evaluator_id, queen_id) = {
+    let (project_path, evaluator_id, queen_id, new_state) = {
         let controller = state.session_controller.read();
+        require_qa_in_progress(&controller, &session_id, "qa-verdict")?;
         let session = controller
             .get_session(&session_id)
             .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
@@ -436,14 +435,16 @@ pub async fn post_verdict(
             .find(|agent| matches!(agent.role, AgentRole::Evaluator))
             .map(|agent| agent.id.clone())
             .unwrap_or_else(|| format!("{}-evaluator", session_id));
-        (session.project_path.clone(), evaluator_id, format!("{}-queen", session_id))
+        let new_state = controller
+            .record_http_qa_verdict(&session_id, &evaluator_id, verdict, commit_sha)
+            .map_err(ApiError::internal)?;
+        (
+            session.project_path.clone(),
+            evaluator_id,
+            format!("{}-queen", session_id),
+            new_state,
+        )
     };
-
-    state.session_controller.write().sync_agent_commit_sha(
-        &session_id,
-        &evaluator_id,
-        commit_sha.map(str::to_string),
-    );
 
     let verdict_message = CoordinationMessage::qa_verdict(&evaluator_id, &queen_id, &verdict_content);
     if let Err(err) = state

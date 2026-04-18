@@ -8,7 +8,10 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
-use crate::session::{FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus, HiveLaunchConfig, QaWorkerConfig};
+use crate::session::{
+    CompletionBlockedError, CompletionError, FusionLaunchConfig, FusionVariantConfig,
+    FusionVariantStatus, HiveLaunchConfig, QaWorkerConfig,
+};
 use crate::storage::SessionTypeInfo;
 use super::{validate_session_id, validate_cli, validate_project_path};
 
@@ -68,6 +71,25 @@ fn is_valid_hex_session_color(color: &str) -> bool {
     color.len() == 7
         && color.starts_with('#')
         && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
+}
+
+fn completion_blocked_to_api_error(error: CompletionBlockedError) -> ApiError {
+    let mut details = std::collections::HashMap::new();
+    details.insert("current_state".to_string(), serde_json::json!(error.current_state));
+    details.insert("unblock_paths".to_string(), serde_json::json!(error.unblock_paths));
+    details.insert(
+        "remaining_quiescence_seconds".to_string(),
+        serde_json::json!(error.remaining_quiescence_seconds),
+    );
+    ApiError::conflict_with_details(error.error, details)
+}
+
+fn map_completion_error(error: CompletionError) -> ApiError {
+    match error {
+        CompletionError::Blocked(blocked) => completion_blocked_to_api_error(blocked),
+        CompletionError::NotFound(message) => ApiError::not_found(message),
+        CompletionError::Storage(message) => ApiError::internal(message),
+    }
 }
 
 #[derive(Serialize)]
@@ -905,18 +927,7 @@ pub async fn complete_session(
         .session_controller
         .read()
         .mark_session_completed(&id)
-        .map_err(|e: crate::session::CompletionBlockedError| {
-            if e.error.starts_with("Session not found") {
-                ApiError::not_found(&e.error)
-            } else {
-                // Return structured 409 response with unblock paths
-                let mut details = std::collections::HashMap::new();
-                details.insert("current_state".to_string(), serde_json::json!(e.current_state));
-                details.insert("unblock_paths".to_string(), serde_json::json!(e.unblock_paths));
-                details.insert("remaining_quiescence_seconds".to_string(), serde_json::json!(e.remaining_quiescence_seconds));
-                ApiError::conflict_with_details(&e.error, details)
-            }
-        })?;
+        .map_err(map_completion_error)?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Session {} marked completed", id)

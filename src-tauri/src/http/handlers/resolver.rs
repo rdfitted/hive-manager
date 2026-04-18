@@ -9,10 +9,29 @@ use serde::Deserialize;
 
 use crate::http::{error::ApiError, state::AppState};
 use crate::orchestrator::resolver::{Resolver, ResolverError};
-use crate::session::SessionType;
+use crate::session::{CompletionBlockedError, CompletionError, SessionType};
 use crate::storage::StorageError;
 
 use super::{validate_candidate_ids, validate_session_id};
+
+fn completion_blocked_to_api_error(error: CompletionBlockedError) -> ApiError {
+    let mut details = std::collections::HashMap::new();
+    details.insert("current_state".to_string(), serde_json::json!(error.current_state));
+    details.insert("unblock_paths".to_string(), serde_json::json!(error.unblock_paths));
+    details.insert(
+        "remaining_quiescence_seconds".to_string(),
+        serde_json::json!(error.remaining_quiescence_seconds),
+    );
+    ApiError::conflict_with_details(error.error, details)
+}
+
+fn map_completion_error(error: CompletionError) -> ApiError {
+    match error {
+        CompletionError::Blocked(blocked) => completion_blocked_to_api_error(blocked),
+        CompletionError::NotFound(message) => ApiError::not_found(message),
+        CompletionError::Storage(message) => ApiError::internal(message),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct LaunchResolverRequest {
@@ -144,17 +163,7 @@ pub async fn launch_resolver(
         .session_controller
         .read()
         .mark_session_completed(&session_id)
-        .map_err(|e: crate::session::CompletionBlockedError| {
-            if e.error.starts_with("Session not found") {
-                ApiError::not_found(&e.error)
-            } else {
-                let mut details = std::collections::HashMap::new();
-                details.insert("current_state".to_string(), serde_json::json!(e.current_state));
-                details.insert("unblock_paths".to_string(), serde_json::json!(e.unblock_paths));
-                details.insert("remaining_quiescence_seconds".to_string(), serde_json::json!(e.remaining_quiescence_seconds));
-                ApiError::conflict_with_details(&e.error, details)
-            }
-        })?;
+        .map_err(map_completion_error)?;
 
     Ok(Json(output))
 }

@@ -186,6 +186,23 @@ impl CompletionBlockedError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum CompletionError {
+    Blocked(CompletionBlockedError),
+    NotFound(String),
+    Storage(String),
+}
+
+impl CompletionError {
+    fn not_found(session_id: &str) -> Self {
+        Self::NotFound(format!("Session not found: {}", session_id))
+    }
+
+    fn storage(message: impl Into<String>) -> Self {
+        Self::Storage(message.into())
+    }
+}
+
 fn default_max_qa_iterations() -> u8 {
     DEFAULT_MAX_QA_ITERATIONS
 }
@@ -254,6 +271,8 @@ pub struct AgentInfo {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub base_commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -667,6 +686,7 @@ impl SessionController {
                 config: queen_config,
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
 
             // Create Worker agents
@@ -710,6 +730,7 @@ impl SessionController {
                     config: worker_config,
                     parent_id: Some(format!("{}-queen", session_id)),
                     commit_sha: None,
+                    base_commit_sha: None,
                 });
             }
         }
@@ -910,42 +931,30 @@ impl SessionController {
         }
     }
 
-    pub fn can_complete_session(&self, session_id: &str) -> Result<(), CompletionBlockedError> {
+    pub fn can_complete_session(&self, session_id: &str) -> Result<(), CompletionError> {
         let session = if let Some(session) = self.get_session(session_id) {
             session
         } else {
             let storage = self
                 .storage
                 .as_ref()
-                .ok_or_else(|| CompletionBlockedError {
-                    error: format!("Session not found: {}", session_id),
-                    current_state: "Unknown".to_string(),
-                    unblock_paths: vec![],
-                    remaining_quiescence_seconds: None,
-                })?;
+                .ok_or_else(|| CompletionError::not_found(session_id))?;
             let persisted = storage
                 .load_session(session_id)
-                .map_err(|_| CompletionBlockedError {
-                    error: format!("Session not found: {}", session_id),
-                    current_state: "Unknown".to_string(),
-                    unblock_paths: vec![],
-                    remaining_quiescence_seconds: None,
+                .map_err(|err| match err {
+                    StorageError::SessionNotFound(_) => CompletionError::not_found(session_id),
+                    _ => CompletionError::storage(format!("Storage error: {}", err)),
                 })?;
             self.session_from_persisted(&persisted)
-                .map_err(|e| CompletionBlockedError {
-                    error: e,
-                    current_state: "Unknown".to_string(),
-                    unblock_paths: vec![],
-                    remaining_quiescence_seconds: None,
-                })?
+                .map_err(CompletionError::storage)?
         };
 
         if !Self::state_allows_completion(&session) {
-            return Err(CompletionBlockedError::state_blocked(
+            return Err(CompletionError::Blocked(CompletionBlockedError::state_blocked(
                 session_id,
                 &session.state,
                 Self::session_requires_internal_evaluator(&session),
-            ));
+            )));
         }
 
         let quiet_for = Utc::now() - session.last_activity_at;
@@ -953,7 +962,9 @@ impl SessionController {
             let remaining = (chrono::Duration::minutes(10) - quiet_for)
                 .num_seconds()
                 .max(0);
-            return Err(CompletionBlockedError::quiescence_blocked(remaining));
+            return Err(CompletionError::Blocked(
+                CompletionBlockedError::quiescence_blocked(remaining),
+            ));
         }
 
         // External reviewer comments are not tracked server-side yet, so the completion gate enforces
@@ -1472,7 +1483,7 @@ impl SessionController {
         }
     }
 
-    pub fn mark_session_completed(&self, session_id: &str) -> Result<(), CompletionBlockedError> {
+    pub fn mark_session_completed(&self, session_id: &str) -> Result<(), CompletionError> {
         self.can_complete_session(session_id)?;
 
         let previous_state = {
@@ -1486,19 +1497,14 @@ impl SessionController {
         };
 
         if let Some(((previous_session_state, previous_auth_strategy), changes)) = previous_state {
-            if let Err(err) = self.update_session_storage_checked(session_id) {
-                let mut sessions = self.sessions.write();
-                if let Some(session) = sessions.get_mut(session_id) {
-                    session.state = previous_session_state;
-                    session.auth_strategy = previous_auth_strategy;
+                if let Err(err) = self.update_session_storage_checked(session_id) {
+                    let mut sessions = self.sessions.write();
+                    if let Some(session) = sessions.get_mut(session_id) {
+                        session.state = previous_session_state;
+                        session.auth_strategy = previous_auth_strategy;
+                    }
+                    return Err(CompletionError::storage(err));
                 }
-                return Err(CompletionBlockedError {
-                    error: err,
-                    current_state: "Unknown".to_string(),
-                    unblock_paths: vec![],
-                    remaining_quiescence_seconds: None,
-                });
-            }
 
             self.emit_cell_status_changes(session_id, changes);
             self.emit_session_update(session_id);
@@ -1508,38 +1514,21 @@ impl SessionController {
         let storage = self
             .storage
             .as_ref()
-            .ok_or_else(|| CompletionBlockedError {
-                error: format!("Session not found: {}", session_id),
-                current_state: "Unknown".to_string(),
-                unblock_paths: vec![],
-                remaining_quiescence_seconds: None,
-            })?;
+            .ok_or_else(|| CompletionError::not_found(session_id))?;
         let mut persisted = storage
             .load_session(session_id)
             .map_err(|err| match err {
-                StorageError::SessionNotFound(_) => CompletionBlockedError {
-                    error: format!("Session not found: {}", session_id),
-                    current_state: "Unknown".to_string(),
-                    unblock_paths: vec![],
-                    remaining_quiescence_seconds: None,
-                },
-                _ => CompletionBlockedError {
-                    error: format!("Storage error: {}", err),
-                    current_state: "Unknown".to_string(),
-                    unblock_paths: vec![],
-                    remaining_quiescence_seconds: None,
-                },
+                StorageError::SessionNotFound(_) => CompletionError::not_found(session_id),
+                _ => CompletionError::storage(format!("Storage error: {}", err)),
             })?;
         persisted.state = serialize_session_state(&SessionState::Completed);
         persisted.auth_strategy = AuthStrategy::None.persist_value();
         storage
             .save_session(&persisted)
-            .map_err(|e| CompletionBlockedError {
-                error: format!("Failed to persist session completion: {}", e),
-                current_state: "Unknown".to_string(),
-                unblock_paths: vec![],
-                remaining_quiescence_seconds: None,
-            })?;
+            .map_err(|e| CompletionError::storage(format!(
+                "Failed to persist session completion: {}",
+                e
+            )))?;
 
         Ok(())
     }
@@ -5506,6 +5495,7 @@ Last updated: {timestamp}
                 config: solo_config.clone(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             }],
             default_cli: cli,
             default_model: model,
@@ -5685,6 +5675,7 @@ Last updated: {timestamp}
             config: config.queen_config.clone(),
             parent_id: None,
             commit_sha: None,
+            base_commit_sha: None,
         });
 
         // Create Worker agents
@@ -5767,6 +5758,7 @@ Last updated: {timestamp}
                 config: worker_config.clone(),
                 parent_id: Some(queen_id.clone()),
                 commit_sha: None,
+                base_commit_sha: None,
             });
         }
 
@@ -6039,6 +6031,7 @@ Last updated: {timestamp}
                 config: variant_agent_config,
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             };
 
             let waiting_changes = {
@@ -6143,6 +6136,7 @@ Last updated: {timestamp}
                 config: config.queen_config.clone(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
         }
 
@@ -6239,6 +6233,7 @@ Last updated: {timestamp}
                 config: queen_cfg.clone(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
         }
 
@@ -6407,6 +6402,7 @@ Last updated: {timestamp}
                 config: queen_cfg,
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
         }
 
@@ -6501,6 +6497,7 @@ Last updated: {timestamp}
                 config: variant_agent_config,
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
         }
 
@@ -6613,6 +6610,7 @@ Last updated: {timestamp}
                 config: config.queen_config.clone(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
         }
 
@@ -6711,11 +6709,13 @@ Last updated: {timestamp}
         }
 
         let base_ref = Self::resolve_worker_base_ref(&session, "spawn_next_worker", index);
+        let worker_cell_name = format!("worker-{index}");
+        let worker_id = format!("{}-worker-{}", session_id, index);
 
         // 1. Create worker worktree FIRST (before writing task/prompt files)
         let (_, worker_cwd) = create_session_worktree(
             session_id,
-            &format!("worker-{}", index),
+            &worker_cell_name,
             &worker_branch,
             &base_ref,
             &session.project_path,
@@ -6724,16 +6724,27 @@ Last updated: {timestamp}
             self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
             SessionError::ConfigError(err)
         })?;
+        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), index as usize);
+        let worker_base_commit_sha = current_head(Path::new(&worker_cwd)).map_err(|err| {
+            Self::rollback_worker_launch_artifacts(
+                &session.project_path,
+                session_id,
+                &worker_cell_name,
+                &task_file_path,
+                None,
+            );
+            self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
+            SessionError::ConfigError(format!(
+                "Failed to snapshot worker base commit for worker {}: {}",
+                index, err
+            ))
+        })?;
         self.emit_workspace_created(
             session_id,
             PRIMARY_CELL_ID,
             &worker_branch,
             Some(&worker_cwd),
         );
-
-        let worker_id = format!("{}-worker-{}", session_id, index);
-        let worker_cell_name = format!("worker-{index}");
-        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), index as usize);
         let filename = format!("worker-{}-prompt.md", index);
         let prompt_file_path = session
             .project_path
@@ -6817,6 +6828,7 @@ Last updated: {timestamp}
                     config: worker_config.clone(),
                     parent_id: Some(queen_id.to_string()),
                     commit_sha: None,
+                    base_commit_sha: Some(worker_base_commit_sha.clone()),
                 };
                 s.agents.push(agent.clone());
                 self.emit_agent_launched(s, &agent);
@@ -6899,6 +6911,13 @@ Last updated: {timestamp}
             .unwrap_or(false)
     }
 
+    fn worker_base_commit_sha(session: &Session, worker_id: u8) -> Option<String> {
+        session.agents.iter().find_map(|agent| match &agent.role {
+            AgentRole::Worker { index, .. } if *index == worker_id => agent.base_commit_sha.clone(),
+            _ => None,
+        })
+    }
+
     fn worker_completion_commit_sha(session: &Session, worker_id: u8) -> Option<String> {
         let worker_worktree = session
             .project_path
@@ -6920,12 +6939,12 @@ Last updated: {timestamp}
             }
         };
 
-        let base_ref = Self::resolve_worker_base_ref(session, "worker_completion_commit_sha", worker_id);
-        if head == base_ref {
-            None
-        } else {
-            Some(head)
+        if let Some(base_commit_sha) = Self::worker_base_commit_sha(session, worker_id) {
+            return if head == base_commit_sha { None } else { Some(head) };
         }
+
+        let base_ref = Self::resolve_worker_base_ref(session, "worker_completion_commit_sha", worker_id);
+        if head == base_ref { None } else { Some(head) }
     }
 
     pub(crate) fn sync_agent_commit_sha(&self, session_id: &str, agent_id: &str, commit_sha: Option<String>) {
@@ -6949,6 +6968,101 @@ Last updated: {timestamp}
             self.update_session_storage(session_id);
             self.emit_session_update(session_id);
         }
+    }
+
+    fn apply_qa_verdict_to_session(
+        &self,
+        session: &mut Session,
+        normalized_verdict: &str,
+        evaluator_id: Option<&str>,
+        commit_sha: Option<&str>,
+    ) -> (SessionState, Vec<(String, String, String)>) {
+        if let Some(evaluator_id) = evaluator_id {
+            if let Some(agent) = session.agents.iter_mut().find(|agent| agent.id == evaluator_id) {
+                agent.commit_sha = commit_sha.map(str::to_string);
+            }
+        }
+
+        match normalized_verdict {
+            "PASS" | "QA_VERDICT: PASS" => {
+                let changes = self.set_session_state_with_events(session, SessionState::QaPassed);
+                (SessionState::QaPassed, changes)
+            }
+            "FAIL" | "QA_VERDICT: FAIL" => {
+                let next_iteration = next_qa_failure_iteration(&session.state);
+
+                if next_iteration > session.max_qa_iterations {
+                    tracing::warn!(
+                        "Session {} exhausted the QA safety ceiling at {} failed verdicts",
+                        session.id,
+                        session.max_qa_iterations
+                    );
+                    let changes =
+                        self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
+                    session.auth_strategy = AuthStrategy::None;
+                    (SessionState::QaMaxRetriesExceeded, changes)
+                } else {
+                    let next_state = SessionState::QaFailed {
+                        iteration: next_iteration,
+                    };
+                    let changes = self.set_session_state_with_events(session, next_state.clone());
+                    (next_state, changes)
+                }
+            }
+            _ => unreachable!("unsupported verdict already validated"),
+        }
+    }
+
+    pub fn record_http_qa_verdict(
+        &self,
+        session_id: &str,
+        evaluator_id: &str,
+        verdict: &str,
+        commit_sha: Option<&str>,
+    ) -> Result<SessionState, String> {
+        let normalized = verdict.trim().to_ascii_uppercase();
+        if !matches!(
+            normalized.as_str(),
+            "PASS" | "QA_VERDICT: PASS" | "FAIL" | "QA_VERDICT: FAIL"
+        ) {
+            return Err(format!("Unsupported QA verdict '{}'", verdict));
+        }
+
+        self.cancel_qa_timeout(session_id);
+
+        let (previous_session, updated_session, changes, new_state) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            let previous_session = session.clone();
+            let now = Utc::now();
+            if now > session.last_activity_at {
+                session.last_activity_at = now;
+            }
+            let (new_state, changes) = self.apply_qa_verdict_to_session(
+                session,
+                normalized.as_str(),
+                Some(evaluator_id),
+                commit_sha,
+            );
+            (previous_session, session.clone(), changes, new_state)
+        };
+
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id) {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    *session = previous_session;
+                }
+                return Err(err);
+            }
+        }
+
+        self.emit_session_update(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+
+        Ok(new_state)
     }
 
     fn try_begin_evaluator_respawn(&self, session_id: &str) -> bool {
@@ -7099,60 +7213,19 @@ Last updated: {timestamp}
         }
 
         self.cancel_qa_timeout(session_id);
-        match normalized.as_str() {
-            "PASS" | "QA_VERDICT: PASS" => {
-                let pass_changes = {
-                    let mut sessions = self.sessions.write();
-                    sessions
-                        .get_mut(session_id)
-                        .map(|session| self.set_session_state_with_events(session, SessionState::QaPassed))
-                };
-                self.emit_session_update(session_id);
-                self.update_session_storage(session_id);
-                if let Some(changes) = pass_changes {
-                    self.emit_cell_status_changes(session_id, changes);
-                }
+        let (new_state, changes) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            self.apply_qa_verdict_to_session(session, normalized.as_str(), None, None)
+        };
 
-                Ok(SessionState::QaPassed)
-            }
-            "FAIL" | "QA_VERDICT: FAIL" => {
-                let (next_state, changes) = {
-                    let mut sessions = self.sessions.write();
-                    let session = sessions
-                        .get_mut(session_id)
-                        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, changes);
 
-                    let next_iteration = next_qa_failure_iteration(&session.state);
-
-                    if next_iteration > session.max_qa_iterations {
-                        tracing::warn!(
-                            "Session {} exhausted the QA safety ceiling at {} failed verdicts",
-                            session_id,
-                            session.max_qa_iterations
-                        );
-                        let changes =
-                            self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
-                        session.auth_strategy = AuthStrategy::None;
-                        (session.state.clone(), changes)
-                    } else {
-                        let changes = self.set_session_state_with_events(
-                            session,
-                            SessionState::QaFailed {
-                                iteration: next_iteration,
-                            },
-                        );
-                        (session.state.clone(), changes)
-                    }
-                };
-
-                self.emit_session_update(session_id);
-                self.update_session_storage(session_id);
-                self.emit_cell_status_changes(session_id, changes);
-
-                Ok(next_state)
-            }
-            _ => unreachable!("unsupported verdict already validated"),
-        }
+        Ok(new_state)
     }
 
     #[allow(dead_code)]
@@ -7415,6 +7488,7 @@ Last updated: {timestamp}
                     config: judge_config,
                     parent_id: None,
                     commit_sha: None,
+                    base_commit_sha: None,
                 };
                 s.agents.push(agent.clone());
                 self.emit_agent_launched(s, &agent);
@@ -7730,6 +7804,7 @@ Last updated: {timestamp}
                 config: config.queen_config.clone(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
 
             // Queen will spawn workers via HTTP API after reading the plan
@@ -7896,6 +7971,7 @@ Last updated: {timestamp}
                     config,
                     parent_id: pa.parent_id.clone(),
                     commit_sha: pa.commit_sha.clone(),
+                    base_commit_sha: pa.base_commit_sha.clone(),
                 })
             })
             .collect();
@@ -8005,6 +8081,7 @@ Last updated: {timestamp}
                 config: config.queen_config.clone(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
 
             // NOTE: Planners and Workers are NOT spawned here anymore
@@ -8117,6 +8194,7 @@ Last updated: {timestamp}
                 config: config.queen_config.clone(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
 
             // NOTE: Planners and Workers are NOT spawned here anymore
@@ -8366,6 +8444,7 @@ Last updated: {timestamp}
             config: agent_config,
             parent_id: Some(actual_parent_id),
             commit_sha: None,
+            base_commit_sha: None,
         };
 
         // Update session
@@ -8472,6 +8551,7 @@ Last updated: {timestamp}
             config,
             parent_id: None,
             commit_sha: None,
+            base_commit_sha: None,
         };
 
         let (timeout_secs, qa_changes) = {
@@ -8594,6 +8674,7 @@ Last updated: {timestamp}
             config,
             parent_id: Some(evaluator_id),
             commit_sha: None,
+            base_commit_sha: None,
         };
 
         let qa_changes = {
@@ -8721,6 +8802,7 @@ Last updated: {timestamp}
             config: agent_config,
             parent_id: Some(queen_id),
             commit_sha: None,
+            base_commit_sha: None,
         };
 
         // Update session state to WaitingForPlanner
@@ -8807,6 +8889,7 @@ Last updated: {timestamp}
                 },
                 parent_id: a.parent_id.clone(),
                 commit_sha: a.commit_sha.clone(),
+                base_commit_sha: a.base_commit_sha.clone(),
             }
         }).collect();
 
@@ -9199,8 +9282,8 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 mod tests {
     use super::{
         parse_persisted_session_state, serialize_session_state, AgentConfig, AgentInfo,
-        AuthStrategy, QaWorkerConfig, Session, SessionController, SessionError, SessionState,
-        SessionType,
+        AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController, SessionError,
+        SessionState, SessionType,
     };
     use crate::pty::{AgentRole, AgentStatus, PtyManager};
     use crate::workspace::git::current_head;
@@ -9431,6 +9514,11 @@ mod tests {
     }
 
     fn waiting_worker_session(session_id: &str, repo_path: &Path, worker_id: u8) -> Session {
+        let worker_worktree = repo_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join(format!("worker-{worker_id}"));
         Session {
             id: session_id.to_string(),
             name: None,
@@ -9450,6 +9538,7 @@ mod tests {
                 config: AgentConfig::default(),
                 parent_id: Some(format!("{session_id}-queen")),
                 commit_sha: None,
+                base_commit_sha: current_head(&worker_worktree).ok(),
             }],
             default_cli: "claude".to_string(),
             default_model: None,
@@ -9477,6 +9566,7 @@ mod tests {
                 config: AgentConfig::default(),
                 parent_id: None,
                 commit_sha: None,
+                base_commit_sha: None,
             });
         }
 
@@ -9539,12 +9629,20 @@ mod tests {
         let blocked = controller
             .can_complete_session("evaluator-blocked")
             .expect_err("evaluator-backed session should require QaPassed");
+        let blocked = match blocked {
+            CompletionError::Blocked(blocked) => blocked,
+            other => panic!("expected blocked completion error, got {:?}", other),
+        };
         assert!(blocked.error.contains("QaPassed"));
         assert!(!blocked.unblock_paths.is_empty()); // Should have unblock paths for evaluator
 
         let recent = controller
             .can_complete_session("fusion-recent")
             .expect_err("fusion session should still require quiet period");
+        let recent = match recent {
+            CompletionError::Blocked(recent) => recent,
+            other => panic!("expected blocked completion error, got {:?}", other),
+        };
         assert!(recent.error.contains("10 minutes"));
         assert!(recent.remaining_quiescence_seconds.is_some());
     }
@@ -9562,6 +9660,10 @@ mod tests {
         let blocked = controller
             .can_complete_session("evaluator-recent-pass")
             .expect_err("QaPassed session should still satisfy quiet period");
+        let blocked = match blocked {
+            CompletionError::Blocked(blocked) => blocked,
+            other => panic!("expected blocked completion error, got {:?}", other),
+        };
         assert!(blocked.error.contains("10 minutes"));
         assert!(blocked.remaining_quiescence_seconds.is_some());
     }
@@ -9583,6 +9685,23 @@ mod tests {
     fn worker_completion_commit_sha_is_none_when_branch_has_no_new_commit() {
         let session_id = "worker-commit-base";
         let (temp_dir, _) = init_repo_with_worker_worktree(session_id, 1);
+        let session = waiting_worker_session(session_id, temp_dir.path(), 1);
+
+        assert_eq!(
+            SessionController::worker_completion_commit_sha(&session, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn worker_completion_commit_sha_ignores_upstream_project_head_movement() {
+        let session_id = "worker-commit-stable-base";
+        let (temp_dir, _) = init_repo_with_worker_worktree(session_id, 1);
+        std::fs::write(temp_dir.path().join("main.txt"), "upstream change\n")
+            .expect("write upstream change");
+        run_git(temp_dir.path(), &["add", "main.txt"]);
+        run_git(temp_dir.path(), &["commit", "-m", "upstream change"]);
+
         let session = waiting_worker_session(session_id, temp_dir.path(), 1);
 
         assert_eq!(

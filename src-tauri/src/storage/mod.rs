@@ -171,6 +171,8 @@ pub struct PersistedAgentInfo {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub commit_sha: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    pub base_commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
