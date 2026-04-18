@@ -1439,9 +1439,24 @@ mod tests {
 
         let mut updated = session.clone();
         updated.state = "QaPassed".to_string();
-        thread::sleep(Duration::from_millis(1100));
+        let baseline_mtime = storage
+            .session_file_modified_at(&session.id)
+            .unwrap();
         let session_file = storage.session_file_path(&session.id);
-        storage.atomic_write_json(&session_file, &updated).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            storage.atomic_write_json(&session_file, &updated).unwrap();
+            let now_mtime = storage
+                .session_file_modified_at(&session.id)
+                .unwrap();
+            if now_mtime != baseline_mtime {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("session.json mtime did not change within timeout");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
 
         assert!(storage.has_newer_session_file(&session.id).unwrap());
 

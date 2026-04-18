@@ -7066,8 +7066,6 @@ Last updated: {timestamp}
             return Err(format!("Unsupported QA verdict '{}'", verdict));
         }
 
-        self.cancel_qa_timeout(session_id);
-
         let (previous_session, updated_session, changes, new_state) = {
             let mut sessions = self.sessions.write();
             let session = sessions
@@ -7096,6 +7094,8 @@ Last updated: {timestamp}
                 return Err(err);
             }
         }
+
+        self.cancel_qa_timeout(session_id);
 
         self.emit_session_update(session_id);
         self.emit_cell_status_changes(session_id, changes);

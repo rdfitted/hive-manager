@@ -46,6 +46,37 @@ async fn setup_test_app() -> axum::Router {
     create_router(state)
 }
 
+/// Setup test app with a specific storage base dir (hermetic). Returns router, controller, and the storage.
+async fn setup_test_app_with_controller_at(
+    base_dir: std::path::PathBuf,
+) -> (
+    axum::Router,
+    Arc<RwLock<SessionController>>,
+    Arc<SessionStorage>,
+) {
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
+    let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        session_controller.clone(),
+        injection_manager,
+        storage.clone(),
+        event_bus,
+        None,
+    ));
+
+    (create_router(state), session_controller, storage)
+}
+
 /// Setup test app and return both the router and session controller for inserting test sessions
 async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionController>>) {
     let storage = Arc::new(SessionStorage::new().unwrap());
@@ -3016,11 +3047,11 @@ impl Drop for TestPathCleanup {
 
 #[tokio::test]
 async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
-    let (app, controller) = setup_test_app_with_controller().await;
-    let external_storage = SessionStorage::new().unwrap();
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, external_storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
     let session_id = format!("qa-verdict-reload-{}", uuid::Uuid::new_v4());
     let temp_dir = TempDir::new().unwrap();
-    let _cleanup = TestPathCleanup::new(vec![external_storage.session_dir(&session_id)]);
 
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
     session.state = SessionState::QaInProgress {
@@ -3088,11 +3119,11 @@ async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
 
 #[tokio::test]
 async fn test_post_verdict_persists_commit_sha_and_rationale() {
-    let (app, controller) = setup_test_app_with_controller().await;
-    let external_storage = SessionStorage::new().unwrap();
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, external_storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
     let session_id = format!("qa-verdict-http-{}", uuid::Uuid::new_v4());
     let temp_dir = TempDir::new().unwrap();
-    let _cleanup = TestPathCleanup::new(vec![external_storage.session_dir(&session_id)]);
 
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
     session.state = SessionState::QaInProgress {
@@ -3193,11 +3224,11 @@ async fn test_post_verdict_persists_commit_sha_and_rationale() {
 
 #[tokio::test]
 async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
-    let (app, controller) = setup_test_app_with_controller().await;
-    let external_storage = SessionStorage::new().unwrap();
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, external_storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
     let session_id = format!("qa-verdict-http-fail-{}", uuid::Uuid::new_v4());
     let temp_dir = TempDir::new().unwrap();
-    let _cleanup = TestPathCleanup::new(vec![external_storage.session_dir(&session_id)]);
 
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
     session.state = SessionState::QaInProgress {
