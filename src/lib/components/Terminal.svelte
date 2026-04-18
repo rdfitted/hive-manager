@@ -108,6 +108,33 @@
   // internal paste listener also fires onData → double send.
   let suppressPaste = false;
 
+  // Single shared decoder with stream mode so multi-byte UTF-8 sequences
+  // split across 4KB PTY chunks don't decode to replacement characters.
+  const ptyDecoder = new TextDecoder('utf-8');
+
+  // Centralised guard for term.write(). @xterm/addon-webgl@0.19.0 can throw
+  // from write() on long-running buffers, corrupting the renderer so the pane
+  // collapses to only xterm's fallback glyph. On first failure, dispose the
+  // WebGL addon and retry once; subsequent writes use the default DOM renderer.
+  // All write paths (PTY listener, exported write()) must route through here.
+  function writeSafely(data: string) {
+    if (!term) return;
+    try {
+      term.write(data);
+    } catch (e) {
+      if (webglAddon) {
+        console.error('xterm write failed, disposing WebGL addon and falling back to DOM renderer:', e);
+        try { webglAddon.dispose(); } catch { /* ignore */ }
+        webglAddon = null;
+        try { term.write(data); } catch (e2) {
+          console.error('xterm write failed after WebGL fallback:', e2);
+        }
+      } else {
+        console.error('xterm write failed:', e);
+      }
+    }
+  }
+
   async function sendToPty(data: string) {
     try {
       await invoke('write_to_pty', { id: agentId, data });
@@ -443,29 +470,13 @@
       await sendToPty(data);
     });
 
-    // Listen for PTY output.
-    // Guard term.write: @xterm/addon-webgl@0.19.0 can throw on long-running
-    // buffers, leaving the renderer in a corrupted state that blanks the pane
-    // to only xterm's fallback glyph. On failure, dispose the WebGL addon
-    // once and retry; subsequent writes use the default DOM renderer.
+    // Listen for PTY output. Uses writeSafely() so a WebGL renderer failure
+    // doesn't blank the pane. Uses a shared streaming decoder so multi-byte
+    // UTF-8 sequences split across chunks decode correctly.
     unlistenOutput = await listen<{ id: string; data: number[] }>('pty-output', (event) => {
       if (event.payload.id === agentId && term) {
-        const decoder = new TextDecoder();
-        const text = decoder.decode(new Uint8Array(event.payload.data));
-        try {
-          term.write(text);
-        } catch (e) {
-          if (webglAddon) {
-            console.error('xterm write failed, disposing WebGL addon and falling back to DOM renderer:', e);
-            try { webglAddon.dispose(); } catch { /* ignore */ }
-            webglAddon = null;
-            try { term.write(text); } catch (e2) {
-              console.error('xterm write failed after WebGL fallback:', e2);
-            }
-          } else {
-            console.error('xterm write failed:', e);
-          }
-        }
+        const text = ptyDecoder.decode(new Uint8Array(event.payload.data), { stream: true });
+        writeSafely(text);
       }
     });
 
@@ -535,7 +546,7 @@
   }
 
   export function write(data: string) {
-    term?.write(data);
+    writeSafely(data);
   }
 </script>
 
