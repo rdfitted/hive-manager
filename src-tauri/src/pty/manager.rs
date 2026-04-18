@@ -164,6 +164,14 @@ impl PtyManager {
         sessions.get(id).map(|s| s.status.read().clone())
     }
 
+    pub fn is_alive(&self, id: &str) -> bool {
+        let sessions = self.sessions.read();
+        sessions
+            .get(id)
+            .map(|session| session.is_alive())
+            .unwrap_or(false)
+    }
+
     pub fn list_sessions(&self) -> Vec<(String, AgentRole, AgentStatus)> {
         let sessions = self.sessions.read();
         sessions

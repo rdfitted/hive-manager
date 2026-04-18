@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use crate::coordination::{CoordinationMessage, StateManager};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole};
@@ -263,6 +264,15 @@ pub struct DevLoginQuery {
     pub token: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostVerdictRequest {
+    pub verdict: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
 pub async fn dev_login(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -321,25 +331,172 @@ fn append_operator_log(state: &AppState, session_id: &str, action: &str, detail:
     let _ = state.storage.append_coordination_log(session_id, &msg);
 }
 
+fn override_log_details(verdict: &str) -> Result<(&'static str, &'static str), ApiError> {
+    let normalized = verdict.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "PASS" | "QA_VERDICT: PASS" => Ok(("FORCE-PASS", "QA pass")),
+        "FAIL" | "QA_VERDICT: FAIL" => Ok(("FORCE-FAIL", "QA fail")),
+        _ => Err(ApiError::bad_request(format!(
+            "Unsupported QA verdict '{}'",
+            verdict
+        ))),
+    }
+}
+
+fn normalize_post_verdict(verdict: &str) -> Result<&'static str, ApiError> {
+    match verdict.trim().to_ascii_uppercase().as_str() {
+        "PASS" => Ok("PASS"),
+        "FAIL" => Ok("FAIL"),
+        other => Err(ApiError::bad_request(format!(
+            "Unsupported QA verdict '{}'. Expected PASS or FAIL",
+            other
+        ))),
+    }
+}
+
+fn build_verdict_content(
+    verdict: &str,
+    rationale: Option<&str>,
+    commit_sha: Option<&str>,
+) -> String {
+    let mut content = serde_json::Map::new();
+    content.insert("kind".to_string(), json!("qa-verdict"));
+    content.insert("verdict".to_string(), json!(verdict));
+    if let Some(rationale) = rationale {
+        content.insert("rationale".to_string(), json!(rationale));
+    }
+    if let Some(commit_sha) = commit_sha {
+        content.insert("commit_sha".to_string(), json!(commit_sha));
+    }
+    Value::Object(content).to_string()
+}
+
+pub(crate) fn apply_verdict(
+    state: &AppState,
+    session_id: &str,
+    verdict: &str,
+    is_override: bool,
+) -> Result<SessionState, ApiError> {
+    let action = if is_override {
+        let (action, _) = override_log_details(verdict)?;
+        match action {
+            "FORCE-PASS" => "force-pass",
+            "FORCE-FAIL" => "force-fail",
+            _ => unreachable!("override verdicts are normalized before logging"),
+        }
+    } else {
+        "qa-verdict"
+    };
+
+    let controller = state.session_controller.read();
+    require_qa_in_progress(&controller, session_id, action)?;
+    let new_state = controller
+        .on_qa_verdict(session_id, verdict)
+        .map_err(ApiError::internal)?;
+    drop(controller);
+
+    if is_override {
+        let (log_action, detail) = override_log_details(verdict)?;
+        append_operator_log(state, session_id, log_action, detail);
+    }
+
+    Ok(new_state)
+}
+
+pub async fn post_verdict(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(req): Json<PostVerdictRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    let verdict = normalize_post_verdict(&req.verdict)?;
+    let commit_sha = req
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let rationale = req
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let verdict_content = build_verdict_content(verdict, rationale, commit_sha);
+    let (project_path, evaluator_id, queen_id, new_state) = {
+        let controller = state.session_controller.read();
+        require_qa_in_progress(&controller, &session_id, "qa-verdict")?;
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+        let evaluator_id = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+            .map(|agent| agent.id.clone())
+            .unwrap_or_else(|| format!("{}-evaluator", session_id));
+        let new_state = controller
+            .record_http_qa_verdict(&session_id, &evaluator_id, verdict, commit_sha)
+            .map_err(ApiError::internal)?;
+        (
+            session.project_path.clone(),
+            evaluator_id,
+            format!("{}-queen", session_id),
+            new_state,
+        )
+    };
+
+    let verdict_message = CoordinationMessage::qa_verdict(&evaluator_id, &queen_id, &verdict_content);
+    if let Err(err) = state
+        .storage
+        .append_coordination_log(&session_id, &verdict_message)
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %err,
+            "Failed to append QA verdict audit log after HTTP verdict"
+        );
+    }
+
+    let state_manager = StateManager::new(project_path.join(".hive-manager").join(&session_id));
+    if let Err(err) = state_manager
+        .write_qa_verdict_async(
+        &evaluator_id,
+        &queen_id,
+        &verdict_content,
+        commit_sha,
+    )
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %err,
+            "Failed to persist QA verdict peer record after HTTP verdict"
+        );
+    }
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "action": "qa-verdict",
+        "verdict": verdict,
+        "new_state": format!("{:?}", new_state),
+        "commit_sha": commit_sha,
+        "rationale": rationale,
+    })))
+}
+
 pub async fn force_pass(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
-    let controller = state.session_controller.read();
-    require_qa_in_progress(&controller, &session_id, "force-pass")?;
-    controller
-        .on_qa_verdict(&session_id, "QA_VERDICT: PASS")
-        .map_err(ApiError::internal)?;
-    drop(controller);
-
-    append_operator_log(&state, &session_id, "FORCE-PASS", "QA pass");
+    let new_state = apply_verdict(&state, &session_id, "QA_VERDICT: PASS", true)?;
 
     Ok(Json(json!({
         "session_id": session_id,
         "action": "force-pass",
-        "new_state": "QaPassed"
+        "new_state": format!("{:?}", new_state)
     })))
 }
 
@@ -349,14 +506,7 @@ pub async fn force_fail(
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
-    let controller = state.session_controller.read();
-    require_qa_in_progress(&controller, &session_id, "force-fail")?;
-    let new_state = controller
-        .on_qa_verdict(&session_id, "QA_VERDICT: FAIL")
-        .map_err(ApiError::internal)?;
-    drop(controller);
-
-    append_operator_log(&state, &session_id, "FORCE-FAIL", "QA fail");
+    let new_state = apply_verdict(&state, &session_id, "QA_VERDICT: FAIL", true)?;
 
     Ok(Json(json!({
         "session_id": session_id,

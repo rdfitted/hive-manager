@@ -29,6 +29,7 @@ interface ConversationState {
 interface HeartbeatState {
   agents: Record<string, HeartbeatInfo>;
   stalledAgents: Set<string>;
+  staleAgents: Set<string>; // Agents with heartbeat >3min old
 }
 
 function delay(ms: number): Promise<void> {
@@ -229,10 +230,21 @@ function createConversationStore() {
   }
 }
 
+// Staleness threshold: 3 minutes in milliseconds
+const STALENESS_THRESHOLD_MS = 3 * 60 * 1000;
+
+function isHeartbeatStale(timestamp: string | null | undefined): boolean {
+  if (!timestamp) return false;
+  const hbTime = new Date(timestamp).getTime();
+  if (isNaN(hbTime)) return false;
+  return Date.now() - hbTime > STALENESS_THRESHOLD_MS;
+}
+
 function createHeartbeatStore() {
   const { subscribe, update } = writable<HeartbeatState>({
     agents: {},
     stalledAgents: new Set(),
+    staleAgents: new Set(),
   });
 
   // Listen for stall/recovery events
@@ -268,22 +280,32 @@ function createHeartbeatStore() {
         }
 
         const data = await resp.json();
-        // Extract agent heartbeats for this session
-        const session = Array.isArray(data)
-          ? data.find((s: { id: string }) => s.id === sessionId)
-          : data;
-        if (session?.agents) {
-          const agents: Record<string, HeartbeatInfo> = {};
-          for (const agent of session.agents) {
-            agents[agent.agent_id || agent.id] = {
-              agent_id: agent.agent_id || agent.id,
-              status: agent.status || 'unknown',
-              summary: agent.summary || '',
-              timestamp: agent.timestamp || agent.last_update || new Date().toISOString(),
-            };
-          }
-          update((state) => ({ ...state, agents }));
+        // Backend returns { sessions: [...] }; only populate the requested session.
+        const sessions: Array<{ id: string; agents?: Array<{ id?: string; agent_id?: string; status?: string; summary?: string; last_activity?: string }> }> =
+          Array.isArray(data?.sessions) ? data.sessions : [];
+        const session = sessions.find((s) => s.id === sessionId);
+        if (!session) {
+          update((state) => ({ ...state, agents: {}, staleAgents: new Set() }));
+          return;
         }
+
+        const agents: Record<string, HeartbeatInfo> = {};
+        const staleAgents = new Set<string>();
+        for (const agent of session.agents ?? []) {
+          const id = agent.id || agent.agent_id;
+          if (!id) continue;
+          const timestamp = agent.last_activity ?? '';
+          agents[id] = {
+            agent_id: id,
+            status: agent.status || 'unknown',
+            summary: agent.summary || '',
+            timestamp,
+          };
+          if (isHeartbeatStale(timestamp)) {
+            staleAgents.add(id);
+          }
+        }
+        update((state) => ({ ...state, agents, staleAgents }));
       } catch {
         // Silently ignore heartbeat fetch errors
       }

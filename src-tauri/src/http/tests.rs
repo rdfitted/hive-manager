@@ -8,6 +8,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
+use crate::coordination::{PeerMessageRecord, StateManager};
 use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
 use crate::pty::PtyManager;
 use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy, DEFAULT_MAX_QA_ITERATIONS};
@@ -43,6 +44,37 @@ async fn setup_test_app() -> axum::Router {
     ));
 
     create_router(state)
+}
+
+/// Setup test app with a specific storage base dir (hermetic). Returns router, controller, and the storage.
+async fn setup_test_app_with_controller_at(
+    base_dir: std::path::PathBuf,
+) -> (
+    axum::Router,
+    Arc<RwLock<SessionController>>,
+    Arc<SessionStorage>,
+) {
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
+    let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        session_controller.clone(),
+        injection_manager,
+        storage.clone(),
+        event_bus,
+        None,
+    ));
+
+    (create_router(state), session_controller, storage)
 }
 
 /// Setup test app and return both the router and session controller for inserting test sessions
@@ -106,6 +138,8 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
+            base_commit_sha: None,
         })
         .collect();
     let now = chrono::Utc::now();
@@ -148,6 +182,8 @@ fn make_test_session_for_completion(
             status: AgentStatus::Completed,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
+            base_commit_sha: None,
         });
     } else {
         session.session_type = SessionType::Fusion {
@@ -2354,6 +2390,8 @@ async fn test_add_qa_worker_valid_request_reaches_controller() {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
     });
     controller.read().insert_test_session(session);
 
@@ -3005,6 +3043,302 @@ impl Drop for TestPathCleanup {
             let _ = std::fs::remove_dir_all(path);
         }
     }
+}
+
+#[tokio::test]
+async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, external_storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-verdict-reload-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress {
+        iteration: Some(1),
+    };
+    controller.write().insert_test_session(session);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let persisted = external_storage.load_session(&session_id).unwrap();
+    assert_eq!(persisted.state, "QaPassed");
+
+    let mut disk_override = persisted.clone();
+    disk_override.name = Some("Reloaded From Disk".to_string());
+    external_storage.save_session(&disk_override).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json.get("name").and_then(|value| value.as_str()),
+        Some("Reloaded From Disk")
+    );
+
+    let refreshed = controller.read().get_session(&session_id).unwrap();
+    assert_eq!(refreshed.id, disk_override.id);
+    assert_eq!(refreshed.name, disk_override.name);
+    assert_eq!(refreshed.color, disk_override.color);
+    assert_eq!(
+        refreshed.project_path.to_string_lossy(),
+        disk_override.project_path
+    );
+    assert_eq!(format!("{:?}", refreshed.state), disk_override.state);
+    assert_eq!(refreshed.default_cli, disk_override.default_cli);
+    assert_eq!(refreshed.default_model, disk_override.default_model);
+    assert_eq!(refreshed.max_qa_iterations, disk_override.max_qa_iterations);
+    assert_eq!(refreshed.qa_timeout_secs, disk_override.qa_timeout_secs);
+    assert_eq!(refreshed.worktree_path, disk_override.worktree_path);
+    assert_eq!(refreshed.worktree_branch, disk_override.worktree_branch);
+}
+
+#[tokio::test]
+async fn test_post_verdict_persists_commit_sha_and_rationale() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, external_storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-verdict-http-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress {
+        iteration: Some(2),
+    };
+    session.agents.push(AgentInfo {
+        id: format!("{session_id}-evaluator"),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.write().insert_test_session(session);
+
+    let request_body = serde_json::json!({
+        "verdict": "PASS",
+        "commit_sha": "abc123def",
+        "rationale": "Looks good",
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/verdict", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json.get("verdict").and_then(|value| value.as_str()),
+        Some("PASS")
+    );
+    assert_eq!(
+        response_json.get("new_state").and_then(|value| value.as_str()),
+        Some("QaPassed")
+    );
+    assert_eq!(
+        response_json.get("commit_sha").and_then(|value| value.as_str()),
+        Some("abc123def")
+    );
+
+    let persisted = external_storage.load_session(&session_id).unwrap();
+    assert_eq!(persisted.state, "QaPassed");
+    let persisted_evaluator = persisted
+        .agents
+        .iter()
+        .find(|agent| agent.id == format!("{session_id}-evaluator"))
+        .unwrap();
+    assert_eq!(persisted_evaluator.commit_sha.as_deref(), Some("abc123def"));
+
+    let refreshed = controller.read().get_session(&session_id).unwrap();
+    let evaluator = refreshed
+        .agents
+        .iter()
+        .find(|agent| agent.id == format!("{session_id}-evaluator"))
+        .unwrap();
+    assert_eq!(evaluator.commit_sha.as_deref(), Some("abc123def"));
+
+    let record: PeerMessageRecord = serde_json::from_str(
+        &std::fs::read_to_string(
+            temp_dir
+                .path()
+                .join(".hive-manager")
+                .join(&session_id)
+                .join("peer")
+                .join("qa-verdict.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record.commit_sha.as_deref(), Some("abc123def"));
+    assert!(!record.content.contains('\n'));
+    let audit_payload: serde_json::Value = serde_json::from_str(&record.content).unwrap();
+    assert_eq!(
+        audit_payload.get("verdict").and_then(|value| value.as_str()),
+        Some("PASS")
+    );
+    assert_eq!(
+        audit_payload.get("rationale").and_then(|value| value.as_str()),
+        Some("Looks good")
+    );
+    assert_eq!(
+        audit_payload.get("commit_sha").and_then(|value| value.as_str()),
+        Some("abc123def")
+    );
+}
+
+#[tokio::test]
+async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, external_storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-verdict-http-fail-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress {
+        iteration: Some(2),
+    };
+    session.agents.push(AgentInfo {
+        id: format!("{session_id}-evaluator"),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.write().insert_test_session(session);
+
+    let request_body = serde_json::json!({
+        "verdict": "FAIL",
+        "commit_sha": "deadbeef",
+        "rationale": "Needs follow-up",
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/verdict", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json.get("verdict").and_then(|value| value.as_str()),
+        Some("FAIL")
+    );
+    assert_eq!(
+        response_json.get("commit_sha").and_then(|value| value.as_str()),
+        Some("deadbeef")
+    );
+
+    let persisted = external_storage.load_session(&session_id).unwrap();
+    assert_eq!(persisted.state, "QaFailed:3");
+    let persisted_evaluator = persisted
+        .agents
+        .iter()
+        .find(|agent| agent.id == format!("{session_id}-evaluator"))
+        .unwrap();
+    assert_eq!(persisted_evaluator.commit_sha.as_deref(), Some("deadbeef"));
+
+    let refreshed = controller.read().get_session(&session_id).unwrap();
+    assert!(matches!(
+        refreshed.state,
+        SessionState::QaFailed { iteration: 3 }
+    ));
+    let evaluator = refreshed
+        .agents
+        .iter()
+        .find(|agent| agent.id == format!("{session_id}-evaluator"))
+        .unwrap();
+    assert_eq!(evaluator.commit_sha.as_deref(), Some("deadbeef"));
+
+    let record: PeerMessageRecord = serde_json::from_str(
+        &std::fs::read_to_string(
+            temp_dir
+                .path()
+                .join(".hive-manager")
+                .join(&session_id)
+                .join("peer")
+                .join("qa-verdict.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record.commit_sha.as_deref(), Some("deadbeef"));
+    assert!(!record.content.contains('\n'));
+    let audit_payload: serde_json::Value = serde_json::from_str(&record.content).unwrap();
+    assert_eq!(
+        audit_payload.get("verdict").and_then(|value| value.as_str()),
+        Some("FAIL")
+    );
+    assert_eq!(
+        audit_payload.get("rationale").and_then(|value| value.as_str()),
+        Some("Needs follow-up")
+    );
+}
+
+#[test]
+fn test_peer_message_record_commit_sha_round_trips_through_peer_json() {
+    let temp_dir = TempDir::new().unwrap();
+    let manager = StateManager::new(temp_dir.path().to_path_buf());
+
+    manager
+        .write_qa_verdict("session-evaluator", "session-queen", "QA_VERDICT: PASS", Some("abc123def"))
+        .unwrap();
+
+    let record: PeerMessageRecord = serde_json::from_str(
+        &std::fs::read_to_string(temp_dir.path().join("peer").join("qa-verdict.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(record.kind, "qa-verdict");
+    assert_eq!(record.commit_sha.as_deref(), Some("abc123def"));
 }
 
 #[tokio::test]

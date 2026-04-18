@@ -2,6 +2,7 @@
   import { CaretDown, CaretRight, Check, ClipboardText, Crown, MagnifyingGlass, Microscope, Scales, X } from 'phosphor-svelte';
   import { createEventDispatcher } from 'svelte';
   import { serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
+  import { heartbeatStore } from '$lib/stores/conversations';
 
   export let agent: AgentInfo;
   export let childrenMap: Map<string | null, AgentInfo[]>;
@@ -95,6 +96,14 @@
     expanded = !expanded;
   }
 
+  function isQaWorker(role: AgentInfo['role']): boolean {
+    return typeof role === 'object' && role !== null && 'QaWorker' in role;
+  }
+
+  function isAgentStale(): boolean {
+    return $heartbeatStore.staleAgents.has(agent.id);
+  }
+
   $: children = childrenMap.get(agent.id) || [];
   $: hasChildren = children.length > 0;
   $: isSelected = selectedId === agent.id;
@@ -141,6 +150,10 @@
     <span class="label">{displayLabel}</span>
 
     <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
+
+    {#if isQaWorker(agent.role) && isAgentStale()}
+      <span class="stale-badge">stale</span>
+    {/if}
 
     <span
       class="status-indicator"
@@ -253,6 +266,17 @@
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
     text-transform: lowercase;
+    flex-shrink: 0;
+  }
+
+  .stale-badge {
+    font-size: 9px;
+    padding: 2px 5px;
+    background: var(--status-warning);
+    border-radius: var(--radius-sm);
+    color: var(--bg-void);
+    text-transform: uppercase;
+    font-weight: 600;
     flex-shrink: 0;
   }
 

@@ -66,6 +66,8 @@ pub struct PeerMessageRecord {
     pub to: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -262,6 +264,7 @@ impl StateManager {
                 to: to.to_string(),
                 content: content.to_string(),
                 timestamp: Utc::now(),
+                commit_sha: None,
             },
         )
     }
@@ -271,6 +274,7 @@ impl StateManager {
         from: &str,
         to: &str,
         content: &str,
+        commit_sha: Option<&str>,
     ) -> Result<(), StateError> {
         self.write_peer_record(
             "qa-verdict.json",
@@ -280,8 +284,32 @@ impl StateManager {
                 to: to.to_string(),
                 content: content.to_string(),
                 timestamp: Utc::now(),
+                commit_sha: commit_sha.map(str::to_string),
             },
         )
+    }
+
+    pub async fn write_qa_verdict_async(
+        &self,
+        from: &str,
+        to: &str,
+        content: &str,
+        commit_sha: Option<&str>,
+    ) -> Result<(), StateError> {
+        let session_path = self.session_path.clone();
+        let from = from.to_string();
+        let to = to.to_string();
+        let content = content.to_string();
+        let commit_sha = commit_sha.map(str::to_string);
+
+        tokio::task::spawn_blocking(move || {
+            StateManager::new(session_path)
+                .write_qa_verdict(&from, &to, &content, commit_sha.as_deref())
+        })
+        .await
+        .map_err(|err| StateError::Io(std::io::Error::other(format!(
+            "QA verdict write task failed: {err}"
+        ))))?
     }
 
     pub fn write_evaluator_feedback(
@@ -298,6 +326,7 @@ impl StateManager {
                 to: to.to_string(),
                 content: content.to_string(),
                 timestamp: Utc::now(),
+                commit_sha: None,
             },
         )
     }
