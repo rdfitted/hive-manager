@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::fs;
 use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -111,7 +112,7 @@ pub struct SessionSummary {
 }
 
 /// Persisted session metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistedSession {
     pub id: String,
     #[serde(default)]
@@ -155,7 +156,7 @@ fn default_qa_timeout_secs() -> u64 {
     300
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum SessionTypeInfo {
     Hive { worker_count: u8 },
     Swarm { planner_count: u8 },
@@ -163,19 +164,19 @@ pub enum SessionTypeInfo {
     Solo { cli: String, model: Option<String> },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistedAgentInfo {
     pub id: String,
     pub role: String,
     pub config: PersistedAgentConfig,
     pub parent_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     pub commit_sha: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     pub base_commit_sha: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistedAgentConfig {
     pub cli: String,
     pub model: Option<String>,
@@ -191,7 +192,14 @@ pub struct PersistedAgentConfig {
 #[derive(Debug, Clone)]
 struct SessionSyncState {
     modified_at: Option<SystemTime>,
-    serialized: String,
+    hash: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRefreshCandidate {
+    pub persisted: PersistedSession,
+    expected_clean_hash: u64,
+    file_modified_at: SystemTime,
 }
 
 /// Manages session storage in %APPDATA%/hive-manager
@@ -344,7 +352,7 @@ impl SessionStorage {
     ) -> Result<(), StorageError> {
         let sync_state = SessionSyncState {
             modified_at: self.session_file_modified_at(session_id)?,
-            serialized: serde_json::to_string(session)?,
+            hash: Self::session_content_hash(session),
         };
         self.session_sync
             .lock()
@@ -352,11 +360,27 @@ impl SessionStorage {
         Ok(())
     }
 
+    pub fn has_newer_session_file(&self, session_id: &str) -> Result<bool, StorageError> {
+        let sync_state = {
+            let sync = self.session_sync.lock();
+            sync.get(session_id).cloned()
+        };
+        let Some(sync_state) = sync_state else {
+            return Ok(false);
+        };
+
+        let Some(current_file_mtime) = self.session_file_modified_at(session_id)? else {
+            return Ok(false);
+        };
+
+        Ok(sync_state.modified_at != Some(current_file_mtime))
+    }
+
     pub fn load_session_if_newer_and_clean(
         &self,
         session_id: &str,
-        current_in_memory: &PersistedSession,
-    ) -> Result<Option<PersistedSession>, StorageError> {
+        current_hash: u64,
+    ) -> Result<Option<SessionRefreshCandidate>, StorageError> {
         let sync_state = {
             let sync = self.session_sync.lock();
             sync.get(session_id).cloned()
@@ -373,13 +397,33 @@ impl SessionStorage {
             return Ok(None);
         }
 
-        if serde_json::to_string(current_in_memory)? != sync_state.serialized {
+        if current_hash != sync_state.hash {
             return Ok(None);
         }
 
         let persisted = self.load_session(session_id)?;
-        self.mark_session_synced(session_id, &persisted)?;
-        Ok(Some(persisted))
+        Ok(Some(SessionRefreshCandidate {
+            persisted,
+            expected_clean_hash: sync_state.hash,
+            file_modified_at: current_file_mtime,
+        }))
+    }
+
+    pub fn should_apply_session_refresh(
+        &self,
+        session_id: &str,
+        candidate: &SessionRefreshCandidate,
+        current_hash: u64,
+    ) -> Result<bool, StorageError> {
+        if current_hash != candidate.expected_clean_hash {
+            return Ok(false);
+        }
+
+        let Some(current_file_mtime) = self.session_file_modified_at(session_id)? else {
+            return Ok(false);
+        };
+
+        Ok(current_file_mtime == candidate.file_modified_at)
     }
 
     /// List all stored sessions
@@ -1132,6 +1176,12 @@ impl SessionStorage {
 
         Ok(fs::metadata(path)?.modified().ok())
     }
+
+    pub fn session_content_hash(session: &PersistedSession) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        session.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 fn parse_conversation_messages(content: &str) -> Vec<ConversationMessage> {
@@ -1242,6 +1292,43 @@ mod tests {
         (storage, temp_dir)
     }
 
+    fn sample_persisted_session(session_id: &str) -> PersistedSession {
+        PersistedSession {
+            id: session_id.to_string(),
+            name: Some("Test Session".to_string()),
+            color: None,
+            session_type: SessionTypeInfo::Hive { worker_count: 1 },
+            project_path: "D:/tmp/project".to_string(),
+            created_at: Utc::now(),
+            last_activity_at: Some(Utc::now()),
+            agents: vec![PersistedAgentInfo {
+                id: format!("{session_id}-worker-1"),
+                role: "Worker(1)".to_string(),
+                config: PersistedAgentConfig {
+                    cli: "codex".to_string(),
+                    model: None,
+                    flags: vec![],
+                    label: None,
+                    name: None,
+                    description: None,
+                    role_type: None,
+                    initial_prompt: None,
+                },
+                parent_id: Some(format!("{session_id}-queen")),
+                commit_sha: None,
+            }],
+            state: "Running".to_string(),
+            default_cli: "codex".to_string(),
+            default_model: None,
+            qa_workers: vec![],
+            max_qa_iterations: default_max_qa_iterations(),
+            qa_timeout_secs: default_qa_timeout_secs(),
+            auth_strategy: String::new(),
+            worktree_path: None,
+            worktree_branch: None,
+        }
+    }
+
     #[test]
     fn test_learning_serialization_roundtrip() {
         let learning = Learning {
@@ -1316,6 +1403,63 @@ mod tests {
         let learning2: Learning = serde_json::from_str(json).unwrap();
         let id2 = stable_learning_id(&learning2);
         assert_eq!(learning.id, id2); // Deterministic
+    }
+
+    #[test]
+    fn test_persisted_agent_blank_commit_sha_deserializes_to_none() {
+        let json = r#"{
+            "id": "agent-1",
+            "role": "Worker(1)",
+            "config": {
+                "cli": "codex",
+                "model": null,
+                "flags": [],
+                "label": null,
+                "name": null,
+                "description": null,
+                "role_type": null,
+                "initial_prompt": null
+            },
+            "parent_id": null,
+            "commit_sha": "   "
+        }"#;
+
+        let agent: PersistedAgentInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(agent.commit_sha, None);
+    }
+
+    #[test]
+    fn test_load_session_if_newer_and_clean_uses_cached_hash() {
+        let (storage, _temp_dir) = create_test_storage();
+        let session = sample_persisted_session("refresh-hash-session");
+        storage.save_session(&session).unwrap();
+
+        let clean_hash = SessionStorage::session_content_hash(&session);
+
+        let mut updated = session.clone();
+        updated.state = "QaPassed".to_string();
+        thread::sleep(Duration::from_millis(1100));
+        let session_file = storage.session_file_path(&session.id);
+        storage.atomic_write_json(&session_file, &updated).unwrap();
+
+        assert!(storage.has_newer_session_file(&session.id).unwrap());
+
+        let candidate = storage
+            .load_session_if_newer_and_clean(&session.id, clean_hash)
+            .unwrap()
+            .expect("refresh candidate");
+        assert_eq!(candidate.persisted.state, "QaPassed");
+        assert!(storage
+            .should_apply_session_refresh(&session.id, &candidate, clean_hash)
+            .unwrap());
+
+        let mut dirty_in_memory = session.clone();
+        dirty_in_memory.state = "Dirty".to_string();
+        let dirty_hash = SessionStorage::session_content_hash(&dirty_in_memory);
+        assert!(storage
+            .load_session_if_newer_and_clean(&session.id, dirty_hash)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -459,12 +459,15 @@ pub async fn post_verdict(
     }
 
     let state_manager = StateManager::new(project_path.join(".hive-manager").join(&session_id));
-    if let Err(err) = state_manager.write_qa_verdict(
+    if let Err(err) = state_manager
+        .write_qa_verdict_async(
         &evaluator_id,
         &queen_id,
         &verdict_content,
         commit_sha,
-    ) {
+    )
+        .await
+    {
         tracing::warn!(
             session_id = %session_id,
             error = %err,

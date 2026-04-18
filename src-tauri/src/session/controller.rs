@@ -325,7 +325,7 @@ pub struct SwarmLaunchConfig {
     pub planners: Vec<PlannerConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct QaWorkerConfig {
     pub specialization: String,
     pub cli: String,
@@ -784,6 +784,21 @@ impl SessionController {
             return;
         };
 
+        let needs_refresh = match storage.has_newer_session_file(session_id) {
+            Ok(needs_refresh) => needs_refresh,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to check session.json freshness for {}: {}",
+                    session_id,
+                    err
+                );
+                return;
+            }
+        };
+        if !needs_refresh {
+            return;
+        }
+
         let current_session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -793,9 +808,9 @@ impl SessionController {
         };
 
         let current_persisted = Self::session_to_persisted_snapshot(&current_session);
-        let persisted = match storage.load_session_if_newer_and_clean(session_id, &current_persisted)
-        {
-            Ok(Some(persisted)) => persisted,
+        let current_hash = SessionStorage::session_content_hash(&current_persisted);
+        let refresh = match storage.load_session_if_newer_and_clean(session_id, current_hash) {
+            Ok(Some(refresh)) => refresh,
             Ok(None) => return,
             Err(err) => {
                 tracing::warn!(
@@ -807,7 +822,7 @@ impl SessionController {
             }
         };
 
-        let refreshed = match self.session_from_persisted(&persisted) {
+        let refreshed = match self.session_from_persisted(&refresh.persisted) {
             Ok(session) => session,
             Err(err) => {
                 tracing::warn!(
@@ -820,7 +835,38 @@ impl SessionController {
         };
 
         let mut sessions = self.sessions.write();
+        let Some(current_session) = sessions.get(session_id) else {
+            return;
+        };
+        let current_hash = SessionStorage::session_content_hash(
+            &Self::session_to_persisted_snapshot(current_session),
+        );
+        let still_clean =
+            match storage.should_apply_session_refresh(session_id, &refresh, current_hash) {
+                Ok(still_clean) => still_clean,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to re-check session.json freshness for {}: {}",
+                        session_id,
+                        err
+                    );
+                    return;
+                }
+            };
+        if !still_clean {
+            return;
+        }
+
         sessions.insert(session_id.to_string(), refreshed);
+        drop(sessions);
+
+        if let Err(err) = storage.mark_session_synced(session_id, &refresh.persisted) {
+            tracing::warn!(
+                "Failed to track refreshed session.json state for {}: {}",
+                session_id,
+                err
+            );
+        }
     }
 
     pub fn update_session_metadata(
@@ -888,14 +934,6 @@ impl SessionController {
     }
 
     pub fn list_sessions(&self) -> Vec<Session> {
-        let session_ids: Vec<String> = {
-            let sessions = self.sessions.read();
-            sessions.keys().cloned().collect()
-        };
-        for session_id in &session_ids {
-            self.refresh_session_from_storage_if_clean(session_id);
-        }
-
         let sessions = self.sessions.read();
         let heartbeats = self.agent_heartbeats.read();
         sessions
@@ -7087,7 +7125,17 @@ Last updated: {timestamp}
         }
 
         let worker_agent_id = format!("{}-worker-{}", session_id, worker_id);
-        let worker_commit_sha = Self::worker_completion_commit_sha(&session, worker_id);
+        let commit_sha_session = session.clone();
+        let worker_commit_sha = tokio::task::spawn_blocking(move || {
+            Self::worker_completion_commit_sha(&commit_sha_session, worker_id)
+        })
+        .await
+        .map_err(|err| {
+            SessionError::ConfigError(format!(
+                "Failed to resolve worker commit SHA for {} worker {}: {}",
+                session_id, worker_id, err
+            ))
+        })?;
         self.sync_agent_commit_sha(session_id, &worker_agent_id, worker_commit_sha.clone());
         if Self::require_commit_sha_gate_enabled() && worker_commit_sha.is_none() {
             tracing::warn!(
