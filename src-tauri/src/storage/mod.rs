@@ -1316,6 +1316,7 @@ mod tests {
                 },
                 parent_id: Some(format!("{session_id}-queen")),
                 commit_sha: None,
+                base_commit_sha: None,
             }],
             state: "Running".to_string(),
             default_cli: "codex".to_string(),
