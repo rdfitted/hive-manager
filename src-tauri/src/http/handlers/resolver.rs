@@ -144,7 +144,17 @@ pub async fn launch_resolver(
         .session_controller
         .read()
         .mark_session_completed(&session_id)
-        .map_err(ApiError::internal)?;
+        .map_err(|e: crate::session::CompletionBlockedError| {
+            if e.error.starts_with("Session not found") {
+                ApiError::not_found(&e.error)
+            } else {
+                let mut details = std::collections::HashMap::new();
+                details.insert("current_state".to_string(), serde_json::json!(e.current_state));
+                details.insert("unblock_paths".to_string(), serde_json::json!(e.unblock_paths));
+                details.insert("remaining_quiescence_seconds".to_string(), serde_json::json!(e.remaining_quiescence_seconds));
+                ApiError::conflict_with_details(&e.error, details)
+            }
+        })?;
 
     Ok(Json(output))
 }

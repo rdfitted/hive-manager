@@ -137,6 +137,55 @@ impl AuthStrategy {
     }
 }
 
+/// Structured error returned when session completion is blocked.
+/// Used to enrich 409 response body with actionable unblock paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionBlockedError {
+    pub error: String,
+    pub current_state: String,
+    pub unblock_paths: Vec<String>,
+    pub remaining_quiescence_seconds: Option<i64>,
+}
+
+impl CompletionBlockedError {
+    /// Create error for state mismatch (evaluator-backed session not in QaPassed).
+    pub fn state_blocked(_session_id: &str, current_state: &SessionState, requires_evaluator: bool) -> Self {
+        let (error, unblock_paths) = if requires_evaluator {
+            (
+                "Session completion blocked: evaluator-backed session must be in QaPassed state".to_string(),
+                vec![
+                    format!("POST /api/sessions/{{{{id}}}}/qa/verdict with {{\"verdict\":\"PASS\"}} (Evaluator submits PASS)"),
+                    format!("POST /api/sessions/{{{{id}}}}/qa/force-pass (Operator override)"),
+                ],
+            )
+        } else {
+            (
+                "Session completion blocked: session must be in Running or QaPassed state".to_string(),
+                vec![],
+            )
+        };
+        Self {
+            error,
+            current_state: format!("{:?}", current_state),
+            unblock_paths,
+            remaining_quiescence_seconds: None,
+        }
+    }
+
+    /// Create error for quiescence period not yet elapsed.
+    pub fn quiescence_blocked(remaining_seconds: i64) -> Self {
+        Self {
+            error: format!(
+                "Session completion blocked: session must be quiescent for 10 minutes ({}s remaining)",
+                remaining_seconds
+            ),
+            current_state: "quiescence_required".to_string(),
+            unblock_paths: vec![format!("Wait {} more seconds before retrying", remaining_seconds)],
+            remaining_quiescence_seconds: Some(remaining_seconds),
+        }
+    }
+}
+
 fn default_max_qa_iterations() -> u8 {
     DEFAULT_MAX_QA_ITERATIONS
 }
@@ -861,29 +910,41 @@ impl SessionController {
         }
     }
 
-    pub fn can_complete_session(&self, session_id: &str) -> Result<(), String> {
+    pub fn can_complete_session(&self, session_id: &str) -> Result<(), CompletionBlockedError> {
         let session = if let Some(session) = self.get_session(session_id) {
             session
         } else {
             let storage = self
                 .storage
                 .as_ref()
-                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+                .ok_or_else(|| CompletionBlockedError {
+                    error: format!("Session not found: {}", session_id),
+                    current_state: "Unknown".to_string(),
+                    unblock_paths: vec![],
+                    remaining_quiescence_seconds: None,
+                })?;
             let persisted = storage
                 .load_session(session_id)
-                .map_err(|_| format!("Session not found: {}", session_id))?;
-            self.session_from_persisted(&persisted)?
+                .map_err(|_| CompletionBlockedError {
+                    error: format!("Session not found: {}", session_id),
+                    current_state: "Unknown".to_string(),
+                    unblock_paths: vec![],
+                    remaining_quiescence_seconds: None,
+                })?;
+            self.session_from_persisted(&persisted)
+                .map_err(|e| CompletionBlockedError {
+                    error: e,
+                    current_state: "Unknown".to_string(),
+                    unblock_paths: vec![],
+                    remaining_quiescence_seconds: None,
+                })?
         };
 
         if !Self::state_allows_completion(&session) {
-            let requirement = if Self::session_requires_internal_evaluator(&session) {
-                "session must remain in QaPassed after internal QA passes"
-            } else {
-                "session must be in a quiescent Running/QaPassed state"
-            };
-            return Err(format!(
-                "Session completion blocked: {} (current state: {:?})",
-                requirement, session.state
+            return Err(CompletionBlockedError::state_blocked(
+                session_id,
+                &session.state,
+                Self::session_requires_internal_evaluator(&session),
             ));
         }
 
@@ -892,10 +953,7 @@ impl SessionController {
             let remaining = (chrono::Duration::minutes(10) - quiet_for)
                 .num_seconds()
                 .max(0);
-            return Err(format!(
-                "Session completion blocked: session must remain quiescent for at least 10 minutes after the last activity ({}s remaining)",
-                remaining
-            ));
+            return Err(CompletionBlockedError::quiescence_blocked(remaining));
         }
 
         // External reviewer comments are not tracked server-side yet, so the completion gate enforces
@@ -1414,7 +1472,7 @@ impl SessionController {
         }
     }
 
-    pub fn mark_session_completed(&self, session_id: &str) -> Result<(), String> {
+    pub fn mark_session_completed(&self, session_id: &str) -> Result<(), CompletionBlockedError> {
         self.can_complete_session(session_id)?;
 
         let previous_state = {
@@ -1434,7 +1492,12 @@ impl SessionController {
                     session.state = previous_session_state;
                     session.auth_strategy = previous_auth_strategy;
                 }
-                return Err(err);
+                return Err(CompletionBlockedError {
+                    error: err,
+                    current_state: "Unknown".to_string(),
+                    unblock_paths: vec![],
+                    remaining_quiescence_seconds: None,
+                });
             }
 
             self.emit_cell_status_changes(session_id, changes);
@@ -1445,18 +1508,38 @@ impl SessionController {
         let storage = self
             .storage
             .as_ref()
-            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            .ok_or_else(|| CompletionBlockedError {
+                error: format!("Session not found: {}", session_id),
+                current_state: "Unknown".to_string(),
+                unblock_paths: vec![],
+                remaining_quiescence_seconds: None,
+            })?;
         let mut persisted = storage
             .load_session(session_id)
             .map_err(|err| match err {
-                StorageError::SessionNotFound(_) => format!("Session not found: {}", session_id),
-                _ => format!("Storage error: {}", err),
+                StorageError::SessionNotFound(_) => CompletionBlockedError {
+                    error: format!("Session not found: {}", session_id),
+                    current_state: "Unknown".to_string(),
+                    unblock_paths: vec![],
+                    remaining_quiescence_seconds: None,
+                },
+                _ => CompletionBlockedError {
+                    error: format!("Storage error: {}", err),
+                    current_state: "Unknown".to_string(),
+                    unblock_paths: vec![],
+                    remaining_quiescence_seconds: None,
+                },
             })?;
         persisted.state = serialize_session_state(&SessionState::Completed);
         persisted.auth_strategy = AuthStrategy::None.persist_value();
         storage
             .save_session(&persisted)
-            .map_err(|e| format!("Failed to persist session completion: {}", e))?;
+            .map_err(|e| CompletionBlockedError {
+                error: format!("Failed to persist session completion: {}", e),
+                current_state: "Unknown".to_string(),
+                unblock_paths: vec![],
+                remaining_quiescence_seconds: None,
+            })?;
 
         Ok(())
     }
@@ -2753,7 +2836,7 @@ After the Judge winner is selected and merge is complete:
 2. Track the latest push timestamp and the PR review baseline from that push forward
 3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for external review
 4. Collect ALL findings since the latest push:
-   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS` only when an Evaluator is attached
+   a. Evaluator QA verdicts — require `QaPassed` state (via `POST /api/sessions/{{{{session_id}}}}/qa/verdict` with verdict PASS) only when an Evaluator is attached
    b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
 5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
@@ -2765,7 +2848,7 @@ After the Judge winner is selected and merge is complete:
 6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
 7. Commit and push, then restart this loop using the new push as the baseline
 8. Only finish when ALL of these are true at the same time:
-   a. If an Evaluator is attached, internal `QA_VERDICT: PASS` has been received
+   a. If an Evaluator is attached, session is in `QaPassed` state (verdict submitted via `POST /api/sessions/{{{{session_id}}}}/qa/verdict`)
    b. The latest push has been live for at least 10 minutes
    c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
 9. When all three conditions are met, mark the session complete:
@@ -3369,7 +3452,7 @@ After all worker tasks complete, the Evaluator will:
 
 {qa_tasks}### Evaluator Verdict:
 1. Collect QA worker results
-2. Post verdict to queen conversation: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"evaluator","content":"QA_VERDICT: PASS - smoke test validated"}}'`
+2. Submit verdict via HTTP endpoint: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/qa/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke test validated"}}'`
 "#,
                 qa_table = qa_table.trim_end(),
                 qa_tasks = qa_tasks,
@@ -3384,7 +3467,7 @@ After all worker tasks complete, the Evaluator will:
             format!(
                 "\n4. Evaluator spawns and reviews worker output\n\
                  5. {} QA worker(s) exercise their specialization\n\
-                 6. Evaluator posts QA_VERDICT to queen",
+                 6. Evaluator submits verdict via POST /api/sessions/{session_id}/qa/verdict",
                 qa_count
             )
         } else {
@@ -3556,7 +3639,7 @@ An **Evaluator** agent validates work after all planners complete.
 After all planner domains complete, the Evaluator will:
 1. Review all worker outputs across all domains
 2. Coordinate QA workers to validate each domain
-3. Post QA_VERDICT to queen conversation
+3. Submit verdict via HTTP endpoint: `POST /api/sessions/{{{{session_id}}}}/qa/verdict`
 "#,
                 qa_info = qa_info.trim_end(),
             )
@@ -3569,7 +3652,7 @@ After all planner domains complete, the Evaluator will:
             format!(
                 "\n6. Evaluator reviews all planner outputs\n\
                  7. {} QA worker(s) validate domain results\n\
-                 8. Evaluator posts QA_VERDICT to queen",
+                 8. Evaluator submits verdict via POST /api/sessions/{{{{session_id}}}}/qa/verdict",
                 qa_count
             )
         } else {
@@ -4111,8 +4194,8 @@ d. Review changes, commit, and push
 The loop is **quiescence-based** (no fixed iteration cap):
 
 1. Commit and push fixes, then use the new push as the review baseline. If NEW unresolved PR comments appear after that push, return to Step 2 and repeat until quiescent.
-2. Only exit when ALL are true at the same time: internal `QA_VERDICT: PASS` has been received if an Evaluator runs, the latest push has been live for at least 10 minutes, and `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since that push.
-3. When all conditions are met, mark the session complete (`POST .../complete`).
+2. Only exit when ALL are true at the same time: session is in `QaPassed` state (verdict submitted via `POST /api/sessions/{{{{session_id}}}}/qa/verdict`) if an Evaluator runs, the latest push has been live for at least 10 minutes, and `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since that push.
+3. When all conditions are met, mark the session complete (`POST /api/sessions/{{{{session_id}}}}/complete`).
 
 Log each iteration to `{coordination_log_path}`:
 ```
@@ -4658,7 +4741,7 @@ After all planners complete, integration is done, and changes are pushed to the 
 2. Track the latest push timestamp and treat it as the baseline for new review activity
 3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for reviewers
 4. Collect ALL findings since the latest push:
-   a. Evaluator QA verdicts (from queen conversation) — require an internal `QA_VERDICT: PASS` only when an Evaluator is attached
+   a. Evaluator QA verdicts — require `QaPassed` state (via `POST /api/sessions/{{{{session_id}}}}/qa/verdict` with verdict PASS) only when an Evaluator is attached
    b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
    c. Your own code integrity concerns
 5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
@@ -4670,7 +4753,7 @@ After all planners complete, integration is done, and changes are pushed to the 
 6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
 7. Commit and push, then restart this loop using the new push as the baseline
 8. Only finish when ALL of these are true at the same time:
-   a. If an Evaluator is attached, internal `QA_VERDICT: PASS` has been received
+   a. If an Evaluator is attached, session is in `QaPassed` state (verdict submitted via `POST /api/sessions/{{{{session_id}}}}/qa/verdict`)
    b. The latest push has been live for at least 10 minutes
    c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
 9. When all three conditions are met, mark the session complete:
@@ -9456,12 +9539,14 @@ mod tests {
         let blocked = controller
             .can_complete_session("evaluator-blocked")
             .expect_err("evaluator-backed session should require QaPassed");
-        assert!(blocked.contains("QaPassed"));
+        assert!(blocked.error.contains("QaPassed"));
+        assert!(!blocked.unblock_paths.is_empty()); // Should have unblock paths for evaluator
 
         let recent = controller
             .can_complete_session("fusion-recent")
             .expect_err("fusion session should still require quiet period");
-        assert!(recent.contains("10 minutes"));
+        assert!(recent.error.contains("10 minutes"));
+        assert!(recent.remaining_quiescence_seconds.is_some());
     }
 
     #[test]
@@ -9477,7 +9562,8 @@ mod tests {
         let blocked = controller
             .can_complete_session("evaluator-recent-pass")
             .expect_err("QaPassed session should still satisfy quiet period");
-        assert!(blocked.contains("10 minutes"));
+        assert!(blocked.error.contains("10 minutes"));
+        assert!(blocked.remaining_quiescence_seconds.is_some());
     }
 
     #[test]

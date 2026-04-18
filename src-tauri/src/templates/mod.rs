@@ -447,17 +447,40 @@ REQUIRED_FIXES:
 - [required follow-up or `none`]
 ```
 
-## Peer Communication
+## QA State Machine HTTP Surface
 
-- Write the final verdict to `.hive-manager/{{session_id}}/peer/qa-verdict.md`.
-- If the coordination runtime is active, send the same verdict through the peer channel so the JSON watcher mirror stays in sync.
-- Send remediation requests to QA workers only when you need missing evidence.
-- Post your verdict summary to the Queen conversation so the Reconciler can collect it:
-  ```bash
-  curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen/append" \
-    -H "Content-Type: application/json" \
-    -d '{"from":"evaluator","content":"<your full QA_VERDICT block>"}'
-  ```
+The QA state machine exposes HTTP endpoints for verdict submission and session completion:
+
+### Submit Verdict (Canonical Path)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
+  -H "Content-Type: application/json" \
+  -d '{"verdict":"PASS","commit_sha":"<git-sha-if-any>","rationale":"<optional explanation>"}'
+```
+- `verdict`: Required. Either `"PASS"` or `"FAIL"`.
+- `commit_sha`: Optional. Include if your QA work produced a commit.
+- `rationale`: Optional. Brief explanation for the verdict.
+
+### Override Endpoints (Operator Use)
+- `POST /api/sessions/{{session_id}}/qa/force-pass` — Force QA to PASS state.
+- `POST /api/sessions/{{session_id}}/qa/force-fail` — Force QA to FAIL state.
+
+### Session Completion Preconditions
+- `POST /api/sessions/{{session_id}}/complete` returns 409 if blocked.
+- **Evaluator-backed sessions**: Must be in `QaPassed` state.
+- **Non-evaluator sessions**: Must be in `Running` or `QaPassed` state.
+- **All sessions**: Must be quiescent for 10 minutes (no recent activity).
+
+## Verdict Submission
+
+Submit your verdict via the canonical HTTP endpoint:
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
+  -H "Content-Type: application/json" \
+  -d '{"verdict":"PASS","commit_sha":"<sha>","rationale":"All criteria met"}'
+```
+
+For audit trail, also write the verdict to `.hive-manager/{{session_id}}/peer/qa-verdict.md`.
 
 ## Coordination Tools
 
@@ -761,6 +784,21 @@ When a milestone is ready for QA:
 - Include the milestone name, contract path, scope, and any known risks.
 - The coordination runtime mirrors this handoff into `.hive-manager/{{session_id}}/peer/milestone-ready.json`.
 
+## QA State Machine HTTP Surface
+
+The QA state machine exposes HTTP endpoints for verdict submission and session completion:
+
+### Verdict Endpoints
+- **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
+  - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
+- **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
+- **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
+
+### Session Completion
+- `POST /api/sessions/{{session_id}}/complete` marks the session completed.
+- Returns 409 if blocked with structured body: `{"error":"...","current_state":"<state>","unblock_paths":[...],"remaining_quiescence_seconds":<num|null>}`
+- **Preconditions**: Evaluator-backed sessions require `QaPassed` state; all sessions require 10-minute quiescence.
+
 ## Communication Format
 
 To send a message to a worker, use this format:
@@ -883,6 +921,21 @@ When a milestone is ready for QA:
 - Include the milestone name, contract path, scope, and any known risks.
 - The coordination runtime mirrors this handoff into `.hive-manager/{{session_id}}/peer/milestone-ready.json`.
 
+## QA State Machine HTTP Surface
+
+The QA state machine exposes HTTP endpoints for verdict submission and session completion:
+
+### Verdict Endpoints
+- **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
+  - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
+- **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
+- **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
+
+### Session Completion
+- `POST /api/sessions/{{session_id}}/complete` marks the session completed.
+- Returns 409 if blocked with structured body: `{"error":"...","current_state":"<state>","unblock_paths":[...],"remaining_quiescence_seconds":<num|null>}`
+- **Preconditions**: Evaluator-backed sessions require `QaPassed` state; all sessions require 10-minute quiescence.
+
 ## Communication Format
 
 To send a message to a worker, use this format:
@@ -970,6 +1023,21 @@ When a milestone is ready for QA:
 - Signal `MILESTONE_READY` through the peer channel to the Evaluator.
 - Include the milestone name, contract path, scope, and any known risks.
 - The coordination runtime mirrors this handoff into `.hive-manager/{{session_id}}/peer/milestone-ready.json`.
+
+## QA State Machine HTTP Surface
+
+The QA state machine exposes HTTP endpoints for verdict submission and session completion:
+
+### Verdict Endpoints
+- **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
+  - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
+- **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
+- **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
+
+### Session Completion
+- `POST /api/sessions/{{session_id}}/complete` marks the session completed.
+- Returns 409 if blocked with structured body: `{"error":"...","current_state":"<state>","unblock_paths":[...],"remaining_quiescence_seconds":<num|null>}`
+- **Preconditions**: Evaluator-backed sessions require `QaPassed` state; all sessions require 10-minute quiescence.
 
 ## Communication Format
 

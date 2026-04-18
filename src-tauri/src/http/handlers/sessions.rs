@@ -905,13 +905,16 @@ pub async fn complete_session(
         .session_controller
         .read()
         .mark_session_completed(&id)
-        .map_err(|e| {
-            if e.starts_with("Session not found") {
-                ApiError::not_found(e)
-            } else if e.starts_with("Session completion blocked:") {
-                ApiError::new(StatusCode::CONFLICT, e)
+        .map_err(|e: crate::session::CompletionBlockedError| {
+            if e.error.starts_with("Session not found") {
+                ApiError::not_found(&e.error)
             } else {
-                ApiError::internal(e)
+                // Return structured 409 response with unblock paths
+                let mut details = std::collections::HashMap::new();
+                details.insert("current_state".to_string(), serde_json::json!(e.current_state));
+                details.insert("unblock_paths".to_string(), serde_json::json!(e.unblock_paths));
+                details.insert("remaining_quiescence_seconds".to_string(), serde_json::json!(e.remaining_quiescence_seconds));
+                ApiError::conflict_with_details(&e.error, details)
             }
         })?;
 
