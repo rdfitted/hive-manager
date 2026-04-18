@@ -797,7 +797,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 ### Session Completion
 - `POST /api/sessions/{{session_id}}/complete` marks the session completed.
 - Returns 409 if blocked with structured body: `{"error":"...","current_state":"<state>","unblock_paths":[...],"remaining_quiescence_seconds":<num|null>}`
-- **Preconditions**: Evaluator-backed sessions require `QaPassed` state; all sessions require 10-minute quiescence.
+- **Preconditions**: Evaluator-backed sessions require `QaPassed`; non-evaluator sessions require `Running` or `QaPassed`; all sessions require 10-minute quiescence.
 
 ## Communication Format
 
@@ -934,7 +934,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 ### Session Completion
 - `POST /api/sessions/{{session_id}}/complete` marks the session completed.
 - Returns 409 if blocked with structured body: `{"error":"...","current_state":"<state>","unblock_paths":[...],"remaining_quiescence_seconds":<num|null>}`
-- **Preconditions**: Evaluator-backed sessions require `QaPassed` state; all sessions require 10-minute quiescence.
+- **Preconditions**: Evaluator-backed sessions require `QaPassed`; non-evaluator sessions require `Running` or `QaPassed`; all sessions require 10-minute quiescence.
 
 ## Communication Format
 
@@ -1037,7 +1037,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 ### Session Completion
 - `POST /api/sessions/{{session_id}}/complete` marks the session completed.
 - Returns 409 if blocked with structured body: `{"error":"...","current_state":"<state>","unblock_paths":[...],"remaining_quiescence_seconds":<num|null>}`
-- **Preconditions**: Evaluator-backed sessions require `QaPassed` state; all sessions require 10-minute quiescence.
+- **Preconditions**: Evaluator-backed sessions require `QaPassed`; non-evaluator sessions require `Running` or `QaPassed`; all sessions require 10-minute quiescence.
 
 ## Communication Format
 
