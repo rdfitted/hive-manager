@@ -23,6 +23,7 @@
   let terminalContainer: HTMLDivElement;
   let term: XTerm | null = null;
   let fitAddon: FitAddon | null = null;
+  let webglAddon: WebglAddon | null = null;
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenDragDrop: UnlistenFn | null = null;
@@ -323,6 +324,7 @@
       lineHeight: 1.2,
       cursorBlink: true,
       cursorStyle: 'block',
+      scrollback: 10000,
       allowProposedApi: true,
     });
 
@@ -347,11 +349,14 @@
       }
     }, true);
 
-    // Try to load WebGL addon for better performance
+    // Try to load WebGL addon for better performance. Retain the reference so
+    // a write-time rendering failure (see pty-output listener) can dispose it
+    // and fall back to the default DOM renderer without losing the terminal.
     try {
-      const webglAddon = new WebglAddon();
+      webglAddon = new WebglAddon();
       term.loadAddon(webglAddon);
     } catch (e) {
+      webglAddon = null;
       console.warn('WebGL addon not supported, using canvas renderer');
     }
 
@@ -438,12 +443,29 @@
       await sendToPty(data);
     });
 
-    // Listen for PTY output
+    // Listen for PTY output.
+    // Guard term.write: @xterm/addon-webgl@0.19.0 can throw on long-running
+    // buffers, leaving the renderer in a corrupted state that blanks the pane
+    // to only xterm's fallback glyph. On failure, dispose the WebGL addon
+    // once and retry; subsequent writes use the default DOM renderer.
     unlistenOutput = await listen<{ id: string; data: number[] }>('pty-output', (event) => {
       if (event.payload.id === agentId && term) {
         const decoder = new TextDecoder();
         const text = decoder.decode(new Uint8Array(event.payload.data));
-        term.write(text);
+        try {
+          term.write(text);
+        } catch (e) {
+          if (webglAddon) {
+            console.error('xterm write failed, disposing WebGL addon and falling back to DOM renderer:', e);
+            try { webglAddon.dispose(); } catch { /* ignore */ }
+            webglAddon = null;
+            try { term.write(text); } catch (e2) {
+              console.error('xterm write failed after WebGL fallback:', e2);
+            }
+          } else {
+            console.error('xterm write failed:', e);
+          }
+        }
       }
     });
 
