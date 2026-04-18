@@ -360,6 +360,43 @@ pub fn run() {
                 }
             });
 
+            let milestone_controller_clone = session_controller.clone();
+            app.listen("milestone-ready", move |event: tauri::Event| {
+                let payload = event.payload();
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let session_id = json
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    if session_id.is_empty() {
+                        tracing::warn!("Invalid milestone-ready payload: {}", payload);
+                        return;
+                    }
+
+                    tracing::info!(
+                        "Milestone-ready signal observed for session {}, checking evaluator launch/respawn",
+                        session_id
+                    );
+
+                    let controller = milestone_controller_clone.clone();
+                    let session_id_clone = session_id.to_string();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let controller_read = controller.read();
+                        if let Err(err) = controller_read.on_milestone_ready(&session_id_clone) {
+                            tracing::error!(
+                                "Failed to handle milestone-ready signal for {}: {}",
+                                session_id_clone,
+                                err
+                            );
+                        }
+                    });
+                } else {
+                    tracing::warn!("Failed to parse milestone-ready payload: {}", payload);
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

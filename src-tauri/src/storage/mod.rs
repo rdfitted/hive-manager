@@ -169,6 +169,8 @@ pub struct PersistedAgentInfo {
     pub role: String,
     pub config: PersistedAgentConfig,
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

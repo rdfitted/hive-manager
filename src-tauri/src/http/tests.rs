@@ -107,6 +107,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
         })
         .collect();
     let now = chrono::Utc::now();
@@ -149,6 +150,7 @@ fn make_test_session_for_completion(
             status: AgentStatus::Completed,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
         });
     } else {
         session.session_type = SessionType::Fusion {
@@ -2355,6 +2357,7 @@ async fn test_add_qa_worker_valid_request_reaches_controller() {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        commit_sha: None,
     });
     controller.read().insert_test_session(session);
 
@@ -3078,6 +3081,97 @@ async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
     assert_eq!(refreshed.qa_timeout_secs, disk_override.qa_timeout_secs);
     assert_eq!(refreshed.worktree_path, disk_override.worktree_path);
     assert_eq!(refreshed.worktree_branch, disk_override.worktree_branch);
+}
+
+#[tokio::test]
+async fn test_post_verdict_persists_commit_sha_and_rationale() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let external_storage = SessionStorage::new().unwrap();
+    let session_id = format!("qa-verdict-http-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let _cleanup = TestPathCleanup::new(vec![external_storage.session_dir(&session_id)]);
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress {
+        iteration: Some(2),
+    };
+    session.agents.push(AgentInfo {
+        id: format!("{session_id}-evaluator"),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+    });
+    controller.write().insert_test_session(session);
+
+    let request_body = serde_json::json!({
+        "verdict": "PASS",
+        "commit_sha": "abc123def",
+        "rationale": "Looks good",
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/verdict", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response_json.get("verdict").and_then(|value| value.as_str()),
+        Some("PASS")
+    );
+    assert_eq!(
+        response_json.get("new_state").and_then(|value| value.as_str()),
+        Some("QaPassed")
+    );
+    assert_eq!(
+        response_json.get("commit_sha").and_then(|value| value.as_str()),
+        Some("abc123def")
+    );
+
+    let persisted = external_storage.load_session(&session_id).unwrap();
+    assert_eq!(persisted.state, "QaPassed");
+    let persisted_evaluator = persisted
+        .agents
+        .iter()
+        .find(|agent| agent.id == format!("{session_id}-evaluator"))
+        .unwrap();
+    assert_eq!(persisted_evaluator.commit_sha.as_deref(), Some("abc123def"));
+
+    let refreshed = controller.read().get_session(&session_id).unwrap();
+    let evaluator = refreshed
+        .agents
+        .iter()
+        .find(|agent| agent.id == format!("{session_id}-evaluator"))
+        .unwrap();
+    assert_eq!(evaluator.commit_sha.as_deref(), Some("abc123def"));
+
+    let record: PeerMessageRecord = serde_json::from_str(
+        &std::fs::read_to_string(
+            temp_dir
+                .path()
+                .join(".hive-manager")
+                .join(&session_id)
+                .join("peer")
+                .join("qa-verdict.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record.commit_sha.as_deref(), Some("abc123def"));
+    assert!(record.content.contains("Rationale: Looks good"));
 }
 
 #[test]

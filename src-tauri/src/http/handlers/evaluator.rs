@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use crate::coordination::{CoordinationMessage, StateManager};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole};
@@ -263,6 +264,15 @@ pub struct DevLoginQuery {
     pub token: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostVerdictRequest {
+    pub verdict: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
 pub async fn dev_login(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -333,6 +343,34 @@ fn override_log_details(verdict: &str) -> Result<(&'static str, &'static str), A
     }
 }
 
+fn normalize_post_verdict(verdict: &str) -> Result<&'static str, ApiError> {
+    match verdict.trim().to_ascii_uppercase().as_str() {
+        "PASS" => Ok("PASS"),
+        "FAIL" => Ok("FAIL"),
+        other => Err(ApiError::bad_request(format!(
+            "Unsupported QA verdict '{}'. Expected PASS or FAIL",
+            other
+        ))),
+    }
+}
+
+fn build_verdict_content(
+    verdict: &str,
+    rationale: Option<&str>,
+    commit_sha: Option<&str>,
+) -> String {
+    let mut content = format!("QA_VERDICT: {verdict}");
+    if let Some(rationale) = rationale {
+        content.push_str("\nRationale: ");
+        content.push_str(rationale);
+    }
+    if let Some(commit_sha) = commit_sha {
+        content.push_str("\nCommit-SHA: ");
+        content.push_str(commit_sha);
+    }
+    content
+}
+
 pub(crate) fn apply_verdict(
     state: &AppState,
     session_id: &str,
@@ -363,6 +401,84 @@ pub(crate) fn apply_verdict(
     }
 
     Ok(new_state)
+}
+
+pub async fn post_verdict(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(req): Json<PostVerdictRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    let verdict = normalize_post_verdict(&req.verdict)?;
+    let commit_sha = req
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let rationale = req
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let new_state = apply_verdict(&state, &session_id, verdict, false)?;
+
+    let verdict_content = build_verdict_content(verdict, rationale, commit_sha);
+    let (project_path, evaluator_id, queen_id) = {
+        let controller = state.session_controller.read();
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+        let evaluator_id = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+            .map(|agent| agent.id.clone())
+            .unwrap_or_else(|| format!("{}-evaluator", session_id));
+        (session.project_path.clone(), evaluator_id, format!("{}-queen", session_id))
+    };
+
+    state.session_controller.write().sync_agent_commit_sha(
+        &session_id,
+        &evaluator_id,
+        commit_sha.map(str::to_string),
+    );
+
+    let verdict_message = CoordinationMessage::qa_verdict(&evaluator_id, &queen_id, &verdict_content);
+    if let Err(err) = state
+        .storage
+        .append_coordination_log(&session_id, &verdict_message)
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %err,
+            "Failed to append QA verdict audit log after HTTP verdict"
+        );
+    }
+
+    let state_manager = StateManager::new(project_path.join(".hive-manager").join(&session_id));
+    if let Err(err) = state_manager.write_qa_verdict(
+        &evaluator_id,
+        &queen_id,
+        &verdict_content,
+        commit_sha,
+    ) {
+        tracing::warn!(
+            session_id = %session_id,
+            error = %err,
+            "Failed to persist QA verdict peer record after HTTP verdict"
+        );
+    }
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "action": "qa-verdict",
+        "verdict": verdict,
+        "new_state": format!("{:?}", new_state),
+        "commit_sha": commit_sha,
+        "rationale": rationale,
+    })))
 }
 
 pub async fn force_pass(

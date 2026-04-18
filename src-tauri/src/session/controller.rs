@@ -203,6 +203,8 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     pub config: AgentConfig,
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,6 +388,7 @@ pub struct SessionController {
     agent_heartbeats: Arc<RwLock<HashMap<String, HashMap<String, AgentHeartbeatInfo>>>>,
     /// QA timeout cancel handles: session_id -> abort handle
     qa_timeout_handles: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    evaluator_respawns_inflight: Mutex<HashSet<String>>,
 }
 
 // Explicitly implement Send + Sync
@@ -527,6 +530,7 @@ impl SessionController {
             task_watchers: Mutex::new(HashMap::new()),
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
             qa_timeout_handles: Mutex::new(HashMap::new()),
+            evaluator_respawns_inflight: Mutex::new(HashSet::new()),
         }
     }
 
@@ -613,6 +617,7 @@ impl SessionController {
                 status: AgentStatus::Running,
                 config: queen_config,
                 parent_id: None,
+                commit_sha: None,
             });
 
             // Create Worker agents
@@ -655,6 +660,7 @@ impl SessionController {
                     status: AgentStatus::Running,
                     config: worker_config,
                     parent_id: Some(format!("{}-queen", session_id)),
+                    commit_sha: None,
                 });
             }
         }
@@ -5416,6 +5422,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: solo_config.clone(),
                 parent_id: None,
+                commit_sha: None,
             }],
             default_cli: cli,
             default_model: model,
@@ -5594,6 +5601,7 @@ Last updated: {timestamp}
             status: AgentStatus::Running,
             config: config.queen_config.clone(),
             parent_id: None,
+            commit_sha: None,
         });
 
         // Create Worker agents
@@ -5675,6 +5683,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: worker_config.clone(),
                 parent_id: Some(queen_id.clone()),
+                commit_sha: None,
             });
         }
 
@@ -5946,6 +5955,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: variant_agent_config,
                 parent_id: None,
+                commit_sha: None,
             };
 
             let waiting_changes = {
@@ -6049,6 +6059,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                commit_sha: None,
             });
         }
 
@@ -6144,6 +6155,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: queen_cfg.clone(),
                 parent_id: None,
+                commit_sha: None,
             });
         }
 
@@ -6311,6 +6323,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: queen_cfg,
                 parent_id: None,
+                commit_sha: None,
             });
         }
 
@@ -6404,6 +6417,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: variant_agent_config,
                 parent_id: None,
+                commit_sha: None,
             });
         }
 
@@ -6515,6 +6529,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                commit_sha: None,
             });
         }
 
@@ -6718,6 +6733,7 @@ Last updated: {timestamp}
                     status: AgentStatus::Running,
                     config: worker_config.clone(),
                     parent_id: Some(queen_id.to_string()),
+                    commit_sha: None,
                 };
                 s.agents.push(agent.clone());
                 self.emit_agent_launched(s, &agent);
@@ -6789,6 +6805,79 @@ Last updated: {timestamp}
         })
     }
 
+    fn require_commit_sha_gate_enabled() -> bool {
+        std::env::var("REQUIRE_COMMIT_SHA")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn worker_completion_commit_sha(session: &Session, worker_id: u8) -> Option<String> {
+        let worker_worktree = session
+            .project_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(&session.id)
+            .join(format!("worker-{worker_id}"));
+        let head = match current_head(&worker_worktree) {
+            Ok(sha) => sha,
+            Err(err) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    worker_id,
+                    worktree = %worker_worktree.display(),
+                    error = %err,
+                    "Unable to resolve worker HEAD for completion gate"
+                );
+                return None;
+            }
+        };
+
+        let base_ref = Self::resolve_worker_base_ref(session, "worker_completion_commit_sha", worker_id);
+        if head == base_ref {
+            None
+        } else {
+            Some(head)
+        }
+    }
+
+    pub(crate) fn sync_agent_commit_sha(&self, session_id: &str, agent_id: &str, commit_sha: Option<String>) {
+        let updated = {
+            let mut sessions = self.sessions.write();
+            let Some(session) = sessions.get_mut(session_id) else {
+                return;
+            };
+            let Some(agent) = session.agents.iter_mut().find(|agent| agent.id == agent_id) else {
+                return;
+            };
+            if agent.commit_sha == commit_sha {
+                false
+            } else {
+                agent.commit_sha = commit_sha;
+                true
+            }
+        };
+
+        if updated {
+            self.update_session_storage(session_id);
+            self.emit_session_update(session_id);
+        }
+    }
+
+    fn try_begin_evaluator_respawn(&self, session_id: &str) -> bool {
+        let mut inflight = self.evaluator_respawns_inflight.lock();
+        inflight.insert(session_id.to_string())
+    }
+
+    fn finish_evaluator_respawn(&self, session_id: &str) {
+        let mut inflight = self.evaluator_respawns_inflight.lock();
+        inflight.remove(session_id);
+    }
+
     /// Called when worker-completed event received
     pub async fn on_worker_completed(&self, session_id: &str, worker_id: u8) -> Result<(), SessionError> {
         let session = self.get_session(session_id)
@@ -6798,6 +6887,24 @@ Last updated: {timestamp}
         if session.state != SessionState::WaitingForWorker(worker_id) {
             tracing::warn!("Worker {} completed but session in state {:?}", worker_id, session.state);
             return Ok(());
+        }
+
+        let worker_agent_id = format!("{}-worker-{}", session_id, worker_id);
+        let worker_commit_sha = Self::worker_completion_commit_sha(&session, worker_id);
+        self.sync_agent_commit_sha(session_id, &worker_agent_id, worker_commit_sha.clone());
+        if Self::require_commit_sha_gate_enabled() && worker_commit_sha.is_none() {
+            tracing::warn!(
+                session_id = %session_id,
+                worker_id,
+                agent_id = %worker_agent_id,
+                gate = "require_commit_sha",
+                reason = "missing_commit_sha",
+                "Rejecting worker completion transition"
+            );
+            return Err(SessionError::ConfigError(format!(
+                "Worker {} completion rejected: commit SHA required before advancing the session",
+                worker_id
+            )));
         }
 
         // Load config - if it doesn't exist, workers may have been spawned via HTTP API
@@ -6827,27 +6934,22 @@ Last updated: {timestamp}
 
     #[allow(dead_code)]
     pub fn on_milestone_ready(&self, session_id: &str) -> Result<(), String> {
-        let maybe_evaluator = {
+        let (maybe_evaluator, config) = {
             let sessions = self.sessions.read();
             let session = sessions
                 .get(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-            session
+            let maybe_evaluator = session
                 .agents
                 .iter()
                 .find(|agent| matches!(agent.role, AgentRole::Evaluator))
-                .cloned()
-        };
+                .cloned();
 
-        if maybe_evaluator.is_none() {
-            let config = {
-                let sessions = self.sessions.read();
-                let session = sessions
-                    .get(session_id)
-                    .ok_or_else(|| format!("Session not found: {}", session_id))?;
-
-                AgentConfig {
+            let config = maybe_evaluator
+                .as_ref()
+                .map(|agent| agent.config.clone())
+                .unwrap_or_else(|| AgentConfig {
                     cli: session.default_cli.clone(),
                     model: session.default_model.clone(),
                     flags: vec![],
@@ -6856,10 +6958,33 @@ Last updated: {timestamp}
                     description: None,
                     role: None,
                     initial_prompt: None,
-                }
-            };
+                });
 
-            self.launch_evaluator(session_id, config, false)?;
+            (maybe_evaluator, config)
+        };
+
+        let evaluator_alive = maybe_evaluator
+            .as_ref()
+            .map(|agent| self.pty_manager.read().is_alive(&agent.id))
+            .unwrap_or(false);
+
+        if maybe_evaluator.is_none() || !evaluator_alive {
+            if !self.try_begin_evaluator_respawn(session_id) {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "Ignoring duplicate milestone-ready signal while evaluator respawn is already in flight"
+                );
+                return Ok(());
+            }
+
+            tracing::info!(
+                session_id = %session_id,
+                reason = if maybe_evaluator.is_some() { "dead_evaluator" } else { "missing_evaluator" },
+                "Launching evaluator from milestone-ready signal"
+            );
+            let result = self.launch_evaluator(session_id, config, false);
+            self.finish_evaluator_respawn(session_id);
+            result?;
             return Ok(());
         }
 
@@ -7206,6 +7331,7 @@ Last updated: {timestamp}
                     status: AgentStatus::Running,
                     config: judge_config,
                     parent_id: None,
+                    commit_sha: None,
                 };
                 s.agents.push(agent.clone());
                 self.emit_agent_launched(s, &agent);
@@ -7520,6 +7646,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                commit_sha: None,
             });
 
             // Queen will spawn workers via HTTP API after reading the plan
@@ -7685,6 +7812,7 @@ Last updated: {timestamp}
                     status: AgentStatus::Completed,
                     config,
                     parent_id: pa.parent_id.clone(),
+                    commit_sha: pa.commit_sha.clone(),
                 })
             })
             .collect();
@@ -7793,6 +7921,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                commit_sha: None,
             });
 
             // NOTE: Planners and Workers are NOT spawned here anymore
@@ -7904,6 +8033,7 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                commit_sha: None,
             });
 
             // NOTE: Planners and Workers are NOT spawned here anymore
@@ -8152,6 +8282,7 @@ Last updated: {timestamp}
             status: AgentStatus::Running,
             config: agent_config,
             parent_id: Some(actual_parent_id),
+            commit_sha: None,
         };
 
         // Update session
@@ -8182,7 +8313,15 @@ Last updated: {timestamp}
 
         let evaluator_id = format!("{}-evaluator", session_id);
         if let Some(existing) = session.agents.iter().find(|agent| agent.id == evaluator_id) {
-            return Ok(existing.clone());
+            let evaluator_alive = self.pty_manager.read().is_alive(&evaluator_id);
+            if evaluator_alive {
+                return Ok(existing.clone());
+            }
+            tracing::info!(
+                session_id = %session_id,
+                evaluator_id = %evaluator_id,
+                "Respawning stale evaluator after PTY exit"
+            );
         }
 
         if config.cli.trim().is_empty() {
@@ -8198,6 +8337,7 @@ Last updated: {timestamp}
         let spawning_changes = {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
+                current.agents.retain(|agent| agent.id != evaluator_id);
                 Some(self.set_session_state_with_events(
                     current,
                     SessionState::SpawningEvaluator,
@@ -8248,6 +8388,7 @@ Last updated: {timestamp}
             status: AgentStatus::Running,
             config,
             parent_id: None,
+            commit_sha: None,
         };
 
         let (timeout_secs, qa_changes) = {
@@ -8369,6 +8510,7 @@ Last updated: {timestamp}
             status: AgentStatus::Running,
             config,
             parent_id: Some(evaluator_id),
+            commit_sha: None,
         };
 
         let qa_changes = {
@@ -8495,6 +8637,7 @@ Last updated: {timestamp}
             status: AgentStatus::Running,
             config: agent_config,
             parent_id: Some(queen_id),
+            commit_sha: None,
         };
 
         // Update session state to WaitingForPlanner
@@ -8580,6 +8723,7 @@ Last updated: {timestamp}
                     initial_prompt: a.config.initial_prompt.clone(),
                 },
                 parent_id: a.parent_id.clone(),
+                commit_sha: a.commit_sha.clone(),
             }
         }).collect();
 
@@ -8972,14 +9116,18 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 mod tests {
     use super::{
         parse_persisted_session_state, serialize_session_state, AgentConfig, AgentInfo,
-        AuthStrategy, QaWorkerConfig, Session, SessionController, SessionState, SessionType,
+        AuthStrategy, QaWorkerConfig, Session, SessionController, SessionError, SessionState,
+        SessionType,
     };
     use crate::pty::{AgentRole, AgentStatus, PtyManager};
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn session_state_variants_exist() {
@@ -9152,6 +9300,85 @@ mod tests {
         SessionController::new(Arc::new(RwLock::new(PtyManager::new())))
     }
 
+    fn run_git(repo_path: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .status()
+            .expect("run git command");
+        assert!(status.success(), "git {:?} should succeed", args);
+    }
+
+    fn init_repo_with_worker_worktree(session_id: &str, worker_id: u8) -> (TempDir, PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let repo_path = temp_dir.path();
+
+        for args in [
+            ["init", "-b", "main"].as_slice(),
+            ["config", "user.name", "Hive Test"].as_slice(),
+            ["config", "user.email", "hive@example.com"].as_slice(),
+        ] {
+            run_git(repo_path, args);
+        }
+
+        std::fs::write(repo_path.join("README.md"), "base commit\n").expect("write file");
+        run_git(repo_path, &["add", "README.md"]);
+        run_git(repo_path, &["commit", "-m", "initial commit"]);
+
+        let worktree_path = repo_path
+            .join(".hive-manager")
+            .join("worktrees")
+            .join(session_id)
+            .join(format!("worker-{worker_id}"));
+        std::fs::create_dir_all(worktree_path.parent().unwrap()).expect("create worktree parent");
+        let worker_branch = format!("hive/{session_id}/worker-{worker_id}");
+        run_git(
+            repo_path,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &worker_branch,
+                worktree_path.to_str().expect("utf8 path"),
+                "HEAD",
+            ],
+        );
+
+        (temp_dir, worktree_path)
+    }
+
+    fn waiting_worker_session(session_id: &str, repo_path: &Path, worker_id: u8) -> Session {
+        Session {
+            id: session_id.to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Hive { worker_count: 1 },
+            project_path: repo_path.to_path_buf(),
+            state: SessionState::WaitingForWorker(worker_id),
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents: vec![AgentInfo {
+                id: format!("{session_id}-worker-{worker_id}"),
+                role: AgentRole::Worker {
+                    index: worker_id,
+                    parent: Some(format!("{session_id}-queen")),
+                },
+                status: AgentStatus::Running,
+                config: AgentConfig::default(),
+                parent_id: Some(format!("{session_id}-queen")),
+                commit_sha: None,
+            }],
+            default_cli: "claude".to_string(),
+            default_model: None,
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
+        }
+    }
+
     fn test_completion_session(
         id: &str,
         state: SessionState,
@@ -9166,6 +9393,7 @@ mod tests {
                 status: AgentStatus::Completed,
                 config: AgentConfig::default(),
                 parent_id: None,
+                commit_sha: None,
             });
         }
 
@@ -9263,6 +9491,84 @@ mod tests {
         ));
 
         assert!(controller.can_complete_session("fusion-ok").is_ok());
+    }
+
+    #[test]
+    fn worker_completion_commit_sha_is_none_when_branch_has_no_new_commit() {
+        let session_id = "worker-commit-base";
+        let (temp_dir, _) = init_repo_with_worker_worktree(session_id, 1);
+        let session = waiting_worker_session(session_id, temp_dir.path(), 1);
+
+        assert_eq!(
+            SessionController::worker_completion_commit_sha(&session, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn worker_completion_commit_sha_returns_worker_head_after_commit() {
+        let session_id = "worker-commit-head";
+        let (temp_dir, worktree_path) = init_repo_with_worker_worktree(session_id, 1);
+        std::fs::write(worktree_path.join("worker.txt"), "worker change\n").expect("write worker change");
+        run_git(&worktree_path, &["add", "worker.txt"]);
+        run_git(&worktree_path, &["commit", "-m", "worker change"]);
+
+        let session = waiting_worker_session(session_id, temp_dir.path(), 1);
+        let expected_head = current_head(&worktree_path).expect("worker HEAD");
+
+        assert_eq!(
+            SessionController::worker_completion_commit_sha(&session, 1),
+            Some(expected_head)
+        );
+    }
+
+    #[tokio::test]
+    async fn on_worker_completed_rejects_missing_commit_when_gate_enabled() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        let session_id = "worker-gate-reject";
+        let (temp_dir, _) = init_repo_with_worker_worktree(session_id, 1);
+        let controller = test_controller();
+        controller.insert_test_session(waiting_worker_session(session_id, temp_dir.path(), 1));
+
+        unsafe {
+            std::env::set_var("REQUIRE_COMMIT_SHA", "true");
+        }
+        let result = controller.on_worker_completed(session_id, 1).await;
+        unsafe {
+            std::env::remove_var("REQUIRE_COMMIT_SHA");
+        }
+
+        let err = result.expect_err("missing worker commit should block completion");
+        assert!(matches!(
+            err,
+            SessionError::ConfigError(message) if message.contains("commit SHA required")
+        ));
+
+        let refreshed = controller.get_session(session_id).unwrap();
+        assert_eq!(refreshed.state, SessionState::WaitingForWorker(1));
+        assert_eq!(refreshed.agents[0].commit_sha, None);
+    }
+
+    #[tokio::test]
+    async fn on_worker_completed_records_commit_sha_before_progression() {
+        let session_id = "worker-gate-record";
+        let (temp_dir, worktree_path) = init_repo_with_worker_worktree(session_id, 1);
+        std::fs::write(worktree_path.join("worker.txt"), "worker change\n").expect("write worker change");
+        run_git(&worktree_path, &["add", "worker.txt"]);
+        run_git(&worktree_path, &["commit", "-m", "worker change"]);
+        let expected_head = current_head(&worktree_path).expect("worker HEAD");
+
+        let controller = test_controller();
+        controller.insert_test_session(waiting_worker_session(session_id, temp_dir.path(), 1));
+
+        controller
+            .on_worker_completed(session_id, 1)
+            .await
+            .expect("missing pending config should not block commit capture");
+
+        let refreshed = controller.get_session(session_id).unwrap();
+        assert_eq!(refreshed.state, SessionState::WaitingForWorker(1));
+        assert_eq!(refreshed.agents[0].commit_sha.as_deref(), Some(expected_head.as_str()));
     }
 
     /// Verifies that planning/swarm sessions (which never populate session.worktree_path)

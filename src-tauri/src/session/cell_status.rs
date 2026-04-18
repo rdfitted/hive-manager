@@ -253,6 +253,7 @@ mod tests {
                     status,
                     config: AgentConfig::default(),
                     parent_id: None,
+                    commit_sha: None,
                 })
                 .collect(),
             default_cli: "claude".to_string(),
@@ -382,6 +383,7 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
         };
         let judge_agent = AgentInfo {
             id: "judge-agent".to_string(),
@@ -391,6 +393,7 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
         };
 
         let session = Session {
@@ -415,6 +418,7 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
         };
         let judge_agent = AgentInfo {
             id: "judge-agent".to_string(),
@@ -424,6 +428,7 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            commit_sha: None,
         };
 
         let session = Session {
