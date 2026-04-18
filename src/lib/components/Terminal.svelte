@@ -23,6 +23,7 @@
   let terminalContainer: HTMLDivElement;
   let term: XTerm | null = null;
   let fitAddon: FitAddon | null = null;
+  let webglAddon: WebglAddon | null = null;
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenDragDrop: UnlistenFn | null = null;
@@ -106,6 +107,33 @@
   // handler already read the clipboard via Tauri API. Without this, xterm's
   // internal paste listener also fires onData → double send.
   let suppressPaste = false;
+
+  // Single shared decoder with stream mode so multi-byte UTF-8 sequences
+  // split across 4KB PTY chunks don't decode to replacement characters.
+  const ptyDecoder = new TextDecoder('utf-8');
+
+  // Centralised guard for term.write(). @xterm/addon-webgl@0.19.0 can throw
+  // from write() on long-running buffers, corrupting the renderer so the pane
+  // collapses to only xterm's fallback glyph. On first failure, dispose the
+  // WebGL addon and retry once; subsequent writes use the default DOM renderer.
+  // All write paths (PTY listener, exported write()) must route through here.
+  function writeSafely(data: string) {
+    if (!term) return;
+    try {
+      term.write(data);
+    } catch (e) {
+      if (webglAddon) {
+        console.error('xterm write failed, disposing WebGL addon and falling back to DOM renderer:', e);
+        try { webglAddon.dispose(); } catch { /* ignore */ }
+        webglAddon = null;
+        try { term.write(data); } catch (e2) {
+          console.error('xterm write failed after WebGL fallback:', e2);
+        }
+      } else {
+        console.error('xterm write failed:', e);
+      }
+    }
+  }
 
   async function sendToPty(data: string) {
     try {
@@ -323,6 +351,7 @@
       lineHeight: 1.2,
       cursorBlink: true,
       cursorStyle: 'block',
+      scrollback: 10000,
       allowProposedApi: true,
     });
 
@@ -347,11 +376,14 @@
       }
     }, true);
 
-    // Try to load WebGL addon for better performance
+    // Try to load WebGL addon for better performance. Retain the reference so
+    // a write-time rendering failure (see pty-output listener) can dispose it
+    // and fall back to the default DOM renderer without losing the terminal.
     try {
-      const webglAddon = new WebglAddon();
+      webglAddon = new WebglAddon();
       term.loadAddon(webglAddon);
     } catch (e) {
+      webglAddon = null;
       console.warn('WebGL addon not supported, using canvas renderer');
     }
 
@@ -438,12 +470,13 @@
       await sendToPty(data);
     });
 
-    // Listen for PTY output
+    // Listen for PTY output. Uses writeSafely() so a WebGL renderer failure
+    // doesn't blank the pane. Uses a shared streaming decoder so multi-byte
+    // UTF-8 sequences split across chunks decode correctly.
     unlistenOutput = await listen<{ id: string; data: number[] }>('pty-output', (event) => {
       if (event.payload.id === agentId && term) {
-        const decoder = new TextDecoder();
-        const text = decoder.decode(new Uint8Array(event.payload.data));
-        term.write(text);
+        const text = ptyDecoder.decode(new Uint8Array(event.payload.data), { stream: true });
+        writeSafely(text);
       }
     });
 
@@ -513,7 +546,7 @@
   }
 
   export function write(data: string) {
-    term?.write(data);
+    writeSafely(data);
   }
 </script>
 
