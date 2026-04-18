@@ -857,6 +857,22 @@ impl SessionController {
             return;
         }
 
+        // session_from_persisted reconstructs every agent with AgentStatus::Completed
+        // because persisted snapshots don't carry runtime status. Overlay the current
+        // in-memory statuses onto the refreshed agents so a clean disk refresh doesn't
+        // mark live Queen/Worker/Evaluator PTYs as completed.
+        let mut refreshed = refreshed;
+        let current_statuses: std::collections::HashMap<String, AgentStatus> = current_session
+            .agents
+            .iter()
+            .map(|a| (a.id.clone(), a.status.clone()))
+            .collect();
+        for agent in refreshed.agents.iter_mut() {
+            if let Some(status) = current_statuses.get(&agent.id) {
+                agent.status = status.clone();
+            }
+        }
+
         sessions.insert(session_id.to_string(), refreshed);
         drop(sessions);
 
@@ -7071,6 +7087,16 @@ Last updated: {timestamp}
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            // Defense-in-depth: reject verdicts outside QaInProgress so HTTP callers
+            // can't jump Running straight to QaPassed/QaFailed, bypassing the
+            // milestone-ready -> QA transition. Force-pass/force-fail uses a
+            // separate path (apply_verdict -> on_qa_verdict) with broader semantics.
+            if !matches!(session.state, SessionState::QaInProgress { .. }) {
+                return Err(format!(
+                    "Cannot record QA verdict: session is in {:?} state, expected QaInProgress",
+                    session.state
+                ));
+            }
             let previous_session = session.clone();
             let now = Utc::now();
             if now > session.last_activity_at {
@@ -7935,15 +7961,14 @@ Last updated: {timestamp}
             }
         }
 
-        // Load session from storage
-        let storage = if let Some(storage) = self.storage.clone() {
-            storage
-        } else {
-            Arc::new(
-                SessionStorage::new()
-                    .map_err(|e| format!("Failed to initialize storage: {}", e))?,
-            )
-        };
+        // Fail fast when storage isn't installed. Previously this fell back to a
+        // locally-constructed SessionStorage, but self.storage (set via &mut self)
+        // would still be None, so later update_session_storage_* calls silently
+        // dropped writes for the resumed session.
+        let storage = self
+            .storage
+            .clone()
+            .ok_or_else(|| "Session storage is not initialized".to_string())?;
         let persisted = storage.load_session(session_id)
             .map_err(|e| format!("Failed to load session from storage: {}", e))?;
         storage
