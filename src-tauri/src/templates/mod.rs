@@ -526,7 +526,7 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 1. Read `.ai-docs/project-dna.md`
 2. Read `.ai-docs/learnings.jsonl`
-3. Read the active sprint contract at `.hive-manager/{{session_id}}/contracts/milestone-N.md`
+3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
@@ -601,7 +601,7 @@ You are the API QA specialist for session `{{session_id}}`.
 
 1. Read `.ai-docs/project-dna.md`
 2. Read `.ai-docs/learnings.jsonl`
-3. Read the active sprint contract at `.hive-manager/{{session_id}}/contracts/milestone-N.md`
+3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
@@ -644,7 +644,7 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 
 1. Read `.ai-docs/project-dna.md`
 2. Read `.ai-docs/learnings.jsonl`
-3. Read the active sprint contract at `.hive-manager/{{session_id}}/contracts/milestone-N.md`
+3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
