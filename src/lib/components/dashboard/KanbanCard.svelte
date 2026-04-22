@@ -39,7 +39,7 @@
   }
 </script>
 
-<article class="card" aria-label={title} style:--session-color={session.color || 'transparent'}>
+<article class="card" aria-label={title} style:--session-color={session.color || 'var(--color-border)'}>
   <header class="card-head">
     <div class="title-wrap">
       <div class="status-icon" title={status} aria-hidden="true">
