@@ -5745,7 +5745,7 @@ Last updated: {timestamp}
         let master_prompt = Self::build_queen_master_prompt(
             &config.queen_config.cli,
             &project_path,
-            &queen_cwd,
+            queen_cwd.as_ref(),
             &session_id,
             &config.workers,
             config.prompt.as_deref(),
@@ -6493,7 +6493,7 @@ Last updated: {timestamp}
                 session_id,
                 &variants,
                 &config.task_description,
-                config.with_evaluator,
+                false, // Fusion sessions never launch an Evaluator
             );
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "fusion-queen-prompt.md", &queen_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
