@@ -465,8 +465,17 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
      -H "Content-Type: application/json" \
      -d '{"verdict":"PASS","commit_sha":"<sha>","rationale":"All criteria met"}'
    ```
-2. You MUST rely on that POST to write `.hive-manager/{{session_id}}/peer/qa-verdict.json`.
-3. You MUST NOT write `.hive-manager/{{session_id}}/peer/qa-verdict.md` or any other shadow verdict file.
+2. After the POST, you MUST confirm that `.hive-manager/{{session_id}}/peer/qa-verdict.json` appears within a bounded interval:
+   ```bash
+   for attempt in $(seq 1 6); do
+     [ -f ".hive-manager/{{session_id}}/peer/qa-verdict.json" ] && break
+     sleep 5
+   done
+   ```
+3. If the peer file is still missing, you MUST retry the same POST exactly once and poll again for up to 30 seconds.
+4. If `.hive-manager/{{session_id}}/peer/qa-verdict.json` is still missing after the retry window, you MUST report `BLOCKED` and stop.
+5. You MUST rely on that POST to write `.hive-manager/{{session_id}}/peer/qa-verdict.json`.
+6. You MUST NOT write `.hive-manager/{{session_id}}/peer/qa-verdict.md` or any other shadow verdict file.
 
 ## Coordination Tools
 

@@ -10,7 +10,7 @@
 
 ## Instructions
 
-Read D:/Code Projects/hive-manager/.hive-manager/70525b48-506a-434e-b7ef-3d4010f6609e/plan.md — execute Task 5 (HIGH). Base branch: feat/worker-scope-kanban-opus47 (W1-W4 all integrated).
+Read `.hive-manager/70525b48-506a-434e-b7ef-3d4010f6609e/plan.md` — execute Task 5 (HIGH). Base branch: feat/worker-scope-kanban-opus47 (W1-W4 all integrated).
 
 Review ALL diffs from Workers 1-4 on feat/worker-scope-kanban-opus47 (commits b26e621, b6b6cb5, 62206ff, 79c3eaf).
 
@@ -27,7 +27,7 @@ Checklist:
 
 Produce review report at .hive-manager/70525b48-506a-434e-b7ef-3d4010f6609e/review-notes.md — list every finding with file:line + severity (BLOCKER/MAJOR/MINOR/NIT). If clean, state that explicitly.
 
-WORK IN YOUR WORKTREE. Commit the review-notes file. Mark task COMPLETED when done.
+WORK IN YOUR WORKTREE. Mark task COMPLETED when done.
 
 ## Completion Protocol
 
