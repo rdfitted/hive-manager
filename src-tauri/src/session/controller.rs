@@ -3834,6 +3834,7 @@ This tests that:
         let coordination_log_path = Self::prompt_path(&session_root.join("coordination.log"));
         let worker_worktree_root =
             Self::prompt_path(&project_path.join(".hive-manager").join("worktrees").join(session_id));
+        let queen_scope_rules = Self::worktree_boundary_rules(&Self::prompt_path(project_path));
         let required_protocol = Self::queen_required_protocol(session_id);
         let post_workers_protocol = Self::queen_post_workers_protocol(session_id);
 
@@ -4111,15 +4112,16 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 ## Worktree Awareness (READ THIS FIRST)
 
-⚠️ **You are running in your OWN worktree**, separate from where the workers are working. This means:
+You are running in your own worktree, separate from the workers.
 
-- `git status` / `git diff` in your CWD **will NOT show worker changes** — your worktree only sees your own commits.
-- `ls`, Read, Glob in your CWD will show the repo as it existed when your worktree was created, NOT the workers' live edits.
-- **Never assume "no diff = no work done."** Workers commit into `hive/{session_id}/worker-N` branches inside their own worktree paths.
+{queen_scope_rules}
+- `git status` / `git diff` in your CWD will NOT show worker changes.
+- `ls`, Read, and Glob in your CWD show your own worktree snapshot, not a worker's live edits.
+- Never assume "no diff = no work done." Workers commit into `hive/{session_id}/worker-N` branches inside their own worktree paths.
 
-### How to actually see worker progress
+### Worker progress cheat sheet
 
-Always target the worker's worktree path or branch explicitly. For every worker `N`:
+Always target the worker's worktree path or branch explicitly:
 
 ```bash
 WT="{worker_worktree_root}/worker-N"
@@ -4143,11 +4145,11 @@ cat "$WT/<relative/path>"
 git -C "$WT" show "$BR:<relative/path>"
 ```
 
-If a worker's task file says COMPLETED but `git log` on their branch is empty, check `git status` in their worktree — they may have forgotten to commit. Prompt them to commit rather than assuming failure.
+If a worker's task file says COMPLETED but `git log` on their branch is empty, check `git status` in their worktree before treating it as a failure.
 
 ### Monitoring cadence
 
-When polling for worker progress, iterate over every worker worktree and run the commands above — do NOT rely on your own CWD's `git status`. A quick sweep:
+When polling for worker progress, iterate over every worker worktree instead of relying on your own CWD's `git status`:
 
 ```bash
 for WT in "{worker_worktree_root}"/worker-*; do
@@ -4164,7 +4166,7 @@ Workers run in isolated git worktrees. Each worker has its own worktree + branch
 
 ### Step 0 — Learning Consolidation (MANDATORY, before any cherry-pick)
 
-Worker worktrees are ephemeral. Any learnings a worker wrote directly into `.ai-docs/learnings.jsonl` inside its worktree will be lost when the worktree is cleaned up — the HTTP API is the only durable path. Before integrating, consolidate into the main repo's `.ai-docs/learnings.jsonl`:
+Worker worktrees are ephemeral. Learnings written directly to `.ai-docs/learnings.jsonl` there will be lost at cleanup, so consolidate into the main repo's `.ai-docs/learnings.jsonl` first:
 
 **a. Primary — flush the session-scoped store (deterministic):**
 ```bash
@@ -4236,6 +4238,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             lessons_dir = lessons_dir,
             coordination_log_path = coordination_log_path,
             worker_worktree_root = worker_worktree_root,
+            queen_scope_rules = queen_scope_rules,
             plan_section = plan_section,
             worker_list = worker_list,
             qa_milestone_handoff = qa_milestone_handoff,
@@ -5252,73 +5255,26 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         Ok(())
     }
 
-    /// Write a task file for a worker (STANDBY by default)
+    /// Write a task file for a worker (ACTIVE when pre-seeded with a task, otherwise STANDBY)
     fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>) -> Result<PathBuf, String> {
-        let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
-        std::fs::create_dir_all(&tasks_dir)
-            .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
-
-        let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
-        let scope_rules = Self::worktree_boundary_rules(&Self::prompt_path(worktree_path));
-
-        let (status, task_content) = if let Some(task) = initial_task {
-            ("ACTIVE", task.to_string())
-        } else {
-            ("STANDBY", "Awaiting task assignment. Monitor this file for updates.".to_string())
-        };
-
-        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-        let content = format!(
-"# Task Assignment - Worker {worker_index}
-
-## Status: {status}
-
-## Role Constraints
-
-- **EXECUTOR**: You have full authority to implement and fix issues.
-- **SCOPE**: Stay within your assigned domain/specialization.
-- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
-
-## Scope
-
-{scope_rules}
-
-## Instructions
-
-{task_content}
-
-## Completion Protocol
-
-When task is complete, update this file:
-1. Change Status to: COMPLETED
-2. Add a summary under a new Result section
-
-If blocked, change Status to: BLOCKED and describe the issue.
-
----
-Last updated: {timestamp}
-",
-            worker_index = worker_index,
-            status = status,
-            scope_rules = scope_rules,
-            task_content = task_content,
-            timestamp = timestamp
-        );
-
-        std::fs::write(&file_path, content)
-            .map_err(|e| format!("Failed to write task file: {}", e))?;
-
-        Ok(file_path)
+        let status = initial_task.map(|_| "ACTIVE");
+        Self::write_task_file_with_status(worktree_path, worker_index, initial_task, status)
     }
 
-    /// Write a task file with a specific status (used for sequential spawning)
-    fn write_task_file_with_status(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>, status: &str) -> Result<PathBuf, String> {
+    /// Write a task file with an optional status override (used for sequential spawning)
+    fn write_task_file_with_status(
+        worktree_path: &Path,
+        worker_index: u8,
+        initial_task: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<PathBuf, String> {
         let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
         let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
         let scope_rules = Self::worktree_boundary_rules(&Self::prompt_path(worktree_path));
+        let status = status.unwrap_or("STANDBY");
 
         let task_content = if let Some(task) = initial_task {
             task.to_string()
@@ -6783,7 +6739,7 @@ Last updated: {timestamp}
             Path::new(&worker_cwd),
             index,
             worker_config.initial_prompt.as_deref(),
-            "ACTIVE",
+            Some("ACTIVE"),
         )
         .map_err(|err| {
             Self::rollback_worker_launch_artifacts(
