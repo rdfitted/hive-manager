@@ -459,11 +459,11 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
 
 ## Verdict Submission
 
-1. You MUST submit the verdict via the canonical HTTP endpoint:
+1. You MUST submit the verdict via the canonical HTTP endpoint. You MUST substitute your computed verdict and rationale — never send a literal 'PASS' without computing it:
    ```bash
    curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
      -H "Content-Type: application/json" \
-     -d '{"verdict":"PASS","commit_sha":"<sha>","rationale":"All criteria met"}'
+     -d '{"verdict":"<PASS|FAIL>","commit_sha":"<sha>","rationale":"<one-line rationale based on contract criteria>"}'
    ```
 2. After the POST, you MUST confirm that `.hive-manager/{{session_id}}/peer/qa-verdict.json` appears within a bounded interval:
    ```bash
