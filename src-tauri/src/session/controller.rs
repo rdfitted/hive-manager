@@ -9285,7 +9285,7 @@ mod tests {
         AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController, SessionError,
         SessionState, SessionType,
     };
-    use crate::pty::{AgentRole, AgentStatus, PtyManager};
+    use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
@@ -9464,6 +9464,103 @@ mod tests {
         assert!(prompt.contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
         assert!(prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:"));
         assert!(!prompt.contains(r#""specialization": "api", "cli": "claude""#));
+    }
+
+    #[test]
+    fn worker_prompt_contains_scope_section_and_boundary_rules() {
+        let prompt = SessionController::build_worker_prompt(
+            1,
+            &AgentConfig {
+                role: Some(WorkerRole::new("backend", "Backend", "claude")),
+                ..AgentConfig::default()
+            },
+            "session-123-queen",
+            "session-123",
+        );
+
+        // Verify ## Scope section is present
+        assert!(prompt.contains("## Scope"));
+
+        // Verify worktree boundary rules are present
+        assert!(prompt.contains("**READ**: You MAY inspect any repository file"));
+        assert!(prompt.contains("**WRITE**: You MUST create and modify files only inside"));
+        assert!(prompt.contains(".hive-manager/worktrees/session-123/worker-1"));
+        assert!(prompt.contains("You MUST NOT edit files outside this worktree"));
+    }
+
+    #[test]
+    fn queen_master_prompt_contains_required_protocol() {
+        let prompt = SessionController::build_queen_master_prompt(
+            "claude",
+            Path::new("/repo"),
+            "session-123",
+            &[],
+            None,
+            false,
+        );
+
+        // Verify ## Required Protocol section is present
+        assert!(prompt.contains("## Required Protocol"));
+        assert!(prompt.contains("You MUST follow every numbered protocol"));
+        assert!(prompt.contains("You MUST NOT use `/loop`"));
+        assert!(prompt.contains("The Evaluator is created PROGRAMMATICALLY"));
+        assert!(prompt.contains("You MUST NOT spawn an Evaluator yourself"));
+    }
+
+    #[test]
+    fn fusion_queen_prompt_contains_required_protocol() {
+        let prompt = SessionController::build_fusion_queen_prompt(
+            "claude",
+            "session-123",
+            &[],
+            "Test task",
+        );
+
+        // Verify ## Required Protocol section is present
+        assert!(prompt.contains("## Required Protocol"));
+        assert!(prompt.contains("You MUST follow every numbered protocol"));
+        assert!(prompt.contains("You MUST NOT use `/loop`"));
+        assert!(prompt.contains("The Evaluator is created PROGRAMMATICALLY"));
+    }
+
+    #[test]
+    fn swarm_queen_prompt_contains_required_protocol() {
+        let prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            Path::new("/repo"),
+            "session-123",
+            &[],
+            None,
+        );
+
+        // Verify ## Required Protocol section is present
+        assert!(prompt.contains("## Required Protocol"));
+        assert!(prompt.contains("You MUST follow every numbered protocol"));
+        assert!(prompt.contains("You MUST NOT use `/loop`"));
+        assert!(prompt.contains("The Evaluator is created PROGRAMMATICALLY"));
+    }
+
+    #[test]
+    fn task_file_contains_scope_section() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let worktree_path = temp_dir.path().join(".hive-manager").join("worktrees").join("session-123").join("worker-1");
+        std::fs::create_dir_all(&worktree_path).expect("create worktree");
+
+        let task_file_path = SessionController::write_task_file(
+            &worktree_path,
+            1,
+            Some("Test task"),
+        ).expect("write task file");
+
+        let content = std::fs::read_to_string(&task_file_path).expect("read task file");
+
+        // Verify ## Scope section is present
+        assert!(content.contains("## Scope"));
+
+        // Verify worktree boundary rules are present with correct path substitution
+        assert!(content.contains("**READ**: You MAY inspect any repository file"));
+        assert!(content.contains("**WRITE**: You MUST create and modify files only inside"));
+        assert!(content.contains("worker-1"));
     }
 
     fn test_controller() -> SessionController {
