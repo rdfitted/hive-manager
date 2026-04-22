@@ -2324,7 +2324,7 @@ Last updated: {timestamp}
     ) -> String {
         let task_file = format!(".hive-manager/tasks/fusion-variant-{}-task.md", variant_index);
         let polling_instructions = get_polling_instructions(cli, &task_file, None);
-        let scope_rules = Self::worktree_boundary_rules(worktree_path);
+        let scope_block = Self::scope_block(worktree_path);
 
         format!(
 r#"You are a Fusion worker implementing variant "{variant_name}".
@@ -2334,8 +2334,9 @@ Branch: {branch}
 ## Your Task
 {task_description}
 
+{scope_block}
+
 ## Rules
-{scope_rules}
 - Commit all changes to your branch
 - Do NOT interact with other variants
 - When complete, update your task file status to COMPLETED
@@ -2346,7 +2347,7 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#
             worktree_path = worktree_path,
             branch = branch,
             task_description = task_description,
-            scope_rules = scope_rules,
+            scope_block = scope_block,
             task_file = task_file,
             polling_instructions = polling_instructions,
         )
@@ -2433,6 +2434,10 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 - **WRITE**: You MUST create and modify files only inside `{worktree_path}`. You MUST NOT edit files outside this worktree."#,
             worktree_path = worktree_path,
         )
+    }
+
+    fn scope_block(worktree_path: &str) -> String {
+        format!("## Scope\n\n{}", Self::worktree_boundary_rules(worktree_path))
     }
 
     fn queen_required_protocol(session_id: &str) -> String {
@@ -2579,6 +2584,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         };
         let (qa_worker_intro, qa_worker_spawn_plan, qa_worker_count, qa_worker_coverage_rule) =
             Self::build_evaluator_qa_plan(config, qa_workers);
+        let required_protocol = Self::queen_required_protocol(session_id);
 
         let mut variables = HashMap::new();
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
@@ -2586,6 +2592,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         variables.insert("default_model".to_string(), default_model.to_string());
         variables.insert("default_model_field".to_string(), default_model_field);
         variables.insert("default_model_suffix".to_string(), default_model_suffix);
+        variables.insert("required_protocol".to_string(), required_protocol);
         variables.insert("qa_worker_intro".to_string(), qa_worker_intro);
         variables.insert("qa_worker_spawn_plan".to_string(), qa_worker_spawn_plan);
         variables.insert("qa_worker_count".to_string(), qa_worker_count);
@@ -4055,7 +4062,7 @@ cat "{queen_conversation}"
 cat "{shared_conversation}"
 ```
 
-Always try the curl API first. Only use file fallback if curl fails.
+You MUST call the curl API first. Only use file fallback if curl fails.
 
 ## Learning Curation Protocol
 
@@ -4256,7 +4263,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             .map(|r| r.label.clone())
             .unwrap_or_else(|| format!("Worker {}", index));
         let worktree_path = format!(".hive-manager/worktrees/{session_id}/worker-{index}");
-        let scope_rules = Self::worktree_boundary_rules(&worktree_path);
+        let scope_block = Self::scope_block(&worktree_path);
 
         let role_description = config.role.as_ref()
             .map(|r| match r.role_type.to_lowercase().as_str() {
@@ -4302,9 +4309,7 @@ You have full access to Claude Code tools:
 - **Glob/Grep** - Search files and content
 - **Task** - Spawn subagents if needed
 
-## Scope
-
-{scope_rules}
+{scope_block}
 
 ## Task File (File-Based Coordination)
 
@@ -4379,7 +4384,7 @@ cat ".hive-manager/{session_id}/conversations/worker-{index}.md"
 cat ".hive-manager/{session_id}/conversations/shared.md"
 ```
 
-Always try the curl API first. Only use file fallback if curl fails.
+You MUST call the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
@@ -4416,7 +4421,7 @@ After completing your task, transition to IDLE state. Continue checking your con
             role_description = role_description,
             queen_id = queen_id,
             session_id = session_id,
-            scope_rules = scope_rules,
+            scope_block = scope_block,
             task_file = task_file,
             polling_instructions = polling_instructions
         )
@@ -5273,7 +5278,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
         let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
-        let scope_rules = Self::worktree_boundary_rules(&Self::prompt_path(worktree_path));
+        let scope_block = Self::scope_block(&Self::prompt_path(worktree_path));
         let status = status.unwrap_or("STANDBY");
 
         let task_content = if let Some(task) = initial_task {
@@ -5294,9 +5299,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
 - **SCOPE**: Stay within your assigned domain/specialization.
 - **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
 
-## Scope
-
-{scope_rules}
+{scope_block}
 
 ## Instructions
 
@@ -5315,7 +5318,7 @@ Last updated: {timestamp}
 ",
             worker_index = worker_index,
             status = status,
-            scope_rules = scope_rules,
+            scope_block = scope_block,
             task_content = task_content,
             timestamp = timestamp
         );
@@ -9433,8 +9436,10 @@ mod tests {
             false,
         );
 
-        assert!(prompt.contains("## Required Protocol"));
-        assert!(prompt.contains("You MUST use the inline bash polling loops in this prompt. You MUST NOT use `/loop`."));
+        assert_eq!(
+            extract_markdown_section(&prompt, "## Required Protocol"),
+            SessionController::queen_required_protocol("session-123"),
+        );
         assert!(prompt.contains(".hive-manager/session-123/peer/qa-verdict.json"));
         assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
         assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
@@ -9460,6 +9465,10 @@ mod tests {
             false,
         );
 
+        assert_eq!(
+            extract_markdown_section(&prompt, "## Required Protocol"),
+            SessionController::queen_required_protocol("session-123"),
+        );
         assert!(prompt.contains("configured QA workers below (1 total) before you grade any criterion"));
         assert!(prompt.contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
         assert!(prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:"));
@@ -9467,30 +9476,54 @@ mod tests {
     }
 
     #[test]
-    fn worker_prompt_contains_scope_section_and_boundary_rules() {
-        let prompt = SessionController::build_worker_prompt(
+    fn scope_block_is_identical_across_worker_and_task_surfaces() {
+        let session_id = "session-scope-equality";
+        let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
+        let session_worktree_root = worktree_path
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("session worktree root");
+
+        let _ = std::fs::remove_dir_all(session_worktree_root);
+        std::fs::create_dir_all(&worktree_path).expect("create worktree");
+
+        let fusion_prompt = SessionController::build_fusion_worker_prompt(
+            session_id,
+            1,
+            "Variant 1",
+            "feat/test",
+            ".hive-manager/worktrees/session-scope-equality/worker-1",
+            "Test task",
+            "claude",
+        );
+        let worker_prompt = SessionController::build_worker_prompt(
             1,
             &AgentConfig {
                 role: Some(WorkerRole::new("backend", "Backend", "claude")),
                 ..AgentConfig::default()
             },
-            "session-123-queen",
-            "session-123",
+            "session-scope-equality-queen",
+            session_id,
         );
+        let task_file_path = SessionController::write_task_file_with_status(
+            &worktree_path,
+            1,
+            Some("Test task"),
+            Some("ACTIVE"),
+        )
+        .expect("write task file");
+        let task_file = std::fs::read_to_string(&task_file_path).expect("read task file");
 
-        // Verify ## Scope section is present
-        assert!(prompt.contains("## Scope"));
+        let expected = extract_markdown_section(&worker_prompt, "## Scope");
+        assert_eq!(extract_markdown_section(&fusion_prompt, "## Scope"), expected);
+        assert_eq!(extract_markdown_section(&task_file, "## Scope"), expected);
 
-        // Verify worktree boundary rules are present
-        assert!(prompt.contains("**READ**: You MAY inspect any repository file"));
-        assert!(prompt.contains("**WRITE**: You MUST create and modify files only inside"));
-        assert!(prompt.contains(".hive-manager/worktrees/session-123/worker-1"));
-        assert!(prompt.contains("You MUST NOT edit files outside this worktree"));
+        std::fs::remove_dir_all(session_worktree_root).expect("remove test worktree");
     }
 
     #[test]
-    fn queen_master_prompt_contains_required_protocol() {
-        let prompt = SessionController::build_queen_master_prompt(
+    fn required_protocol_block_is_identical_across_queens_and_evaluator() {
+        let queen_master_prompt = SessionController::build_queen_master_prompt(
             "claude",
             Path::new("/repo"),
             "session-123",
@@ -9498,69 +9531,56 @@ mod tests {
             None,
             false,
         );
-
-        // Verify ## Required Protocol section is present
-        assert!(prompt.contains("## Required Protocol"));
-        assert!(prompt.contains("You MUST follow every numbered protocol"));
-        assert!(prompt.contains("You MUST NOT use `/loop`"));
-        assert!(prompt.contains("The Evaluator is created PROGRAMMATICALLY"));
-        assert!(prompt.contains("You MUST NOT spawn an Evaluator yourself"));
-    }
-
-    #[test]
-    fn fusion_queen_prompt_contains_required_protocol() {
-        let prompt = SessionController::build_fusion_queen_prompt(
+        let fusion_queen_prompt = SessionController::build_fusion_queen_prompt(
             "claude",
             "session-123",
             &[],
             "Test task",
         );
-
-        // Verify ## Required Protocol section is present
-        assert!(prompt.contains("## Required Protocol"));
-        assert!(prompt.contains("You MUST follow every numbered protocol"));
-        assert!(prompt.contains("You MUST NOT use `/loop`"));
-        assert!(prompt.contains("The Evaluator is created PROGRAMMATICALLY"));
-    }
-
-    #[test]
-    fn swarm_queen_prompt_contains_required_protocol() {
-        let prompt = SessionController::build_swarm_queen_prompt(
+        let swarm_queen_prompt = SessionController::build_swarm_queen_prompt(
             "claude",
             Path::new("/repo"),
             "session-123",
             &[],
             None,
         );
+        let evaluator_prompt = SessionController::build_evaluator_prompt(
+            "session-123",
+            &AgentConfig {
+                cli: "claude".to_string(),
+                model: Some("opus-4-6".to_string()),
+                ..AgentConfig::default()
+            },
+            &[],
+            false,
+        );
+        let expected = extract_markdown_section(&queen_master_prompt, "## Required Protocol");
 
-        // Verify ## Required Protocol section is present
-        assert!(prompt.contains("## Required Protocol"));
-        assert!(prompt.contains("You MUST follow every numbered protocol"));
-        assert!(prompt.contains("You MUST NOT use `/loop`"));
-        assert!(prompt.contains("The Evaluator is created PROGRAMMATICALLY"));
+        assert_eq!(
+            extract_markdown_section(&fusion_queen_prompt, "## Required Protocol"),
+            expected,
+        );
+        assert_eq!(
+            extract_markdown_section(&swarm_queen_prompt, "## Required Protocol"),
+            expected,
+        );
+        assert_eq!(
+            extract_markdown_section(&evaluator_prompt, "## Required Protocol"),
+            expected,
+        );
     }
 
-    #[test]
-    fn task_file_contains_scope_section() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let worktree_path = temp_dir.path().join(".hive-manager").join("worktrees").join("session-123").join("worker-1");
-        std::fs::create_dir_all(&worktree_path).expect("create worktree");
-
-        let task_file_path = SessionController::write_task_file(
-            &worktree_path,
-            1,
-            Some("Test task"),
-        ).expect("write task file");
-
-        let content = std::fs::read_to_string(&task_file_path).expect("read task file");
-
-        // Verify ## Scope section is present
-        assert!(content.contains("## Scope"));
-
-        // Verify worktree boundary rules are present with correct path substitution
-        assert!(content.contains("**READ**: You MAY inspect any repository file"));
-        assert!(content.contains("**WRITE**: You MUST create and modify files only inside"));
-        assert!(content.contains("worker-1"));
+    fn extract_markdown_section(content: &str, heading: &str) -> String {
+        let start = content
+            .find(heading)
+            .unwrap_or_else(|| panic!("missing heading: {heading}"));
+        let rest = &content[start..];
+        let search_offset = heading.len();
+        let end = rest[search_offset..]
+            .find("\n## ")
+            .map(|offset| start + search_offset + offset)
+            .unwrap_or(content.len());
+        content[start..end].trim_end().to_string()
     }
 
     fn test_controller() -> SessionController {
