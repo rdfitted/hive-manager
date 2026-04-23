@@ -34,6 +34,12 @@ const QUEEN_QUALITY_RECONCILIATION_LOG_LINES: &str = r#"[TIMESTAMP] QUEEN: Enter
 [TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#;
 
+const QUEEN_QUALITY_RECONCILIATION_LOG_LINES_NO_EVALUATOR: &str = r#"[TIMESTAMP] QUEEN: Entering reconciliation loop for latest push
+[TIMESTAMP] QUEEN: Collected N external comments and integrity findings since latest push
+[TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
+[TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
     Hive { worker_count: u8 },
@@ -2324,6 +2330,7 @@ Last updated: {timestamp}
     ) -> String {
         let task_file = format!(".hive-manager/tasks/fusion-variant-{}-task.md", variant_index);
         let polling_instructions = get_polling_instructions(cli, &task_file, None);
+        let scope_block = Self::scope_block(".");
 
         format!(
 r#"You are a Fusion worker implementing variant "{variant_name}".
@@ -2333,8 +2340,9 @@ Branch: {branch}
 ## Your Task
 {task_description}
 
+{scope_block}
+
 ## Rules
-- Work ONLY within your worktree directory
 - Commit all changes to your branch
 - Do NOT interact with other variants
 - When complete, update your task file status to COMPLETED
@@ -2345,6 +2353,7 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#
             worktree_path = worktree_path,
             branch = branch,
             task_description = task_description,
+            scope_block = scope_block,
             task_file = task_file,
             polling_instructions = polling_instructions,
         )
@@ -2425,6 +2434,139 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         path.to_string_lossy().replace('\\', "/")
     }
 
+    fn worktree_boundary_rules(worktree_path: &str) -> String {
+        format!(
+            r#"- **READ**: You MAY inspect any repository file and git history for context by running Bash commands from this worktree.
+- **WRITE**: You MUST create and modify files only inside `{worktree_path}`. You MUST NOT edit files outside this worktree."#,
+            worktree_path = worktree_path,
+        )
+    }
+
+    fn scope_block(worktree_path: &str) -> String {
+        format!("## Scope\n\n{}", Self::worktree_boundary_rules(worktree_path))
+    }
+
+    fn queen_quality_reconciliation_log_lines(has_evaluator: bool) -> &'static str {
+        if has_evaluator {
+            QUEEN_QUALITY_RECONCILIATION_LOG_LINES
+        } else {
+            QUEEN_QUALITY_RECONCILIATION_LOG_LINES_NO_EVALUATOR
+        }
+    }
+
+    fn queen_required_protocol(session_root: &Path, has_evaluator: bool) -> String {
+        if !has_evaluator {
+            return r#"## Required Protocol
+```text
+1. You MUST follow every numbered protocol in this prompt exactly as written.
+2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
+```"#
+                .to_string();
+        }
+
+        let milestone_ready_path =
+            Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
+        let qa_verdict_path =
+            Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+
+        format!(
+            r#"## Required Protocol
+```text
+1. You MUST follow every numbered protocol in this prompt exactly as written.
+2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
+3. The Evaluator is created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). It already exists as `AgentRole::Evaluator`.
+4. You MUST NOT spawn an Evaluator yourself. DO NOT `curl POST /workers` with `role=evaluator`. DO NOT `curl POST /evaluators`.
+5. You MUST signal the existing Evaluator via `{milestone_ready_path}` and WAIT for `{qa_verdict_path}`.
+```"#,
+            milestone_ready_path = milestone_ready_path,
+            qa_verdict_path = qa_verdict_path,
+        )
+    }
+
+    fn evaluator_required_protocol(session_id: &str) -> String {
+        format!(
+            r#"## Required Protocol
+```text
+1. You MUST follow every numbered protocol in this prompt exactly as written.
+2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
+3. The backend already launched you as `AgentRole::Evaluator`. You MUST NOT spawn another Evaluator or ask the Queen to create one.
+4. The Queen signals you via `.hive-manager/{session_id}/peer/milestone-ready.json`. You MUST wait for that handoff before you read the contract or grade criteria.
+5. You MUST submit the verdict via `POST /api/sessions/{session_id}/qa/verdict`. You MUST NOT write shadow verdict files.
+```"#,
+            session_id = session_id,
+        )
+    }
+
+    fn queen_post_workers_protocol(session_id: &str, session_root: &Path, has_evaluator: bool) -> String {
+        let milestone_ready_path =
+            Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
+        let qa_verdict_path =
+            Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+
+        if !has_evaluator {
+            return format!(
+                r#"## Post-Workers Protocol (MANDATORY)
+
+1. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
+2. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow:
+   ```bash
+   gh api repos/<owner>/<repo>/issues/<pr-number>/comments
+   gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+   ```
+3. If unresolved findings remain, you MUST spawn a Reconciler worker and the required resolver workers via `POST /api/sessions/{session_id}/workers`, integrate their fixes, and then return to Step 1.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external review comments and integrity findings into one fix list"}}'
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
+   ```
+4. You MUST call `POST /api/sessions/{session_id}/complete` only after the latest push has aged at least 10 minutes and there are no new unresolved PR comments or integrity concerns.
+"#,
+                session_id = session_id,
+            );
+        }
+
+        format!(
+            r#"## Post-Workers Protocol (MANDATORY)
+
+Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). It already exists as `AgentRole::Evaluator`. You MUST NOT spawn an Evaluator. DO NOT `curl POST /workers` with `role=evaluator`. DO NOT `curl POST /evaluators`. Signal via `{milestone_ready_path}` and WAIT for `{qa_verdict_path}`.
+
+1. You MUST execute the QA Milestone Handoff block below exactly as written. Treat Step 2 of that handoff as blocking.
+2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
+   ```bash
+   while [ ! -f "{qa_verdict_path}" ]; do
+     sleep 30
+   done
+   cat "{qa_verdict_path}"
+   ```
+3. You MUST inspect the verdict. If it says `PASS`, continue to Step 5. If it says `FAIL`, continue to Step 4.
+4. You MUST spawn a Reconciler worker and the required resolver workers via `POST /api/sessions/{session_id}/workers`. Reconcile Evaluator findings, external review comments, and your own integrity concerns before continuing.
+   ```bash
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate evaluator verdicts, external review comments, and integrity findings into one fix list"}}'
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
+   ```
+5. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
+6. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow before looping back to Step 4 whenever unresolved findings remain:
+   ```bash
+   gh api repos/<owner>/<repo>/issues/<pr-number>/comments
+   gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+   ```
+7. You MUST call `POST /api/sessions/{session_id}/complete` only after QA is PASS, the latest push has aged at least 10 minutes, and there are no new unresolved PR comments.
+"#,
+            milestone_ready_path = milestone_ready_path,
+            qa_verdict_path = qa_verdict_path,
+            session_id = session_id,
+        )
+    }
+
     fn session_root_path(project_path: &Path, session_id: &str) -> PathBuf {
         project_path.join(".hive-manager").join(session_id)
     }
@@ -2483,22 +2625,21 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         }
 
         let intro = if qa_workers.is_empty() {
-            "You start with NO QA workers — you MUST spawn all three specializations.".to_string()
+            "You start with NO QA workers. You MUST spawn all three specializations before you grade any criterion.".to_string()
         } else {
             format!(
-                "You start with NO QA workers — you MUST spawn the configured QA workers below ({} total).",
+                "You start with NO QA workers. You MUST spawn the configured QA workers below ({} total) before you grade any criterion.",
                 configured_workers.len()
             )
         };
         let spawn_plan = format!(
-            "1. **Spawn all {} QA workers** — one at a time, in this order:\n   ```bash\n{}   ```",
-            configured_workers.len(),
+            "```bash\n{}   ```",
             command_block,
         );
         let coverage_rule = if qa_workers.is_empty() {
-            "Do NOT skip any specialization — every milestone gets full coverage.".to_string()
+            "You MUST NOT skip any specialization. Every milestone requires full coverage.".to_string()
         } else {
-            "Do NOT skip any configured QA specialization — every milestone gets the requested coverage.".to_string()
+            "You MUST NOT skip any configured QA specialization. Every milestone requires the requested coverage.".to_string()
         };
 
         (
@@ -2517,7 +2658,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         smoke_test: bool,
     ) -> String {
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
-            "Review the milestone handoff, coordinate QA workers only when evidence is missing, and return a strict contract-based verdict to the Queen.",
+            "You MUST grade the milestone against the contract, spawn QA workers when direct evidence is missing, and return a strict PASS/FAIL verdict with criterion-numbered evidence.",
         );
         let default_model = config.model.as_deref().unwrap_or("");
         let default_model_suffix = if default_model.is_empty() {
@@ -2532,6 +2673,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         };
         let (qa_worker_intro, qa_worker_spawn_plan, qa_worker_count, qa_worker_coverage_rule) =
             Self::build_evaluator_qa_plan(config, qa_workers);
+        let required_protocol = Self::evaluator_required_protocol(session_id);
 
         let mut variables = HashMap::new();
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
@@ -2539,6 +2681,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         variables.insert("default_model".to_string(), default_model.to_string());
         variables.insert("default_model_field".to_string(), default_model_field);
         variables.insert("default_model_suffix".to_string(), default_model_suffix);
+        variables.insert("required_protocol".to_string(), required_protocol);
         variables.insert("qa_worker_intro".to_string(), qa_worker_intro);
         variables.insert("qa_worker_spawn_plan".to_string(), qa_worker_spawn_plan);
         variables.insert("qa_worker_count".to_string(), qa_worker_count);
@@ -2778,10 +2921,13 @@ Write the plan in this structure:
     /// Build the Fusion Queen's prompt — monitors variants, spawns Judge when all complete
     fn build_fusion_queen_prompt(
         cli: &str,
+        project_path: &Path,
         session_id: &str,
         variants: &[FusionVariantMetadata],
         task_description: &str,
+        has_evaluator: bool,
     ) -> String {
+        let session_root = Self::session_root_path(project_path, session_id);
         let variant_count = variants.len();
         let mut variant_info = String::new();
         let mut task_files = String::new();
@@ -2789,6 +2935,32 @@ Write the plan in this structure:
             variant_info.push_str(&format!("| {} | {} | {} | {} |\n", v.index, v.name, v.branch, v.worktree_path));
             task_files.push_str(&format!("- Variant {} ({}): `{}`\n", v.index, v.name, v.task_file));
         }
+        let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
+        let qa_milestone_handoff = if has_evaluator {
+            Self::build_qa_milestone_handoff(session_id, &session_root, "winner integration work")
+        } else {
+            String::new()
+        };
+        let post_workers_protocol =
+            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let status_reporting_lines = if has_evaluator {
+            r#"[TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
+[TIMESTAMP] QUEEN: All variants complete - spawning Judge
+[TIMESTAMP] QUEEN: Judge evaluation complete
+[TIMESTAMP] QUEEN: Entering quality loop for latest push
+[TIMESTAMP] QUEEN: QA PASS received / waiting on QA PASS
+[TIMESTAMP] QUEEN: Latest push has / has not aged 10 minutes
+[TIMESTAMP] QUEEN: Found / no new unresolved PR comments since latest push
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#
+        } else {
+            r#"[TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
+[TIMESTAMP] QUEEN: All variants complete - spawning Judge
+[TIMESTAMP] QUEEN: Judge evaluation complete
+[TIMESTAMP] QUEEN: Entering quality loop for latest push
+[TIMESTAMP] QUEEN: Latest push has / has not aged 10 minutes
+[TIMESTAMP] QUEEN: Found / no new unresolved PR comments since latest push
+[TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#
+        };
         let task_file_glob = variants
             .iter()
             .map(|variant| format!("\"{}\"", Self::prompt_path(Path::new(&variant.task_file))))
@@ -2821,6 +2993,7 @@ r#"# Queen Agent - Fusion Session
 
 You are the **Queen** monitoring a Fusion session where {variant_count} variants compete to implement the same task.
 {hardening}
+{required_protocol}
 
 ## Session Info
 
@@ -2871,46 +3044,15 @@ After spawning the Judge, monitor the evaluation directory:
 - Decision file: `.hive-manager/{session_id}/evaluation/decision.md`
 - When the decision file exists and is non-empty, report completion
 
-### Phase 4: Quality Reconciliation After Merge (MANDATORY)
+{qa_milestone_handoff}
 
-After the Judge winner is selected and merge is complete:
-
-1. Push the PR branch — this triggers CodeRabbit and Gemini reviewers
-2. Track the latest push timestamp and the PR review baseline from that push forward
-3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for external review
-4. Collect ALL findings since the latest push:
-   a. Evaluator QA verdicts — require `QaPassed` state (via `POST /api/sessions/{{{{session_id}}}}/qa/verdict` with verdict PASS) only when an Evaluator is attached
-   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
-   c. Your own code integrity concerns
-5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
-   ```
-6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
-7. Commit and push, then restart this loop using the new push as the baseline
-8. Only finish when ALL of these are true at the same time:
-   a. If an Evaluator is attached, session is in `QaPassed` state (verdict submitted via `POST /api/sessions/{{{{session_id}}}}/qa/verdict`)
-   b. The latest push has been live for at least 10 minutes
-   c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
-9. When all three conditions are met, mark the session complete:
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/complete"
-   ```
+{post_workers_protocol}
 
 ## Status Reporting
 
 Write status updates to `.hive-manager/{session_id}/coordination.log`:
 ```
-[TIMESTAMP] QUEEN: Variant N (name) - COMPLETED/IN_PROGRESS/FAILED
-[TIMESTAMP] QUEEN: All variants complete - spawning Judge
-[TIMESTAMP] QUEEN: Judge evaluation complete
-[TIMESTAMP] QUEEN: Entering quality loop for latest push
-[TIMESTAMP] QUEEN: QA PASS received / waiting on QA PASS
-[TIMESTAMP] QUEEN: Latest push has / has not aged 10 minutes
-[TIMESTAMP] QUEEN: Found / no new unresolved PR comments since latest push
-[TIMESTAMP] QUEEN: Quality loop complete - session marked completed
+{status_reporting_lines}
 ```
 
 ## Learning Tools
@@ -2921,52 +3063,38 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
 "#,
             variant_count = variant_count,
             hardening = hardening,
+            required_protocol = required_protocol,
             session_id = session_id,
             task_description = task_description,
             variant_info = variant_info,
             task_files = task_files,
             task_file_glob = task_file_glob,
             cli = cli,
+            qa_milestone_handoff = qa_milestone_handoff,
+            post_workers_protocol = post_workers_protocol,
+            status_reporting_lines = status_reporting_lines,
         )
     }
 
     fn build_qa_milestone_handoff(
-        session_id: &str,
+        _session_id: &str,
         session_root: &Path,
         completion_scope: &str,
     ) -> String {
         let peer_dir = Self::prompt_path(&session_root.join("peer"));
-        let milestone_ready_path = Self::prompt_path(&session_root.join("peer").join("milestone-ready.md"));
+        let milestone_ready_path =
+            Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
+        let qa_verdict_path =
+            Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
         let contracts_dir = Self::prompt_path(&session_root.join("contracts"));
         let contract_path = Self::prompt_path(&session_root.join("contracts").join("milestone-1.md"));
 
         format!(
 r#"## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
 
-When ALL {completion_scope} have completed, you MUST signal the Evaluator:
+When ALL {completion_scope} have completed, you MUST signal the existing Evaluator:
 
-1. **Write the milestone-ready file** (this is what the Evaluator polls for):
-   ```bash
-   mkdir -p "{peer_dir}"
-   cat > "{milestone_ready_path}" << 'MILESTONE_EOF'
-   # Milestone Ready
-
-   ## Status: MILESTONE_READY
-   ## Milestone: [name or "smoke-test"]
-   ## Contract: {contract_path}
-   ## Scope: [brief description of what was implemented]
-   ## Risks: [known risks or "none"]
-   MILESTONE_EOF
-   ```
-
-2. **Also notify the Evaluator via conversation** (backup signal):
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
-     -H "Content-Type: application/json" \
-     -d '{{"from":"queen","content":"MILESTONE_READY: All workers completed. Please begin QA evaluation."}}'
-   ```
-
-3. For smoke tests: write a simple contract for the Evaluator to grade against:
+1. You MUST create or update the contract FIRST. For smoke tests, use this contract:
    ```bash
    mkdir -p "{contracts_dir}"
    cat > "{contract_path}" << 'CONTRACT_EOF'
@@ -2978,11 +3106,23 @@ When ALL {completion_scope} have completed, you MUST signal the Evaluator:
    3. Conversation API exercised (queen inbox + shared channel)
    4. All task files transitioned to COMPLETED status
    CONTRACT_EOF
-   ```"#,
-            session_id = session_id,
+   ```
+
+2. You MUST write the milestone payload to a temp file in `{peer_dir}` and rename it to `{milestone_ready_path}` LAST. This step is blocking. The already-running Evaluator polls the final filename.
+   ```bash
+   mkdir -p "{peer_dir}"
+   TMP_MILESTONE="$(mktemp "{peer_dir}/milestone-ready.XXXXXX")"
+   cat > "$TMP_MILESTONE" << 'MILESTONE_EOF'
+   {{"kind":"milestone-ready","from":"queen","to":"evaluator","content":"MILESTONE_READY\nmilestone: [name or smoke-test]\ncontract: {contract_path}\nscope: [brief description of what was implemented]\nrisks: [known risks or none]"}}
+   MILESTONE_EOF
+   mv "$TMP_MILESTONE" "{milestone_ready_path}"
+   ```
+
+3. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
             completion_scope = completion_scope,
             peer_dir = peer_dir,
             milestone_ready_path = milestone_ready_path,
+            qa_verdict_path = qa_verdict_path,
             contracts_dir = contracts_dir,
             contract_path = contract_path,
         )
@@ -3795,10 +3935,12 @@ This tests that:
     fn build_queen_master_prompt(
         cli: &str,
         project_path: &Path,
+        queen_workspace_path: &Path,
         session_id: &str,
         workers: &[AgentConfig],
         user_prompt: Option<&str>,
         has_plan: bool,
+        has_evaluator: bool,
     ) -> String {
         let session_root = Self::session_root_path(project_path, session_id);
         let prompts_dir = Self::prompt_path(&session_root.join("prompts"));
@@ -3811,9 +3953,18 @@ This tests that:
         let plan_path = Self::prompt_path(&session_root.join("plan.md"));
         let lessons_dir = Self::prompt_path(&session_root.join("lessons"));
         let coordination_log_path = Self::prompt_path(&session_root.join("coordination.log"));
-        let reconciliation_path = Self::prompt_path(&session_root.join("reconciliation.md"));
         let worker_worktree_root =
             Self::prompt_path(&project_path.join(".hive-manager").join("worktrees").join(session_id));
+        let queen_scope_rules =
+            Self::worktree_boundary_rules(&Self::prompt_path(queen_workspace_path));
+        let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
+        let post_workers_protocol =
+            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let final_integration_step = if has_evaluator {
+            "8. **Signal Evaluator** - Once all tasks are done, write milestone-ready (see above)"
+        } else {
+            ""
+        };
 
 
         let mut worker_list = String::new();
@@ -3911,15 +4062,19 @@ git push -u origin feat/add-authentication
 
 Do NOT assign worker tasks until the branch exists!
 "#;
-        let qa_milestone_handoff =
-            Self::build_qa_milestone_handoff(session_id, &session_root, "workers");
+        let qa_milestone_handoff = if has_evaluator {
+            Self::build_qa_milestone_handoff(session_id, &session_root, "workers")
+        } else {
+            String::new()
+        };
 
         format!(
-            r#"# Queen Agent - Hive Manager Session
+r#"# Queen Agent - Hive Manager Session
 
 You are the **Queen** orchestrating a multi-agent Hive session. You have full Claude Code capabilities plus coordination tools.
 {hardening}
 {branch_protocol}
+{required_protocol}
 ## Session Info
 - **Session ID**: {session_id}
 - **Prompts Directory**: `{prompts_dir}`
@@ -4031,7 +4186,7 @@ cat "{queen_conversation}"
 cat "{shared_conversation}"
 ```
 
-Always try the curl API first. Only use file fallback if curl fails.
+You MUST call the curl API first. Only use file fallback if curl fails.
 
 ## Learning Curation Protocol
 
@@ -4088,15 +4243,16 @@ Workers record learnings during task completion. Your curation responsibilities:
 
 ## Worktree Awareness (READ THIS FIRST)
 
-⚠️ **You are running in your OWN worktree**, separate from where the workers are working. This means:
+You are running in your own worktree, separate from the workers.
 
-- `git status` / `git diff` in your CWD **will NOT show worker changes** — your worktree only sees your own commits.
-- `ls`, Read, Glob in your CWD will show the repo as it existed when your worktree was created, NOT the workers' live edits.
-- **Never assume "no diff = no work done."** Workers commit into `hive/{session_id}/worker-N` branches inside their own worktree paths.
+{queen_scope_rules}
+- `git status` / `git diff` in your CWD will NOT show worker changes.
+- `ls`, Read, and Glob in your CWD show your own worktree snapshot, not a worker's live edits.
+- Never assume "no diff = no work done." Workers commit into `hive/{session_id}/worker-N` branches inside their own worktree paths.
 
-### How to actually see worker progress
+### Worker progress cheat sheet
 
-Always target the worker's worktree path or branch explicitly. For every worker `N`:
+Always target the worker's worktree path or branch explicitly:
 
 ```bash
 WT="{worker_worktree_root}/worker-N"
@@ -4120,11 +4276,11 @@ cat "$WT/<relative/path>"
 git -C "$WT" show "$BR:<relative/path>"
 ```
 
-If a worker's task file says COMPLETED but `git log` on their branch is empty, check `git status` in their worktree — they may have forgotten to commit. Prompt them to commit rather than assuming failure.
+If a worker's task file says COMPLETED but `git log` on their branch is empty, check `git status` in their worktree before treating it as a failure.
 
 ### Monitoring cadence
 
-When polling for worker progress, iterate over every worker worktree and run the commands above — do NOT rely on your own CWD's `git status`. A quick sweep:
+When polling for worker progress, iterate over every worker worktree instead of relying on your own CWD's `git status`:
 
 ```bash
 for WT in "{worker_worktree_root}"/worker-*; do
@@ -4141,7 +4297,7 @@ Workers run in isolated git worktrees. Each worker has its own worktree + branch
 
 ### Step 0 — Learning Consolidation (MANDATORY, before any cherry-pick)
 
-Worker worktrees are ephemeral. Any learnings a worker wrote directly into `.ai-docs/learnings.jsonl` inside its worktree will be lost when the worktree is cleaned up — the HTTP API is the only durable path. Before integrating, consolidate into the main repo's `.ai-docs/learnings.jsonl`:
+Worker worktrees are ephemeral. Learnings written directly to `.ai-docs/learnings.jsonl` there will be lost at cleanup, so consolidate into the main repo's `.ai-docs/learnings.jsonl` first:
 
 **a. Primary — flush the session-scoped store (deterministic):**
 ```bash
@@ -4185,60 +4341,9 @@ done
 6. **CONFLICTS**: resolve in the main checkout, re-run the repository's relevant verification commands (from the plan, project DNA, and touched package/tooling) to confirm integrity, then commit the resolution.
 
 7. **Commit & push** - You handle final commits (workers don't push)
-8. **Signal Evaluator** - Once all tasks are done, write milestone-ready (see above)
+{final_integration_step}
 
-## Quality Reconciliation Protocol (MANDATORY after PR push)
-
-After you have committed and pushed all changes to the PR branch:
-
-### Step 1: Push PR and Start the Clock
-- Push the PR branch to GitHub
-- This triggers CodeRabbit and Gemini reviewers automatically
-- WAIT 10 minutes (`sleep 600`) for external reviewers to post comments
-
-### Step 2: Collect ALL Findings
-Gather feedback from every source:
-
-a. **Evaluator QA verdicts** (if Evaluator is active):
-   ```bash
-   curl -s "http://localhost:18800/api/sessions/{{{{session_id}}}}/conversations/queen?since=0" | jq '.messages[] | select(.from == "evaluator")'
-   ```
-
-b. **CodeRabbit + Gemini PR comments**:
-   ```bash
-   gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments --jq '.[].body'
-   ```
-
-c. **Your own code integrity concerns** from reviewing the diff
-
-### Step 3: Spawn Reconciler (if findings exist)
-If there are findings from ANY source, spawn a **Reconciler** — a high-effort sub-agent that triages and deduplicates:
-
-```bash
-curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-  -H "Content-Type: application/json" \
-  -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE the following findings into a unified fix list.\n\n## Evaluator QA Verdicts\n<paste evaluator findings>\n\n## External Reviewer Comments (CodeRabbit/Gemini)\n<paste PR comments>\n\n## Queen Code Integrity Concerns\n<paste your concerns>\n\nFor each finding:\n1. Deduplicate — group related comments about the same issue\n2. Detect conflicts — flag where a UX fix and a code refactor touch the same file\n3. Prioritize — HIGH (blocking), MEDIUM (should fix), LOW (nice to have)\n4. Produce a unified fix list as numbered items with file paths\n\nWrite the reconciled fix list to {reconciliation_path}"}}'
-```
-
-### Step 4: Execute Fixes
-Once the Reconciler completes and `{reconciliation_path}` exists:
-
-a. Read the reconciled fix list
-b. Spawn code-quality workers to address the unified list:
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"code-quality","cli":"codex","initial_task":"<assign specific fixes from reconciliation.md>"}}'
-   ```
-c. Wait for workers to complete
-d. Review changes, commit, and push
-
-### Step 5: Repeat or Complete
-The loop is **quiescence-based** (no fixed iteration cap):
-
-1. Commit and push fixes, then use the new push as the review baseline. If NEW unresolved PR comments appear after that push, return to Step 2 and repeat until quiescent.
-2. Only exit when ALL are true at the same time: session is in `QaPassed` state (verdict submitted via `POST /api/sessions/{{{{session_id}}}}/qa/verdict`) if an Evaluator runs, the latest push has been live for at least 10 minutes, and `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since that push.
-3. When all conditions are met, mark the session complete (`POST /api/sessions/{{{{session_id}}}}/complete`).
+{post_workers_protocol}
 
 Log each iteration to `{coordination_log_path}`:
 ```
@@ -4252,6 +4357,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
 {task}"#,
             hardening = hardening,
             branch_protocol = branch_protocol,
+            required_protocol = required_protocol,
             session_id = session_id,
             cli = cli,
             prompts_dir = prompts_dir,
@@ -4262,12 +4368,14 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             plan_path = plan_path,
             lessons_dir = lessons_dir,
             coordination_log_path = coordination_log_path,
-            reconciliation_path = reconciliation_path,
             worker_worktree_root = worker_worktree_root,
+            queen_scope_rules = queen_scope_rules,
             plan_section = plan_section,
             worker_list = worker_list,
             qa_milestone_handoff = qa_milestone_handoff,
-            queen_quality_log = QUEEN_QUALITY_RECONCILIATION_LOG_LINES,
+            post_workers_protocol = post_workers_protocol,
+            queen_quality_log = Self::queen_quality_reconciliation_log_lines(has_evaluator),
+            final_integration_step = final_integration_step,
             worker_worktrees_dir = worker_worktrees_dir,
             worker_task_file_example = worker_task_file_example,
             task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
@@ -4279,6 +4387,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
         let role_name = config.role.as_ref()
             .map(|r| r.label.clone())
             .unwrap_or_else(|| format!("Worker {}", index));
+        let scope_block = Self::scope_block(".");
 
         let role_description = config.role.as_ref()
             .map(|r| match r.role_type.to_lowercase().as_str() {
@@ -4323,6 +4432,8 @@ You have full access to Claude Code tools:
 - **Bash** - Run shell commands
 - **Glob/Grep** - Search files and content
 - **Task** - Spawn subagents if needed
+
+{scope_block}
 
 ## Task File (File-Based Coordination)
 
@@ -4397,7 +4508,7 @@ cat ".hive-manager/{session_id}/conversations/worker-{index}.md"
 cat ".hive-manager/{session_id}/conversations/shared.md"
 ```
 
-Always try the curl API first. Only use file fallback if curl fails.
+You MUST call the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
@@ -4434,6 +4545,7 @@ After completing your task, transition to IDLE state. Continue checking your con
             role_description = role_description,
             queen_id = queen_id,
             session_id = session_id,
+            scope_block = scope_block,
             task_file = task_file,
             polling_instructions = polling_instructions
         )
@@ -4583,8 +4695,19 @@ Awaiting task assignment from the Queen."#,
     }
 
     /// Build the Queen's master prompt for Swarm mode with sequential planner spawning
-    fn build_swarm_queen_prompt(cli: &str, project_path: &Path, session_id: &str, planners: &[PlannerConfig], user_prompt: Option<&str>) -> String {
+    fn build_swarm_queen_prompt(
+        cli: &str,
+        project_path: &Path,
+        session_id: &str,
+        planners: &[PlannerConfig],
+        user_prompt: Option<&str>,
+        has_evaluator: bool,
+    ) -> String {
         let planner_count = planners.len();
+        let session_root = Self::session_root_path(project_path, session_id);
+        let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
+        let post_workers_protocol =
+            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
 
         // Build planner info section (what Queen will spawn)
         let mut planner_info = String::new();
@@ -4619,17 +4742,18 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
         } else {
             ""
         };
-        let qa_milestone_handoff = Self::build_qa_milestone_handoff(
-            session_id,
-            &Self::session_root_path(project_path, session_id),
-            "workers/planners",
-        );
+        let qa_milestone_handoff = if has_evaluator {
+            Self::build_qa_milestone_handoff(session_id, &session_root, "workers/planners")
+        } else {
+            String::new()
+        };
 
         format!(
 r#"# Queen Agent - Swarm Session
 
 You are the **Queen** orchestrating a multi-agent Swarm session. You spawn and coordinate Planners who each manage their own domain.
 {hardening}
+{required_protocol}
 
 ## Session Info
 
@@ -4776,33 +4900,7 @@ git commit -m "feat(DOMAIN): Brief description of what this domain accomplished"
 3. Run integration tests
 4. Final commit and push
 
-## Quality Reconciliation Protocol (MANDATORY after PR push)
-
-After all planners complete, integration is done, and changes are pushed to the PR branch:
-
-1. Push triggers CodeRabbit and Gemini reviewers automatically
-2. Track the latest push timestamp and treat it as the baseline for new review activity
-3. WAIT 10 minutes (`sleep 600`) so the latest push has been live long enough for reviewers
-4. Collect ALL findings since the latest push:
-   a. Evaluator QA verdicts — require `QaPassed` state (via `POST /api/sessions/{{{{session_id}}}}/qa/verdict` with verdict PASS) only when an Evaluator is attached
-   b. CodeRabbit + Gemini PR comments: `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments`
-   c. Your own code integrity concerns
-5. If findings exist, spawn a **Reconciler** worker to triage and deduplicate:
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"codex","initial_task":"RECONCILE findings into unified fix list. Write to .hive-manager/{{{{session_id}}}}/reconciliation.md"}}'
-   ```
-6. Read the reconciled fix list, spawn code-quality workers for the unified fixes
-7. Commit and push, then restart this loop using the new push as the baseline
-8. Only finish when ALL of these are true at the same time:
-   a. If an Evaluator is attached, session is in `QaPassed` state (verdict submitted via `POST /api/sessions/{{{{session_id}}}}/qa/verdict`)
-   b. The latest push has been live for at least 10 minutes
-   c. `gh api repos/{{{{owner}}}}/{{{{repo}}}}/pulls/{{{{pr_number}}}}/comments` returns no NEW unresolved comments since the latest push
-9. When all three conditions are met, mark the session complete:
-   ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{{{{session_id}}}}/complete"
-   ```
+{post_workers_protocol}
 
 Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 ```
@@ -4813,12 +4911,14 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
 
 {task}"#,
             hardening = hardening,
+            required_protocol = required_protocol,
             session_id = session_id,
             cli = cli,
             planner_info = planner_info,
             planner_count = planner_count,
             qa_milestone_handoff = qa_milestone_handoff,
-            queen_quality_log = QUEEN_QUALITY_RECONCILIATION_LOG_LINES,
+            post_workers_protocol = post_workers_protocol,
+            queen_quality_log = Self::queen_quality_reconciliation_log_lines(has_evaluator),
             task = user_prompt.unwrap_or("Awaiting instructions from the operator.")
         )
     }
@@ -5293,66 +5393,26 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         Ok(())
     }
 
-    /// Write a task file for a worker (STANDBY by default)
+    /// Write a task file for a worker (ACTIVE when pre-seeded with a task, otherwise STANDBY)
     fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>) -> Result<PathBuf, String> {
-        let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
-        std::fs::create_dir_all(&tasks_dir)
-            .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
-
-        let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
-
-        let (status, task_content) = if let Some(task) = initial_task {
-            ("ACTIVE", task.to_string())
-        } else {
-            ("STANDBY", "Awaiting task assignment. Monitor this file for updates.".to_string())
-        };
-
-        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-        let content = format!(
-"# Task Assignment - Worker {worker_index}
-
-## Status: {status}
-
-## Role Constraints
-
-- **EXECUTOR**: You have full authority to implement and fix issues.
-- **SCOPE**: Stay within your assigned domain/specialization.
-- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
-
-## Instructions
-
-{task_content}
-
-## Completion Protocol
-
-When task is complete, update this file:
-1. Change Status to: COMPLETED
-2. Add a summary under a new Result section
-
-If blocked, change Status to: BLOCKED and describe the issue.
-
----
-Last updated: {timestamp}
-",
-            worker_index = worker_index,
-            status = status,
-            task_content = task_content,
-            timestamp = timestamp
-        );
-
-        std::fs::write(&file_path, content)
-            .map_err(|e| format!("Failed to write task file: {}", e))?;
-
-        Ok(file_path)
+        let status = initial_task.map(|_| "ACTIVE");
+        Self::write_task_file_with_status(worktree_path, worker_index, initial_task, status)
     }
 
-    /// Write a task file with a specific status (used for sequential spawning)
-    fn write_task_file_with_status(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>, status: &str) -> Result<PathBuf, String> {
+    /// Write a task file with an optional status override (used for sequential spawning)
+    fn write_task_file_with_status(
+        worktree_path: &Path,
+        worker_index: u8,
+        initial_task: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<PathBuf, String> {
         let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
         let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
+        let scope_block = Self::scope_block(".");
+        let status = status.unwrap_or("STANDBY");
 
         let task_content = if let Some(task) = initial_task {
             task.to_string()
@@ -5372,6 +5432,8 @@ Last updated: {timestamp}
 - **SCOPE**: Stay within your assigned domain/specialization.
 - **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
 
+{scope_block}
+
 ## Instructions
 
 {task_content}
@@ -5389,6 +5451,7 @@ Last updated: {timestamp}
 ",
             worker_index = worker_index,
             status = status,
+            scope_block = scope_block,
             task_content = task_content,
             timestamp = timestamp
         );
@@ -5682,10 +5745,12 @@ Last updated: {timestamp}
         let master_prompt = Self::build_queen_master_prompt(
             &config.queen_config.cli,
             &project_path,
+            queen_cwd.as_ref(),
             &session_id,
             &config.workers,
             config.prompt.as_deref(),
             has_plan,
+            config.with_evaluator,
         );
         let prompt_file = match Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt) {
             Ok(prompt_file) => prompt_file,
@@ -6424,9 +6489,11 @@ Last updated: {timestamp}
 
             let queen_prompt = Self::build_fusion_queen_prompt(
                 &queen_cfg.cli,
+                &session.project_path,
                 session_id,
                 &variants,
                 &config.task_description,
+                false, // Fusion sessions never launch an Evaluator
             );
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "fusion-queen-prompt.md", &queen_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
@@ -6812,7 +6879,7 @@ Last updated: {timestamp}
             Path::new(&worker_cwd),
             index,
             worker_config.initial_prompt.as_deref(),
-            "ACTIVE",
+            Some("ACTIVE"),
         )
         .map_err(|err| {
             Self::rollback_worker_launch_artifacts(
@@ -7845,10 +7912,12 @@ Last updated: {timestamp}
             let master_prompt = Self::build_queen_master_prompt(
                 &config.queen_config.cli,
                 &session.project_path,
+                &session.project_path,
                 session_id,
                 &config.workers,
                 config.prompt.as_deref(),
                 has_plan,
+                config.with_evaluator,
             );
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
@@ -8125,7 +8194,14 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Write Queen prompt with sequential planner spawning protocol
-            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, &session.project_path, session_id, &planners, config.prompt.as_deref());
+            let master_prompt = Self::build_swarm_queen_prompt(
+                &config.queen_config.cli,
+                &session.project_path,
+                session_id,
+                &planners,
+                config.prompt.as_deref(),
+                config.with_evaluator,
+            );
             let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -8238,7 +8314,14 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Write Queen prompt to file and pass to CLI
-            let master_prompt = Self::build_swarm_queen_prompt(&config.queen_config.cli, &project_path, &session_id, &planners, config.prompt.as_deref());
+            let master_prompt = Self::build_swarm_queen_prompt(
+                &config.queen_config.cli,
+                &project_path,
+                &session_id,
+                &planners,
+                config.prompt.as_deref(),
+                config.with_evaluator,
+            );
             let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -9358,7 +9441,7 @@ mod tests {
         AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController, SessionError,
         SessionState, SessionType,
     };
-    use crate::pty::{AgentRole, AgentStatus, PtyManager};
+    use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
@@ -9506,6 +9589,11 @@ mod tests {
             false,
         );
 
+        assert_eq!(
+            extract_markdown_section(&prompt, "## Required Protocol"),
+            SessionController::evaluator_required_protocol("session-123"),
+        );
+        assert!(prompt.contains(".hive-manager/session-123/peer/qa-verdict.json"));
         assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
         assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
         assert!(!prompt.contains(r#""cli": "claude""#));
@@ -9530,9 +9618,142 @@ mod tests {
             false,
         );
 
-        assert!(prompt.contains("configured QA workers below (1 total)"));
+        assert_eq!(
+            extract_markdown_section(&prompt, "## Required Protocol"),
+            SessionController::evaluator_required_protocol("session-123"),
+        );
+        assert!(prompt.contains("configured QA workers below (1 total) before you grade any criterion"));
         assert!(prompt.contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
+        assert!(prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:"));
         assert!(!prompt.contains(r#""specialization": "api", "cli": "claude""#));
+    }
+
+    #[test]
+    fn scope_block_is_identical_across_worker_and_task_surfaces() {
+        let session_id = "session-scope-equality";
+        let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
+        let session_worktree_root = worktree_path
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("session worktree root");
+
+        let _ = std::fs::remove_dir_all(session_worktree_root);
+        std::fs::create_dir_all(&worktree_path).expect("create worktree");
+
+        let fusion_prompt = SessionController::build_fusion_worker_prompt(
+            session_id,
+            1,
+            "Variant 1",
+            "feat/test",
+            ".hive-manager/worktrees/session-scope-equality/worker-1",
+            "Test task",
+            "claude",
+        );
+        let worker_prompt = SessionController::build_worker_prompt(
+            1,
+            &AgentConfig {
+                role: Some(WorkerRole::new("backend", "Backend", "claude")),
+                ..AgentConfig::default()
+            },
+            "session-scope-equality-queen",
+            session_id,
+        );
+        let task_file_path = SessionController::write_task_file_with_status(
+            &worktree_path,
+            1,
+            Some("Test task"),
+            Some("ACTIVE"),
+        )
+        .expect("write task file");
+        let task_file = std::fs::read_to_string(&task_file_path).expect("read task file");
+
+        let expected = SessionController::scope_block(".");
+        assert_eq!(extract_markdown_section(&worker_prompt, "## Scope"), expected);
+        assert_eq!(extract_markdown_section(&fusion_prompt, "## Scope"), expected);
+        assert_eq!(extract_markdown_section(&task_file, "## Scope"), expected);
+
+        std::fs::remove_dir_all(session_worktree_root).expect("remove test worktree");
+    }
+
+    #[test]
+    fn required_protocol_block_is_identical_across_queens() {
+        let session_root = SessionController::session_root_path(Path::new("/repo"), "session-123");
+        let queen_master_prompt = SessionController::build_queen_master_prompt(
+            "claude",
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-123/queen"),
+            "session-123",
+            &[],
+            None,
+            false,
+            true,
+        );
+        let fusion_queen_prompt = SessionController::build_fusion_queen_prompt(
+            "claude",
+            Path::new("/repo"),
+            "session-123",
+            &[],
+            "Test task",
+            true,
+        );
+        let swarm_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            Path::new("/repo"),
+            "session-123",
+            &[],
+            None,
+            true,
+        );
+        let expected = SessionController::queen_required_protocol(&session_root, true);
+
+        assert_eq!(
+            extract_markdown_section(&queen_master_prompt, "## Required Protocol"),
+            expected,
+        );
+        assert_eq!(
+            extract_markdown_section(&fusion_queen_prompt, "## Required Protocol"),
+            expected,
+        );
+        assert_eq!(
+            extract_markdown_section(&swarm_queen_prompt, "## Required Protocol"),
+            expected,
+        );
+    }
+
+    #[test]
+    fn evaluator_required_protocol_omits_queen_only_handoff_and_wait_text() {
+        let evaluator_prompt = SessionController::build_evaluator_prompt(
+            "session-123",
+            &AgentConfig {
+                cli: "claude".to_string(),
+                model: Some("opus-4-6".to_string()),
+                ..AgentConfig::default()
+            },
+            &[],
+            false,
+        );
+        let required_protocol = extract_markdown_section(&evaluator_prompt, "## Required Protocol");
+
+        assert_eq!(
+            required_protocol,
+            SessionController::evaluator_required_protocol("session-123"),
+        );
+        assert!(!required_protocol.contains("signal the existing Evaluator"));
+        assert!(!required_protocol.contains("WAIT for"));
+        assert!(required_protocol.contains("The Queen signals you via"));
+    }
+
+    fn extract_markdown_section(content: &str, heading: &str) -> String {
+        let start = content
+            .find(heading)
+            .unwrap_or_else(|| panic!("missing heading: {heading}"));
+        let rest = &content[start..];
+        let search_offset = heading.len();
+        let end = rest[search_offset..]
+            .find("\n## ")
+            .map(|offset| start + search_offset + offset)
+            .unwrap_or(content.len());
+        content[start..end].trim_end().to_string()
     }
 
     fn test_controller() -> SessionController {

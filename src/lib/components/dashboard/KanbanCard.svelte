@@ -39,7 +39,7 @@
   }
 </script>
 
-<article class="card" aria-label={title}>
+<article class="card" aria-label={title} style:--session-color={session.color || 'var(--color-border)'}>
   <header class="card-head">
     <div class="title-wrap">
       <div class="status-icon" title={status} aria-hidden="true">
@@ -66,6 +66,7 @@
   .card {
     background: var(--bg-elevated);
     border: 1px solid var(--color-border);
+    border-left: 3px solid var(--session-color);
     border-radius: var(--radius-sm);
     padding: var(--space-3);
     display: flex;
@@ -74,7 +75,9 @@
     transition: border-color var(--transition-fast);
   }
   .card:hover {
-    border-color: var(--accent-cyan);
+    border-top-color: var(--accent-cyan);
+    border-right-color: var(--accent-cyan);
+    border-bottom-color: var(--accent-cyan);
   }
   .card-head {
     display: flex;
