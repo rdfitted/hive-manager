@@ -2596,7 +2596,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
 2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
    ```bash
    while [ ! -f "{qa_verdict_path}" ]; do
-     curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
        -H "Content-Type: application/json" \
        -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Evaluator verdict"}}'
      sleep 30
@@ -4407,7 +4407,7 @@ When polling for worker progress, iterate over every worker worktree instead of 
 
 ```bash
 for WT in "{worker_worktree_root}"/worker-*; do
-  curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+  curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
     -H "Content-Type: application/json" \
     -d '{{"agent_id":"queen","status":"working","summary":"Polling worker progress"}}'
   BR="hive/{session_id}/$(basename "$WT")"
