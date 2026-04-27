@@ -18,7 +18,15 @@ use crate::session::cell_status::{
     agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids, variant_to_cell_id,
     PRIMARY_CELL_ID, RESOLVER_CELL_ID,
 };
-use crate::templates::{PromptContext, TemplateEngine};
+use crate::session::polling_intervals::{
+    ACTIVATION_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL, SMOKE_ACTIVE_POLL_LABEL,
+    SMOKE_EVALUATOR_FIRST_POLL_INTERVAL, SMOKE_EVALUATOR_FIRST_POLL_LABEL,
+    SMOKE_IDLE_POLL_INTERVAL, SMOKE_IDLE_POLL_LABEL, STANDARD_ACTIVE_POLL_INTERVAL,
+    STANDARD_ACTIVE_POLL_LABEL, STANDARD_EVALUATOR_FIRST_POLL_INTERVAL,
+    STANDARD_EVALUATOR_FIRST_POLL_LABEL, STANDARD_IDLE_POLL_INTERVAL,
+    STANDARD_IDLE_POLL_LABEL,
+};
+use crate::templates::{heartbeat_snippet, PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
 use crate::artifacts::collector::ArtifactCollector;
 use crate::domain::ArtifactBundle;
@@ -561,12 +569,13 @@ while true; do
   STATUS=$(grep "^## Status:" "{}" | head -1)
   if [[ "$STATUS" == *"ACTIVE"* ]]; then break; fi
 {}
-  sleep 30
+  sleep {}
 done
 ```
 "#,
                 task_file,
-                heartbeat_line
+                heartbeat_line,
+                ACTIVATION_POLL_INTERVAL.as_secs()
             )
         }
         CliBehavior::ActionProne => {
@@ -687,7 +696,7 @@ impl SessionController {
 
             let queen_config = AgentConfig {
                 cli: cmd.to_string(),
-                model: CliRegistry::default_model(cmd).map(str::to_string),
+                model: CliRegistry::default_model(cmd).map(ToString::to_string),
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
                 name: None,
@@ -731,7 +740,7 @@ impl SessionController {
 
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
-                    model: CliRegistry::default_model(cmd).map(str::to_string),
+                    model: CliRegistry::default_model(cmd).map(ToString::to_string),
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     name: None,
@@ -764,7 +773,7 @@ impl SessionController {
             last_activity_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
-            default_model: CliRegistry::default_model(cmd).map(str::to_string),
+            default_model: CliRegistry::default_model(cmd).map(ToString::to_string),
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -2710,19 +2719,31 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         );
 
         if smoke_test {
-            variables.insert("evaluator_first_poll_interval".to_string(), "30 seconds".to_string());
-            variables.insert("evaluator_first_poll_secs".to_string(), "30".to_string());
-            variables.insert("idle_poll_interval".to_string(), "30 seconds".to_string());
-            variables.insert("idle_poll_secs".to_string(), "30".to_string());
-            variables.insert("active_poll_interval".to_string(), "15 seconds".to_string());
-            variables.insert("active_poll_secs".to_string(), "15".to_string());
+            variables.insert("idle_poll_interval".to_string(), SMOKE_IDLE_POLL_LABEL.to_string());
+            variables.insert("idle_poll_secs".to_string(), SMOKE_IDLE_POLL_INTERVAL.as_secs().to_string());
+            variables.insert("active_poll_interval".to_string(), SMOKE_ACTIVE_POLL_LABEL.to_string());
+            variables.insert("active_poll_secs".to_string(), SMOKE_ACTIVE_POLL_INTERVAL.as_secs().to_string());
+            variables.insert(
+                "evaluator_first_poll_interval".to_string(),
+                SMOKE_EVALUATOR_FIRST_POLL_LABEL.to_string(),
+            );
+            variables.insert(
+                "evaluator_first_poll_secs".to_string(),
+                SMOKE_EVALUATOR_FIRST_POLL_INTERVAL.as_secs().to_string(),
+            );
         } else {
-            variables.insert("evaluator_first_poll_interval".to_string(), "20 minutes".to_string());
-            variables.insert("evaluator_first_poll_secs".to_string(), "1200".to_string());
-            variables.insert("idle_poll_interval".to_string(), "8 minutes".to_string());
-            variables.insert("idle_poll_secs".to_string(), "480".to_string());
-            variables.insert("active_poll_interval".to_string(), "8 minutes".to_string());
-            variables.insert("active_poll_secs".to_string(), "480".to_string());
+            variables.insert("idle_poll_interval".to_string(), STANDARD_IDLE_POLL_LABEL.to_string());
+            variables.insert("idle_poll_secs".to_string(), STANDARD_IDLE_POLL_INTERVAL.as_secs().to_string());
+            variables.insert("active_poll_interval".to_string(), STANDARD_ACTIVE_POLL_LABEL.to_string());
+            variables.insert("active_poll_secs".to_string(), STANDARD_ACTIVE_POLL_INTERVAL.as_secs().to_string());
+            variables.insert(
+                "evaluator_first_poll_interval".to_string(),
+                STANDARD_EVALUATOR_FIRST_POLL_LABEL.to_string(),
+            );
+            variables.insert(
+                "evaluator_first_poll_secs".to_string(),
+                STANDARD_EVALUATOR_FIRST_POLL_INTERVAL.as_secs().to_string(),
+            );
         }
 
         Self::render_named_prompt("roles/evaluator", session_id, None, variables)
@@ -3728,10 +3749,10 @@ Each worker should use the Inter-Agent Communication endpoints from their prompt
 Workers MUST use curl to exercise the conversation and heartbeat APIs.
 
 ### Task 1 (Worker 1):
-1. Send heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"working","summary":"Starting smoke test"}}'`
+1. Send heartbeat: `{smoke_worker_start_heartbeat}`
 2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
 3. Post to shared: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
-4. Send completed heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"completed","summary":"Smoke test done"}}'`
+4. Send completed heartbeat: `{smoke_worker_completed_heartbeat}`
 
 ### Task 2 (Worker 2, if present):
 1. Send heartbeat with working status
@@ -3771,6 +3792,20 @@ This tests that:
             dependencies = dependencies.trim_end(),
             evaluator_section = evaluator_section,
             evaluator_test_items = evaluator_test_items,
+            smoke_worker_start_heartbeat = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                "worker-1",
+                "working",
+                "Starting smoke test",
+            ),
+            smoke_worker_completed_heartbeat = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                "worker-1",
+                "completed",
+                "Smoke test done",
+            ),
         )
     }
 
@@ -4185,9 +4220,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/
   -d '{{"from":"queen","content":"Announcement"}}'
 
 # Heartbeat (every 60-90s)
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{{"agent_id":"queen","status":"working","summary":"Monitoring workers"}}'
+{queen_heartbeat_snippet}
 
 # Inspect active sessions and heartbeat state
 curl -s "http://localhost:18800/api/sessions/active"
@@ -4405,6 +4438,13 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             qa_milestone_handoff = qa_milestone_handoff,
             post_workers_protocol = post_workers_protocol,
             queen_quality_log = Self::queen_quality_reconciliation_log_lines(has_evaluator),
+            queen_heartbeat_snippet = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                "queen",
+                "working",
+                "Monitoring workers",
+            ),
             final_integration_step = final_integration_step,
             worker_worktrees_dir = worker_worktrees_dir,
             worker_task_file_example = worker_task_file_example,
@@ -4513,9 +4553,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/
 curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared?since=<last_check_ts>"
 
 # Heartbeat (every 60-90s)
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{{"agent_id":"worker-{index}","status":"working","summary":"Current task focus"}}'
+{worker_heartbeat_snippet}
 
 # Inspect active sessions and heartbeat state
 curl -s "http://localhost:18800/api/sessions/active"
@@ -4580,6 +4618,13 @@ After completing your task, transition to IDLE state. Continue checking your con
             session_id = session_id,
             scope_block = scope_block,
             task_file = task_file,
+            worker_heartbeat_snippet = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                &format!("worker-{index}"),
+                "working",
+                "Current task focus",
+            ),
             polling_instructions = polling_instructions
         )
     }

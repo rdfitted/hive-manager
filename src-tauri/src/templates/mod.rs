@@ -53,6 +53,20 @@ fn normalize_api_base_url(raw: Option<&String>) -> String {
     trimmed.trim_end_matches('/').to_string()
 }
 
+pub fn heartbeat_snippet(
+    api_base_url: &str,
+    session_id: &str,
+    agent_id: &str,
+    status: &str,
+    summary: &str,
+) -> String {
+    format!(
+        r#"curl -s -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{{"agent_id":"{agent_id}","status":"{status}","summary":"{summary}"}}'"#
+    )
+}
+
 /// Information about a worker for prompt rendering
 #[derive(Debug, Clone)]
 pub struct WorkerInfo {
@@ -420,9 +434,7 @@ You are a ruthless QA engineer. Grade against the contract. Do not rationalize f
    ```bash
    FIRST_WAIT=1
    while [ ! -f ".hive-manager/{{session_id}}/peer/milestone-ready.json" ]; do
-     curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-       -H "Content-Type: application/json" \
-       -d '{"agent_id":"{{session_id}}-evaluator","status":"idle","summary":"Waiting for milestone handoff"}'
+     {{evaluator_idle_heartbeat_snippet}}
      if [ "$FIRST_WAIT" = "1" ]; then
        FIRST_WAIT=0
        sleep {{evaluator_first_poll_secs}}
@@ -873,7 +885,7 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/work
 ### Broadcast to all:
 curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+{{queen_heartbeat_snippet}}
 
 ## Learning Curation Protocol
 
@@ -985,7 +997,7 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/work
 ### Broadcast to all:
 curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+{{queen_heartbeat_snippet}}
 
 ## Resolver Invocation
 
@@ -1353,6 +1365,26 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         );
         let api_base_url = normalize_api_base_url(context.variables.get("api_base_url"));
         rendered = rendered.replace("{{api_base_url}}", &api_base_url);
+        rendered = rendered.replace(
+            "{{queen_heartbeat_snippet}}",
+            &heartbeat_snippet(
+                &api_base_url,
+                &context.session_id,
+                "queen",
+                "working",
+                "Monitoring workers",
+            ),
+        );
+        rendered = rendered.replace(
+            "{{evaluator_idle_heartbeat_snippet}}",
+            &heartbeat_snippet(
+                &api_base_url,
+                &context.session_id,
+                &format!("{}-evaluator", context.session_id),
+                "idle",
+                "Waiting for milestone handoff",
+            ),
+        );
 
         for (key, value) in &context.variables {
             let placeholder = format!("{{{{{}}}}}", key);
