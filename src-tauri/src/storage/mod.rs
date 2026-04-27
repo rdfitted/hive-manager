@@ -587,17 +587,37 @@ impl SessionStorage {
             cli: "codex".to_string(),
             model: "gpt-5.5".to_string(),
         });
+        default_roles.insert("reviewer".to_string(), RoleDefaults {
+            cli: "claude".to_string(),
+            model: "claude-opus-4-7".to_string(),
+        });
+        default_roles.insert("reviewer-quick".to_string(), RoleDefaults {
+            cli: "claude".to_string(),
+            model: "claude-opus-4-7".to_string(),
+        });
+        default_roles.insert("resolver".to_string(), RoleDefaults {
+            cli: "claude".to_string(),
+            model: "claude-opus-4-7".to_string(),
+        });
+        default_roles.insert("tester".to_string(), RoleDefaults {
+            cli: "claude".to_string(),
+            model: "claude-opus-4-7".to_string(),
+        });
         default_roles.insert("code-quality".to_string(), RoleDefaults {
             cli: "codex".to_string(),
             model: "gpt-5.5".to_string(),
         });
         default_roles.insert("evaluator".to_string(), RoleDefaults {
-            cli: "qwen".to_string(),
-            model: "qwen3-coder".to_string(),
+            cli: "claude".to_string(),
+            model: "claude-opus-4-7".to_string(),
         });
         default_roles.insert("qa-worker".to_string(), RoleDefaults {
-            cli: "gemini".to_string(),
-            model: "gemini-2.5-pro".to_string(),
+            cli: "claude".to_string(),
+            model: "claude-opus-4-7".to_string(),
+        });
+        default_roles.insert("general".to_string(), RoleDefaults {
+            cli: "claude".to_string(),
+            model: "claude-opus-4-7".to_string(),
         });
 
         AppConfig {

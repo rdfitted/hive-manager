@@ -136,7 +136,7 @@ mod tests {
     fn make_spec() -> AgentLaunchSpec {
         AgentLaunchSpec {
             cli: "opencode".to_string(),
-            model: Some("claude-3.5-sonnet".to_string()),
+            model: Some("opencode/big-pickle".to_string()),
             flags: vec![],
             cwd: PathBuf::from("/project"),
             env: std::collections::HashMap::new(),
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(cmd.env.get("OPENCODE_YOLO"), Some(&"true".to_string()));
         // Check model flag
         assert!(cmd.args.contains(&"-m".to_string()));
-        assert!(cmd.args.contains(&"claude-3.5-sonnet".to_string()));
+        assert!(cmd.args.contains(&"opencode/big-pickle".to_string()));
         // Check prompt flag
         assert!(cmd.args.contains(&"--prompt".to_string()));
     }

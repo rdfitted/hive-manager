@@ -109,6 +109,20 @@ impl CliRegistry {
             .map(|defaults| (defaults.cli.as_str(), defaults.model.as_str()))
     }
 
+    /// Get the built-in default model for a CLI.
+    pub fn default_model(cli: &str) -> Option<&'static str> {
+        match cli {
+            "claude" => Some("opus-4-7"),
+            "gemini" => Some("gemini-2.5-pro"),
+            "opencode" => Some("opencode/big-pickle"),
+            "codex" => Some("gpt-5.5"),
+            "cursor" => Some("composer-2"),
+            "droid" => Some("glm-5.1"),
+            "qwen" => Some("qwen3-coder"),
+            _ => None,
+        }
+    }
+
     /// Update the config
     pub fn update_config(&mut self, config: AppConfig) {
         self.config = config;
@@ -350,5 +364,13 @@ mod tests {
             CliRegistry::get_behavior_for_role("claude", Some("backend")),
             CliBehavior::ActionProne
         ));
+    }
+
+    #[test]
+    fn test_default_model_lookup() {
+        assert_eq!(CliRegistry::default_model("claude"), Some("opus-4-7"));
+        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.5"));
+        assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
+        assert_eq!(CliRegistry::default_model("unknown"), None);
     }
 }

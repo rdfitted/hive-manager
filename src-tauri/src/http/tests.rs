@@ -2557,6 +2557,47 @@ async fn test_launch_fusion_success() {
 }
 
 #[tokio::test]
+async fn test_launch_swarm_accepts_model_capable_configs() {
+    let app = setup_test_app().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate the feature",
+        "planner_count": 1,
+        "default_cli": "codex",
+        "default_model": "gpt-5.5",
+        "planner_config": {
+            "cli": "droid",
+            "model": "glm-5.1",
+            "flags": []
+        },
+        "workers_per_planner": [
+            {
+                "cli": "codex",
+                "model": "gpt-5.5",
+                "flags": []
+            }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/swarm")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400.
+    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();

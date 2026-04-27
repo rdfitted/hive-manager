@@ -687,7 +687,7 @@ impl SessionController {
 
             let queen_config = AgentConfig {
                 cli: cmd.to_string(),
-                model: if cmd == "claude" { Some("opus-4-7".to_string()) } else { None },
+                model: CliRegistry::default_model(cmd).map(str::to_string),
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
                 name: None,
@@ -731,7 +731,7 @@ impl SessionController {
 
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
-                    model: if cmd == "claude" { Some("opus-4-7".to_string()) } else { None },
+                    model: CliRegistry::default_model(cmd).map(str::to_string),
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     name: None,
@@ -764,7 +764,7 @@ impl SessionController {
             last_activity_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
-            default_model: if cmd == "claude" { Some("opus-4-7".to_string()) } else { None },
+            default_model: CliRegistry::default_model(cmd).map(str::to_string),
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
