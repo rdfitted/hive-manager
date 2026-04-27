@@ -68,12 +68,30 @@ pub fn heartbeat_snippet(
     .to_string();
 
     format!(
-        r#"cat <<'JSON' | curl -s -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
+        r#"cat <<'JSON' | curl -fsS -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
   -H "Content-Type: application/json" \
   --data-binary @-
 {body}
 JSON"#
     )
+}
+
+fn required_variable<'a>(
+    variables: &'a HashMap<String, String>,
+    key: &str,
+) -> Result<&'a str, TemplateError> {
+    let value = variables
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TemplateError::Invalid(format!(
+                "generic_heartbeat_snippet requires non-empty variable `{}`",
+                key
+            ))
+        })?;
+
+    Ok(value)
 }
 
 /// Information about a worker for prompt rendering
@@ -466,7 +484,7 @@ Use these defaults when spawning QA workers unless the plan specifies otherwise.
 3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`, and emit a heartbeat inside each polling iteration:
    ```bash
    while true; do
-     curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+     curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
        -H "Content-Type: application/json" \
        -d '{"agent_id":"{{session_id}}-evaluator","status":"working","summary":"Polling QA workers"}'
      # Check QA worker task files here; break when all are COMPLETED or BLOCKED.
@@ -503,7 +521,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 
 ### Submit Verdict (Canonical Path)
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
   -H "Content-Type: application/json" \
   -d '{"verdict":"PASS","commit_sha":"<git-sha-if-any>","rationale":"<optional explanation>"}'
 ```
@@ -525,7 +543,7 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
 
 1. You MUST submit the verdict via the canonical HTTP endpoint. You MUST substitute your computed verdict and rationale — never send a literal 'PASS' without computing it:
    ```bash
-   curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
+   curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
      -H "Content-Type: application/json" \
      -d '{"verdict":"<PASS|FAIL>","commit_sha":"<sha>","rationale":"<one-line rationale based on contract criteria>"}'
    ```
@@ -607,7 +625,7 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 Before long-running checks and between major test steps, emit:
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running UI QA"}'
 ```
@@ -696,7 +714,7 @@ You are the API QA specialist for session `{{session_id}}`.
 
 Before long-running checks and between major test steps, emit:
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running API QA"}'
 ```
@@ -753,7 +771,7 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 
 Before long-running checks and between major test steps, emit:
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running accessibility QA"}'
 ```
@@ -857,11 +875,11 @@ curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
 {{queen_heartbeat_snippet}}
 
@@ -969,11 +987,11 @@ curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
 {{queen_heartbeat_snippet}}
 
@@ -983,7 +1001,7 @@ When all Fusion candidate workers have completed their implementation pass, or w
 
 ### Launch the resolver
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
   -H "Content-Type: application/json" \
   -d '{"candidate_ids": {{variant_ids}}, "timeout_secs": 120}'
 ```
@@ -1353,28 +1371,21 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
                 "Monitoring workers",
             ),
         );
-        rendered = rendered.replace(
-            "{{generic_heartbeat_snippet}}",
-            &heartbeat_snippet(
-                &api_base_url,
-                &context.session_id,
-                context
-                    .variables
-                    .get("agent_id")
-                    .map(String::as_str)
-                    .unwrap_or_default(),
-                context
-                    .variables
-                    .get("heartbeat_status")
-                    .map(String::as_str)
-                    .unwrap_or_default(),
-                context
-                    .variables
-                    .get("heartbeat_summary")
-                    .map(String::as_str)
-                    .unwrap_or_default(),
-            ),
-        );
+        if rendered.contains("{{generic_heartbeat_snippet}}") {
+            let agent_id = required_variable(&context.variables, "agent_id")?;
+            let heartbeat_status = required_variable(&context.variables, "heartbeat_status")?;
+            let heartbeat_summary = required_variable(&context.variables, "heartbeat_summary")?;
+            rendered = rendered.replace(
+                "{{generic_heartbeat_snippet}}",
+                &heartbeat_snippet(
+                    &api_base_url,
+                    &context.session_id,
+                    agent_id,
+                    heartbeat_status,
+                    heartbeat_summary,
+                ),
+            );
+        }
         rendered = rendered.replace(
             "{{evaluator_idle_heartbeat_snippet}}",
             &heartbeat_snippet(
@@ -1609,6 +1620,7 @@ mod tests {
         );
 
         assert!(rendered.contains("cat <<'JSON' | curl"));
+        assert!(rendered.contains("curl -fsS -X POST"));
         assert!(rendered.contains("--data-binary @-"));
         assert!(rendered.contains(r#""summary":"Don't block""#));
         assert!(!rendered.contains(" -d '"));
@@ -1638,6 +1650,26 @@ mod tests {
         assert!(!prompt.contains(concat!("working", "|", "idle")));
         assert!(prompt.contains(r#""agent_id":"session-123-worker-1""#));
         assert!(prompt.contains(r#""summary":"Implementing backend task""#));
+    }
+
+    #[test]
+    fn rendered_worker_prompt_rejects_missing_generic_heartbeat_variables() {
+        let err = TemplateEngine::default()
+            .render_worker_prompt(
+                &WorkerRole::new("backend", "Backend", "claude"),
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: Some("Build API".to_string()),
+                    variables: HashMap::new(),
+                },
+            )
+            .expect_err("missing heartbeat variables should fail rendering");
+
+        assert!(matches!(err, TemplateError::Invalid(_)));
+        assert!(err
+            .to_string()
+            .contains("generic_heartbeat_snippet requires non-empty variable `agent_id`"));
     }
 
     #[test]

@@ -2572,8 +2572,11 @@ async fn test_launch_fusion_success() {
         .await
         .unwrap();
 
-    // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400
-    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+    let status = response.status();
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
 }
 
 #[tokio::test]
@@ -2617,8 +2620,10 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
         .unwrap();
 
     let status = response.status();
-    // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400.
-    assert_ne!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
     if status == StatusCode::CREATED {
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2638,10 +2643,16 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
             .filter(|agent| matches!(agent.role, AgentRole::Worker { .. }))
             .collect();
         assert_eq!(workers.len(), 2);
-        assert_eq!(workers[0].config.cli, "codex");
-        assert_eq!(workers[0].config.model.as_deref(), Some("gpt-5.5"));
-        assert_eq!(workers[1].config.cli, "droid");
-        assert_eq!(workers[1].config.model.as_deref(), Some("glm-5.1"));
+        let codex_worker = workers
+            .iter()
+            .find(|worker| worker.config.cli == "codex")
+            .expect("codex worker should be present");
+        assert_eq!(codex_worker.config.model.as_deref(), Some("gpt-5.5"));
+        let droid_worker = workers
+            .iter()
+            .find(|worker| worker.config.cli == "droid")
+            .expect("droid worker should be present");
+        assert_eq!(droid_worker.config.model.as_deref(), Some("glm-5.1"));
     }
 }
 
@@ -2688,8 +2699,10 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
         .unwrap();
 
     let status = response.status();
-    // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400.
-    assert_ne!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
     if status == StatusCode::CREATED {
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
@@ -2787,7 +2800,10 @@ async fn test_launch_solo_accepts_droid_model_config() {
 
     let status = response.status();
     // Droid launches through the generic Solo endpoint; there is no dedicated Droid endpoint.
-    assert_ne!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
     if status == StatusCode::CREATED {
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();

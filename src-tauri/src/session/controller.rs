@@ -45,6 +45,23 @@ const QUEEN_QUALITY_RECONCILIATION_LOG_LINES_NO_EVALUATOR: &str = r#"[TIMESTAMP]
 [TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#;
 
+fn extract_model_arg(args: &[&str]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if *arg == "-m" || *arg == "--model" {
+            return iter.next().map(|model| (*model).to_string());
+        }
+
+        if let Some(model) = arg.strip_prefix("--model=") {
+            if !model.is_empty() {
+                return Some(model.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
     Hive { worker_count: u8 },
@@ -660,6 +677,8 @@ impl SessionController {
         } else {
             (parts[0], parts[1..].to_vec())
         };
+        let launch_model = extract_model_arg(&base_args)
+            .or_else(|| CliRegistry::default_model(cmd).map(ToString::to_string));
 
         {
             let pty_manager = self.pty_manager.read();
@@ -693,7 +712,7 @@ impl SessionController {
 
             let queen_config = AgentConfig {
                 cli: cmd.to_string(),
-                model: CliRegistry::default_model(cmd).map(ToString::to_string),
+                model: launch_model.clone(),
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
                 name: None,
@@ -737,7 +756,7 @@ impl SessionController {
 
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
-                    model: CliRegistry::default_model(cmd).map(ToString::to_string),
+                    model: launch_model.clone(),
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     name: None,
@@ -770,7 +789,7 @@ impl SessionController {
             last_activity_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
-            default_model: CliRegistry::default_model(cmd).map(ToString::to_string),
+            default_model: launch_model,
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -9572,6 +9591,7 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        extract_model_arg,
         parse_persisted_session_state, serialize_session_state, AgentConfig, AgentInfo,
         AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController, SessionError,
         SessionState, SessionType,
@@ -9585,6 +9605,25 @@ mod tests {
     use tempfile::TempDir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn extract_model_arg_reads_short_long_and_equals_forms() {
+        assert_eq!(
+            extract_model_arg(&["--dangerously-skip-permissions", "-m", "gpt-5.5"])
+                .as_deref(),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            extract_model_arg(&["--model", "opus-4-7"]).as_deref(),
+            Some("opus-4-7")
+        );
+        assert_eq!(
+            extract_model_arg(&["--model=gemini-2.5-pro"]).as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(extract_model_arg(&["--model="]), None);
+        assert_eq!(extract_model_arg(&["-m"]), None);
+    }
 
     #[test]
     fn session_state_variants_exist() {
