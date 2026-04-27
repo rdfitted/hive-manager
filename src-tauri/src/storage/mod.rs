@@ -589,35 +589,35 @@ impl SessionStorage {
         });
         default_roles.insert("reviewer".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "claude-opus-4-7".to_string(),
+            model: "opus-4-7".to_string(),
         });
         default_roles.insert("reviewer-quick".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "claude-opus-4-7".to_string(),
+            model: "opus-4-7".to_string(),
         });
         default_roles.insert("resolver".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "claude-opus-4-7".to_string(),
+            model: "opus-4-7".to_string(),
         });
         default_roles.insert("tester".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "claude-opus-4-7".to_string(),
+            model: "opus-4-7".to_string(),
         });
         default_roles.insert("code-quality".to_string(), RoleDefaults {
             cli: "codex".to_string(),
             model: "gpt-5.5".to_string(),
         });
         default_roles.insert("evaluator".to_string(), RoleDefaults {
-            cli: "claude".to_string(),
-            model: "claude-opus-4-7".to_string(),
+            cli: "qwen".to_string(),
+            model: "qwen3-coder".to_string(),
         });
         default_roles.insert("qa-worker".to_string(), RoleDefaults {
-            cli: "claude".to_string(),
-            model: "claude-opus-4-7".to_string(),
+            cli: "gemini".to_string(),
+            model: "gemini-2.5-pro".to_string(),
         });
         default_roles.insert("general".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "claude-opus-4-7".to_string(),
+            model: "opus-4-7".to_string(),
         });
 
         AppConfig {
@@ -1310,6 +1310,25 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap();
         (storage, temp_dir)
+    }
+
+    #[test]
+    fn test_default_role_models_match_frontend_defaults() {
+        let config = SessionStorage::default_config();
+
+        for role in ["backend", "reviewer", "reviewer-quick", "resolver", "tester", "general"] {
+            let defaults = config.default_roles.get(role).unwrap();
+            assert_eq!(defaults.cli, "claude");
+            assert_eq!(defaults.model, "opus-4-7");
+        }
+
+        let evaluator = config.default_roles.get("evaluator").unwrap();
+        assert_eq!(evaluator.cli, "qwen");
+        assert_eq!(evaluator.model, "qwen3-coder");
+
+        let qa_worker = config.default_roles.get("qa-worker").unwrap();
+        assert_eq!(qa_worker.cli, "gemini");
+        assert_eq!(qa_worker.model, "gemini-2.5-pro");
     }
 
     fn sample_persisted_session(session_id: &str) -> PersistedSession {

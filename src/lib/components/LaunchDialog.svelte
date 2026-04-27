@@ -7,7 +7,7 @@
   import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
   import { templates, selectedTemplate } from '$lib/stores/templates';
-  import { cliOptions, defaultRoles, getDefaultModel } from '$lib/config/clis';
+  import { cliOptions, defaultRoles } from '$lib/config/clis';
 
   export let show: boolean = false;
 

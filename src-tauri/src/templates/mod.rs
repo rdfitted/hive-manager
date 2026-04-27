@@ -60,10 +60,17 @@ pub fn heartbeat_snippet(
     status: &str,
     summary: &str,
 ) -> String {
+    let body = serde_json::json!({
+        "agent_id": agent_id,
+        "status": status,
+        "summary": summary,
+    })
+    .to_string();
+
     format!(
         r#"curl -s -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
   -H "Content-Type: application/json" \
-  -d '{{"agent_id":"{agent_id}","status":"{status}","summary":"{summary}"}}'"#
+  -d '{body}'"#
     )
 }
 
@@ -289,9 +296,7 @@ You are a Backend Worker in a multi-agent coding session.
 
 ## Heartbeat (every 60-90s — REQUIRED)
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+{{generic_heartbeat_snippet}}
 ```
 
 ## Current Assignment
@@ -318,9 +323,7 @@ You are a Frontend Worker in a multi-agent coding session.
 
 ## Heartbeat (every 60-90s — REQUIRED)
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+{{generic_heartbeat_snippet}}
 ```
 
 ## Current Assignment
@@ -348,9 +351,7 @@ You are a Coherence Worker in a multi-agent coding session.
 
 ## Heartbeat (every 60-90s — REQUIRED)
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+{{generic_heartbeat_snippet}}
 ```
 
 ## Current Assignment
@@ -378,9 +379,7 @@ You are a Simplify Worker in a multi-agent coding session.
 
 ## Heartbeat (every 60-90s — REQUIRED)
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+{{generic_heartbeat_snippet}}
 ```
 
 ## Current Assignment
@@ -405,9 +404,7 @@ You are a Worker in a multi-agent coding session.
 
 ## Heartbeat (every 60-90s — REQUIRED)
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+{{generic_heartbeat_snippet}}
 ```
 
 ## Current Assignment
@@ -659,13 +656,6 @@ CRITERION 2: PASS|FAIL - [UI evidence, screenshots, or exact failure]
 
 Always reference criteria by number. Fail when the behavior is flaky, blocked, ambiguous, or visually broken.
 
-## Heartbeat (every 60-90s — REQUIRED)
-```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
-```
-
 ## Additional Guidance
 
 {{custom_instructions}}
@@ -723,13 +713,6 @@ CRITERION 2: PASS|FAIL - [endpoint, response details, and evidence]
 
 Always reference criteria by number. Fail when a response is ambiguous, unverified, or missing error coverage.
 
-## Heartbeat (every 60-90s — REQUIRED)
-```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
-```
-
 ## Additional Guidance
 
 {{custom_instructions}}
@@ -786,13 +769,6 @@ CRITERION 2: PASS|FAIL - [a11y evidence, score, or exact defect]
 ```
 
 Always reference criteria by number. Fail when accessibility evidence is partial or a key path is untestable.
-
-## Heartbeat (every 60-90s — REQUIRED)
-```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
-```
 
 ## Additional Guidance
 
@@ -1373,6 +1349,16 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
                 "queen",
                 "working",
                 "Monitoring workers",
+            ),
+        );
+        rendered = rendered.replace(
+            "{{generic_heartbeat_snippet}}",
+            &heartbeat_snippet(
+                &api_base_url,
+                &context.session_id,
+                "<your-id>",
+                "working|idle",
+                "<what>",
             ),
         );
         rendered = rendered.replace(

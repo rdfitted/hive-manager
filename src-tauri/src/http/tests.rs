@@ -2185,11 +2185,31 @@ async fn test_add_worker_accepts_latest_worker_models() {
             .await
             .unwrap();
 
+        let status = response.status();
         assert_ne!(
-            response.status(),
+            status,
             StatusCode::BAD_REQUEST,
             "{cli}/{model} should be accepted as a worker model"
         );
+        if status == StatusCode::CREATED {
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            let worker_id = response_json
+                .get("worker_id")
+                .and_then(|value| value.as_str())
+                .expect("created worker response includes worker_id");
+            let session = controller
+                .read()
+                .get_session("session-latest-models")
+                .expect("session should still exist");
+            let worker = session
+                .agents
+                .iter()
+                .find(|agent| agent.id == worker_id)
+                .expect("created worker should be stored on session");
+            assert_eq!(worker.config.cli, cli);
+            assert_eq!(worker.config.model.as_deref(), Some(model));
+        }
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -2558,7 +2578,7 @@ async fn test_launch_fusion_success() {
 
 #[tokio::test]
 async fn test_create_hive_accepts_per_worker_model_overrides() {
-    let app = setup_test_app().await;
+    let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
 
     let body = serde_json::json!({
@@ -2596,13 +2616,38 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
         .await
         .unwrap();
 
+    let status = response.status();
     // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400.
-    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+    assert_ne!(status, StatusCode::BAD_REQUEST);
+    if status == StatusCode::CREATED {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let session_id = launch_response
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .expect("launch response includes session_id");
+        let session = controller
+            .read()
+            .get_session(session_id)
+            .expect("created hive session should be stored");
+        assert_eq!(session.default_cli, "claude");
+        assert_eq!(session.default_model.as_deref(), Some("opus-4-7"));
+        let workers: Vec<_> = session
+            .agents
+            .iter()
+            .filter(|agent| matches!(agent.role, AgentRole::Worker { .. }))
+            .collect();
+        assert_eq!(workers.len(), 2);
+        assert_eq!(workers[0].config.cli, "codex");
+        assert_eq!(workers[0].config.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(workers[1].config.cli, "droid");
+        assert_eq!(workers[1].config.model.as_deref(), Some("glm-5.1"));
+    }
 }
 
 #[tokio::test]
 async fn test_launch_swarm_accepts_model_capable_configs() {
-    let app = setup_test_app().await;
+    let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
 
     let body = serde_json::json!({
@@ -2642,13 +2687,83 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
         .await
         .unwrap();
 
+    let status = response.status();
     // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400.
-    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+    assert_ne!(status, StatusCode::BAD_REQUEST);
+    if status == StatusCode::CREATED {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let session_id = launch_response
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .expect("launch response includes session_id");
+        let session = controller
+            .read()
+            .get_session(session_id)
+            .expect("created swarm session should be stored");
+        assert_eq!(session.default_cli, "codex");
+        assert_eq!(session.default_model.as_deref(), Some("gpt-5.5"));
+        let queen = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Queen))
+            .expect("swarm session should include queen");
+        assert_eq!(queen.config.cli, "qwen");
+        assert_eq!(queen.config.model.as_deref(), Some("qwen3-coder"));
+        let planner = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Planner { .. }))
+            .expect("swarm session should include planner");
+        assert_eq!(planner.config.cli, "droid");
+        assert_eq!(planner.config.model.as_deref(), Some("glm-5.1"));
+        let worker = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Worker { .. }))
+            .expect("swarm session should include worker");
+        assert_eq!(worker.config.cli, "codex");
+        assert_eq!(worker.config.model.as_deref(), Some("gpt-5.5"));
+    }
+}
+
+#[tokio::test]
+async fn test_launch_swarm_rejects_explicit_empty_workers_per_planner() {
+    let app = setup_test_app().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate the feature",
+        "planner_count": 1,
+        "workers_per_planner": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/swarm")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let error_msg = response_json.get("error").unwrap().as_str().unwrap();
+    assert!(
+        error_msg.contains("workers_per_planner cannot be empty"),
+        "Error should mention empty workers_per_planner: {error_msg}"
+    );
 }
 
 #[tokio::test]
 async fn test_launch_solo_accepts_droid_model_config() {
-    let app = setup_test_app().await;
+    let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
 
     let body = serde_json::json!({
@@ -2670,8 +2785,45 @@ async fn test_launch_solo_accepts_droid_model_config() {
         .await
         .unwrap();
 
+    let status = response.status();
     // Droid launches through the generic Solo endpoint; there is no dedicated Droid endpoint.
-    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+    assert_ne!(status, StatusCode::BAD_REQUEST);
+    if status == StatusCode::CREATED {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let session_id = launch_response
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .expect("launch response includes session_id");
+        let session = controller
+            .read()
+            .get_session(session_id)
+            .expect("created solo session should be stored");
+        assert_eq!(session.default_cli, "droid");
+        assert_eq!(session.default_model.as_deref(), Some("glm-5.1"));
+        match &session.session_type {
+            SessionType::Solo { cli, model } => {
+                assert_eq!(cli, "droid");
+                assert_eq!(model.as_deref(), Some("glm-5.1"));
+            }
+            other => panic!("expected solo session, got {other:?}"),
+        }
+        let solo_agent = session
+            .agents
+            .iter()
+            .find(|agent| {
+                matches!(
+                    agent.role,
+                    AgentRole::Worker {
+                        index: 1,
+                        parent: None
+                    }
+                )
+            })
+            .expect("solo session should include solo agent");
+        assert_eq!(solo_agent.config.cli, "droid");
+        assert_eq!(solo_agent.config.model.as_deref(), Some("glm-5.1"));
+    }
 }
 
 #[tokio::test]

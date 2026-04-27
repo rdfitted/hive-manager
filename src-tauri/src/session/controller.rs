@@ -19,12 +19,9 @@ use crate::session::cell_status::{
     PRIMARY_CELL_ID, RESOLVER_CELL_ID,
 };
 use crate::session::polling_intervals::{
-    ACTIVATION_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL, SMOKE_ACTIVE_POLL_LABEL,
-    SMOKE_EVALUATOR_FIRST_POLL_INTERVAL, SMOKE_EVALUATOR_FIRST_POLL_LABEL,
-    SMOKE_IDLE_POLL_INTERVAL, SMOKE_IDLE_POLL_LABEL, STANDARD_ACTIVE_POLL_INTERVAL,
-    STANDARD_ACTIVE_POLL_LABEL, STANDARD_EVALUATOR_FIRST_POLL_INTERVAL,
-    STANDARD_EVALUATOR_FIRST_POLL_LABEL, STANDARD_IDLE_POLL_INTERVAL,
-    STANDARD_IDLE_POLL_LABEL,
+    format_poll_label, ACTIVATION_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL,
+    SMOKE_EVALUATOR_FIRST_POLL_INTERVAL, SMOKE_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL,
+    STANDARD_EVALUATOR_FIRST_POLL_INTERVAL, STANDARD_IDLE_POLL_INTERVAL,
 };
 use crate::templates::{heartbeat_snippet, PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
@@ -2350,8 +2347,19 @@ Last updated: {timestamp}
     ) -> String {
         let task_file = format!(".hive-manager/tasks/fusion-variant-{}-task.md", variant_index);
         let agent_id = format!("{}-fusion-{}", session_id, variant_index);
-        let heartbeat_command = format!(
-            r#"curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"{agent_id}","status":"idle","summary":"Waiting for task activation"}}'"#
+        let startup_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &agent_id,
+            "working",
+            "Starting fusion variant",
+        );
+        let heartbeat_command = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &agent_id,
+            "idle",
+            "Waiting for task activation",
         );
         let polling_instructions =
             get_polling_instructions(cli, &task_file, None, Some(&heartbeat_command));
@@ -2373,6 +2381,11 @@ Branch: {branch}
 - When complete, update your task file status to COMPLETED
 
 ## Task Coordination
+Send a startup heartbeat before reading the task file:
+```bash
+{startup_heartbeat}
+```
+
 Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#,
             variant_name = variant_name,
             worktree_path = worktree_path,
@@ -2380,6 +2393,7 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#
             task_description = task_description,
             scope_block = scope_block,
             task_file = task_file,
+            startup_heartbeat = startup_heartbeat,
             polling_instructions = polling_instructions,
         )
     }
@@ -2719,26 +2733,50 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         );
 
         if smoke_test {
-            variables.insert("idle_poll_interval".to_string(), SMOKE_IDLE_POLL_LABEL.to_string());
-            variables.insert("idle_poll_secs".to_string(), SMOKE_IDLE_POLL_INTERVAL.as_secs().to_string());
-            variables.insert("active_poll_interval".to_string(), SMOKE_ACTIVE_POLL_LABEL.to_string());
-            variables.insert("active_poll_secs".to_string(), SMOKE_ACTIVE_POLL_INTERVAL.as_secs().to_string());
+            variables.insert(
+                "idle_poll_interval".to_string(),
+                format_poll_label(SMOKE_IDLE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "idle_poll_secs".to_string(),
+                SMOKE_IDLE_POLL_INTERVAL.as_secs().to_string(),
+            );
+            variables.insert(
+                "active_poll_interval".to_string(),
+                format_poll_label(SMOKE_ACTIVE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "active_poll_secs".to_string(),
+                SMOKE_ACTIVE_POLL_INTERVAL.as_secs().to_string(),
+            );
             variables.insert(
                 "evaluator_first_poll_interval".to_string(),
-                SMOKE_EVALUATOR_FIRST_POLL_LABEL.to_string(),
+                format_poll_label(SMOKE_EVALUATOR_FIRST_POLL_INTERVAL),
             );
             variables.insert(
                 "evaluator_first_poll_secs".to_string(),
                 SMOKE_EVALUATOR_FIRST_POLL_INTERVAL.as_secs().to_string(),
             );
         } else {
-            variables.insert("idle_poll_interval".to_string(), STANDARD_IDLE_POLL_LABEL.to_string());
-            variables.insert("idle_poll_secs".to_string(), STANDARD_IDLE_POLL_INTERVAL.as_secs().to_string());
-            variables.insert("active_poll_interval".to_string(), STANDARD_ACTIVE_POLL_LABEL.to_string());
-            variables.insert("active_poll_secs".to_string(), STANDARD_ACTIVE_POLL_INTERVAL.as_secs().to_string());
+            variables.insert(
+                "idle_poll_interval".to_string(),
+                format_poll_label(STANDARD_IDLE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "idle_poll_secs".to_string(),
+                STANDARD_IDLE_POLL_INTERVAL.as_secs().to_string(),
+            );
+            variables.insert(
+                "active_poll_interval".to_string(),
+                format_poll_label(STANDARD_ACTIVE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "active_poll_secs".to_string(),
+                STANDARD_ACTIVE_POLL_INTERVAL.as_secs().to_string(),
+            );
             variables.insert(
                 "evaluator_first_poll_interval".to_string(),
-                STANDARD_EVALUATOR_FIRST_POLL_LABEL.to_string(),
+                format_poll_label(STANDARD_EVALUATOR_FIRST_POLL_INTERVAL),
             );
             variables.insert(
                 "evaluator_first_poll_secs".to_string(),
@@ -3332,7 +3370,7 @@ Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
 [1-2 sentence overview]
 
 ## Investigation Results
-- Scouts Used: 3 (BigPickle, GLM 5.1, Grok Code)
+- Scouts Used: 3 (BigPickle, GLM 5.1, cursor-cli)
 - Files Identified: [count]
 - Consensus Level: HIGH/MEDIUM/LOW
 
@@ -3749,10 +3787,16 @@ Each worker should use the Inter-Agent Communication endpoints from their prompt
 Workers MUST use curl to exercise the conversation and heartbeat APIs.
 
 ### Task 1 (Worker 1):
-1. Send heartbeat: `{smoke_worker_start_heartbeat}`
+1. Send heartbeat:
+   ```bash
+   {smoke_worker_start_heartbeat}
+   ```
 2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
 3. Post to shared: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
-4. Send completed heartbeat: `{smoke_worker_completed_heartbeat}`
+4. Send completed heartbeat:
+   ```bash
+   {smoke_worker_completed_heartbeat}
+   ```
 
 ### Task 2 (Worker 2, if present):
 1. Send heartbeat with working status
@@ -5371,7 +5415,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
-| model | string | No | Model to use (e.g., `claude --model claude-opus-4-7`, `gpt-5.5` for Codex, or `glm-5.1` via Droid `/model`) |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus-4-7`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |

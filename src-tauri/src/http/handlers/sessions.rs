@@ -601,9 +601,13 @@ pub async fn launch_swarm(
     validate_cli(&queen_config.cli)?;
     let planner_config = req.planner_config.unwrap_or_else(|| default_config.clone());
     validate_cli(&planner_config.cli)?;
-    let workers_per_planner = req
-        .workers_per_planner
-        .unwrap_or_else(|| vec![default_config.clone(); 2]);
+    let workers_per_planner = match req.workers_per_planner {
+        Some(workers) if workers.is_empty() => {
+            return Err(ApiError::bad_request("workers_per_planner cannot be empty"));
+        }
+        Some(workers) => workers,
+        None => vec![default_config.clone(); 2],
+    };
     for worker in &workers_per_planner {
         validate_cli(&worker.cli)?;
     }

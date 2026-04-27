@@ -14,9 +14,9 @@
   }
 
   const claudePresets: PresetOption[] = [
-    { value: 'claude-opus-4-7-high', label: 'Opus 4.7 (High effort)' },
-    { value: 'claude-opus-4-7-low', label: 'Opus 4.7 (Low effort)' },
-    { value: 'claude-opus-4-7', label: 'Opus 4.7' },
+    { value: 'opus-4-7-high', label: 'Opus 4.7 (High effort)' },
+    { value: 'opus-4-7-low', label: 'Opus 4.7 (Low effort)' },
+    { value: 'opus-4-7', label: 'Opus 4.7' },
     { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
     { value: 'claude-opus-4-6-low', label: 'Opus 4.6 (Low effort)' },
     { value: 'claude-opus-4-5', label: 'Opus 4.5' },
@@ -70,21 +70,17 @@
     { value: 'qwen2.5-coder', label: 'Qwen2.5 Coder' },
   ];
 
-  $: presetOptions = config.cli === 'claude'
-    ? claudePresets
-    : config.cli === 'codex'
-      ? codexPresets
-      : config.cli === 'gemini'
-        ? geminiPresets
-        : config.cli === 'cursor'
-          ? cursorPresets
-          : config.cli === 'droid'
-            ? droidPresets
-            : config.cli === 'opencode'
-              ? opencodePresets
-              : config.cli === 'qwen'
-                ? qwenPresets
-                : [];
+  const presetsByCliType: Record<string, PresetOption[]> = {
+    claude: claudePresets,
+    codex: codexPresets,
+    gemini: geminiPresets,
+    cursor: cursorPresets,
+    droid: droidPresets,
+    opencode: opencodePresets,
+    qwen: qwenPresets,
+  };
+
+  $: presetOptions = presetsByCliType[config.cli] ?? [];
 
   $: selectedPreset = detectPreset(config);
 
@@ -113,7 +109,7 @@
     let flags = [...baseFlags];
 
     if (nextCli === 'claude') {
-      model = 'claude-opus-4-7';
+      model = 'opus-4-7';
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
       model = 'gpt-5.5';
@@ -238,9 +234,9 @@
       if (model.includes('sonnet')) return 'claude-sonnet-4-5';
 
       if (model.includes('opus-4-7') || model.includes('opus-4.7')) {
-        if (effort === 'low') return 'claude-opus-4-7-low';
-        if (effort === 'high') return 'claude-opus-4-7-high';
-        return 'claude-opus-4-7';
+        if (effort === 'low') return 'opus-4-7-low';
+        if (effort === 'high') return 'opus-4-7-high';
+        return 'opus-4-7';
       }
 
       if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
@@ -329,16 +325,16 @@
     let flags = [...cleanedFlags];
 
     switch (preset) {
-      case 'claude-opus-4-7-high':
-        model = 'claude-opus-4-7';
+      case 'opus-4-7-high':
+        model = 'opus-4-7';
         flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
         break;
-      case 'claude-opus-4-7-low':
-        model = 'claude-opus-4-7';
+      case 'opus-4-7-low':
+        model = 'opus-4-7';
         flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
         break;
-      case 'claude-opus-4-7':
-        model = 'claude-opus-4-7';
+      case 'opus-4-7':
+        model = 'opus-4-7';
         break;
       case 'claude-opus-4-6-high':
         model = 'claude-opus-4-6';
