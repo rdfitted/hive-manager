@@ -633,7 +633,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   id="evaluator-model"
                   type="text"
                   bind:value={evaluatorModel}
-                  placeholder="e.g. claude-opus-4-6"
+                  placeholder="e.g. claude-opus-4-7"
                 />
               </div>
               <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />

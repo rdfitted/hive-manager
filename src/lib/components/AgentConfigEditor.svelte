@@ -14,6 +14,9 @@
   }
 
   const claudePresets: PresetOption[] = [
+    { value: 'claude-opus-4-7-high', label: 'Opus 4.7 (High effort)' },
+    { value: 'claude-opus-4-7-low', label: 'Opus 4.7 (Low effort)' },
+    { value: 'claude-opus-4-7', label: 'Opus 4.7' },
     { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
     { value: 'claude-opus-4-6-low', label: 'Opus 4.6 (Low effort)' },
     { value: 'claude-opus-4-5', label: 'Opus 4.5' },
@@ -23,6 +26,10 @@
   ];
 
   const codexPresets: PresetOption[] = [
+    { value: 'codex-gpt-5-5-low', label: 'GPT-5.5 (Low effort)' },
+    { value: 'codex-gpt-5-5-medium', label: 'GPT-5.5 (Medium effort)' },
+    { value: 'codex-gpt-5-5-high', label: 'GPT-5.5 (High effort)' },
+    { value: 'codex-gpt-5-5-xhigh', label: 'GPT-5.5 (Extra high effort)' },
     { value: 'codex-gpt-5-4-low', label: 'GPT-5.4 (Low effort)' },
     { value: 'codex-gpt-5-4-medium', label: 'GPT-5.4 (Medium effort)' },
     { value: 'codex-gpt-5-4-high', label: 'GPT-5.4 (High effort)' },
@@ -48,6 +55,11 @@
     { value: 'composer-1', label: 'Composer 1' },
   ];
 
+  const droidPresets: PresetOption[] = [
+    { value: 'glm-5.1', label: 'GLM 5.1' },
+    { value: 'glm-4.7', label: 'GLM 4.7' },
+  ];
+
   $: presetOptions = config.cli === 'claude'
     ? claudePresets
     : config.cli === 'codex'
@@ -56,7 +68,9 @@
         ? geminiPresets
         : config.cli === 'cursor'
           ? cursorPresets
-          : [];
+          : config.cli === 'droid'
+            ? droidPresets
+            : [];
 
   $: selectedPreset = detectPreset(config);
 
@@ -68,7 +82,9 @@
         ? 'Gemini model IDs for `gemini -m`'
         : config.cli === 'cursor'
           ? 'Cursor Composer mode selection'
-          : '';
+          : config.cli === 'droid'
+            ? 'Droid GLM model selection'
+            : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -79,15 +95,15 @@
     let flags = [...baseFlags];
 
     if (nextCli === 'claude') {
-      model = 'claude-opus-4-6';
+      model = 'claude-opus-4-7';
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
-      model = 'gpt-5.4';
+      model = 'gpt-5.5';
       flags.push('-c', 'model_reasoning_effort="medium"');
     } else if (nextCli === 'gemini') {
       model = 'gemini-3.1-pro-preview';
     } else if (nextCli === 'droid') {
-      model = 'glm-4.7';
+      model = 'glm-5.1';
     } else if (nextCli === 'cursor') {
       model = 'composer-2';
     } else if (nextCli === 'opencode') {
@@ -202,6 +218,13 @@
       if (model.includes('haiku')) return 'claude-haiku-4-5';
       if (model.includes('sonnet-4-6') || model.includes('sonnet-4.6')) return 'claude-sonnet-4-6';
       if (model.includes('sonnet')) return 'claude-sonnet-4-5';
+
+      if (model.includes('opus-4-7') || model.includes('opus-4.7')) {
+        if (effort === 'low') return 'claude-opus-4-7-low';
+        if (effort === 'high') return 'claude-opus-4-7-high';
+        return 'claude-opus-4-7';
+      }
+
       if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
 
       if ((model.includes('opus') || model === '') && effort === 'low') {
@@ -217,13 +240,20 @@
 
     if (agent.cli === 'codex') {
       const effort = parseCodexEffort(flags);
+      const isGpt55 = model.includes('gpt-5.5');
       const isGpt54 = model.includes('gpt-5.4');
       const isGpt53 = model.includes('gpt-5.3');
+
+      if (isGpt55 && effort === 'low') return 'codex-gpt-5-5-low';
+      if (isGpt55 && effort === 'medium') return 'codex-gpt-5-5-medium';
+      if (isGpt55 && effort === 'high') return 'codex-gpt-5-5-high';
+      if (isGpt55 && effort === 'xhigh') return 'codex-gpt-5-5-xhigh';
 
       if (isGpt54 && effort === 'low') return 'codex-gpt-5-4-low';
       if (isGpt54 && effort === 'medium') return 'codex-gpt-5-4-medium';
       if (isGpt54 && effort === 'high') return 'codex-gpt-5-4-high';
       if (isGpt54 && effort === 'xhigh') return 'codex-gpt-5-4-xhigh';
+
       if (isGpt53 && effort === 'low') return 'codex-gpt-5-3-low';
       if (isGpt53 && effort === 'medium') return 'codex-gpt-5-3-medium';
       if (isGpt53 && effort === 'high') return 'codex-gpt-5-3-high';
@@ -250,6 +280,12 @@
       return 'custom';
     }
 
+    if (agent.cli === 'droid') {
+      if (model.includes('glm-5.1')) return 'glm-5.1';
+      if (model.includes('glm-4.7')) return 'glm-4.7';
+      return 'custom';
+    }
+
     return 'custom';
   }
 
@@ -263,6 +299,17 @@
     let flags = [...cleanedFlags];
 
     switch (preset) {
+      case 'claude-opus-4-7-high':
+        model = 'claude-opus-4-7';
+        flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
+        break;
+      case 'claude-opus-4-7-low':
+        model = 'claude-opus-4-7';
+        flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
+        break;
+      case 'claude-opus-4-7':
+        model = 'claude-opus-4-7';
+        break;
       case 'claude-opus-4-6-high':
         model = 'claude-opus-4-6';
         flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
@@ -282,6 +329,22 @@
         break;
       case 'claude-haiku-4-5':
         model = 'claude-haiku-4-5';
+        break;
+      case 'codex-gpt-5-5-low':
+        model = 'gpt-5.5';
+        flags.push('-c', 'model_reasoning_effort="low"');
+        break;
+      case 'codex-gpt-5-5-medium':
+        model = 'gpt-5.5';
+        flags.push('-c', 'model_reasoning_effort="medium"');
+        break;
+      case 'codex-gpt-5-5-high':
+        model = 'gpt-5.5';
+        flags.push('-c', 'model_reasoning_effort="high"');
+        break;
+      case 'codex-gpt-5-5-xhigh':
+        model = 'gpt-5.5';
+        flags.push('-c', 'model_reasoning_effort="xhigh"');
         break;
       case 'codex-gpt-5-4-low':
         model = 'gpt-5.4';
@@ -326,6 +389,10 @@
       case 'composer-2':
       case 'composer-2-fast':
       case 'composer-1':
+        model = preset;
+        break;
+      case 'glm-5.1':
+      case 'glm-4.7':
         model = preset;
         break;
       default:
@@ -379,7 +446,7 @@
     </span>
   </div>
 
-  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini' || config.cli === 'cursor'}
+  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini' || config.cli === 'cursor' || config.cli === 'droid'}
     <div class="field">
       <label for="preset">Model &amp; Effort</label>
       <select
