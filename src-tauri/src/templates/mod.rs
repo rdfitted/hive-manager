@@ -1358,9 +1358,21 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             &heartbeat_snippet(
                 &api_base_url,
                 &context.session_id,
-                "{{agent_id}}",
-                "{{heartbeat_status}}",
-                "{{heartbeat_summary}}",
+                context
+                    .variables
+                    .get("agent_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                context
+                    .variables
+                    .get("heartbeat_status")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                context
+                    .variables
+                    .get("heartbeat_summary")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
             ),
         );
         rendered = rendered.replace(
@@ -1626,6 +1638,40 @@ mod tests {
         assert!(!prompt.contains(concat!("working", "|", "idle")));
         assert!(prompt.contains(r#""agent_id":"session-123-worker-1""#));
         assert!(prompt.contains(r#""summary":"Implementing backend task""#));
+    }
+
+    #[test]
+    fn rendered_worker_prompt_escapes_generic_heartbeat_json_values() {
+        let mut variables = HashMap::new();
+        variables.insert("agent_id".to_string(), "session-123-worker-1".to_string());
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert(
+            "heartbeat_summary".to_string(),
+            "Don't block with \"quotes\"\nand slashes \\".to_string(),
+        );
+
+        let prompt = TemplateEngine::default()
+            .render_worker_prompt(
+                &WorkerRole::new("backend", "Backend", "claude"),
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: Some("Build API".to_string()),
+                    variables,
+                },
+            )
+            .unwrap();
+
+        let heartbeat_body = prompt
+            .lines()
+            .find(|line| line.starts_with('{') && line.contains(r#""summary""#))
+            .expect("heartbeat JSON body should be rendered");
+        let parsed: serde_json::Value =
+            serde_json::from_str(heartbeat_body).expect("heartbeat body should be valid JSON");
+        assert_eq!(
+            parsed["summary"],
+            "Don't block with \"quotes\"\nand slashes \\"
+        );
     }
 
     #[test]

@@ -2898,6 +2898,60 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
 }
 
 #[tokio::test]
+async fn test_launch_solo_with_same_cli_evaluator_preserves_custom_session_model() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate evaluator wiring",
+        "cli": "codex",
+        "model": "custom-codex-model",
+        "evaluator_cli": "codex"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let session_id = launch_response
+        .get("session_id")
+        .and_then(|value| value.as_str())
+        .unwrap();
+
+    let session = controller.read().get_session(session_id).unwrap();
+    assert_eq!(session.default_cli, "codex");
+    assert_eq!(session.default_model.as_deref(), Some("custom-codex-model"));
+
+    let evaluator = session
+        .agents
+        .iter()
+        .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+        .unwrap();
+    assert_eq!(evaluator.config.cli, "codex");
+    assert_eq!(
+        evaluator.config.model.as_deref(),
+        Some("custom-codex-model")
+    );
+
+    controller.write().close_session(session_id).unwrap();
+}
+
+#[tokio::test]
 async fn test_launch_fusion_empty_variants() {
     let app = setup_test_app().await;
 

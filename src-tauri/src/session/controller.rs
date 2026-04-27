@@ -4520,13 +4520,18 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             .unwrap_or("General development tasks as assigned.");
 
         let task_file = format!(".hive-manager/tasks/worker-{}-task.md", index);
+        let activation_wait_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &format!("worker-{}", index),
+            "idle",
+            "Waiting for task activation",
+        );
         let polling_instructions = get_polling_instructions(
             &config.cli,
             &task_file,
             config.role.as_ref().map(|role| role.role_type.as_str()),
-            Some(&format!(
-                r#"curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-{index}","status":"idle","summary":"Waiting for task activation"}}'"#
-            )),
+            Some(&activation_wait_heartbeat),
         );
 
         format!(
@@ -8768,8 +8773,9 @@ Last updated: {timestamp}
         if uses_session_default_cli {
             config.cli = session.default_cli.clone();
         }
+        let uses_session_cli = uses_session_default_cli || config.cli.trim() == session.default_cli;
         if config.model.is_none() {
-            config.model = if uses_session_default_cli {
+            config.model = if uses_session_cli {
                 session.default_model.clone()
             } else {
                 CliRegistry::default_model(&config.cli)
