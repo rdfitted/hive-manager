@@ -221,6 +221,24 @@ mod tests {
             default_model: "qwen3-coder".to_string(),
             env: None,
         });
+        clis.insert("codex".to_string(), CliConfig {
+            command: "codex".to_string(),
+            auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "gpt-5.5".to_string(),
+            env: None,
+        });
+        clis.insert("opencode".to_string(), CliConfig {
+            command: "opencode".to_string(),
+            auto_approve_flag: None,
+            model_flag: Some("-m".to_string()),
+            default_model: "opencode/big-pickle".to_string(),
+            env: Some({
+                let mut env = HashMap::new();
+                env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
+                env
+            }),
+        });
 
         AppConfig {
             clis,
@@ -331,6 +349,49 @@ mod tests {
         assert!(built.args.contains(&"-y".to_string()));
         assert!(built.args.contains(&"-m".to_string()));
         assert!(built.args.contains(&"qwen3-coder".to_string()));
+    }
+
+    #[test]
+    fn test_build_codex_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "codex".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "codex");
+        assert!(built.args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"gpt-5.5".to_string()));
+    }
+
+    #[test]
+    fn test_build_opencode_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "opencode".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "opencode");
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"opencode/big-pickle".to_string()));
+        // Check env has OPENCODE_YOLO
+        assert_eq!(built.env.get("OPENCODE_YOLO"), Some(&"true".to_string()));
     }
 
     #[test]

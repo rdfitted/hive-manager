@@ -273,6 +273,13 @@ You are a Backend Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -294,6 +301,13 @@ You are a Frontend Worker in a multi-agent coding session.
 - Check your conversation file between subtasks
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
+
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
 
 ## Current Assignment
 {{task}}
@@ -318,6 +332,13 @@ You are a Coherence Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -341,6 +362,13 @@ You are a Simplify Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -361,6 +389,13 @@ You are a Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -375,9 +410,11 @@ You are a ruthless QA engineer. Grade against the contract. Do not rationalize f
 
 ## Phase 1: Warm Up And Wait
 
-1. You MUST read project context once:
-   - `.ai-docs/project-dna.md`
-   - `.ai-docs/learnings.jsonl`
+1. You MUST read project context via HTTP API:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
 2. You MUST use this inline bash polling loop. You MUST NOT use `/loop`.
    The first poll waits {{evaluator_first_poll_interval}} (`sleep {{evaluator_first_poll_secs}}`); after that, poll every {{idle_poll_interval}} (`sleep {{idle_poll_secs}}`).
    ```bash
@@ -528,7 +565,9 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 ## Required Protocol
 ```text
-1. You MUST read `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, and the active contract before testing.
+1. You MUST read project context via HTTP API before testing:
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect concrete evidence for every numbered criterion you touch.
 3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
 4. You MUST fail any criterion that is flaky, blocked, ambiguous, or untestable.
@@ -540,9 +579,12 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 ## Start Here
 
-1. Read `.ai-docs/project-dna.md`
-2. Read `.ai-docs/learnings.jsonl`
-3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
+1. Read project context via HTTP API:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
@@ -605,6 +647,13 @@ CRITERION 2: PASS|FAIL - [UI evidence, screenshots, or exact failure]
 
 Always reference criteria by number. Fail when the behavior is flaky, blocked, ambiguous, or visually broken.
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
+
 ## Additional Guidance
 
 {{custom_instructions}}
@@ -616,7 +665,9 @@ You are the API QA specialist for session `{{session_id}}`.
 
 ## Required Protocol
 ```text
-1. You MUST read `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, and the active contract before testing.
+1. You MUST read project context via HTTP API before testing:
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect exact request and response evidence for every numbered criterion you touch.
 3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
 4. You MUST fail any criterion whose API evidence is ambiguous, blocked, or incomplete.
@@ -624,9 +675,12 @@ You are the API QA specialist for session `{{session_id}}`.
 
 ## Start Here
 
-1. Read `.ai-docs/project-dna.md`
-2. Read `.ai-docs/learnings.jsonl`
-3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
+1. Read project context via HTTP API:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
@@ -657,6 +711,13 @@ CRITERION 2: PASS|FAIL - [endpoint, response details, and evidence]
 
 Always reference criteria by number. Fail when a response is ambiguous, unverified, or missing error coverage.
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
+
 ## Additional Guidance
 
 {{custom_instructions}}
@@ -668,7 +729,9 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 
 ## Required Protocol
 ```text
-1. You MUST read `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, and the active contract before testing.
+1. You MUST read project context via HTTP API before testing:
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect concrete accessibility evidence for every numbered criterion you touch.
 3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
 4. You MUST fail any criterion whose accessibility evidence is partial, blocked, or untestable.
@@ -676,9 +739,12 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 
 ## Start Here
 
-1. Read `.ai-docs/project-dna.md`
-2. Read `.ai-docs/learnings.jsonl`
-3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
+1. Read project context via HTTP API:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
@@ -708,6 +774,13 @@ CRITERION 2: PASS|FAIL - [a11y evidence, score, or exact defect]
 ```
 
 Always reference criteria by number. Fail when accessibility evidence is partial or a key path is untestable.
+
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"<your-id>","status":"working|idle","summary":"<what>"}'
+```
 
 ## Additional Guidance
 
@@ -786,9 +859,11 @@ You are the Queen agent orchestrating a Hive session with direct worker manageme
 
 ## Start Here
 
-Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+Before assigning work, read project context via HTTP API:
+```bash
+curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+```
 
 ## Inter-Agent Communication
 ### Check your inbox:
@@ -814,25 +889,22 @@ Workers record learnings during task completion. Your curation responsibilities:
    curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** via HTTP API (POST to project-dna endpoint):
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
-```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions
-├── project-dna.md       # Curated patterns and conventions
-├── curation-state.json  # Tracks curation state
-└── archive/             # Retired learnings (after 50+ entries)
-```
+### Session-Scoped Storage
+Project DNA and learnings are stored session-scoped via HTTP API:
+- Read: `GET /api/sessions/{{session_id}}/project-dna`
+- Read: `GET /api/sessions/{{session_id}}/learnings`
+- Write: `POST /api/sessions/{{session_id}}/project-dna` with `{"content": "..."}`
 
 ### Curation Process
 1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md`
-3. After 50+ learnings, archive to `.ai-docs/archive/`
+2. Synthesize insights and POST updated project-dna
+3. After 50+ learnings, archive via dedicated endpoint
 
 ### When to Curate
 - After each major task phase completes
@@ -899,9 +971,11 @@ You are the Queen agent orchestrating a Fusion session with competing candidate 
 
 ## Start Here
 
-Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+Before assigning work, read project context via HTTP API:
+```bash
+curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+```
 
 ## Inter-Agent Communication
 ### Check your inbox:
@@ -951,25 +1025,22 @@ Workers record learnings during task completion. Your curation responsibilities:
    curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** via HTTP API (POST to project-dna endpoint):
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
-```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions
-├── project-dna.md       # Curated patterns and conventions
-├── curation-state.json  # Tracks curation state
-└── archive/             # Retired learnings (after 50+ entries)
-```
+### Session-Scoped Storage
+Project DNA and learnings are stored session-scoped via HTTP API:
+- Read: `GET /api/sessions/{{session_id}}/project-dna`
+- Read: `GET /api/sessions/{{session_id}}/learnings`
+- Write: `POST /api/sessions/{{session_id}}/project-dna` with `{"content": "..."}`
 
 ### Curation Process
 1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md`
-3. After 50+ learnings, archive to `.ai-docs/archive/`
+2. Synthesize insights and POST updated project-dna
+3. After 50+ learnings, archive via dedicated endpoint
 
 ### When to Curate
 - After each major task phase completes
@@ -1036,9 +1107,11 @@ You are the Queen agent orchestrating a Swarm session with hierarchical planning
 
 ## Start Here
 
-Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+Before assigning work, read project context via HTTP API:
+```bash
+curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+```
 
 ## Learning Curation Protocol
 
@@ -1054,25 +1127,22 @@ Workers record learnings during task completion. Your curation responsibilities:
    curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** via HTTP API (POST to project-dna endpoint):
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
-```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions
-├── project-dna.md       # Curated patterns and conventions
-├── curation-state.json  # Tracks curation state
-└── archive/             # Retired learnings (after 50+ entries)
-```
+### Session-Scoped Storage
+Project DNA and learnings are stored session-scoped via HTTP API:
+- Read: `GET /api/sessions/{{session_id}}/project-dna`
+- Read: `GET /api/sessions/{{session_id}}/learnings`
+- Write: `POST /api/sessions/{{session_id}}/project-dna` with `{"content": "..."}`
 
 ### Curation Process
 1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md`
-3. After 50+ learnings, archive to `.ai-docs/archive/`
+2. Synthesize insights and POST updated project-dna
+3. After 50+ learnings, archive via dedicated endpoint
 
 ### When to Curate
 - After each major task phase completes

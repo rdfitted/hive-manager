@@ -45,7 +45,7 @@ export const defaultRoles: Record<string, RoleDefaults> = {
   resolver: { cli: 'claude', model: 'opus-4-7' },
   tester: { cli: 'claude', model: 'opus-4-7' },
   'code-quality': { cli: 'codex', model: 'gpt-5.5' },
-  // Evaluator & QA roles (backend uses qwen for evaluator, gemini for qa-worker)
+  // Evaluator & QA roles - match backend storage/mod.rs default_roles
   evaluator: { cli: 'qwen', model: 'qwen3-coder' },
   'qa-worker': { cli: 'gemini', model: 'gemini-2.5-pro' },
   // General purpose
