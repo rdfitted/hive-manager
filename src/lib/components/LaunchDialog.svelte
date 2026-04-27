@@ -7,7 +7,7 @@
   import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
   import { templates, selectedTemplate } from '$lib/stores/templates';
-  import { cliOptions } from '$lib/config/clis';
+  import { cliOptions, getDefaultModel } from '$lib/config/clis';
 
   export let show: boolean = false;
 
@@ -633,7 +633,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   id="evaluator-model"
                   type="text"
                   bind:value={evaluatorModel}
-                  placeholder="e.g. claude-opus-4-7"
+                  placeholder="e.g. opus-4-7"
                 />
               </div>
               <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />

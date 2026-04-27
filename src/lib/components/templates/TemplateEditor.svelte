@@ -128,7 +128,7 @@
 
                     <div class="form-group">
                         <label>Model (optional)</label>
-                        <input type="text" bind:value={cell.model} placeholder="e.g. claude-opus-4-7" />
+                        <input type="text" bind:value={cell.model} placeholder="e.g. opus-4-7" />
                     </div>
 
                     <div class="form-group">

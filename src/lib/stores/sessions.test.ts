@@ -73,4 +73,61 @@ describe('sessions store', () => {
       }));
     });
   });
+
+  describe('launchSwarm', () => {
+    it('sends swarm config with planner_count and planner_config', async () => {
+      const config = {
+        project_path: '/test/path',
+        queen_config: { cli: 'claude', flags: [] },
+        planner_count: 2,
+        planner_config: { cli: 'claude', model: 'opus-4-7', flags: [] },
+        workers_per_planner: [
+          { cli: 'claude', flags: [], role: { role_type: 'backend', label: 'Backend', default_cli: 'claude', prompt_template: null } }
+        ],
+        prompt: 'test task',
+        with_planning: true,
+      };
+
+      await sessions.launchSwarm(config as any);
+
+      expect(invoke).toHaveBeenCalledWith('launch_swarm', {
+        config: expect.objectContaining({
+          project_path: '/test/path',
+          planner_count: 2,
+          planner_config: expect.objectContaining({
+            cli: 'claude',
+            model: 'opus-4-7'
+          }),
+          workers_per_planner: expect.any(Array)
+        })
+      });
+    });
+
+    it('includes evaluator fields when with_evaluator is true', async () => {
+      const config = {
+        project_path: '/test/path',
+        queen_config: { cli: 'claude', flags: [] },
+        planner_count: 2,
+        planner_config: { cli: 'claude', flags: [] },
+        workers_per_planner: [],
+        with_evaluator: true,
+        evaluator_cli: 'qwen',
+        evaluator_model: 'qwen3-coder',
+        qa_workers: [{ specialization: 'ui' as const, cli: 'gemini', flags: [] }]
+      };
+
+      await sessions.launchSwarm(config as any);
+
+      expect(invoke).toHaveBeenCalledWith('launch_swarm', {
+        config: expect.objectContaining({
+          with_evaluator: true,
+          evaluator_cli: 'qwen',
+          evaluator_model: 'qwen3-coder',
+          qa_workers: expect.arrayContaining([
+            expect.objectContaining({ specialization: 'ui' })
+          ])
+        })
+      });
+    });
+  });
 });
