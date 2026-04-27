@@ -176,7 +176,7 @@ mod tests {
             command: "claude".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
-            default_model: "opus-4-6".to_string(),
+            default_model: "opus-4-7".to_string(),
             env: None,
         });
         clis.insert("gemini".to_string(), CliConfig {
@@ -197,7 +197,7 @@ mod tests {
             command: "droid".to_string(),
             auto_approve_flag: None,  // Interactive mode - no auto-approve flag
             model_flag: None,  // Model selected via /model command in TUI
-            default_model: "glm-4.7".to_string(),
+            default_model: "glm-5.1".to_string(),
             env: None,
         });
         clis.insert("qwen".to_string(), CliConfig {
@@ -282,7 +282,7 @@ mod tests {
         let registry = CliRegistry::new(test_config());
         let config = AgentConfig {
             cli: "droid".to_string(),
-            model: Some("glm-4.7".to_string()),
+            model: Some("glm-5.1".to_string()),
             flags: vec![],
             label: None,
             name: None,

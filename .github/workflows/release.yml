@@ -56,6 +56,11 @@ jobs:
           tagName: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
           releaseName: Hive Manager ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
           releaseBody: |
+            ## Highlights
+
+            - Adds model presets/defaults for Claude Opus 4.7, OpenAI GPT-5.5, and Droid GLM 5.1
+            - Standardizes evaluator/QA polling heartbeat cadence for long-running sessions
+
             ## Installation
 
             - **Windows**: Download the `.msi` or `.exe` installer below

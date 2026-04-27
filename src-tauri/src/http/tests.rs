@@ -115,7 +115,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -154,7 +154,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         last_activity_at: now,
         agents,
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -299,7 +299,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -351,7 +351,7 @@ async fn test_patch_session_null_clears_field() {
         last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -503,7 +503,7 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         agents: vec![],
         state: "Completed".to_string(),
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -2153,6 +2153,48 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_add_worker_accepts_latest_worker_models() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-latest-worker-models");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session(
+        "session-latest-models",
+        temp_dir.to_str().unwrap(),
+    ));
+
+    for (cli, model) in [("codex", "gpt-5.5"), ("droid", "glm-5.1")] {
+        let body = serde_json::json!({
+            "role_type": "backend",
+            "cli": cli,
+            "model": model
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-latest-models/workers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{cli}/{model} should be accepted as a worker model"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 #[test]
 fn test_add_worker_request_accepts_name_and_description_fields() {
     let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
@@ -2221,7 +2263,7 @@ fn test_add_worker_request_blank_description_deserializes_to_none() {
 fn test_persisted_agent_config_round_trips_name_and_description_fields() {
     let config = crate::storage::PersistedAgentConfig {
         cli: "codex".to_string(),
-        model: Some("gpt-5.4".to_string()),
+        model: Some("gpt-5.5".to_string()),
         flags: vec![],
         label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
         name: Some("Worker 2 (Frontend)".to_string()),
@@ -2249,7 +2291,7 @@ fn test_persisted_agent_config_blank_name_round_trip_uses_indexed_default_behavi
     for raw_name in ["", "   "] {
         let config = crate::storage::PersistedAgentConfig {
             cli: "codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             flags: vec![],
             label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
             name: Some(raw_name.to_string()),
@@ -2523,7 +2565,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
         "project_path": temp_dir.path().to_string_lossy(),
         "task_description": "Investigate evaluator wiring",
         "cli": "claude",
-        "model": "opus-4-6",
+        "model": "opus-4-7",
         "evaluator_cli": "codex"
     });
 
@@ -2554,7 +2596,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
     match &session.session_type {
         SessionType::Solo { cli, model } => {
             assert_eq!(cli, "claude");
-            assert_eq!(model.as_deref(), Some("opus-4-6"));
+            assert_eq!(model.as_deref(), Some("opus-4-7"));
         }
         other => panic!("expected solo session type, got {:?}", other),
     }
@@ -2570,7 +2612,17 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
         .find(|agent| matches!(agent.role, AgentRole::Evaluator))
         .unwrap();
     assert_eq!(evaluator.config.cli, "codex");
-    assert_eq!(evaluator.config.model.as_deref(), Some("opus-4-6"));
+    assert_eq!(evaluator.config.model.as_deref(), Some("opus-4-7"));
+
+    let prompt_path = temp_dir
+        .path()
+        .join(".hive-manager")
+        .join(session_id)
+        .join("prompts")
+        .join("evaluator-prompt.md");
+    let prompt = std::fs::read_to_string(prompt_path).expect("read evaluator prompt");
+    assert!(prompt.contains("sleep 1200"));
+    assert!(prompt.contains("sleep 480"));
 
     controller.write().close_session(session_id).unwrap();
 }
@@ -3523,7 +3575,7 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             agents: vec![],
             state: "Completed".to_string(),
             default_cli: "claude".to_string(),
-            default_model: Some("opus-4-6".to_string()),
+            default_model: Some("opus-4-7".to_string()),
             qa_workers: Vec::new(),
             max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
@@ -3767,7 +3819,7 @@ async fn test_template_crud_endpoints() {
             {
                 "role": "candidate-a",
                 "cli": "codex",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "prompt_template": "fusion-worker"
             }
         ],
@@ -4423,7 +4475,7 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,

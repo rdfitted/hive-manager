@@ -676,7 +676,7 @@ impl SessionController {
 
             let queen_config = AgentConfig {
                 cli: cmd.to_string(),
-                model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
+                model: if cmd == "claude" { Some("opus-4-7".to_string()) } else { None },
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
                 name: None,
@@ -720,7 +720,7 @@ impl SessionController {
 
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
-                    model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
+                    model: if cmd == "claude" { Some("opus-4-7".to_string()) } else { None },
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     name: None,
@@ -753,7 +753,7 @@ impl SessionController {
             last_activity_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
-            default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
+            default_model: if cmd == "claude" { Some("opus-4-7".to_string()) } else { None },
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -2695,11 +2695,21 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             variables.insert("idle_poll_secs".to_string(), "30".to_string());
             variables.insert("active_poll_interval".to_string(), "15 seconds".to_string());
             variables.insert("active_poll_secs".to_string(), "15".to_string());
+            variables.insert(
+                "evaluator_first_poll_interval".to_string(),
+                "30 seconds".to_string(),
+            );
+            variables.insert("evaluator_first_poll_secs".to_string(), "30".to_string());
         } else {
-            variables.insert("idle_poll_interval".to_string(), "20 minutes".to_string());
-            variables.insert("idle_poll_secs".to_string(), "1200".to_string());
-            variables.insert("active_poll_interval".to_string(), "5 minutes".to_string());
-            variables.insert("active_poll_secs".to_string(), "300".to_string());
+            variables.insert("idle_poll_interval".to_string(), "8 minutes".to_string());
+            variables.insert("idle_poll_secs".to_string(), "480".to_string());
+            variables.insert("active_poll_interval".to_string(), "8 minutes".to_string());
+            variables.insert("active_poll_secs".to_string(), "480".to_string());
+            variables.insert(
+                "evaluator_first_poll_interval".to_string(),
+                "20 minutes".to_string(),
+            );
+            variables.insert("evaluator_first_poll_secs".to_string(), "1200".to_string());
         }
 
         Self::render_named_prompt("roles/evaluator", session_id, None, variables)
@@ -3249,9 +3259,9 @@ You MUST spawn Task agents that call external CLI tools via Bash. This provides 
 
 Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
 
-### Scout 2 - Droid GLM 4.7 (Pattern Recognition)
+### Scout 2 - Droid GLM 5.1 (Pattern Recognition)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-4.7 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-5.1 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
 
 ### Scout 3 - Cursor (Quick Search)
 
@@ -5293,7 +5303,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
-| model | string | No | Model to use (e.g., "opus-4-6" for {default_cli}) |
+| model | string | No | Model to use (e.g., "opus-4-7" for {default_cli}) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -9582,7 +9592,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 ..AgentConfig::default()
             },
             &[],
@@ -9594,8 +9604,8 @@ mod tests {
             SessionController::evaluator_required_protocol("session-123"),
         );
         assert!(prompt.contains(".hive-manager/session-123/peer/qa-verdict.json"));
-        assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
-        assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
+        assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.5."));
+        assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.5""#));
         assert!(!prompt.contains(r#""cli": "claude""#));
     }
 
@@ -9605,7 +9615,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 ..AgentConfig::default()
             },
             &[QaWorkerConfig {
@@ -9726,7 +9736,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 ..AgentConfig::default()
             },
             &[],

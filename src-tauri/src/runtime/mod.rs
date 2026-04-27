@@ -254,7 +254,7 @@ mod tests {
         let spec = LaunchSpec::new("claude")
             .arg("--dangerously-skip-permissions")
             .arg("--model")
-            .arg("opus-4-6")
+            .arg("opus-4-7")
             .cwd("/project")
             .env("KEY", "value")
             .terminal_size(120, 40)
@@ -263,7 +263,7 @@ mod tests {
             .wsl_binary_path("/custom/agent");
 
         assert_eq!(spec.command, "claude");
-        assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "--model", "opus-4-6"]);
+        assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "--model", "opus-4-7"]);
         assert_eq!(spec.cwd, Some(PathBuf::from("/project")));
         assert_eq!(spec.env.get("KEY"), Some(&"value".to_string()));
         assert_eq!(spec.cols, 120);

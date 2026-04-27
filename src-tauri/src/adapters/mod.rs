@@ -37,7 +37,7 @@ pub fn is_valid_cli(cli: &str) -> bool {
 pub struct AgentLaunchSpec {
     /// CLI name (e.g., "claude", "gemini")
     pub cli: String,
-    /// Model identifier (e.g., "opus-4-6", "gemini-2.5-pro")
+    /// Model identifier (e.g., "opus-4-7", "gemini-2.5-pro")
     pub model: Option<String>,
     /// Additional CLI flags
     pub flags: Vec<String>,
@@ -209,11 +209,11 @@ mod tests {
         let cmd = LaunchCommand::new("claude", "/project")
             .arg("--dangerously-skip-permissions")
             .arg("--model")
-            .arg("opus-4-6")
+            .arg("opus-4-7")
             .env("KEY", "value");
 
         assert_eq!(cmd.binary, "claude");
-        assert_eq!(cmd.args, vec!["--dangerously-skip-permissions", "--model", "opus-4-6"]);
+        assert_eq!(cmd.args, vec!["--dangerously-skip-permissions", "--model", "opus-4-7"]);
         assert_eq!(cmd.env.get("KEY"), Some(&"value".to_string()));
     }
 

@@ -514,7 +514,7 @@ impl SessionStorage {
             command: "claude".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
-            default_model: "opus-4-6".to_string(),
+            default_model: "opus-4-7".to_string(),
             env: None,
         });
 
@@ -542,7 +542,7 @@ impl SessionStorage {
             command: "codex".to_string(),
             auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
             model_flag: Some("-m".to_string()),
-            default_model: "gpt-5.4".to_string(),
+            default_model: "gpt-5.5".to_string(),
             env: None,
         });
 
@@ -558,7 +558,7 @@ impl SessionStorage {
             command: "droid".to_string(),
             auto_approve_flag: None,  // Interactive mode - no auto-approve flag
             model_flag: None,  // Model selected via /model command in TUI
-            default_model: "glm-4.7".to_string(),
+            default_model: "glm-5.1".to_string(),
             env: None,
         });
 
@@ -573,7 +573,7 @@ impl SessionStorage {
         let mut default_roles = HashMap::new();
         default_roles.insert("backend".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus-4-6".to_string(),
+            model: "opus-4-7".to_string(),
         });
         default_roles.insert("frontend".to_string(), RoleDefaults {
             cli: "gemini".to_string(),
@@ -581,15 +581,15 @@ impl SessionStorage {
         });
         default_roles.insert("coherence".to_string(), RoleDefaults {
             cli: "droid".to_string(),
-            model: "glm-4.7".to_string(),
+            model: "glm-5.1".to_string(),
         });
         default_roles.insert("simplify".to_string(), RoleDefaults {
             cli: "codex".to_string(),
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
         });
         default_roles.insert("code-quality".to_string(), RoleDefaults {
             cli: "codex".to_string(),
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
         });
         default_roles.insert("evaluator".to_string(), RoleDefaults {
             cli: "qwen".to_string(),

@@ -384,7 +384,7 @@ You are a ruthless QA engineer. Grade against the contract. Do not rationalize f
      curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
        -H "Content-Type: application/json" \
        -d '{"agent_id":"{{session_id}}-evaluator","status":"idle","summary":"Waiting for milestone handoff"}'
-     sleep {{idle_poll_secs}}
+     sleep {{evaluator_first_poll_secs}}
    done
    cat ".hive-manager/{{session_id}}/peer/milestone-ready.json"
    ```
