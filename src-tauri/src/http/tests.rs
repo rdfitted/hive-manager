@@ -2882,7 +2882,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
         .find(|agent| matches!(agent.role, AgentRole::Evaluator))
         .unwrap();
     assert_eq!(evaluator.config.cli, "codex");
-    assert_eq!(evaluator.config.model.as_deref(), Some("opus-4-7"));
+    assert_eq!(evaluator.config.model.as_deref(), Some("gpt-5.5"));
 
     let prompt_path = temp_dir
         .path()

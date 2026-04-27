@@ -8764,11 +8764,18 @@ Last updated: {timestamp}
             );
         }
 
-        if config.cli.trim().is_empty() {
+        let uses_session_default_cli = config.cli.trim().is_empty();
+        if uses_session_default_cli {
             config.cli = session.default_cli.clone();
         }
         if config.model.is_none() {
-            config.model = session.default_model.clone();
+            config.model = if uses_session_default_cli {
+                session.default_model.clone()
+            } else {
+                CliRegistry::default_model(&config.cli)
+                    .map(ToString::to_string)
+                    .or_else(|| session.default_model.clone())
+            };
         }
         if config.label.is_none() {
             config.label = Some("Evaluator".to_string());

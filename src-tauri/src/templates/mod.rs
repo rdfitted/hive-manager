@@ -68,9 +68,11 @@ pub fn heartbeat_snippet(
     .to_string();
 
     format!(
-        r#"curl -s -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
+        r#"cat <<'JSON' | curl -s -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
   -H "Content-Type: application/json" \
-  -d '{body}'"#
+  --data-binary @-
+{body}
+JSON"#
     )
 }
 
@@ -1356,9 +1358,9 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             &heartbeat_snippet(
                 &api_base_url,
                 &context.session_id,
-                "<your-id>",
-                "working|idle",
-                "<what>",
+                "{{agent_id}}",
+                "{{heartbeat_status}}",
+                "{{heartbeat_summary}}",
             ),
         );
         rendered = rendered.replace(
@@ -1519,9 +1521,11 @@ impl Default for TemplateEngine {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::pty::WorkerRole;
+
     use super::{
-        builtin_role_packs, builtin_session_templates, normalize_api_base_url, PromptContext,
-        SessionTemplate, TemplateCatalog, TemplateEngine, DEFAULT_API_BASE_URL,
+        builtin_role_packs, builtin_session_templates, heartbeat_snippet, normalize_api_base_url,
+        PromptContext, SessionTemplate, TemplateCatalog, TemplateEngine, DEFAULT_API_BASE_URL,
     };
 
     #[test]
@@ -1580,6 +1584,48 @@ mod tests {
             DEFAULT_API_BASE_URL
         );
         assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
+    }
+
+    #[test]
+    fn heartbeat_snippet_uses_stdin_for_shell_safe_json() {
+        let rendered = heartbeat_snippet(
+            "http://localhost:18800",
+            "session-123",
+            "worker-1",
+            "working",
+            "Don't block",
+        );
+
+        assert!(rendered.contains("cat <<'JSON' | curl"));
+        assert!(rendered.contains("--data-binary @-"));
+        assert!(rendered.contains(r#""summary":"Don't block""#));
+        assert!(!rendered.contains(" -d '"));
+    }
+
+    #[test]
+    fn rendered_worker_prompt_does_not_leak_generic_heartbeat_placeholders() {
+        let mut variables = HashMap::new();
+        variables.insert("agent_id".to_string(), "session-123-worker-1".to_string());
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert("heartbeat_summary".to_string(), "Implementing backend task".to_string());
+
+        let prompt = TemplateEngine::default()
+            .render_worker_prompt(
+                &WorkerRole::new("backend", "Backend", "claude"),
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: Some("Build API".to_string()),
+                    variables,
+                },
+            )
+            .unwrap();
+
+        assert!(!prompt.contains(concat!("<", "your-id", ">")));
+        assert!(!prompt.contains(concat!("<", "what", ">")));
+        assert!(!prompt.contains(concat!("working", "|", "idle")));
+        assert!(prompt.contains(r#""agent_id":"session-123-worker-1""#));
+        assert!(prompt.contains(r#""summary":"Implementing backend task""#));
     }
 
     #[test]
