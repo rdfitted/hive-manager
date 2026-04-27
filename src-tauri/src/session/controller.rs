@@ -540,7 +540,16 @@ fn cell_status_changes_for_transition(
     changes
 }
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
-fn get_polling_instructions(cli: &str, task_file: &str, role_type: Option<&str>) -> String {
+fn get_polling_instructions(
+    cli: &str,
+    task_file: &str,
+    role_type: Option<&str>,
+    heartbeat_command: Option<&str>,
+) -> String {
+    let heartbeat_line = heartbeat_command
+        .map(|command| format!("  {command}\n"))
+        .unwrap_or_default();
+
     match CliRegistry::get_behavior_for_role(cli, role_type) {
         CliBehavior::ExplicitPolling => {
             format!(
@@ -551,11 +560,13 @@ Run this bash loop to wait for task activation:
 while true; do
   STATUS=$(grep "^## Status:" "{}" | head -1)
   if [[ "$STATUS" == *"ACTIVE"* ]]; then break; fi
+{}
   sleep 30
 done
 ```
 "#,
-                task_file
+                task_file,
+                heartbeat_line
             )
         }
         CliBehavior::ActionProne => {
@@ -2320,7 +2331,7 @@ Last updated: {timestamp}
     }
 
     fn build_fusion_worker_prompt(
-        _session_id: &str,
+        session_id: &str,
         variant_index: u8,
         variant_name: &str,
         branch: &str,
@@ -2329,7 +2340,12 @@ Last updated: {timestamp}
         cli: &str,
     ) -> String {
         let task_file = format!(".hive-manager/tasks/fusion-variant-{}-task.md", variant_index);
-        let polling_instructions = get_polling_instructions(cli, &task_file, None);
+        let agent_id = format!("{}-fusion-{}", session_id, variant_index);
+        let heartbeat_command = format!(
+            r#"curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"{agent_id}","status":"idle","summary":"Waiting for task activation"}}'"#
+        );
+        let polling_instructions =
+            get_polling_instructions(cli, &task_file, None, Some(&heartbeat_command));
         let scope_block = Self::scope_block(".");
 
         format!(
@@ -2538,6 +2554,9 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
 2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
    ```bash
    while [ ! -f "{qa_verdict_path}" ]; do
+     curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Evaluator verdict"}}'
      sleep 30
    done
    cat "{qa_verdict_path}"
@@ -2691,25 +2710,19 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         );
 
         if smoke_test {
+            variables.insert("evaluator_first_poll_interval".to_string(), "30 seconds".to_string());
+            variables.insert("evaluator_first_poll_secs".to_string(), "30".to_string());
             variables.insert("idle_poll_interval".to_string(), "30 seconds".to_string());
             variables.insert("idle_poll_secs".to_string(), "30".to_string());
             variables.insert("active_poll_interval".to_string(), "15 seconds".to_string());
             variables.insert("active_poll_secs".to_string(), "15".to_string());
-            variables.insert(
-                "evaluator_first_poll_interval".to_string(),
-                "30 seconds".to_string(),
-            );
-            variables.insert("evaluator_first_poll_secs".to_string(), "30".to_string());
         } else {
+            variables.insert("evaluator_first_poll_interval".to_string(), "20 minutes".to_string());
+            variables.insert("evaluator_first_poll_secs".to_string(), "1200".to_string());
             variables.insert("idle_poll_interval".to_string(), "8 minutes".to_string());
             variables.insert("idle_poll_secs".to_string(), "480".to_string());
             variables.insert("active_poll_interval".to_string(), "8 minutes".to_string());
             variables.insert("active_poll_secs".to_string(), "480".to_string());
-            variables.insert(
-                "evaluator_first_poll_interval".to_string(),
-                "20 minutes".to_string(),
-            );
-            variables.insert("evaluator_first_poll_secs".to_string(), "1200".to_string());
         }
 
         Self::render_named_prompt("roles/evaluator", session_id, None, variables)
@@ -2749,6 +2762,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
 
         let mut variables = HashMap::new();
         variables.insert("qa_worker_index".to_string(), index.to_string());
+        variables.insert(
+            "qa_worker_agent_id".to_string(),
+            format!("{}-qa-worker-{}", session_id, index),
+        );
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
         variables.insert(
             "supports_chrome".to_string(),
@@ -3294,7 +3311,7 @@ Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
 [1-2 sentence overview]
 
 ## Investigation Results
-- Scouts Used: 3 (BigPickle, GLM 4.7, Grok Code)
+- Scouts Used: 3 (BigPickle, GLM 5.1, Grok Code)
 - Files Identified: [count]
 - Consensus Level: HIGH/MEDIUM/LOW
 
@@ -4294,6 +4311,9 @@ When polling for worker progress, iterate over every worker worktree instead of 
 
 ```bash
 for WT in "{worker_worktree_root}"/worker-*; do
+  curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+    -H "Content-Type: application/json" \
+    -d '{{"agent_id":"queen","status":"working","summary":"Polling worker progress"}}'
   BR="hive/{session_id}/$(basename "$WT")"
   echo "=== $BR ==="
   git -C "$WT" log --oneline "$BR" ^<feature-branch> 2>/dev/null | head -5
@@ -4420,6 +4440,9 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             &config.cli,
             &task_file,
             config.role.as_ref().map(|role| role.role_type.as_str()),
+            Some(&format!(
+                r#"curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-{index}","status":"idle","summary":"Waiting for task activation"}}'"#
+            )),
         );
 
         format!(
@@ -5303,7 +5326,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
-| model | string | No | Model to use (e.g., "opus-4-7" for {default_cli}) |
+| model | string | No | Model to use (e.g., `claude --model claude-opus-4-7`, `gpt-5.5` for Codex, or `glm-5.1` via Droid `/model`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |

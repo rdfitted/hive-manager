@@ -107,13 +107,13 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "queen".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-6".to_string()),
+                    model: Some("opus-4-7".to_string()),
                     prompt_template: "queen-hive".to_string(),
                 },
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.4".to_string()),
+                    model: Some("gpt-5.5".to_string()),
                     prompt_template: "roles/backend".to_string(),
                 },
                 CellTemplate {
@@ -135,13 +135,13 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "queen".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-6".to_string()),
+                    model: Some("opus-4-7".to_string()),
                     prompt_template: "queen-hive".to_string(),
                 },
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.4".to_string()),
+                    model: Some("gpt-5.5".to_string()),
                     prompt_template: "roles/backend".to_string(),
                 },
                 CellTemplate {
@@ -153,7 +153,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "coherence".to_string(),
                     cli: "droid".to_string(),
-                    model: Some("glm-4.7".to_string()),
+                    model: Some("glm-5.1".to_string()),
                     prompt_template: "roles/coherence".to_string(),
                 },
             ],
@@ -169,7 +169,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "candidate-a".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.4".to_string()),
+                    model: Some("gpt-5.5".to_string()),
                     prompt_template: "fusion-worker".to_string(),
                 },
                 CellTemplate {
@@ -181,7 +181,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "resolver".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-6".to_string()),
+                    model: Some("opus-4-7".to_string()),
                     prompt_template: "resolver".to_string(),
                 },
             ],
@@ -199,7 +199,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "queen".to_string(),
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 prompt_template: "queen-hive".to_string(),
             }],
         },
@@ -209,7 +209,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "backend".to_string(),
                 cli: "codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 prompt_template: "roles/backend".to_string(),
             }],
         },
@@ -219,7 +219,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "coherence".to_string(),
                 cli: "droid".to_string(),
-                model: Some("glm-4.7".to_string()),
+                model: Some("glm-5.1".to_string()),
                 prompt_template: "roles/coherence".to_string(),
             }],
         },
@@ -229,7 +229,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "resolver".to_string(),
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 prompt_template: "resolver".to_string(),
             }],
         },
@@ -378,13 +378,20 @@ You are a ruthless QA engineer. Grade against the contract. Do not rationalize f
 1. You MUST read project context once:
    - `.ai-docs/project-dna.md`
    - `.ai-docs/learnings.jsonl`
-2. You MUST use this inline bash polling loop. You MUST NOT use `/loop`:
+2. You MUST use this inline bash polling loop. You MUST NOT use `/loop`.
+   The first poll waits {{evaluator_first_poll_interval}} (`sleep {{evaluator_first_poll_secs}}`); after that, poll every {{idle_poll_interval}} (`sleep {{idle_poll_secs}}`).
    ```bash
+   FIRST_WAIT=1
    while [ ! -f ".hive-manager/{{session_id}}/peer/milestone-ready.json" ]; do
      curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
        -H "Content-Type: application/json" \
        -d '{"agent_id":"{{session_id}}-evaluator","status":"idle","summary":"Waiting for milestone handoff"}'
-     sleep {{evaluator_first_poll_secs}}
+     if [ "$FIRST_WAIT" = "1" ]; then
+       FIRST_WAIT=0
+       sleep {{evaluator_first_poll_secs}}
+     else
+       sleep {{idle_poll_secs}}
+     fi
    done
    cat ".hive-manager/{{session_id}}/peer/milestone-ready.json"
    ```
@@ -408,7 +415,16 @@ Use these defaults when spawning QA workers unless the plan specifies otherwise.
 1. You MUST act as a coordinator, not a tester.
 2. You MUST spawn all {{qa_worker_count}} QA workers one at a time in this exact order:
 {{qa_worker_spawn_plan}}
-3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`.
+3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`, and emit a heartbeat inside each polling iteration:
+   ```bash
+   while true; do
+     curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{"agent_id":"{{session_id}}-evaluator","status":"working","summary":"Polling QA workers"}'
+     # Check QA worker task files here; break when all are COMPLETED or BLOCKED.
+     sleep {{active_poll_secs}}
+   done
+   ```
 4. You MUST wait for all {{qa_worker_count}} QA workers to finish before you render the verdict.
 5. {{qa_worker_coverage_rule}}
 
@@ -534,6 +550,15 @@ You are the UI QA specialist for session `{{session_id}}`.
 2. You MUST capture screenshot evidence for visual regressions or broken flows.
 3. You MUST verify buttons, links, forms, navigation, and modals on every criterion you cover.
 
+## Heartbeat
+
+Before long-running checks and between major test steps, emit:
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running UI QA"}'
+```
+
 {{#if supports_chrome}}
 ## How to Test — Native Chrome Tools
 
@@ -609,6 +634,15 @@ You are the API QA specialist for session `{{session_id}}`.
 2. You MUST validate status codes, payload shape, and error handling.
 3. You MUST record exact requests, responses, and broken invariants.
 
+## Heartbeat
+
+Before long-running checks and between major test steps, emit:
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running API QA"}'
+```
+
 ## Auth Bypass
 
 - URL: {{auth_bypass_url}}
@@ -651,6 +685,15 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 1. You MUST run axe-core, Lighthouse, or equivalent tooling when available.
 2. You MUST check keyboard navigation, focus order, semantic roles, ARIA, and contrast.
 3. You MUST record the exact defect and the affected criterion.
+
+## Heartbeat
+
+Before long-running checks and between major test steps, emit:
+```bash
+curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running accessibility QA"}'
+```
 
 ## Auth Bypass
 
