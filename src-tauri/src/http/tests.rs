@@ -2557,6 +2557,50 @@ async fn test_launch_fusion_success() {
 }
 
 #[tokio::test]
+async fn test_create_hive_accepts_per_worker_model_overrides() {
+    let app = setup_test_app().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "mode": "hive",
+        "objective": "Implement feature X",
+        "default_cli": "claude",
+        "default_model": "opus-4-7",
+        "workers": [
+            {
+                "cli": "codex",
+                "model": "gpt-5.5",
+                "flags": [],
+                "label": "Codex worker"
+            },
+            {
+                "cli": "droid",
+                "model": "glm-5.1",
+                "flags": [],
+                "label": "Droid worker"
+            }
+        ],
+        "smoke_test": true
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400.
+    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn test_launch_swarm_accepts_model_capable_configs() {
     let app = setup_test_app().await;
     let temp_dir = TempDir::new().unwrap();
@@ -2567,6 +2611,11 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
         "planner_count": 1,
         "default_cli": "codex",
         "default_model": "gpt-5.5",
+        "queen_config": {
+            "cli": "qwen",
+            "model": "qwen3-coder",
+            "flags": []
+        },
         "planner_config": {
             "cli": "droid",
             "model": "glm-5.1",
@@ -2594,6 +2643,34 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
         .unwrap();
 
     // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400.
+    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_launch_solo_accepts_droid_model_config() {
+    let app = setup_test_app().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate the issue",
+        "cli": "droid",
+        "model": "glm-5.1"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Droid launches through the generic Solo endpoint; there is no dedicated Droid endpoint.
     assert_ne!(response.status(), StatusCode::BAD_REQUEST);
 }
 

@@ -187,6 +187,7 @@ pub struct CreateSessionRequest {
     pub default_cli: Option<String>,
     pub default_model: Option<String>,
     pub worker_count: Option<u8>,
+    pub workers: Option<Vec<AgentConfig>>,
     pub variants: Option<Vec<LaunchFusionVariantRequest>>,
     pub judge_cli: Option<String>,
     pub judge_model: Option<String>,
@@ -280,6 +281,19 @@ pub async fn create_session(
                 role: None,
                 initial_prompt: None,
             };
+            let workers = if let Some(workers) = req.workers {
+                if workers.is_empty() {
+                    return Err(ApiError::bad_request(
+                        "Hive launch requires at least one worker",
+                    ));
+                }
+                for worker in &workers {
+                    validate_cli(&worker.cli)?;
+                }
+                workers
+            } else {
+                vec![worker_config; worker_count as usize]
+            };
 
             // Build evaluator_config: validate if provided, else fall back to default_cli silently
             let evaluator_config = if let Some(ref evaluator_cli) = req.evaluator_cli {
@@ -315,7 +329,7 @@ pub async fn create_session(
                 name: req.name,
                 color: req.color,
                 queen_config,
-                workers: vec![worker_config; worker_count as usize],
+                workers,
                 prompt: req.objective.filter(|value| !value.trim().is_empty()),
                 with_planning: req.with_planning.unwrap_or(false),
                 with_evaluator: req.with_evaluator.unwrap_or(false),
