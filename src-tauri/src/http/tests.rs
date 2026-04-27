@@ -115,7 +115,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -154,7 +154,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         last_activity_at: now,
         agents,
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -299,7 +299,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -351,7 +351,7 @@ async fn test_patch_session_null_clears_field() {
         last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -503,7 +503,7 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         agents: vec![],
         state: "Completed".to_string(),
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -2153,6 +2153,68 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_add_worker_accepts_latest_worker_models() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-latest-worker-models");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session(
+        "session-latest-models",
+        temp_dir.to_str().unwrap(),
+    ));
+
+    for (cli, model) in [("codex", "gpt-5.5"), ("droid", "glm-5.1")] {
+        let body = serde_json::json!({
+            "role_type": "backend",
+            "cli": cli,
+            "model": model
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-latest-models/workers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{cli}/{model} should be accepted as a worker model"
+        );
+        if status == StatusCode::CREATED {
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            let worker_id = response_json
+                .get("worker_id")
+                .and_then(|value| value.as_str())
+                .expect("created worker response includes worker_id");
+            let session = controller
+                .read()
+                .get_session("session-latest-models")
+                .expect("session should still exist");
+            let worker = session
+                .agents
+                .iter()
+                .find(|agent| agent.id == worker_id)
+                .expect("created worker should be stored on session");
+            assert_eq!(worker.config.cli, cli);
+            assert_eq!(worker.config.model.as_deref(), Some(model));
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
 #[test]
 fn test_add_worker_request_accepts_name_and_description_fields() {
     let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
@@ -2221,7 +2283,7 @@ fn test_add_worker_request_blank_description_deserializes_to_none() {
 fn test_persisted_agent_config_round_trips_name_and_description_fields() {
     let config = crate::storage::PersistedAgentConfig {
         cli: "codex".to_string(),
-        model: Some("gpt-5.4".to_string()),
+        model: Some("gpt-5.5".to_string()),
         flags: vec![],
         label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
         name: Some("Worker 2 (Frontend)".to_string()),
@@ -2249,7 +2311,7 @@ fn test_persisted_agent_config_blank_name_round_trip_uses_indexed_default_behavi
     for raw_name in ["", "   "] {
         let config = crate::storage::PersistedAgentConfig {
             cli: "codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             flags: vec![],
             label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
             name: Some(raw_name.to_string()),
@@ -2510,8 +2572,274 @@ async fn test_launch_fusion_success() {
         .await
         .unwrap();
 
-    // May be 201 (success) or 500 (PTY spawn fails in test env), but NOT 400
-    assert_ne!(response.status(), StatusCode::BAD_REQUEST);
+    let status = response.status();
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_create_hive_accepts_per_worker_model_overrides() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "mode": "hive",
+        "objective": "Implement feature X",
+        "default_cli": "claude",
+        "default_model": "opus-4-7",
+        "workers": [
+            {
+                "cli": "codex",
+                "model": "gpt-5.5",
+                "flags": [],
+                "label": "Codex worker"
+            },
+            {
+                "cli": "droid",
+                "model": "glm-5.1",
+                "flags": [],
+                "label": "Droid worker"
+            }
+        ],
+        "smoke_test": true
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
+    if status == StatusCode::CREATED {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let session_id = launch_response
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .expect("launch response includes session_id");
+        let session = controller
+            .read()
+            .get_session(session_id)
+            .expect("created hive session should be stored");
+        assert_eq!(session.default_cli, "claude");
+        assert_eq!(session.default_model.as_deref(), Some("opus-4-7"));
+        let workers: Vec<_> = session
+            .agents
+            .iter()
+            .filter(|agent| matches!(agent.role, AgentRole::Worker { .. }))
+            .collect();
+        assert_eq!(workers.len(), 2);
+        let codex_worker = workers
+            .iter()
+            .find(|worker| worker.config.cli == "codex")
+            .expect("codex worker should be present");
+        assert_eq!(codex_worker.config.model.as_deref(), Some("gpt-5.5"));
+        let droid_worker = workers
+            .iter()
+            .find(|worker| worker.config.cli == "droid")
+            .expect("droid worker should be present");
+        assert_eq!(droid_worker.config.model.as_deref(), Some("glm-5.1"));
+    }
+}
+
+#[tokio::test]
+async fn test_launch_swarm_accepts_model_capable_configs() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate the feature",
+        "planner_count": 1,
+        "default_cli": "codex",
+        "default_model": "gpt-5.5",
+        "queen_config": {
+            "cli": "qwen",
+            "model": "qwen3-coder",
+            "flags": []
+        },
+        "planner_config": {
+            "cli": "droid",
+            "model": "glm-5.1",
+            "flags": []
+        },
+        "workers_per_planner": [
+            {
+                "cli": "codex",
+                "model": "gpt-5.5",
+                "flags": []
+            }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/swarm")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
+    if status == StatusCode::CREATED {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let session_id = launch_response
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .expect("launch response includes session_id");
+        let session = controller
+            .read()
+            .get_session(session_id)
+            .expect("created swarm session should be stored");
+        assert_eq!(session.default_cli, "codex");
+        assert_eq!(session.default_model.as_deref(), Some("gpt-5.5"));
+        let queen = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Queen))
+            .expect("swarm session should include queen");
+        assert_eq!(queen.config.cli, "qwen");
+        assert_eq!(queen.config.model.as_deref(), Some("qwen3-coder"));
+        let planner = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Planner { .. }))
+            .expect("swarm session should include planner");
+        assert_eq!(planner.config.cli, "droid");
+        assert_eq!(planner.config.model.as_deref(), Some("glm-5.1"));
+        let worker = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Worker { .. }))
+            .expect("swarm session should include worker");
+        assert_eq!(worker.config.cli, "codex");
+        assert_eq!(worker.config.model.as_deref(), Some("gpt-5.5"));
+    }
+}
+
+#[tokio::test]
+async fn test_launch_swarm_rejects_explicit_empty_workers_per_planner() {
+    let app = setup_test_app().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate the feature",
+        "planner_count": 1,
+        "workers_per_planner": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/swarm")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let error_msg = response_json.get("error").unwrap().as_str().unwrap();
+    assert!(
+        error_msg.contains("workers_per_planner cannot be empty"),
+        "Error should mention empty workers_per_planner: {error_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_launch_solo_accepts_droid_model_config() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate the issue",
+        "cli": "droid",
+        "model": "glm-5.1"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    // Droid launches through the generic Solo endpoint; there is no dedicated Droid endpoint.
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
+    if status == StatusCode::CREATED {
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        let session_id = launch_response
+            .get("session_id")
+            .and_then(|value| value.as_str())
+            .expect("launch response includes session_id");
+        let session = controller
+            .read()
+            .get_session(session_id)
+            .expect("created solo session should be stored");
+        assert_eq!(session.default_cli, "droid");
+        assert_eq!(session.default_model.as_deref(), Some("glm-5.1"));
+        match &session.session_type {
+            SessionType::Solo { cli, model } => {
+                assert_eq!(cli, "droid");
+                assert_eq!(model.as_deref(), Some("glm-5.1"));
+            }
+            other => panic!("expected solo session, got {other:?}"),
+        }
+        let solo_agent = session
+            .agents
+            .iter()
+            .find(|agent| {
+                matches!(
+                    agent.role,
+                    AgentRole::Worker {
+                        index: 1,
+                        parent: None
+                    }
+                )
+            })
+            .expect("solo session should include solo agent");
+        assert_eq!(solo_agent.config.cli, "droid");
+        assert_eq!(solo_agent.config.model.as_deref(), Some("glm-5.1"));
+    }
 }
 
 #[tokio::test]
@@ -2523,7 +2851,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
         "project_path": temp_dir.path().to_string_lossy(),
         "task_description": "Investigate evaluator wiring",
         "cli": "claude",
-        "model": "opus-4-6",
+        "model": "opus-4-7",
         "evaluator_cli": "codex"
     });
 
@@ -2554,7 +2882,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
     match &session.session_type {
         SessionType::Solo { cli, model } => {
             assert_eq!(cli, "claude");
-            assert_eq!(model.as_deref(), Some("opus-4-6"));
+            assert_eq!(model.as_deref(), Some("opus-4-7"));
         }
         other => panic!("expected solo session type, got {:?}", other),
     }
@@ -2570,7 +2898,71 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
         .find(|agent| matches!(agent.role, AgentRole::Evaluator))
         .unwrap();
     assert_eq!(evaluator.config.cli, "codex");
-    assert_eq!(evaluator.config.model.as_deref(), Some("opus-4-6"));
+    assert_eq!(evaluator.config.model.as_deref(), Some("gpt-5.5"));
+
+    let prompt_path = temp_dir
+        .path()
+        .join(".hive-manager")
+        .join(session_id)
+        .join("prompts")
+        .join("evaluator-prompt.md");
+    let prompt = std::fs::read_to_string(prompt_path).expect("read evaluator prompt");
+    assert!(prompt.contains("sleep 1200"));
+    assert!(prompt.contains("sleep 480"));
+
+    controller.write().close_session(session_id).unwrap();
+}
+
+#[tokio::test]
+async fn test_launch_solo_with_same_cli_evaluator_preserves_custom_session_model() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Investigate evaluator wiring",
+        "cli": "codex",
+        "model": "custom-codex-model",
+        "evaluator_cli": "codex"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let session_id = launch_response
+        .get("session_id")
+        .and_then(|value| value.as_str())
+        .unwrap();
+
+    let session = controller.read().get_session(session_id).unwrap();
+    assert_eq!(session.default_cli, "codex");
+    assert_eq!(session.default_model.as_deref(), Some("custom-codex-model"));
+
+    let evaluator = session
+        .agents
+        .iter()
+        .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+        .unwrap();
+    assert_eq!(evaluator.config.cli, "codex");
+    assert_eq!(
+        evaluator.config.model.as_deref(),
+        Some("custom-codex-model")
+    );
 
     controller.write().close_session(session_id).unwrap();
 }
@@ -3523,7 +3915,7 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             agents: vec![],
             state: "Completed".to_string(),
             default_cli: "claude".to_string(),
-            default_model: Some("opus-4-6".to_string()),
+            default_model: Some("opus-4-7".to_string()),
             qa_workers: Vec::new(),
             max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
@@ -3767,7 +4159,7 @@ async fn test_template_crud_endpoints() {
             {
                 "role": "candidate-a",
                 "cli": "codex",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "prompt_template": "fusion-worker"
             }
         ],
@@ -4423,7 +4815,7 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-6".to_string()),
+        default_model: Some("opus-4-7".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,

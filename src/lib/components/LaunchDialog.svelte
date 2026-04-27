@@ -7,7 +7,7 @@
   import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
   import { templates, selectedTemplate } from '$lib/stores/templates';
-  import { cliOptions } from '$lib/config/clis';
+  import { cliOptions, defaultRoles } from '$lib/config/clis';
 
   export let show: boolean = false;
 
@@ -159,8 +159,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   function createDefaultConfig(roleType: string = 'general'): LaunchWorkerConfig {
     const generalRole = predefinedRoles.find((r) => r.type === 'general')!;
     const role = predefinedRoles.find((r) => r.type === roleType) ?? generalRole;
+    const defaults = defaultRoles[role.type] ?? defaultRoles.general;
     return {
-      cli: role.cli,
+      cli: defaults.cli,
+      model: defaults.model,
       flags: [],
       label: undefined,
       selectedRole: roleType,
@@ -324,10 +326,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   let withPlanning = true;
   let withEvaluator = true;
-  let evaluatorCli = 'claude';
-  let evaluatorModel = '';
+  let evaluatorCli = defaultRoles.evaluator.cli;
+  let evaluatorModel = defaultRoles.evaluator.model;
   let evaluatorConfig: AgentConfig = {
-    cli: 'claude',
+    cli: defaultRoles.evaluator.cli,
+    model: defaultRoles.evaluator.model,
     flags: [],
     label: 'Evaluator',
   };
@@ -337,15 +340,24 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     evaluatorConfig.model = evaluatorModel || undefined;
   }
 
+  function createDefaultQaWorker(specialization: QaWorkerConfig['specialization'] = 'ui'): QaWorkerConfig {
+    return {
+      specialization,
+      cli: defaultRoles['qa-worker'].cli,
+      model: defaultRoles['qa-worker'].model,
+      flags: [],
+    };
+  }
+
   let qaWorkers: QaWorkerConfig[] = [
-    { specialization: 'ui', cli: 'claude', flags: [] },
-    { specialization: 'api', cli: 'claude', flags: [] },
-    { specialization: 'a11y', cli: 'claude', flags: [] },
+    createDefaultQaWorker('ui'),
+    createDefaultQaWorker('api'),
+    createDefaultQaWorker('a11y'),
   ];
 
   function addQaWorker() {
     if (qaWorkers.length < 6) {
-      qaWorkers = [...qaWorkers, { specialization: 'ui', cli: 'claude', flags: [] }];
+      qaWorkers = [...qaWorkers, createDefaultQaWorker('ui')];
     }
   }
 
@@ -366,6 +378,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         // Build worker configs with roles
         const workersWithRoles: AgentConfig[] = hiveWorkers.map((w) => ({
           cli: w.cli,
+          model: w.model,
           flags: w.flags,
           label: w.label,
           role: buildWorkerRole(w.selectedRole, w.promptTemplateOverride),
@@ -391,6 +404,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         // Build workers config with roles
         const workersWithRoles: AgentConfig[] = workersPerPlanner.map((w) => ({
           cli: w.cli,
+          model: w.model,
           flags: w.flags,
           label: w.label,
           role: buildWorkerRole(w.selectedRole, w.promptTemplateOverride),
@@ -633,7 +647,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   id="evaluator-model"
                   type="text"
                   bind:value={evaluatorModel}
-                  placeholder="e.g. claude-opus-4-6"
+                  placeholder="e.g. opus-4-7"
                 />
               </div>
               <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />

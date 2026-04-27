@@ -1,5 +1,6 @@
 pub(crate) mod cell_status;
 mod controller;
+mod polling_intervals;
 
 #[allow(unused_imports)]
 pub use controller::{

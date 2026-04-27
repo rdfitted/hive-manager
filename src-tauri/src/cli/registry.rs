@@ -109,6 +109,20 @@ impl CliRegistry {
             .map(|defaults| (defaults.cli.as_str(), defaults.model.as_str()))
     }
 
+    /// Get the built-in default model for a CLI.
+    pub fn default_model(cli: &str) -> Option<&'static str> {
+        match cli {
+            "claude" => Some("opus-4-7"),
+            "gemini" => Some("gemini-2.5-pro"),
+            "opencode" => Some("opencode/big-pickle"),
+            "codex" => Some("gpt-5.5"),
+            "cursor" => Some("composer-2"),
+            "droid" => Some("glm-5.1"),
+            "qwen" => Some("qwen3-coder"),
+            _ => None,
+        }
+    }
+
     /// Update the config
     pub fn update_config(&mut self, config: AppConfig) {
         self.config = config;
@@ -176,7 +190,7 @@ mod tests {
             command: "claude".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
-            default_model: "opus-4-6".to_string(),
+            default_model: "opus-4-7".to_string(),
             env: None,
         });
         clis.insert("gemini".to_string(), CliConfig {
@@ -197,7 +211,7 @@ mod tests {
             command: "droid".to_string(),
             auto_approve_flag: None,  // Interactive mode - no auto-approve flag
             model_flag: None,  // Model selected via /model command in TUI
-            default_model: "glm-4.7".to_string(),
+            default_model: "glm-5.1".to_string(),
             env: None,
         });
         clis.insert("qwen".to_string(), CliConfig {
@@ -206,6 +220,24 @@ mod tests {
             model_flag: Some("-m".to_string()),
             default_model: "qwen3-coder".to_string(),
             env: None,
+        });
+        clis.insert("codex".to_string(), CliConfig {
+            command: "codex".to_string(),
+            auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "gpt-5.5".to_string(),
+            env: None,
+        });
+        clis.insert("opencode".to_string(), CliConfig {
+            command: "opencode".to_string(),
+            auto_approve_flag: None,
+            model_flag: Some("-m".to_string()),
+            default_model: "opencode/big-pickle".to_string(),
+            env: Some({
+                let mut env = HashMap::new();
+                env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
+                env
+            }),
         });
 
         AppConfig {
@@ -282,7 +314,7 @@ mod tests {
         let registry = CliRegistry::new(test_config());
         let config = AgentConfig {
             cli: "droid".to_string(),
-            model: Some("glm-4.7".to_string()),
+            model: Some("glm-5.1".to_string()),
             flags: vec![],
             label: None,
             name: None,
@@ -320,6 +352,49 @@ mod tests {
     }
 
     #[test]
+    fn test_build_codex_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "codex".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "codex");
+        assert!(built.args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"gpt-5.5".to_string()));
+    }
+
+    #[test]
+    fn test_build_opencode_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "opencode".to_string(),
+            model: None,
+            flags: vec![],
+            label: None,
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "opencode");
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"opencode/big-pickle".to_string()));
+        // Check env has OPENCODE_YOLO
+        assert_eq!(built.env.get("OPENCODE_YOLO"), Some(&"true".to_string()));
+    }
+
+    #[test]
     fn test_cli_behavior_profiles() {
         assert_eq!(CliRegistry::get_behavior("claude"), CliBehavior::ActionProne);
         assert_eq!(CliRegistry::get_behavior("gemini"), CliBehavior::ActionProne);
@@ -350,5 +425,13 @@ mod tests {
             CliRegistry::get_behavior_for_role("claude", Some("backend")),
             CliBehavior::ActionProne
         ));
+    }
+
+    #[test]
+    fn test_default_model_lookup() {
+        assert_eq!(CliRegistry::default_model("claude"), Some("opus-4-7"));
+        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.5"));
+        assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
+        assert_eq!(CliRegistry::default_model("unknown"), None);
     }
 }

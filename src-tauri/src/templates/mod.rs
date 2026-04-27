@@ -53,6 +53,47 @@ fn normalize_api_base_url(raw: Option<&String>) -> String {
     trimmed.trim_end_matches('/').to_string()
 }
 
+pub fn heartbeat_snippet(
+    api_base_url: &str,
+    session_id: &str,
+    agent_id: &str,
+    status: &str,
+    summary: &str,
+) -> String {
+    let body = serde_json::json!({
+        "agent_id": agent_id,
+        "status": status,
+        "summary": summary,
+    })
+    .to_string();
+
+    format!(
+        r#"cat <<'JSON' | curl -fsS -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
+  -H "Content-Type: application/json" \
+  --data-binary @-
+{body}
+JSON"#
+    )
+}
+
+fn required_variable<'a>(
+    variables: &'a HashMap<String, String>,
+    key: &str,
+) -> Result<&'a str, TemplateError> {
+    let value = variables
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            TemplateError::Invalid(format!(
+                "generic_heartbeat_snippet requires non-empty variable `{}`",
+                key
+            ))
+        })?;
+
+    Ok(value)
+}
+
 /// Information about a worker for prompt rendering
 #[derive(Debug, Clone)]
 pub struct WorkerInfo {
@@ -107,13 +148,13 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "queen".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-6".to_string()),
+                    model: Some("opus-4-7".to_string()),
                     prompt_template: "queen-hive".to_string(),
                 },
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.4".to_string()),
+                    model: Some("gpt-5.5".to_string()),
                     prompt_template: "roles/backend".to_string(),
                 },
                 CellTemplate {
@@ -135,13 +176,13 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "queen".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-6".to_string()),
+                    model: Some("opus-4-7".to_string()),
                     prompt_template: "queen-hive".to_string(),
                 },
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.4".to_string()),
+                    model: Some("gpt-5.5".to_string()),
                     prompt_template: "roles/backend".to_string(),
                 },
                 CellTemplate {
@@ -153,7 +194,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "coherence".to_string(),
                     cli: "droid".to_string(),
-                    model: Some("glm-4.7".to_string()),
+                    model: Some("glm-5.1".to_string()),
                     prompt_template: "roles/coherence".to_string(),
                 },
             ],
@@ -169,7 +210,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "candidate-a".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.4".to_string()),
+                    model: Some("gpt-5.5".to_string()),
                     prompt_template: "fusion-worker".to_string(),
                 },
                 CellTemplate {
@@ -181,7 +222,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "resolver".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-6".to_string()),
+                    model: Some("opus-4-7".to_string()),
                     prompt_template: "resolver".to_string(),
                 },
             ],
@@ -199,7 +240,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "queen".to_string(),
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 prompt_template: "queen-hive".to_string(),
             }],
         },
@@ -209,7 +250,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "backend".to_string(),
                 cli: "codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 prompt_template: "roles/backend".to_string(),
             }],
         },
@@ -219,7 +260,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "coherence".to_string(),
                 cli: "droid".to_string(),
-                model: Some("glm-4.7".to_string()),
+                model: Some("glm-5.1".to_string()),
                 prompt_template: "roles/coherence".to_string(),
             }],
         },
@@ -229,7 +270,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "resolver".to_string(),
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 prompt_template: "resolver".to_string(),
             }],
         },
@@ -273,6 +314,11 @@ You are a Backend Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+{{generic_heartbeat_snippet}}
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -294,6 +340,11 @@ You are a Frontend Worker in a multi-agent coding session.
 - Check your conversation file between subtasks
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
+
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+{{generic_heartbeat_snippet}}
+```
 
 ## Current Assignment
 {{task}}
@@ -318,6 +369,11 @@ You are a Coherence Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+{{generic_heartbeat_snippet}}
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -341,6 +397,11 @@ You are a Simplify Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+{{generic_heartbeat_snippet}}
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -361,6 +422,11 @@ You are a Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+{{generic_heartbeat_snippet}}
+```
+
 ## Current Assignment
 {{task}}
 "#.to_string());
@@ -375,16 +441,23 @@ You are a ruthless QA engineer. Grade against the contract. Do not rationalize f
 
 ## Phase 1: Warm Up And Wait
 
-1. You MUST read project context once:
-   - `.ai-docs/project-dna.md`
-   - `.ai-docs/learnings.jsonl`
-2. You MUST use this inline bash polling loop. You MUST NOT use `/loop`:
+1. You MUST read project context via HTTP API:
    ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+2. You MUST use this inline bash polling loop. You MUST NOT use `/loop`.
+   The first poll waits {{evaluator_first_poll_interval}} (`sleep {{evaluator_first_poll_secs}}`); after that, poll every {{idle_poll_interval}} (`sleep {{idle_poll_secs}}`).
+   ```bash
+   FIRST_WAIT=1
    while [ ! -f ".hive-manager/{{session_id}}/peer/milestone-ready.json" ]; do
-     curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-       -H "Content-Type: application/json" \
-       -d '{"agent_id":"{{session_id}}-evaluator","status":"idle","summary":"Waiting for milestone handoff"}'
-     sleep {{idle_poll_secs}}
+     {{evaluator_idle_heartbeat_snippet}}
+     if [ "$FIRST_WAIT" = "1" ]; then
+       FIRST_WAIT=0
+       sleep {{evaluator_first_poll_secs}}
+     else
+       sleep {{idle_poll_secs}}
+     fi
    done
    cat ".hive-manager/{{session_id}}/peer/milestone-ready.json"
    ```
@@ -408,7 +481,16 @@ Use these defaults when spawning QA workers unless the plan specifies otherwise.
 1. You MUST act as a coordinator, not a tester.
 2. You MUST spawn all {{qa_worker_count}} QA workers one at a time in this exact order:
 {{qa_worker_spawn_plan}}
-3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`.
+3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`, and emit a heartbeat inside each polling iteration:
+   ```bash
+   while true; do
+     curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{"agent_id":"{{session_id}}-evaluator","status":"working","summary":"Polling QA workers"}'
+     # Check QA worker task files here; break when all are COMPLETED or BLOCKED.
+     sleep {{active_poll_secs}}
+   done
+   ```
 4. You MUST wait for all {{qa_worker_count}} QA workers to finish before you render the verdict.
 5. {{qa_worker_coverage_rule}}
 
@@ -439,7 +521,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 
 ### Submit Verdict (Canonical Path)
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
   -H "Content-Type: application/json" \
   -d '{"verdict":"PASS","commit_sha":"<git-sha-if-any>","rationale":"<optional explanation>"}'
 ```
@@ -461,7 +543,7 @@ curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
 
 1. You MUST submit the verdict via the canonical HTTP endpoint. You MUST substitute your computed verdict and rationale — never send a literal 'PASS' without computing it:
    ```bash
-   curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
+   curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
      -H "Content-Type: application/json" \
      -d '{"verdict":"<PASS|FAIL>","commit_sha":"<sha>","rationale":"<one-line rationale based on contract criteria>"}'
    ```
@@ -512,7 +594,9 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 ## Required Protocol
 ```text
-1. You MUST read `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, and the active contract before testing.
+1. You MUST read project context via HTTP API before testing:
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect concrete evidence for every numbered criterion you touch.
 3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
 4. You MUST fail any criterion that is flaky, blocked, ambiguous, or untestable.
@@ -524,15 +608,27 @@ You are the UI QA specialist for session `{{session_id}}`.
 
 ## Start Here
 
-1. Read `.ai-docs/project-dna.md`
-2. Read `.ai-docs/learnings.jsonl`
-3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
+1. Read project context via HTTP API:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
 1. You MUST run click-through flows end to end using your UI automation or browser tooling.
 2. You MUST capture screenshot evidence for visual regressions or broken flows.
 3. You MUST verify buttons, links, forms, navigation, and modals on every criterion you cover.
+
+## Heartbeat
+
+Before long-running checks and between major test steps, emit:
+```bash
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running UI QA"}'
+```
 
 {{#if supports_chrome}}
 ## How to Test — Native Chrome Tools
@@ -591,7 +687,9 @@ You are the API QA specialist for session `{{session_id}}`.
 
 ## Required Protocol
 ```text
-1. You MUST read `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, and the active contract before testing.
+1. You MUST read project context via HTTP API before testing:
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect exact request and response evidence for every numbered criterion you touch.
 3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
 4. You MUST fail any criterion whose API evidence is ambiguous, blocked, or incomplete.
@@ -599,15 +697,27 @@ You are the API QA specialist for session `{{session_id}}`.
 
 ## Start Here
 
-1. Read `.ai-docs/project-dna.md`
-2. Read `.ai-docs/learnings.jsonl`
-3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
+1. Read project context via HTTP API:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
 1. You MUST exercise the HTTP surface directly.
 2. You MUST validate status codes, payload shape, and error handling.
 3. You MUST record exact requests, responses, and broken invariants.
+
+## Heartbeat
+
+Before long-running checks and between major test steps, emit:
+```bash
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running API QA"}'
+```
 
 ## Auth Bypass
 
@@ -634,7 +744,9 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 
 ## Required Protocol
 ```text
-1. You MUST read `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, and the active contract before testing.
+1. You MUST read project context via HTTP API before testing:
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   - curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 2. You MUST collect concrete accessibility evidence for every numbered criterion you touch.
 3. You MUST report only `CRITERION N: PASS|FAIL - ...` lines in your final result.
 4. You MUST fail any criterion whose accessibility evidence is partial, blocked, or untestable.
@@ -642,15 +754,27 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 
 ## Start Here
 
-1. Read `.ai-docs/project-dna.md`
-2. Read `.ai-docs/learnings.jsonl`
-3. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
+1. Read project context via HTTP API:
+   ```bash
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+   curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+   ```
+2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
 ## Execution Focus
 
 1. You MUST run axe-core, Lighthouse, or equivalent tooling when available.
 2. You MUST check keyboard navigation, focus order, semantic roles, ARIA, and contrast.
 3. You MUST record the exact defect and the affected criterion.
+
+## Heartbeat
+
+Before long-running checks and between major test steps, emit:
+```bash
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"{{qa_worker_agent_id}}","status":"working","summary":"Running accessibility QA"}'
+```
 
 ## Auth Bypass
 
@@ -743,19 +867,21 @@ You are the Queen agent orchestrating a Hive session with direct worker manageme
 
 ## Start Here
 
-Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+Before assigning work, read project context via HTTP API:
+```bash
+curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+```
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+{{queen_heartbeat_snippet}}
 
 ## Learning Curation Protocol
 
@@ -771,25 +897,22 @@ Workers record learnings during task completion. Your curation responsibilities:
    curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** via HTTP API (POST to project-dna endpoint):
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
-```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions
-├── project-dna.md       # Curated patterns and conventions
-├── curation-state.json  # Tracks curation state
-└── archive/             # Retired learnings (after 50+ entries)
-```
+### Session-Scoped Storage
+Project DNA and learnings are stored session-scoped via HTTP API:
+- Read: `GET /api/sessions/{{session_id}}/project-dna`
+- Read: `GET /api/sessions/{{session_id}}/learnings`
+- Write: `POST /api/sessions/{{session_id}}/project-dna` with `{"content": "..."}`
 
 ### Curation Process
 1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md`
-3. After 50+ learnings, archive to `.ai-docs/archive/`
+2. Synthesize insights and POST updated project-dna
+3. After 50+ learnings, archive via dedicated endpoint
 
 ### When to Curate
 - After each major task phase completes
@@ -856,19 +979,21 @@ You are the Queen agent orchestrating a Fusion session with competing candidate 
 
 ## Start Here
 
-Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+Before assigning work, read project context via HTTP API:
+```bash
+curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+```
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -s "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat (every 60-90s):
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" -H "Content-Type: application/json" -d '{"agent_id":"queen","status":"working","summary":"Monitoring workers"}'
+{{queen_heartbeat_snippet}}
 
 ## Resolver Invocation
 
@@ -876,7 +1001,7 @@ When all Fusion candidate workers have completed their implementation pass, or w
 
 ### Launch the resolver
 ```bash
-curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/resolver/launch" \
   -H "Content-Type: application/json" \
   -d '{"candidate_ids": {{variant_ids}}, "timeout_secs": 120}'
 ```
@@ -908,25 +1033,22 @@ Workers record learnings during task completion. Your curation responsibilities:
    curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** via HTTP API (POST to project-dna endpoint):
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
-```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions
-├── project-dna.md       # Curated patterns and conventions
-├── curation-state.json  # Tracks curation state
-└── archive/             # Retired learnings (after 50+ entries)
-```
+### Session-Scoped Storage
+Project DNA and learnings are stored session-scoped via HTTP API:
+- Read: `GET /api/sessions/{{session_id}}/project-dna`
+- Read: `GET /api/sessions/{{session_id}}/learnings`
+- Write: `POST /api/sessions/{{session_id}}/project-dna` with `{"content": "..."}`
 
 ### Curation Process
 1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md`
-3. After 50+ learnings, archive to `.ai-docs/archive/`
+2. Synthesize insights and POST updated project-dna
+3. After 50+ learnings, archive via dedicated endpoint
 
 ### When to Curate
 - After each major task phase completes
@@ -993,9 +1115,11 @@ You are the Queen agent orchestrating a Swarm session with hierarchical planning
 
 ## Start Here
 
-Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+Before assigning work, read project context via HTTP API:
+```bash
+curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
+curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
+```
 
 ## Learning Curation Protocol
 
@@ -1011,25 +1135,22 @@ Workers record learnings during task completion. Your curation responsibilities:
    curl "{{api_base_url}}/api/sessions/{{session_id}}/project-dna"
    ```
 
-3. **Curate useful learnings** into `.ai-docs/project-dna.md` (manual edit):
+3. **Curate useful learnings** via HTTP API (POST to project-dna endpoint):
    - Group by theme/topic
    - Remove duplicates
    - Improve clarity where needed
    - Capture architectural decisions and project conventions
 
-### .ai-docs/ Structure
-```
-.ai-docs/
-├── learnings.jsonl      # Raw learnings from all sessions
-├── project-dna.md       # Curated patterns and conventions
-├── curation-state.json  # Tracks curation state
-└── archive/             # Retired learnings (after 50+ entries)
-```
+### Session-Scoped Storage
+Project DNA and learnings are stored session-scoped via HTTP API:
+- Read: `GET /api/sessions/{{session_id}}/project-dna`
+- Read: `GET /api/sessions/{{session_id}}/learnings`
+- Write: `POST /api/sessions/{{session_id}}/project-dna` with `{"content": "..."}`
 
 ### Curation Process
 1. Review learnings via `GET /api/sessions/{{session_id}}/learnings`
-2. Synthesize insights into `.ai-docs/project-dna.md`
-3. After 50+ learnings, archive to `.ai-docs/archive/`
+2. Synthesize insights and POST updated project-dna
+3. After 50+ learnings, archive via dedicated endpoint
 
 ### When to Curate
 - After each major task phase completes
@@ -1240,6 +1361,41 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         );
         let api_base_url = normalize_api_base_url(context.variables.get("api_base_url"));
         rendered = rendered.replace("{{api_base_url}}", &api_base_url);
+        rendered = rendered.replace(
+            "{{queen_heartbeat_snippet}}",
+            &heartbeat_snippet(
+                &api_base_url,
+                &context.session_id,
+                "queen",
+                "working",
+                "Monitoring workers",
+            ),
+        );
+        if rendered.contains("{{generic_heartbeat_snippet}}") {
+            let agent_id = required_variable(&context.variables, "agent_id")?;
+            let heartbeat_status = required_variable(&context.variables, "heartbeat_status")?;
+            let heartbeat_summary = required_variable(&context.variables, "heartbeat_summary")?;
+            rendered = rendered.replace(
+                "{{generic_heartbeat_snippet}}",
+                &heartbeat_snippet(
+                    &api_base_url,
+                    &context.session_id,
+                    agent_id,
+                    heartbeat_status,
+                    heartbeat_summary,
+                ),
+            );
+        }
+        rendered = rendered.replace(
+            "{{evaluator_idle_heartbeat_snippet}}",
+            &heartbeat_snippet(
+                &api_base_url,
+                &context.session_id,
+                &format!("{}-evaluator", context.session_id),
+                "idle",
+                "Waiting for milestone handoff",
+            ),
+        );
 
         for (key, value) in &context.variables {
             let placeholder = format!("{{{{{}}}}}", key);
@@ -1388,9 +1544,11 @@ impl Default for TemplateEngine {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::pty::WorkerRole;
+
     use super::{
-        builtin_role_packs, builtin_session_templates, normalize_api_base_url, PromptContext,
-        SessionTemplate, TemplateCatalog, TemplateEngine, DEFAULT_API_BASE_URL,
+        builtin_role_packs, builtin_session_templates, heartbeat_snippet, normalize_api_base_url,
+        PromptContext, SessionTemplate, TemplateCatalog, TemplateEngine, DEFAULT_API_BASE_URL,
     };
 
     #[test]
@@ -1449,6 +1607,103 @@ mod tests {
             DEFAULT_API_BASE_URL
         );
         assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
+    }
+
+    #[test]
+    fn heartbeat_snippet_uses_stdin_for_shell_safe_json() {
+        let rendered = heartbeat_snippet(
+            "http://localhost:18800",
+            "session-123",
+            "worker-1",
+            "working",
+            "Don't block",
+        );
+
+        assert!(rendered.contains("cat <<'JSON' | curl"));
+        assert!(rendered.contains("curl -fsS -X POST"));
+        assert!(rendered.contains("--data-binary @-"));
+        assert!(rendered.contains(r#""summary":"Don't block""#));
+        assert!(!rendered.contains(" -d '"));
+    }
+
+    #[test]
+    fn rendered_worker_prompt_does_not_leak_generic_heartbeat_placeholders() {
+        let mut variables = HashMap::new();
+        variables.insert("agent_id".to_string(), "session-123-worker-1".to_string());
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert("heartbeat_summary".to_string(), "Implementing backend task".to_string());
+
+        let prompt = TemplateEngine::default()
+            .render_worker_prompt(
+                &WorkerRole::new("backend", "Backend", "claude"),
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: Some("Build API".to_string()),
+                    variables,
+                },
+            )
+            .unwrap();
+
+        assert!(!prompt.contains(concat!("<", "your-id", ">")));
+        assert!(!prompt.contains(concat!("<", "what", ">")));
+        assert!(!prompt.contains(concat!("working", "|", "idle")));
+        assert!(prompt.contains(r#""agent_id":"session-123-worker-1""#));
+        assert!(prompt.contains(r#""summary":"Implementing backend task""#));
+    }
+
+    #[test]
+    fn rendered_worker_prompt_rejects_missing_generic_heartbeat_variables() {
+        let err = TemplateEngine::default()
+            .render_worker_prompt(
+                &WorkerRole::new("backend", "Backend", "claude"),
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: Some("Build API".to_string()),
+                    variables: HashMap::new(),
+                },
+            )
+            .expect_err("missing heartbeat variables should fail rendering");
+
+        assert!(matches!(err, TemplateError::Invalid(_)));
+        assert!(err
+            .to_string()
+            .contains("generic_heartbeat_snippet requires non-empty variable `agent_id`"));
+    }
+
+    #[test]
+    fn rendered_worker_prompt_escapes_generic_heartbeat_json_values() {
+        let mut variables = HashMap::new();
+        variables.insert("agent_id".to_string(), "session-123-worker-1".to_string());
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert(
+            "heartbeat_summary".to_string(),
+            "Don't block with \"quotes\"\nand slashes \\".to_string(),
+        );
+
+        let prompt = TemplateEngine::default()
+            .render_worker_prompt(
+                &WorkerRole::new("backend", "Backend", "claude"),
+                &PromptContext {
+                    session_id: "session-123".to_string(),
+                    project_path: ".".to_string(),
+                    task: Some("Build API".to_string()),
+                    variables,
+                },
+            )
+            .unwrap();
+
+        let heartbeat_body = prompt
+            .lines()
+            .find(|line| line.starts_with('{') && line.contains(r#""summary""#))
+            .expect("heartbeat JSON body should be rendered");
+        let parsed: serde_json::Value =
+            serde_json::from_str(heartbeat_body).expect("heartbeat body should be valid JSON");
+        assert_eq!(
+            parsed["summary"],
+            "Don't block with \"quotes\"\nand slashes \\"
+        );
     }
 
     #[test]

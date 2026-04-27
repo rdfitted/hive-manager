@@ -3,8 +3,11 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use crate::cli::CliRegistry;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use super::{validate_cli, validate_project_path, validate_session_id};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
@@ -13,7 +16,6 @@ use crate::session::{
     FusionVariantStatus, HiveLaunchConfig, QaWorkerConfig,
 };
 use crate::storage::SessionTypeInfo;
-use super::{validate_session_id, validate_cli, validate_project_path};
 
 const SESSION_COLOR_ALLOWLIST: &[&str] = &[
     "#7aa2f7",
@@ -130,6 +132,11 @@ pub struct LaunchSwarmRequest {
     pub task_description: Option<String>,
     pub planner_count: Option<u8>,
     pub project_path: String,
+    pub default_cli: Option<String>,
+    pub default_model: Option<String>,
+    pub queen_config: Option<AgentConfig>,
+    pub planner_config: Option<AgentConfig>,
+    pub workers_per_planner: Option<Vec<AgentConfig>>,
     pub evaluator_cli: Option<String>,
     pub evaluator_model: Option<String>,
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
@@ -180,6 +187,7 @@ pub struct CreateSessionRequest {
     pub default_cli: Option<String>,
     pub default_model: Option<String>,
     pub worker_count: Option<u8>,
+    pub workers: Option<Vec<AgentConfig>>,
     pub variants: Option<Vec<LaunchFusionVariantRequest>>,
     pub judge_cli: Option<String>,
     pub judge_model: Option<String>,
@@ -273,6 +281,19 @@ pub async fn create_session(
                 role: None,
                 initial_prompt: None,
             };
+            let workers = if let Some(workers) = req.workers {
+                if workers.is_empty() {
+                    return Err(ApiError::bad_request(
+                        "Hive launch requires at least one worker",
+                    ));
+                }
+                for worker in &workers {
+                    validate_cli(&worker.cli)?;
+                }
+                workers
+            } else {
+                vec![worker_config; worker_count as usize]
+            };
 
             // Build evaluator_config: validate if provided, else fall back to default_cli silently
             let evaluator_config = if let Some(ref evaluator_cli) = req.evaluator_cli {
@@ -308,7 +329,7 @@ pub async fn create_session(
                 name: req.name,
                 color: req.color,
                 queen_config,
-                workers: vec![worker_config; worker_count as usize],
+                workers,
                 prompt: req.objective.filter(|value| !value.trim().is_empty()),
                 with_planning: req.with_planning.unwrap_or(false),
                 with_evaluator: req.with_evaluator.unwrap_or(false),
@@ -561,10 +582,14 @@ pub async fn launch_swarm(
 
     let controller = state.session_controller.write();
 
-    let default_cli = "claude".to_string();
+    let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
+    validate_cli(&default_cli)?;
+    let default_model = req
+        .default_model
+        .or_else(|| CliRegistry::default_model(&default_cli).map(str::to_string));
     let default_config = AgentConfig {
         cli: default_cli.clone(),
-        model: None,
+        model: default_model.clone(),
         flags: vec![],
         label: None,
         name: None,
@@ -572,6 +597,20 @@ pub async fn launch_swarm(
         role: None,
         initial_prompt: None,
     };
+    let queen_config = req.queen_config.unwrap_or_else(|| default_config.clone());
+    validate_cli(&queen_config.cli)?;
+    let planner_config = req.planner_config.unwrap_or_else(|| default_config.clone());
+    validate_cli(&planner_config.cli)?;
+    let workers_per_planner = match req.workers_per_planner {
+        Some(workers) if workers.is_empty() => {
+            return Err(ApiError::bad_request("workers_per_planner cannot be empty"));
+        }
+        Some(workers) => workers,
+        None => vec![default_config.clone(); 2],
+    };
+    for worker in &workers_per_planner {
+        validate_cli(&worker.cli)?;
+    }
 
     // Build evaluator_config: validate if provided, else fall back to default_cli silently
     let evaluator_config = if let Some(ref evaluator_cli) = req.evaluator_cli {
@@ -595,10 +634,10 @@ pub async fn launch_swarm(
         project_path: req.project_path,
         name: req.name,
         color: req.color,
-        queen_config: default_config.clone(),
+        queen_config,
         planner_count: req.planner_count.unwrap_or(2),
-        planner_config: default_config.clone(),
-        workers_per_planner: vec![default_config.clone(); 2],
+        planner_config,
+        workers_per_planner,
         prompt: req.task_description,
         with_planning: false,
         with_evaluator,

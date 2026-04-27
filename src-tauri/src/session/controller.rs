@@ -18,7 +18,12 @@ use crate::session::cell_status::{
     agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids, variant_to_cell_id,
     PRIMARY_CELL_ID, RESOLVER_CELL_ID,
 };
-use crate::templates::{PromptContext, TemplateEngine};
+use crate::session::polling_intervals::{
+    format_poll_label, ACTIVATION_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL,
+    SMOKE_EVALUATOR_FIRST_POLL_INTERVAL, SMOKE_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL,
+    STANDARD_EVALUATOR_FIRST_POLL_INTERVAL, STANDARD_IDLE_POLL_INTERVAL,
+};
+use crate::templates::{heartbeat_snippet, PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
 use crate::artifacts::collector::ArtifactCollector;
 use crate::domain::ArtifactBundle;
@@ -39,6 +44,23 @@ const QUEEN_QUALITY_RECONCILIATION_LOG_LINES_NO_EVALUATOR: &str = r#"[TIMESTAMP]
 [TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
 [TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#;
+
+fn extract_model_arg(args: &[&str]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if *arg == "-m" || *arg == "--model" {
+            return iter.next().map(|model| (*model).to_string());
+        }
+
+        if let Some(model) = arg.strip_prefix("--model=") {
+            if !model.is_empty() {
+                return Some(model.to_string());
+            }
+        }
+    }
+
+    None
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
@@ -540,7 +562,16 @@ fn cell_status_changes_for_transition(
     changes
 }
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
-fn get_polling_instructions(cli: &str, task_file: &str, role_type: Option<&str>) -> String {
+fn get_polling_instructions(
+    cli: &str,
+    task_file: &str,
+    role_type: Option<&str>,
+    heartbeat_command: Option<&str>,
+) -> String {
+    let heartbeat_line = heartbeat_command
+        .map(|command| format!("  {command}\n"))
+        .unwrap_or_default();
+
     match CliRegistry::get_behavior_for_role(cli, role_type) {
         CliBehavior::ExplicitPolling => {
             format!(
@@ -551,11 +582,14 @@ Run this bash loop to wait for task activation:
 while true; do
   STATUS=$(grep "^## Status:" "{}" | head -1)
   if [[ "$STATUS" == *"ACTIVE"* ]]; then break; fi
-  sleep 30
+{}
+  sleep {}
 done
 ```
 "#,
-                task_file
+                task_file,
+                heartbeat_line,
+                ACTIVATION_POLL_INTERVAL.as_secs()
             )
         }
         CliBehavior::ActionProne => {
@@ -643,6 +677,8 @@ impl SessionController {
         } else {
             (parts[0], parts[1..].to_vec())
         };
+        let launch_model = extract_model_arg(&base_args)
+            .or_else(|| CliRegistry::default_model(cmd).map(ToString::to_string));
 
         {
             let pty_manager = self.pty_manager.read();
@@ -676,7 +712,7 @@ impl SessionController {
 
             let queen_config = AgentConfig {
                 cli: cmd.to_string(),
-                model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
+                model: launch_model.clone(),
                 flags: base_args.iter().map(|s| s.to_string()).collect(),
                 label: None,
                 name: None,
@@ -720,7 +756,7 @@ impl SessionController {
 
                 let worker_config = AgentConfig {
                     cli: cmd.to_string(),
-                    model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
+                    model: launch_model.clone(),
                     flags: worker_args.iter().map(|s| s.to_string()).collect(),
                     label: None,
                     name: None,
@@ -753,7 +789,7 @@ impl SessionController {
             last_activity_at: Utc::now(),
             agents,
             default_cli: cmd.to_string(),
-            default_model: if cmd == "claude" { Some("opus-4-6".to_string()) } else { None },
+            default_model: launch_model,
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -2320,7 +2356,7 @@ Last updated: {timestamp}
     }
 
     fn build_fusion_worker_prompt(
-        _session_id: &str,
+        session_id: &str,
         variant_index: u8,
         variant_name: &str,
         branch: &str,
@@ -2329,7 +2365,23 @@ Last updated: {timestamp}
         cli: &str,
     ) -> String {
         let task_file = format!(".hive-manager/tasks/fusion-variant-{}-task.md", variant_index);
-        let polling_instructions = get_polling_instructions(cli, &task_file, None);
+        let agent_id = format!("{}-fusion-{}", session_id, variant_index);
+        let startup_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &agent_id,
+            "working",
+            "Starting fusion variant",
+        );
+        let heartbeat_command = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &agent_id,
+            "idle",
+            "Waiting for task activation",
+        );
+        let polling_instructions =
+            get_polling_instructions(cli, &task_file, None, Some(&heartbeat_command));
         let scope_block = Self::scope_block(".");
 
         format!(
@@ -2348,6 +2400,11 @@ Branch: {branch}
 - When complete, update your task file status to COMPLETED
 
 ## Task Coordination
+Send a startup heartbeat before reading the task file:
+```bash
+{startup_heartbeat}
+```
+
 Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#,
             variant_name = variant_name,
             worktree_path = worktree_path,
@@ -2355,6 +2412,7 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#
             task_description = task_description,
             scope_block = scope_block,
             task_file = task_file,
+            startup_heartbeat = startup_heartbeat,
             polling_instructions = polling_instructions,
         )
     }
@@ -2538,6 +2596,9 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
 2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
    ```bash
    while [ ! -f "{qa_verdict_path}" ]; do
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Evaluator verdict"}}'
      sleep 30
    done
    cat "{qa_verdict_path}"
@@ -2691,15 +2752,55 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         );
 
         if smoke_test {
-            variables.insert("idle_poll_interval".to_string(), "30 seconds".to_string());
-            variables.insert("idle_poll_secs".to_string(), "30".to_string());
-            variables.insert("active_poll_interval".to_string(), "15 seconds".to_string());
-            variables.insert("active_poll_secs".to_string(), "15".to_string());
+            variables.insert(
+                "idle_poll_interval".to_string(),
+                format_poll_label(SMOKE_IDLE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "idle_poll_secs".to_string(),
+                SMOKE_IDLE_POLL_INTERVAL.as_secs().to_string(),
+            );
+            variables.insert(
+                "active_poll_interval".to_string(),
+                format_poll_label(SMOKE_ACTIVE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "active_poll_secs".to_string(),
+                SMOKE_ACTIVE_POLL_INTERVAL.as_secs().to_string(),
+            );
+            variables.insert(
+                "evaluator_first_poll_interval".to_string(),
+                format_poll_label(SMOKE_EVALUATOR_FIRST_POLL_INTERVAL),
+            );
+            variables.insert(
+                "evaluator_first_poll_secs".to_string(),
+                SMOKE_EVALUATOR_FIRST_POLL_INTERVAL.as_secs().to_string(),
+            );
         } else {
-            variables.insert("idle_poll_interval".to_string(), "20 minutes".to_string());
-            variables.insert("idle_poll_secs".to_string(), "1200".to_string());
-            variables.insert("active_poll_interval".to_string(), "5 minutes".to_string());
-            variables.insert("active_poll_secs".to_string(), "300".to_string());
+            variables.insert(
+                "idle_poll_interval".to_string(),
+                format_poll_label(STANDARD_IDLE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "idle_poll_secs".to_string(),
+                STANDARD_IDLE_POLL_INTERVAL.as_secs().to_string(),
+            );
+            variables.insert(
+                "active_poll_interval".to_string(),
+                format_poll_label(STANDARD_ACTIVE_POLL_INTERVAL),
+            );
+            variables.insert(
+                "active_poll_secs".to_string(),
+                STANDARD_ACTIVE_POLL_INTERVAL.as_secs().to_string(),
+            );
+            variables.insert(
+                "evaluator_first_poll_interval".to_string(),
+                format_poll_label(STANDARD_EVALUATOR_FIRST_POLL_INTERVAL),
+            );
+            variables.insert(
+                "evaluator_first_poll_secs".to_string(),
+                STANDARD_EVALUATOR_FIRST_POLL_INTERVAL.as_secs().to_string(),
+            );
         }
 
         Self::render_named_prompt("roles/evaluator", session_id, None, variables)
@@ -2739,6 +2840,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
 
         let mut variables = HashMap::new();
         variables.insert("qa_worker_index".to_string(), index.to_string());
+        variables.insert(
+            "qa_worker_agent_id".to_string(),
+            format!("{}-qa-worker-{}", session_id, index),
+        );
         variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
         variables.insert(
             "supports_chrome".to_string(),
@@ -3249,9 +3354,9 @@ You MUST spawn Task agents that call external CLI tools via Bash. This provides 
 
 Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
 
-### Scout 2 - Droid GLM 4.7 (Pattern Recognition)
+### Scout 2 - Droid GLM 5.1 (Pattern Recognition)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-4.7 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-5.1 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
 
 ### Scout 3 - Cursor (Quick Search)
 
@@ -3284,7 +3389,7 @@ Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
 [1-2 sentence overview]
 
 ## Investigation Results
-- Scouts Used: 3 (BigPickle, GLM 4.7, Grok Code)
+- Scouts Used: 3 (BigPickle, GLM 5.1, cursor-cli)
 - Files Identified: [count]
 - Consensus Level: HIGH/MEDIUM/LOW
 
@@ -3701,10 +3806,16 @@ Each worker should use the Inter-Agent Communication endpoints from their prompt
 Workers MUST use curl to exercise the conversation and heartbeat APIs.
 
 ### Task 1 (Worker 1):
-1. Send heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"working","summary":"Starting smoke test"}}'`
+1. Send heartbeat:
+   ```bash
+   {smoke_worker_start_heartbeat}
+   ```
 2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
 3. Post to shared: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
-4. Send completed heartbeat: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" -H "Content-Type: application/json" -d '{{"agent_id":"worker-1","status":"completed","summary":"Smoke test done"}}'`
+4. Send completed heartbeat:
+   ```bash
+   {smoke_worker_completed_heartbeat}
+   ```
 
 ### Task 2 (Worker 2, if present):
 1. Send heartbeat with working status
@@ -3744,6 +3855,20 @@ This tests that:
             dependencies = dependencies.trim_end(),
             evaluator_section = evaluator_section,
             evaluator_test_items = evaluator_test_items,
+            smoke_worker_start_heartbeat = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                "worker-1",
+                "working",
+                "Starting smoke test",
+            ),
+            smoke_worker_completed_heartbeat = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                "worker-1",
+                "completed",
+                "Smoke test done",
+            ),
         )
     }
 
@@ -4158,9 +4283,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/
   -d '{{"from":"queen","content":"Announcement"}}'
 
 # Heartbeat (every 60-90s)
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{{"agent_id":"queen","status":"working","summary":"Monitoring workers"}}'
+{queen_heartbeat_snippet}
 
 # Inspect active sessions and heartbeat state
 curl -s "http://localhost:18800/api/sessions/active"
@@ -4284,6 +4407,9 @@ When polling for worker progress, iterate over every worker worktree instead of 
 
 ```bash
 for WT in "{worker_worktree_root}"/worker-*; do
+  curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+    -H "Content-Type: application/json" \
+    -d '{{"agent_id":"queen","status":"working","summary":"Polling worker progress"}}'
   BR="hive/{session_id}/$(basename "$WT")"
   echo "=== $BR ==="
   git -C "$WT" log --oneline "$BR" ^<feature-branch> 2>/dev/null | head -5
@@ -4375,6 +4501,13 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             qa_milestone_handoff = qa_milestone_handoff,
             post_workers_protocol = post_workers_protocol,
             queen_quality_log = Self::queen_quality_reconciliation_log_lines(has_evaluator),
+            queen_heartbeat_snippet = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                "queen",
+                "working",
+                "Monitoring workers",
+            ),
             final_integration_step = final_integration_step,
             worker_worktrees_dir = worker_worktrees_dir,
             worker_task_file_example = worker_task_file_example,
@@ -4406,10 +4539,18 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             .unwrap_or("General development tasks as assigned.");
 
         let task_file = format!(".hive-manager/tasks/worker-{}-task.md", index);
+        let activation_wait_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &format!("worker-{}", index),
+            "idle",
+            "Waiting for task activation",
+        );
         let polling_instructions = get_polling_instructions(
             &config.cli,
             &task_file,
             config.role.as_ref().map(|role| role.role_type.as_str()),
+            Some(&activation_wait_heartbeat),
         );
 
         format!(
@@ -4480,9 +4621,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/
 curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared?since=<last_check_ts>"
 
 # Heartbeat (every 60-90s)
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
-  -H "Content-Type: application/json" \
-  -d '{{"agent_id":"worker-{index}","status":"working","summary":"Current task focus"}}'
+{worker_heartbeat_snippet}
 
 # Inspect active sessions and heartbeat state
 curl -s "http://localhost:18800/api/sessions/active"
@@ -4547,6 +4686,13 @@ After completing your task, transition to IDLE state. Continue checking your con
             session_id = session_id,
             scope_block = scope_block,
             task_file = task_file,
+            worker_heartbeat_snippet = heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                &format!("worker-{index}"),
+                "working",
+                "Current task focus",
+            ),
             polling_instructions = polling_instructions
         )
     }
@@ -5293,7 +5439,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
-| model | string | No | Model to use (e.g., "opus-4-6" for {default_cli}) |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus-4-7`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -8642,11 +8788,19 @@ Last updated: {timestamp}
             );
         }
 
-        if config.cli.trim().is_empty() {
+        let uses_session_default_cli = config.cli.trim().is_empty();
+        if uses_session_default_cli {
             config.cli = session.default_cli.clone();
         }
+        let uses_session_cli = uses_session_default_cli || config.cli.trim() == session.default_cli;
         if config.model.is_none() {
-            config.model = session.default_model.clone();
+            config.model = if uses_session_cli {
+                session.default_model.clone()
+            } else {
+                CliRegistry::default_model(&config.cli)
+                    .map(ToString::to_string)
+                    .or_else(|| session.default_model.clone())
+            };
         }
         if config.label.is_none() {
             config.label = Some("Evaluator".to_string());
@@ -9437,6 +9591,7 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        extract_model_arg,
         parse_persisted_session_state, serialize_session_state, AgentConfig, AgentInfo,
         AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController, SessionError,
         SessionState, SessionType,
@@ -9450,6 +9605,25 @@ mod tests {
     use tempfile::TempDir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn extract_model_arg_reads_short_long_and_equals_forms() {
+        assert_eq!(
+            extract_model_arg(&["--dangerously-skip-permissions", "-m", "gpt-5.5"])
+                .as_deref(),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            extract_model_arg(&["--model", "opus-4-7"]).as_deref(),
+            Some("opus-4-7")
+        );
+        assert_eq!(
+            extract_model_arg(&["--model=gemini-2.5-pro"]).as_deref(),
+            Some("gemini-2.5-pro")
+        );
+        assert_eq!(extract_model_arg(&["--model="]), None);
+        assert_eq!(extract_model_arg(&["-m"]), None);
+    }
 
     #[test]
     fn session_state_variants_exist() {
@@ -9582,7 +9756,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 ..AgentConfig::default()
             },
             &[],
@@ -9594,8 +9768,8 @@ mod tests {
             SessionController::evaluator_required_protocol("session-123"),
         );
         assert!(prompt.contains(".hive-manager/session-123/peer/qa-verdict.json"));
-        assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.4."));
-        assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.4""#));
+        assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.5."));
+        assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.5""#));
         assert!(!prompt.contains(r#""cli": "claude""#));
     }
 
@@ -9605,7 +9779,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 ..AgentConfig::default()
             },
             &[QaWorkerConfig {
@@ -9726,7 +9900,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-6".to_string()),
+                model: Some("opus-4-7".to_string()),
                 ..AgentConfig::default()
             },
             &[],
