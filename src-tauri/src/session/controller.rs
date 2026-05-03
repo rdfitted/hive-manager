@@ -3350,17 +3350,17 @@ You MUST spawn Task agents that call external CLI tools via Bash. This provides 
 
 **Launch ALL scouts in PARALLEL (single message, multiple Task calls):**
 
-### Scout 1 - OpenCode BigPickle (Deep Analysis)
+### Scout 1 - Codex GPT-5.5 Low (Deep Analysis)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
 
-### Scout 2 - Droid GLM 5.1 (Pattern Recognition)
+### Scout 2 - Codex GPT-5.5 Low (Pattern Recognition)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-5.1 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.' Return file paths with observations.")
 
-### Scout 3 - Cursor (Quick Search)
+### Scout 3 - Codex GPT-5.5 Medium (Quick Search)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: cursor-cli --print 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"medium\" 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
 
 **CRITICAL RULES:**
 - Replace [TASK] with the actual task description from Phase 0
@@ -3389,7 +3389,7 @@ Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
 [1-2 sentence overview]
 
 ## Investigation Results
-- Scouts Used: 3 (BigPickle, GLM 5.1, cursor-cli)
+- Scouts Used: 3 (Codex GPT-5.5 low, low, medium)
 - Files Identified: [count]
 - Consensus Level: HIGH/MEDIUM/LOW
 
@@ -3573,16 +3573,19 @@ Each Planner will break their domain task into {workers_per} worker subtasks.
 
 Spawn 3 scout agents to investigate the codebase in parallel:
 
-```bash
-# Scout 1 - Code Structure (Gemini)
-gemini -y -i "Analyze the codebase structure for: [TASK]. List relevant files by priority."
+Spawn each scout via the Task tool calling Codex through Bash. Launch all 3 in PARALLEL via a single message with three Task calls.
 
-# Scout 2 - Implementation Patterns (Claude Subagent via Task tool)
-# Use Claude's Task tool with Explore agent
+### Scout 1 - Codex GPT-5.5 Low (Code Structure)
 
-# Scout 3 - Related Code (Cursor)
-cursor-cli --print "Find code related to: [TASK]"
-```
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Analyze the codebase structure for: [TASK]. List relevant files by priority.' Return file paths with priority notes.")
+
+### Scout 2 - Codex GPT-5.5 Low (Implementation Patterns)
+
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Identify implementation patterns relevant to: [TASK]. Focus on existing conventions, helpers, and shared abstractions.' Return file paths with pattern notes.")
+
+### Scout 3 - Codex GPT-5.5 Medium (Related Code)
+
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"medium\" 'Find code related to: [TASK]. Identify entry points, test files, dependencies.' Return file paths with notes.")
 
 ---
 
