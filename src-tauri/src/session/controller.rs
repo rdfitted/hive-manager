@@ -4429,9 +4429,9 @@ Worker worktrees are ephemeral. Learnings written directly to `.ai-docs/learning
 ```bash
 curl -s "http://localhost:18800/api/sessions/{session_id}/learnings" \
   | jq -c '.learnings[]? // .[]?' \
-  >> .ai-docs/learnings.jsonl
+  | while IFS= read -r line; do grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl; done
 ```
-Deduplicate against existing lines (e.g., by `task` + `insight`) before appending.
+Deduplicate by exact JSONL line before appending.
 
 **b. Fallback sweep — scan worker worktrees for any direct file writes and pending fallback records:**
 ```bash
@@ -4448,7 +4448,7 @@ ingest_pending_learnings() {{
   [ -f "$pending" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    if ! printf '%s\n' "$line" | jq -e 'has("date") and has("session") and has("task") and has("outcome") and has("keywords") and has("insight") and has("files_touched")' >/dev/null; then
+    if ! printf '%s\n' "$line" | jq -e '(.date | type == "string" and length > 0) and (.session | type == "string" and length > 0) and (.task | type == "string" and length > 0) and (.insight | type == "string" and length > 0) and (.outcome == "success" or .outcome == "partial" or .outcome == "failed") and (.keywords | type == "array") and (.files_touched | type == "array") and all(.files_touched[]; type == "string" and length > 0 and (contains("..") | not) and (startswith("/") | not) and (contains("\\") | not) and (test("^[A-Za-z]:") | not))' >/dev/null; then
       echo "Skipping invalid learning JSONL record: $line" >&2
       continue
     fi
@@ -7104,10 +7104,6 @@ Last updated: {timestamp}
             Some(&worker_cwd),
         );
         let filename = format!("worker-{}-prompt.md", index);
-        let prompt_file_path = Path::new(&worker_cwd)
-            .join(".hive-manager")
-            .join("prompts")
-            .join(&filename);
 
         // 2. Write task file (Status: ACTIVE since it's their turn)
         Self::write_task_file_with_status(
@@ -7138,7 +7134,7 @@ Last updated: {timestamp}
                         session_id,
                         &worker_cell_name,
                         &task_file_path,
-                        Some(&prompt_file_path),
+                        None,
                     );
                     self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
                     SessionError::ConfigError(err)
@@ -7167,7 +7163,7 @@ Last updated: {timestamp}
                     session_id,
                     &worker_cell_name,
                     &task_file_path,
-                    Some(&prompt_file_path),
+                    Some(&prompt_file),
                 );
                 self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
                 SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e))
@@ -8769,10 +8765,6 @@ Last updated: {timestamp}
         // Write worker prompt to file and add to args
         let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
         let filename = format!("worker-{}-prompt.md", worker_index);
-        let prompt_file_path = Path::new(&worker_cwd)
-            .join(".hive-manager")
-            .join("prompts")
-            .join(&filename);
         let prompt_file = match Self::write_worker_prompt_file(
             Path::new(&worker_cwd),
             worker_index,
@@ -8786,7 +8778,7 @@ Last updated: {timestamp}
                     session_id,
                     &worker_cell_name,
                     &task_file_path,
-                    Some(&prompt_file_path),
+                    None,
                 );
                 return Err(err);
             }
