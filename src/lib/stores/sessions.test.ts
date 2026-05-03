@@ -135,6 +135,10 @@ describe('sessions store', () => {
           })
         })
       });
+
+      const payload = (invoke as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as any;
+      expect(payload.config).not.toHaveProperty('evaluator_cli');
+      expect(payload.config).not.toHaveProperty('evaluator_model');
     });
 
   });
