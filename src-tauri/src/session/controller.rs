@@ -4433,21 +4433,19 @@ curl -s "http://localhost:18800/api/sessions/{session_id}/learnings" \
 ```
 Deduplicate against existing lines (e.g., by `task` + `insight`) before appending.
 
-**b. Fallback sweep — scan worker worktrees for any direct file writes:**
+**b. Fallback sweep — scan worker worktrees for any direct file writes and pending fallback records:**
 ```bash
-for WT in "{worker_worktree_root}"/*; do
-  f="$WT/.ai-docs/learnings.jsonl"
-  [ -f "$f" ] || continue
-  # Append only lines not already present in root
-  comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
-done
+case "{session_id}" in
+  *..*|*/*|*\\*) echo "Invalid session id in learning ingest path: {session_id}" >&2; exit 1 ;;
+esac
 
-# Ingest session-scoped pending fallback records written by workers
-pending=".hive-manager/{session_id}/learnings.pending.jsonl"
-archive=".hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
-if [ -f "$pending" ]; then
-  mkdir -p .ai-docs
-  touch .ai-docs/learnings.jsonl
+mkdir -p .ai-docs
+touch .ai-docs/learnings.jsonl
+
+ingest_pending_learnings() {{
+  pending="$1"
+  archive="$2"
+  [ -f "$pending" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
     if ! printf '%s\n' "$line" | jq -e 'has("date") and has("session") and has("task") and has("outcome") and has("keywords") and has("insight") and has("files_touched")' >/dev/null; then
@@ -4461,7 +4459,24 @@ if [ -f "$pending" ]; then
     fi
   done < "$pending"
   mv "$pending" "$archive"
-fi
+}}
+
+# Ingest any pending records that were written from the main checkout.
+ingest_pending_learnings \
+  ".hive-manager/{session_id}/learnings.pending.jsonl" \
+  ".hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+
+for WT in "{worker_worktree_root}"/*; do
+  f="$WT/.ai-docs/learnings.jsonl"
+  if [ -f "$f" ]; then
+    # Append only lines not already present in root
+    comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
+  fi
+
+  ingest_pending_learnings \
+    "$WT/.hive-manager/{session_id}/learnings.pending.jsonl" \
+    "$WT/.hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+done
 ```
 
 **c. Stage the updated learnings file into your integration commit** so consolidation is visible in the PR.
@@ -9830,6 +9845,29 @@ mod tests {
             std::fs::read_to_string(path).expect("read worker prompt"),
             "Prompt body"
         );
+    }
+
+    #[test]
+    fn add_prompt_to_args_preserves_worktree_scoped_absolute_prompt_path() {
+        let prompt_path =
+            r"D:\repo\.hive-manager\worktrees\session-123\worker-2\.hive-manager\prompts\worker-2-prompt.md";
+        let expected_prompt = format!("Read {} and execute.", prompt_path);
+
+        for cli in ["claude", "codex", "cursor", "droid"] {
+            let mut args = Vec::new();
+            SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
+            assert_eq!(args, vec![expected_prompt.clone()], "cli {cli}");
+        }
+
+        for cli in ["gemini", "qwen"] {
+            let mut args = Vec::new();
+            SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
+            assert_eq!(
+                args,
+                vec!["-i".to_string(), expected_prompt.clone()],
+                "cli {cli}"
+            );
+        }
     }
 
     #[test]

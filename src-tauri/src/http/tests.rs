@@ -836,6 +836,61 @@ async fn test_session_scoped_submit_learning_success() {
 }
 
 #[tokio::test]
+async fn test_pending_jsonl_learning_round_trips_through_session_submit_endpoint() {
+    let storage_dir = TempDir::new().unwrap();
+    let project_dir = TempDir::new().unwrap();
+    let session_id = "session-pending-jsonl";
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+
+    controller.read().insert_test_session(make_test_session(
+        session_id,
+        project_dir.path().to_str().unwrap(),
+    ));
+
+    let pending_jsonl_line = serde_json::json!({
+        "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        "session": session_id,
+        "task": "coherence learning fallback",
+        "outcome": "success",
+        "keywords": ["learnings", "jsonl"],
+        "insight": "Worker fallback JSONL records use the same shape as SubmitLearningRequest plus date.",
+        "files_touched": ["src-tauri/src/session/controller.rs"]
+    })
+    .to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/learnings", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(pending_jsonl_line))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let learnings = storage
+        .read_learnings_session(session_id)
+        .expect("read session learnings");
+    assert_eq!(learnings.len(), 1);
+    assert_eq!(learnings[0].session, session_id);
+    assert_eq!(learnings[0].task, "coherence learning fallback");
+    assert_eq!(learnings[0].outcome, "success");
+    assert_eq!(
+        learnings[0].insight,
+        "Worker fallback JSONL records use the same shape as SubmitLearningRequest plus date."
+    );
+    assert_eq!(
+        learnings[0].files_touched,
+        vec!["src-tauri/src/session/controller.rs"]
+    );
+}
+
+#[tokio::test]
 async fn test_session_scoped_submit_learning_validates_empty_session() {
     let (app, controller) = setup_test_app_with_controller().await;
 
