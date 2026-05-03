@@ -103,5 +103,39 @@ describe('sessions store', () => {
       });
     });
 
+    it('propagates evaluator_config to the launch_swarm payload', async () => {
+      const config = {
+        project_path: '/test/path',
+        queen_config: { cli: 'claude', flags: [] },
+        planner_count: 1,
+        planner_config: { cli: 'claude', model: 'opus', flags: [] },
+        workers_per_planner: [
+          { cli: 'claude', flags: [], role: { role_type: 'backend', label: 'Backend', default_cli: 'claude', prompt_template: null } }
+        ],
+        prompt: 'test task',
+        with_evaluator: true,
+        evaluator_config: {
+          cli: 'codex',
+          model: 'gpt-5.5',
+          flags: ['--search'],
+          label: 'Review evaluator'
+        },
+      };
+
+      await sessions.launchSwarm(config as any);
+
+      expect(invoke).toHaveBeenCalledWith('launch_swarm', {
+        config: expect.objectContaining({
+          with_evaluator: true,
+          evaluator_config: expect.objectContaining({
+            cli: 'codex',
+            model: 'gpt-5.5',
+            flags: ['--search'],
+            label: 'Review evaluator'
+          })
+        })
+      });
+    });
+
   });
 });
