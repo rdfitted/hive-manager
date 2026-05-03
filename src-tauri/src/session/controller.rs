@@ -5439,7 +5439,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus-4-7`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`) |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -9614,8 +9614,8 @@ mod tests {
             Some("gpt-5.5")
         );
         assert_eq!(
-            extract_model_arg(&["--model", "opus-4-7"]).as_deref(),
-            Some("opus-4-7")
+            extract_model_arg(&["--model", "opus"]).as_deref(),
+            Some("opus")
         );
         assert_eq!(
             extract_model_arg(&["--model=gemini-2.5-pro"]).as_deref(),
@@ -9779,7 +9779,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-7".to_string()),
+                model: Some("opus".to_string()),
                 ..AgentConfig::default()
             },
             &[QaWorkerConfig {
@@ -9900,7 +9900,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-7".to_string()),
+                model: Some("opus".to_string()),
                 ..AgentConfig::default()
             },
             &[],

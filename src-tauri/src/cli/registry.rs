@@ -112,7 +112,7 @@ impl CliRegistry {
     /// Get the built-in default model for a CLI.
     pub fn default_model(cli: &str) -> Option<&'static str> {
         match cli {
-            "claude" => Some("opus-4-7"),
+            "claude" => Some("opus"),
             "gemini" => Some("gemini-2.5-pro"),
             "opencode" => Some("opencode/big-pickle"),
             "codex" => Some("gpt-5.5"),
@@ -190,7 +190,7 @@ mod tests {
             command: "claude".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
-            default_model: "opus-4-7".to_string(),
+            default_model: "opus".to_string(),
             env: None,
         });
         clis.insert("gemini".to_string(), CliConfig {
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_default_model_lookup() {
-        assert_eq!(CliRegistry::default_model("claude"), Some("opus-4-7"));
+        assert_eq!(CliRegistry::default_model("claude"), Some("opus"));
         assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.5"));
         assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
         assert_eq!(CliRegistry::default_model("unknown"), None);

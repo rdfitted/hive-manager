@@ -148,7 +148,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "queen".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-7".to_string()),
+                    model: Some("opus".to_string()),
                     prompt_template: "queen-hive".to_string(),
                 },
                 CellTemplate {
@@ -176,7 +176,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "queen".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-7".to_string()),
+                    model: Some("opus".to_string()),
                     prompt_template: "queen-hive".to_string(),
                 },
                 CellTemplate {
@@ -222,7 +222,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "resolver".to_string(),
                     cli: "claude".to_string(),
-                    model: Some("opus-4-7".to_string()),
+                    model: Some("opus".to_string()),
                     prompt_template: "resolver".to_string(),
                 },
             ],
@@ -240,7 +240,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "queen".to_string(),
                 cli: "claude".to_string(),
-                model: Some("opus-4-7".to_string()),
+                model: Some("opus".to_string()),
                 prompt_template: "queen-hive".to_string(),
             }],
         },
@@ -270,7 +270,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "resolver".to_string(),
                 cli: "claude".to_string(),
-                model: Some("opus-4-7".to_string()),
+                model: Some("opus".to_string()),
                 prompt_template: "resolver".to_string(),
             }],
         },
@@ -1548,7 +1548,8 @@ mod tests {
 
     use super::{
         builtin_role_packs, builtin_session_templates, heartbeat_snippet, normalize_api_base_url,
-        PromptContext, SessionTemplate, TemplateCatalog, TemplateEngine, DEFAULT_API_BASE_URL,
+        PromptContext, SessionTemplate, TemplateCatalog, TemplateEngine, TemplateError,
+        DEFAULT_API_BASE_URL,
     };
 
     #[test]

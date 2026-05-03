@@ -115,7 +115,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-7".to_string()),
+        default_model: Some("opus".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -154,7 +154,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         last_activity_at: now,
         agents,
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-7".to_string()),
+        default_model: Some("opus".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -299,7 +299,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-7".to_string()),
+        default_model: Some("opus".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -351,7 +351,7 @@ async fn test_patch_session_null_clears_field() {
         last_activity_at: chrono::Utc::now(),
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-7".to_string()),
+        default_model: Some("opus".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -503,7 +503,7 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         agents: vec![],
         state: "Completed".to_string(),
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-7".to_string()),
+        default_model: Some("opus".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -2589,7 +2589,7 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
         "mode": "hive",
         "objective": "Implement feature X",
         "default_cli": "claude",
-        "default_model": "opus-4-7",
+        "default_model": "opus",
         "workers": [
             {
                 "cli": "codex",
@@ -2636,7 +2636,7 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
             .get_session(session_id)
             .expect("created hive session should be stored");
         assert_eq!(session.default_cli, "claude");
-        assert_eq!(session.default_model.as_deref(), Some("opus-4-7"));
+        assert_eq!(session.default_model.as_deref(), Some("opus"));
         let workers: Vec<_> = session
             .agents
             .iter()
@@ -2851,7 +2851,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
         "project_path": temp_dir.path().to_string_lossy(),
         "task_description": "Investigate evaluator wiring",
         "cli": "claude",
-        "model": "opus-4-7",
+        "model": "opus",
         "evaluator_cli": "codex"
     });
 
@@ -2882,7 +2882,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
     match &session.session_type {
         SessionType::Solo { cli, model } => {
             assert_eq!(cli, "claude");
-            assert_eq!(model.as_deref(), Some("opus-4-7"));
+            assert_eq!(model.as_deref(), Some("opus"));
         }
         other => panic!("expected solo session type, got {:?}", other),
     }
@@ -3915,7 +3915,7 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             agents: vec![],
             state: "Completed".to_string(),
             default_cli: "claude".to_string(),
-            default_model: Some("opus-4-7".to_string()),
+            default_model: Some("opus".to_string()),
             qa_workers: Vec::new(),
             max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
@@ -4815,7 +4815,7 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         last_activity_at: now,
         agents: vec![],
         default_cli: "claude".to_string(),
-        default_model: Some("opus-4-7".to_string()),
+        default_model: Some("opus".to_string()),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,

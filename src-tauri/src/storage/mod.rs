@@ -514,7 +514,7 @@ impl SessionStorage {
             command: "claude".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
-            default_model: "opus-4-7".to_string(),
+            default_model: "opus".to_string(),
             env: None,
         });
 
@@ -573,7 +573,7 @@ impl SessionStorage {
         let mut default_roles = HashMap::new();
         default_roles.insert("backend".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus-4-7".to_string(),
+            model: "opus".to_string(),
         });
         default_roles.insert("frontend".to_string(), RoleDefaults {
             cli: "gemini".to_string(),
@@ -589,19 +589,19 @@ impl SessionStorage {
         });
         default_roles.insert("reviewer".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus-4-7".to_string(),
+            model: "opus".to_string(),
         });
         default_roles.insert("reviewer-quick".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus-4-7".to_string(),
+            model: "opus".to_string(),
         });
         default_roles.insert("resolver".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus-4-7".to_string(),
+            model: "opus".to_string(),
         });
         default_roles.insert("tester".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus-4-7".to_string(),
+            model: "opus".to_string(),
         });
         default_roles.insert("code-quality".to_string(), RoleDefaults {
             cli: "codex".to_string(),
@@ -617,7 +617,7 @@ impl SessionStorage {
         });
         default_roles.insert("general".to_string(), RoleDefaults {
             cli: "claude".to_string(),
-            model: "opus-4-7".to_string(),
+            model: "opus".to_string(),
         });
 
         AppConfig {
@@ -1319,7 +1319,7 @@ mod tests {
         for role in ["backend", "reviewer", "reviewer-quick", "resolver", "tester", "general"] {
             let defaults = config.default_roles.get(role).unwrap();
             assert_eq!(defaults.cli, "claude");
-            assert_eq!(defaults.model, "opus-4-7");
+            assert_eq!(defaults.model, "opus");
         }
 
         let evaluator = config.default_roles.get("evaluator").unwrap();

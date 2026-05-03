@@ -139,7 +139,7 @@ mod tests {
     fn make_spec() -> AgentLaunchSpec {
         AgentLaunchSpec {
             cli: "claude".to_string(),
-            model: Some("opus-4-7".to_string()),
+            model: Some("opus".to_string()),
             flags: vec![],
             cwd: PathBuf::from("/project"),
             env: std::collections::HashMap::new(),
@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(cmd.binary, "claude");
         assert!(cmd.args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(cmd.args.contains(&"--model".to_string()));
-        assert!(cmd.args.contains(&"opus-4-7".to_string()));
+        assert!(cmd.args.contains(&"opus".to_string()));
     }
 
     #[test]
