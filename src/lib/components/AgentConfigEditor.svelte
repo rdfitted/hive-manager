@@ -232,6 +232,11 @@
       if (model.includes('haiku')) return 'claude-haiku-4-5';
       if (model.includes('sonnet-4-6') || model.includes('sonnet-4.6')) return 'claude-sonnet-4-6';
       if (model.includes('sonnet')) return 'claude-sonnet-4-5';
+      if (model.includes('opus-4-6') || model.includes('opus-4.6')) {
+        if (effort === 'low') return 'claude-opus-4-6-low';
+        return 'claude-opus-4-6-high';
+      }
+      if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
 
       if (model.includes('opus')) {
         if (effort === 'low') return 'opus-low';
