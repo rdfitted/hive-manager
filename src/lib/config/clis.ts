@@ -16,7 +16,7 @@ export interface CliOption {
  * All available CLI options for agent configuration
  */
 export const cliOptions: CliOption[] = [
-  { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.7)', defaultModel: 'opus' },
+  { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude', defaultModel: 'opus' },
   { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro', defaultModel: 'gemini-2.5-pro' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model', defaultModel: 'opencode/big-pickle' },
   { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.5', defaultModel: 'gpt-5.5' },

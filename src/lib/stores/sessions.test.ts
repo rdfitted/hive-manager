@@ -103,31 +103,5 @@ describe('sessions store', () => {
       });
     });
 
-    it('includes evaluator fields when with_evaluator is true', async () => {
-      const config = {
-        project_path: '/test/path',
-        queen_config: { cli: 'claude', flags: [] },
-        planner_count: 2,
-        planner_config: { cli: 'claude', flags: [] },
-        workers_per_planner: [],
-        with_evaluator: true,
-        evaluator_cli: 'qwen',
-        evaluator_model: 'qwen3-coder',
-        qa_workers: [{ specialization: 'ui' as const, cli: 'gemini', flags: [] }]
-      };
-
-      await sessions.launchSwarm(config as any);
-
-      expect(invoke).toHaveBeenCalledWith('launch_swarm', {
-        config: expect.objectContaining({
-          with_evaluator: true,
-          evaluator_cli: 'qwen',
-          evaluator_model: 'qwen3-coder',
-          qa_workers: expect.arrayContaining([
-            expect.objectContaining({ specialization: 'ui' })
-          ])
-        })
-      });
-    });
   });
 });

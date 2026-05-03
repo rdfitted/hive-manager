@@ -387,8 +387,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           with_planning: withPlanning,
           smoke_test: smokeTest,
           with_evaluator: withEvaluator,
-          evaluator_cli: withEvaluator ? evaluatorConfig.cli : undefined,
-          evaluator_model: withEvaluator ? (evaluatorConfig.model || undefined) : undefined,
           evaluator_config: withEvaluator ? evaluatorConfig : undefined,
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
@@ -415,8 +413,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           with_planning: true, // Planning is always enabled
           smoke_test: smokeTest,
           with_evaluator: withEvaluator,
-          evaluator_cli: withEvaluator ? evaluatorConfig.cli : undefined,
-          evaluator_model: withEvaluator ? (evaluatorConfig.model || undefined) : undefined,
           evaluator_config: withEvaluator ? evaluatorConfig : undefined,
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
