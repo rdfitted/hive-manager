@@ -14,9 +14,9 @@
   }
 
   const claudePresets: PresetOption[] = [
-    { value: 'opus-4-7-high', label: 'Opus 4.7 (High effort)' },
-    { value: 'opus-4-7-low', label: 'Opus 4.7 (Low effort)' },
-    { value: 'opus-4-7', label: 'Opus 4.7' },
+    { value: 'opus-high', label: 'Opus (High effort)' },
+    { value: 'opus-low', label: 'Opus (Low effort)' },
+    { value: 'opus', label: 'Opus' },
     { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
     { value: 'claude-opus-4-6-low', label: 'Opus 4.6 (Low effort)' },
     { value: 'claude-opus-4-5', label: 'Opus 4.5' },
@@ -109,7 +109,7 @@
     let flags = [...baseFlags];
 
     if (nextCli === 'claude') {
-      model = 'opus-4-7';
+      model = 'opus';
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
       model = 'gpt-5.5';
@@ -233,10 +233,10 @@
       if (model.includes('sonnet-4-6') || model.includes('sonnet-4.6')) return 'claude-sonnet-4-6';
       if (model.includes('sonnet')) return 'claude-sonnet-4-5';
 
-      if (model.includes('opus-4-7') || model.includes('opus-4.7')) {
-        if (effort === 'low') return 'opus-4-7-low';
-        if (effort === 'high') return 'opus-4-7-high';
-        return 'opus-4-7';
+      if (model.includes('opus')) {
+        if (effort === 'low') return 'opus-low';
+        if (effort === 'high') return 'opus-high';
+        return 'opus';
       }
 
       if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
@@ -325,16 +325,16 @@
     let flags = [...cleanedFlags];
 
     switch (preset) {
-      case 'opus-4-7-high':
-        model = 'opus-4-7';
+      case 'opus-high':
+        model = 'opus';
         flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
         break;
-      case 'opus-4-7-low':
-        model = 'opus-4-7';
+      case 'opus-low':
+        model = 'opus';
         flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
         break;
-      case 'opus-4-7':
-        model = 'opus-4-7';
+      case 'opus':
+        model = 'opus';
         break;
       case 'claude-opus-4-6-high':
         model = 'claude-opus-4-6';

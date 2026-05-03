@@ -80,7 +80,7 @@ describe('sessions store', () => {
         project_path: '/test/path',
         queen_config: { cli: 'claude', flags: [] },
         planner_count: 2,
-        planner_config: { cli: 'claude', model: 'opus-4-7', flags: [] },
+        planner_config: { cli: 'claude', model: 'opus', flags: [] },
         workers_per_planner: [
           { cli: 'claude', flags: [], role: { role_type: 'backend', label: 'Backend', default_cli: 'claude', prompt_template: null } }
         ],
@@ -96,7 +96,7 @@ describe('sessions store', () => {
           planner_count: 2,
           planner_config: expect.objectContaining({
             cli: 'claude',
-            model: 'opus-4-7'
+            model: 'opus'
           }),
           workers_per_planner: expect.any(Array)
         })
