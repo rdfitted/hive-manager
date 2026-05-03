@@ -4441,10 +4441,27 @@ for WT in "{worker_worktree_root}"/*; do
   # Append only lines not already present in root
   comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
 done
-# Also scoop session-scoped files
-for f in .hive-manager/{session_id}/learnings*.json .hive-manager/{session_id}/learning-submission.json; do
-  [ -f "$f" ] && echo "Review and merge: $f"
-done
+
+# Ingest session-scoped pending fallback records written by workers
+pending=".hive-manager/{session_id}/learnings.pending.jsonl"
+archive=".hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+if [ -f "$pending" ]; then
+  mkdir -p .ai-docs
+  touch .ai-docs/learnings.jsonl
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    if ! printf '%s\n' "$line" | jq -e 'has("date") and has("session") and has("task") and has("outcome") and has("keywords") and has("insight") and has("files_touched")' >/dev/null; then
+      echo "Skipping invalid learning JSONL record: $line" >&2
+      continue
+    fi
+    if ! curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
+      -H "Content-Type: application/json" \
+      --data-binary "$line"; then
+      grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl
+    fi
+  done < "$pending"
+  mv "$pending" "$archive"
+fi
 ```
 
 **c. Stage the updated learnings file into your integration commit** so consolidation is visible in the PR.
@@ -4651,7 +4668,7 @@ You MUST call the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
-Before marking your task COMPLETED, submit what you learned **via the HTTP API only**:
+Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
 
 ```bash
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
@@ -4667,6 +4684,24 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 ```
 
 Even if you learned nothing notable, submit with insight "No significant learnings for this task."
+
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, append the learning record to the session-scoped pending JSONL file instead:
+
+```bash
+mkdir -p ".hive-manager/{session_id}"
+jq -nc \
+  --arg date "$(date -u +%Y-%m-%d)" \
+  --arg session "{session_id}" \
+  --arg task "Brief task description" \
+  --arg outcome "success|partial|failed" \
+  --arg insight "What you learned - be specific and actionable" \
+  --argjson keywords '["keyword1","keyword2"]' \
+  --argjson files_touched '["path/to/file.rs"]' \
+  '{{date:$date,session:$session,task:$task,outcome:$outcome,keywords:$keywords,insight:$insight,files_touched:$files_touched}}' \
+  >> ".hive-manager/{session_id}/learnings.pending.jsonl"
+```
 
 ⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
 
