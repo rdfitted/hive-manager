@@ -238,7 +238,7 @@
       }
       if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
 
-      if (model.includes('opus')) {
+      if (model === 'opus') {
         if (effort === 'low') return 'opus-low';
         if (effort === 'high') return 'opus-high';
         return 'opus';
