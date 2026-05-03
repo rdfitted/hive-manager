@@ -4430,6 +4430,9 @@ Worker worktrees are ephemeral. Learnings written directly to `.ai-docs/learning
 
 **a. Primary — flush the session-scoped store (deterministic):**
 ```bash
+mkdir -p .ai-docs
+touch .ai-docs/learnings.jsonl
+
 curl -s "http://localhost:18800/api/sessions/{session_id}/learnings" \
   | jq -c '.learnings[]? // .[]?' \
   | while IFS= read -r line; do grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl; done
