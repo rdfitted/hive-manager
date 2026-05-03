@@ -2712,6 +2712,69 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
 }
 
 #[tokio::test]
+async fn test_create_hive_with_evaluator_config_propagates_to_evaluator() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "mode": "hive",
+        "objective": "Verify evaluator config launch contract",
+        "worker_count": 1,
+        "default_cli": "claude",
+        "default_model": "opus",
+        "with_evaluator": true,
+        "evaluator_config": {
+            "cli": "codex",
+            "model": "gpt-5.5",
+            "flags": ["--search"],
+            "label": "Config evaluator"
+        },
+        "smoke_test": true
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let session_id = launch_response
+        .get("session_id")
+        .and_then(|value| value.as_str())
+        .expect("launch response includes session_id");
+
+    let session = controller
+        .read()
+        .get_session(session_id)
+        .expect("created hive session should be stored");
+    let evaluator = session
+        .agents
+        .iter()
+        .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+        .expect("hive session should launch evaluator from evaluator_config");
+    assert_eq!(evaluator.config.cli, "codex");
+    assert_eq!(evaluator.config.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(evaluator.config.flags, vec!["--search".to_string()]);
+    assert_eq!(evaluator.config.label.as_deref(), Some("Config evaluator"));
+    assert_eq!(session.state, SessionState::QaInProgress { iteration: None });
+
+    controller.write().close_session(session_id).unwrap();
+}
+
+#[tokio::test]
 async fn test_launch_swarm_accepts_model_capable_configs() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();

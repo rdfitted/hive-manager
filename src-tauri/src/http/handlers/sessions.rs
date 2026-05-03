@@ -75,6 +75,51 @@ fn is_valid_hex_session_color(color: &str) -> bool {
         && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
 }
 
+fn evaluator_config_from_request(
+    evaluator_config: Option<AgentConfig>,
+    evaluator_cli: Option<String>,
+    evaluator_model: Option<String>,
+    default_cli: Option<&str>,
+) -> Result<Option<AgentConfig>, ApiError> {
+    if let Some(mut config) = evaluator_config {
+        validate_cli(&config.cli)?;
+        if config.label.is_none() {
+            config.label = Some("Evaluator".to_string());
+        }
+        return Ok(Some(config));
+    }
+
+    if let Some(evaluator_cli) = evaluator_cli {
+        validate_cli(&evaluator_cli)?;
+        return Ok(Some(AgentConfig {
+            cli: evaluator_cli,
+            model: evaluator_model,
+            flags: vec![],
+            label: Some("Evaluator".to_string()),
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        }));
+    }
+
+    if let Some(default_cli) = default_cli {
+        validate_cli(default_cli)?;
+        return Ok(Some(AgentConfig {
+            cli: default_cli.to_string(),
+            model: evaluator_model,
+            flags: vec![],
+            label: Some("Evaluator".to_string()),
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        }));
+    }
+
+    Ok(None)
+}
+
 fn completion_blocked_to_api_error(error: CompletionBlockedError) -> ApiError {
     let mut details = std::collections::HashMap::new();
     details.insert("current_state".to_string(), serde_json::json!(error.current_state));
@@ -137,6 +182,7 @@ pub struct LaunchSwarmRequest {
     pub queen_config: Option<AgentConfig>,
     pub planner_config: Option<AgentConfig>,
     pub workers_per_planner: Option<Vec<AgentConfig>>,
+    pub evaluator_config: Option<AgentConfig>,
     pub evaluator_cli: Option<String>,
     pub evaluator_model: Option<String>,
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
@@ -173,6 +219,7 @@ pub struct LaunchSoloRequest {
     pub cli: String,
     pub model: Option<String>,
     pub flags: Option<Vec<String>>,
+    pub evaluator_config: Option<AgentConfig>,
     pub evaluator_cli: Option<String>,
     pub evaluator_model: Option<String>,
     pub name: Option<String>,
@@ -193,6 +240,7 @@ pub struct CreateSessionRequest {
     pub judge_model: Option<String>,
     pub with_planning: Option<bool>,
     pub with_evaluator: Option<bool>,
+    pub evaluator_config: Option<AgentConfig>,
     pub evaluator_cli: Option<String>,
     pub evaluator_model: Option<String>,
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
@@ -295,34 +343,13 @@ pub async fn create_session(
                 vec![worker_config; worker_count as usize]
             };
 
-            // Build evaluator_config: validate if provided, else fall back to default_cli silently
-            let evaluator_config = if let Some(ref evaluator_cli) = req.evaluator_cli {
-                validate_cli(evaluator_cli)?;
-                Some(AgentConfig {
-                    cli: evaluator_cli.clone(),
-                    model: req.evaluator_model.clone(),
-                    flags: vec![],
-                    label: Some("Evaluator".to_string()),
-                    name: None,
-                    description: None,
-                    role: None,
-                    initial_prompt: None,
-                })
-            } else if req.with_evaluator.unwrap_or(false) {
-                // Backward compat: if with_evaluator is true but no evaluator_cli, use default_cli silently
-                Some(AgentConfig {
-                    cli: default_cli,
-                    model: req.evaluator_model.clone(),
-                    flags: vec![],
-                    label: Some("Evaluator".to_string()),
-                    name: None,
-                    description: None,
-                    role: None,
-                    initial_prompt: None,
-                })
-            } else {
-                None
-            };
+            let evaluator_config = evaluator_config_from_request(
+                req.evaluator_config,
+                req.evaluator_cli,
+                req.evaluator_model,
+                req.with_evaluator.unwrap_or(false).then_some(default_cli.as_str()),
+            )?;
+            let with_evaluator = req.with_evaluator.unwrap_or(false) || evaluator_config.is_some();
 
             let config = HiveLaunchConfig {
                 project_path: req.project_path,
@@ -332,7 +359,7 @@ pub async fn create_session(
                 workers,
                 prompt: req.objective.filter(|value| !value.trim().is_empty()),
                 with_planning: req.with_planning.unwrap_or(false),
-                with_evaluator: req.with_evaluator.unwrap_or(false),
+                with_evaluator,
                 evaluator_config,
                 qa_workers: req.qa_workers,
                 smoke_test: req.smoke_test.unwrap_or(false),
@@ -612,22 +639,12 @@ pub async fn launch_swarm(
         validate_cli(&worker.cli)?;
     }
 
-    // Build evaluator_config: validate if provided, else fall back to default_cli silently
-    let evaluator_config = if let Some(ref evaluator_cli) = req.evaluator_cli {
-        validate_cli(evaluator_cli)?;
-        Some(AgentConfig {
-            cli: evaluator_cli.clone(),
-            model: req.evaluator_model.clone(),
-            flags: vec![],
-            label: Some("Evaluator".to_string()),
-            name: None,
-            description: None,
-            role: None,
-            initial_prompt: None,
-        })
-    } else {
-        None
-    };
+    let evaluator_config = evaluator_config_from_request(
+        req.evaluator_config,
+        req.evaluator_cli,
+        req.evaluator_model,
+        None,
+    )?;
     let with_evaluator = evaluator_config.is_some();
 
     let config = crate::session::SwarmLaunchConfig {
@@ -680,22 +697,12 @@ pub async fn launch_solo(
         initial_prompt: None,
     };
 
-    // Build evaluator_config: validate if provided, else fall back to req.cli silently
-    let evaluator_config = if let Some(ref evaluator_cli) = req.evaluator_cli {
-        validate_cli(evaluator_cli)?;
-        Some(AgentConfig {
-            cli: evaluator_cli.clone(),
-            model: req.evaluator_model.clone(),
-            flags: vec![],
-            label: Some("Evaluator".to_string()),
-            name: None,
-            description: None,
-            role: None,
-            initial_prompt: None,
-        })
-    } else {
-        None
-    };
+    let evaluator_config = evaluator_config_from_request(
+        req.evaluator_config,
+        req.evaluator_cli,
+        req.evaluator_model,
+        None,
+    )?;
     let with_evaluator = evaluator_config.is_some();
 
     let config = HiveLaunchConfig {

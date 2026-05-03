@@ -9039,6 +9039,8 @@ Last updated: {timestamp}
             &config,
             &session.auth_strategy,
         );
+        // QA workers spawned after evaluator launch run from the project root, not
+        // isolated worker worktrees, so their prompts stay in the session prompt dir.
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
