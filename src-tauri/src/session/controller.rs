@@ -5117,6 +5117,32 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         Ok(file_path)
     }
 
+    /// Write a worker prompt file inside the worker's own worktree.
+    fn write_worker_prompt_file(
+        worktree_root: &Path,
+        worker_index: u8,
+        filename: &str,
+        content: &str,
+    ) -> Result<PathBuf, String> {
+        let prompts_dir = worktree_root.join(".hive-manager").join("prompts");
+        std::fs::create_dir_all(&prompts_dir).map_err(|e| {
+            format!(
+                "Failed to create prompts directory for worker {}: {}",
+                worker_index, e
+            )
+        })?;
+
+        let file_path = prompts_dir.join(filename);
+        std::fs::write(&file_path, content).map_err(|e| {
+            format!(
+                "Failed to write prompt file for worker {}: {}",
+                worker_index, e
+            )
+        })?;
+
+        Ok(file_path)
+    }
+
     /// Write a tool documentation file to the session's tools directory
     fn write_tool_file(project_path: &PathBuf, session_id: &str, filename: &str, content: &str) -> Result<PathBuf, String> {
         let tools_dir = project_path.join(".hive-manager").join(session_id).join("tools");
@@ -6022,7 +6048,12 @@ Last updated: {timestamp}
             // Write worker prompt to file and pass to CLI
             let worker_prompt = Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
             let filename = format!("worker-{}-prompt.md", index);
-            let prompt_file = match Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt) {
+            let prompt_file = match Self::write_worker_prompt_file(
+                Path::new(&worker_cwd),
+                index,
+                &filename,
+                &worker_prompt,
+            ) {
                 Ok(prompt_file) => prompt_file,
                 Err(err) => {
                     self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
@@ -6291,7 +6322,12 @@ Last updated: {timestamp}
                 &cli,
             );
             let prompt_filename = format!("fusion-worker-{}-prompt.md", variant.index);
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, &prompt_filename, &worker_prompt)?;
+            let prompt_file = Self::write_worker_prompt_file(
+                Path::new(&variant.worktree_path),
+                variant.index,
+                &prompt_filename,
+                &worker_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
 
             let (cmd, mut args) = Self::build_command(&variant_agent_config);
@@ -6766,7 +6802,12 @@ Last updated: {timestamp}
                 &cli,
             );
             let prompt_filename = format!("fusion-worker-{}-prompt.md", variant.index);
-            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &prompt_filename, &worker_prompt)?;
+            let prompt_file = Self::write_worker_prompt_file(
+                Path::new(&variant.worktree_path),
+                variant.index,
+                &prompt_filename,
+                &worker_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
 
             let (cmd, mut args) = Self::build_command(&variant_agent_config);
@@ -7048,10 +7089,8 @@ Last updated: {timestamp}
             Some(&worker_cwd),
         );
         let filename = format!("worker-{}-prompt.md", index);
-        let prompt_file_path = session
-            .project_path
+        let prompt_file_path = Path::new(&worker_cwd)
             .join(".hive-manager")
-            .join(session_id)
             .join("prompts")
             .join(&filename);
 
@@ -7077,7 +7116,7 @@ Last updated: {timestamp}
         // 3. Write worker prompt to file
         let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
         let prompt_file =
-            Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)
+            Self::write_worker_prompt_file(Path::new(&worker_cwd), index, &filename, &worker_prompt)
                 .map_err(|err| {
                     Self::rollback_worker_launch_artifacts(
                         &session.project_path,
@@ -8715,13 +8754,16 @@ Last updated: {timestamp}
         // Write worker prompt to file and add to args
         let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
         let filename = format!("worker-{}-prompt.md", worker_index);
-        let prompt_file_path = session
-            .project_path
+        let prompt_file_path = Path::new(&worker_cwd)
             .join(".hive-manager")
-            .join(session_id)
             .join("prompts")
             .join(&filename);
-        let prompt_file = match Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt) {
+        let prompt_file = match Self::write_worker_prompt_file(
+            Path::new(&worker_cwd),
+            worker_index,
+            &filename,
+            &worker_prompt,
+        ) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
                 Self::rollback_worker_launch_artifacts(
@@ -9760,6 +9802,33 @@ mod tests {
             PathBuf::from(
                 "/repo/.hive-manager/worktrees/session-123/worker-4/.hive-manager/tasks/worker-4-task.md"
             )
+        );
+    }
+
+    #[test]
+    fn worker_prompt_file_uses_worktree_local_hive_manager_dir() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let worktree_path = temp_dir.path().join("worker-2");
+        std::fs::create_dir_all(&worktree_path).expect("create worktree");
+
+        let path = SessionController::write_worker_prompt_file(
+            &worktree_path,
+            2,
+            "worker-2-prompt.md",
+            "Prompt body",
+        )
+        .expect("write worker prompt");
+
+        assert_eq!(
+            path,
+            worktree_path
+                .join(".hive-manager")
+                .join("prompts")
+                .join("worker-2-prompt.md")
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read worker prompt"),
+            "Prompt body"
         );
     }
 
