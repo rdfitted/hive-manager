@@ -2013,7 +2013,7 @@ impl SessionController {
     /// Add prompt argument to args based on CLI type
     /// Each CLI has different syntax for accepting initial prompts
     fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
-        let prompt_path = if cli == "cursor" {
+        let prompt_path = if matches!(cli, "cursor" | "wsl") {
             Self::to_wsl_path(prompt_path)
         } else {
             prompt_path.to_string()
@@ -9887,7 +9887,11 @@ mod tests {
 
         let mut args = Vec::new();
         SessionController::add_prompt_to_args("cursor", &mut args, prompt_path);
-        assert_eq!(args, vec![expected_cursor_prompt], "cli cursor");
+        assert_eq!(args, vec![expected_cursor_prompt.clone()], "cli cursor");
+
+        let mut args = Vec::new();
+        SessionController::add_prompt_to_args("wsl", &mut args, prompt_path);
+        assert_eq!(args, vec![expected_cursor_prompt], "cli wsl");
 
         for cli in ["gemini", "qwen"] {
             let mut args = Vec::new();
