@@ -4480,10 +4480,11 @@ ingest_pending_learnings() {{
       echo "Skipping invalid learning JSONL record: $line" >&2
       continue
     fi
+    grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl
     if ! curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
       -H "Content-Type: application/json" \
       --data-binary "$line"; then
-      grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl
+      echo "Learning POST failed; preserved via root JSONL fallback" >&2
     fi
   done < "$pending"
   mv "$pending" "$archive"
