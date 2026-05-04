@@ -1,8 +1,14 @@
 {
-  "last_curated_at": "2026-03-30T03:20:00Z",
-  "last_curated_line": 23,
-  "total_curated": 28,
-  "curated_hive_sessions": ["ba712c73-71ff-4f29-8105-c1177d03f962"],
+  "last_curated_at": "2026-05-04T01:21:44Z",
+  "last_curated_line": 0,
+  "total_curated": 55,
+  "curated_hive_sessions": [
+    "ba712c73-71ff-4f29-8105-c1177d03f962",
+    "2c48ccc7-fca3-421a-9fde-f933b378d038",
+    "518540a0-7024-45f1-9700-fd80b15b4850",
+    "b993faf5-1e74-45ad-ba3a-7803987078bf",
+    "134cdfd8-4247-4a67-9583-7da87bda6d8d"
+  ],
   "curation_history": [
     {
       "date": "2026-02-12",
@@ -15,6 +21,18 @@
       "entries_processed": 23,
       "type": "curation",
       "sources": ["learnings.jsonl (22 pending)", "hive-session ba712c73"]
+    },
+    {
+      "date": "2026-05-04",
+      "entries_processed": 27,
+      "type": "curation",
+      "sources": ["learnings.jsonl (27 pending)", "session 2c48ccc7", "session 518540a0", "session b993faf5", "session 134cdfd8 (PR #110)"]
+    },
+    {
+      "date": "2026-05-04",
+      "entries_archived": 50,
+      "type": "archive",
+      "archive_file": "learnings-20260503-152144.jsonl"
     }
   ]
 }

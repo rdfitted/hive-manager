@@ -28,6 +28,7 @@ How we do things in this project. Updated by AI sessions.
 - Spawn 3 verification agents per concern using different models for consensus-based triage
 - Consolidate raw PR comments into distinct concerns before spawning agents (12 comments -> 7 concerns -> 21 agents instead of 36)
 - Workflow: fetch comments -> group by concern -> spawn 3 agents -> categorize by consensus -> implement fixes -> commit
+-> global: practices/multi-agent-workflows.md
 
 ### Session Defaults Propagation
 - Store `default_cli` and `default_model` on PersistedSession/Session structs with `#[serde(default)]` for backward compat
@@ -61,6 +62,82 @@ How we do things in this project. Updated by AI sessions.
 - Unit tests that only verify serde deserialization are redundant when integration tests cover the same validation end-to-end
 - Integration tests catch more: routing, deserialization, validation, storage, response serialization
 
+### Worktree-Scoped Worker Prompt Files (#108)
+- Worker prompts must live INSIDE the worker worktree at `<worktree_root>/.hive-manager/prompts/<filename>`
+- Queen, master-planner, fusion-queen run from project root — their prompts stay at `<project>/.hive-manager/{session_id}/prompts/`
+- Helper: `write_worker_prompt_file(worktree_root, worker_index, filename, content)` mirrors `write_tool_files`
+- All 8 worker spawn callsites in `controller.rs` MUST use the helper; non-worker callsites untouched
+- Why: gemini sandboxes file-read tools to the worktree; placing prompts outside causes 15min stalls
+-> global: practices/multi-agent-workflows.md
+
+### WSL Path Conversion for Cursor CLI (#108 follow-up)
+- `cursor` CLI runs via `wsl /root/.local/bin/agent`; Linux-side process cannot read Windows `D:\...` paths
+- Helper: `to_wsl_path(path)` converts `D:\foo\bar` (or `D:/foo/bar`) → `/mnt/d/foo/bar`, lowercases drive letter
+- Apply in `add_prompt_to_args` BEFORE building the prompt argument
+- **Critical gotcha**: `build_command` maps `cli == "cursor"` to spawn name `"wsl"` BEFORE downstream helpers see it. Match `matches!(cli, "cursor" | "wsl")` so the converter actually fires at runtime
+-> global: practices/multi-agent-workflows.md
+
+### Learnings JSONL Fallback (`learnings.pending.jsonl`)
+- Workers POST learnings to `/api/sessions/{id}/learnings`; on curl exit code 7 / non-zero, fall back to writing `.hive-manager/{session_id}/learnings.pending.jsonl`
+- Workers MUST NEVER write directly to `.ai-docs/learnings.jsonl` — that's the consolidated repo store
+- Queen consolidation Step 0.a: `mkdir -p .ai-docs && touch .ai-docs/learnings.jsonl` BEFORE the flush pipeline (otherwise `grep -Fxq` errors and drops records on first run in fresh repos)
+- Queen ingest validates JSONL value types (non-empty strings, outcome enum, array shapes, no path traversal in `files_touched`) BEFORE both POST and dedup-append
+- Append to root JSONL **unconditionally** after validation — POST success doesn't bypass repo preservation; on POST failure log a warning and still preserve
+
+### Evaluator Config — Nested with Legacy Fallback (#106)
+- Frontend now sends ONLY `evaluator_config: AgentConfig` (no legacy `evaluator_cli`/`evaluator_model` scalars)
+- Backend handlers (`CreateSessionRequest`, `LaunchSwarmRequest`, `LaunchSoloRequest`) accept BOTH shapes:
+  - Add `evaluator_config: Option<AgentConfig>` field
+  - Centralized helper `evaluator_config_from_request(...)` prefers `evaluator_config`, falls back to legacy scalars, validates `cli` against allowlist
+- Without the backend deserializer change, serde silently drops the new field → HTTP launches lose evaluator selection
+- Tests: post the new shape AND assert legacy scalars are absent from the payload
+
+### AgentConfigEditor Preset Selector (#109 follow-up)
+- Default selection: `"Custom (keep current model)"` — does NOT auto-detect a matching preset
+- Generic opus branch uses `model === 'opus'` (exact equality), NOT `model.includes('opus')` — broader match misclassifies versioned `claude-opus-4-6` etc.
+- Versioned Claude opus checks (`claude-opus-4-6`, `claude-opus-4-5`) run BEFORE the generic `opus` branch
+- Removing legacy `parseClaudeEffort`/`parseCodexEffort`/`detectPreset` helpers is fine once the dropdown defaults to `'custom'`
+
+### Default Role CLI Assignments (Personal-App Preference)
+- **Queen**: `claude` / `opus` (LaunchDialog `queenConfig` initial state)
+- **Evaluator**: `claude` / `opus` (defaultRoles.evaluator)
+- **Frontend**: `gemini` / `gemini-2.5-pro` (defaultRoles.frontend)
+- **Everything else** (backend, coherence, simplify, reviewer, reviewer-quick, resolver, tester, code-quality, qa-worker, general): `codex` / `gpt-5.5`
+- Defaults are mirrored in `src/lib/config/clis.ts` AND `src-tauri/src/storage/mod.rs::default_roles` — must stay in sync
+- `test_default_role_models_match_frontend_defaults` enforces sync; update it when changing defaults
+- Why: this is a personal app; the user manually overrode these every session before this change
+
+### Heartbeat Snippet Centralization
+- All prompt templates (worker, queen, tool files) use a single `templates::heartbeat_snippet()` helper
+- Avoids drift when heartbeat payload shape evolves
+- Pattern reusable for any cross-template snippet that's at risk of duplication
+
+### Mtime + Cached-Hash Hot-Reload Dirty Check
+- Use `session.json` mtime PLUS a cached "last-synced serialized snapshot" as the dirty check
+- Hot-reload disk state into memory only when current in-memory persisted view still matches the last synced snapshot
+- Prevents stale disk writes from clobbering newer in-memory state while still reconciling clean external updates
+- Re-verify cleanliness under the write lock before applying refreshed storage data
+
+### `spawn_blocking` for Sync git/FS in Async Handlers
+- Push synchronous git HEAD resolution and peer-file writes onto `tokio::task::spawn_blocking` to keep async runtime threads free
+- Especially critical for evaluator/QA handlers that resolve commit SHAs
+
+### Stable Worker Base SHA + Atomic Verdict Persistence
+- Persist a worker branch's creation-time base SHA on the agent — avoids false-positive commit-gating when project HEAD moves later
+- The same controller mutation can atomically persist evaluator `commit_sha` with a QA verdict, eliminating follow-up writes and string-based error classification
+- Use `CompletionBlockedError` struct for structured 409 responses (`current_state`, `unblock_paths`, `remaining_quiescence_seconds`) — reusable for any blocked-state guidance
+
+### Reconciliation Mirror Pattern in Worktrees
+- Shared session artifacts under `<project>/.hive-manager/{session_id}/...` sit OUTSIDE worker worktree git toplevels
+- When a task requires both a tracked deliverable AND a shared handoff file: write the file inside the worktree (tracked) AND copy it to the shared session path (consumed by Queen/peers)
+- Avoids "file not in this repo" git errors while preserving cross-agent handoff
+
+### Master Planner Scout Choices (Personal Setup)
+- Hive + Swarm Master Planner spawn 3 codex scouts via Task tool: `gpt-5.5` low / low / medium reasoning effort
+- Pattern unchanged: `Task(subagent_type="general-purpose", prompt="...IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"<level>\" '...'")`
+- Synthesis remains inline in the planner (no separate synthesis agent)
+- Fusion master-planner has no scouts (writes plan directly)
+
 ## Patterns That Failed
 
 ### Random UUIDs for Serde Defaults
@@ -82,7 +159,21 @@ How we do things in this project. Updated by AI sessions.
 - Confirmation modals for destructive actions must capture the target entity ID when opened, not when confirmed
 - Svelte reactive stores (`$activeSession`) can change between modal open and confirm
 - Never read store at confirm time for the action target — capture into a local variable at open time
-- SessionSidebar had the correct pattern; StatusPanel was inconsistent (fixed in PR review)
+
+### Defaults Sync Sites Multiplied Silently
+- Model and role defaults are mirrored in FIVE places: `clis.ts`, `AgentConfigEditor.svelte` model selectors, `LaunchDialog.svelte` initial configs, backend `cli/registry.rs`, backend `storage/mod.rs`
+- Updating only the shared map is insufficient if launch UI initializers still hardcode an older CLI
+- Mitigation: rely on `defaultRoles` map in `LaunchDialog` (`createDefaultConfig`) instead of string literals; backend test enforces frontend↔backend parity
+
+### `add_prompt_to_args` Ran on Spawn-Command Name, Not CLI Identifier
+- `build_command` mutates `"cursor"` → `"wsl"` BEFORE downstream callers invoke `add_prompt_to_args(&cmd, ...)`
+- A first-pass cursor fix that only matched `cli == "cursor"` never fired at runtime
+- Generic lesson: when a name-mapping function happens upstream, downstream branches on the original identifier are dead code. Either match BOTH the source and target identifiers (`matches!(cli, "cursor" | "wsl")`) or thread the original identifier through.
+
+### Active Sessions Payload Shape Misparse
+- `GET /api/sessions/active` returns `{ sessions: [...] }` with `ActiveAgentInfo { id, last_activity }`
+- Frontend store was parsing as array | object and reading `timestamp`/`last_update` — both wrong
+- Treat missing `last_activity` as not-yet-heartbeated, NOT stale, to avoid false QA-stale badges and cross-session leakage
 
 ## Code Conventions
 
@@ -107,6 +198,11 @@ How we do things in this project. Updated by AI sessions.
 - `tempfile` in `[dependencies]` (not just `[dev-dependencies]`) when used in production code
 - `uuid` features: `v4` for random generation, `v5` for deterministic content-based hashing
 
+### Test Rigor for Launch Endpoints
+- Launch tests that depend on PTY/worktree setup MUST tolerate `INTERNAL_SERVER_ERROR` (env can fail mid-spawn)
+- Pattern: `assert!(status == CREATED || status == INTERNAL_SERVER_ERROR)`, then gate evaluator/session assertions and `close_session` behind `if status == CREATED { ... }`
+- Don't hard-require 201 in tests where the failure mode is environmental rather than logical
+
 ## Architecture Notes
 
 ### Dual Storage Paths
@@ -119,12 +215,10 @@ How we do things in this project. Updated by AI sessions.
 - `validate_session_id()` rejects `..`, `/`, `\` characters
 - Applied at HTTP handler layer (not storage layer) for all session-scoped endpoints
 - `files_touched` body field also validated for traversal characters
-- Defense-in-depth: could also add validation in `SessionStorage::session_dir()`
 
 ### Security: CLI Allowlist Validation
 - `validate_cli()` in `http/handlers/mod.rs` checks against `VALID_CLIS` allowlist
 - `VALID_CLIS` must stay synchronized with `default_config()` in `storage/mod.rs`
-- Applied to all handlers accepting CLI input (workers, planners)
 
 ### Security: Evaluator Authority Enforcement
 - `evaluator_inject()` restricts targets to Queen and QA workers only — no planners, no other evaluators
@@ -134,27 +228,30 @@ How we do things in this project. Updated by AI sessions.
 ### Prompt Template Structure in controller.rs
 - Queen prompt (standard Hive): includes Learning Curation Protocol, tool table, sequential spawning
 - Queen prompt (Swarm): similar but with planner-focused curation protocol
-- Worker prompt: includes Learnings Protocol section with correct outcome values
+- Worker prompt: includes Learnings Protocol section with correct outcome values + File-Based Fallback block
 - Tool files (`.hive-manager/{session_id}/tools/*.md`): generated by `write_tool_files()` method
 
 ### Tauri Command Pattern
 - `resume_session` loads `PersistedSession` from storage, converts to active `Session`
 - `PersistedAgentInfo` stores role as String (e.g., 'Queen', 'Worker(1)') requiring string parsing
+- Tauri icon CLI regenerates ALL platform icons including new android/ios directories — commit them all together
 
 ### UI/UX Improvements
-- Convert text inputs to dropdown selectors for constrained options (e.g., model selection in solo mode)
-- Provide dynamic options based on selected parent option (e.g., model options change based on selected CLI)
-- This prevents invalid selections and improves user experience
+- Convert text inputs to dropdown selectors for constrained options
+- Provide dynamic options based on selected parent option
+- Default preset selectors to "Custom (keep current)" so opening an editor never silently overwrites config
 
 ### Solo Mode as Zero-Worker Hive
 - Frontend maps Solo mode to a Hive session with zero workers — backend detects this and spawns a single agent directly
 - Avoids creating a separate session type flow end-to-end; reuses existing `launch_hive_v2` plumbing
 - Dedicated `launch_solo()` in controller skips orchestration: no task files, no queen prompt, no watcher setup
+- Solo mode supports evaluator: `SoloLaunchConfig` carries `evaluator_config` and the LaunchDialog exposes the Evaluator Peer toggle for Solo too
 
 ### CLI-Specific Command Builders
 - Each CLI (claude, gemini, codex, droid, cursor) has different prompt flags (`-p`, `-q`, positional)
 - Dedicated solo command builder avoids coupling to orchestration-oriented defaults
 - Model flag passthrough varies per CLI — must be handled per-type
+- `cursor` is special: `build_command` maps it to `wsl` spawn — downstream helpers must recognize both identifiers
 
 ### SessionType Variant Synchronization
 - Adding a new `SessionType` variant requires synchronized updates in:
@@ -168,31 +265,37 @@ How we do things in this project. Updated by AI sessions.
 - Rust compiler catches all exhaustive match failures — fix ALL before merging
 - Frontend `AgentRole` type must exactly mirror Rust enum serialization shape (object variants, not strings)
 - Filters in workers/planners handlers must explicitly exclude new roles from listings
-- Hierarchy in `coordination/state.rs` must place new root agents with `parent_id: None`
 
 ### CLI Worker Reliability (Hive Sessions)
 - **codex**: Performs extensive codebase indexing before producing output (8-12 min with no git diff is normal). Performs well once indexing completes. Occasional interactive approval stalls but rarer than indexing delays.
 - **gemini**: Also indexes codebase before starting (~7-12 min). Good for frontend, data model changes. Reliable once indexing completes.
-- **cursor**: Good for review/test tasks. WSL environment may lack Rust toolchain.
+- **cursor**: Good for review/test tasks. WSL environment may lack Rust toolchain. Prompt paths must be WSL-converted.
 - **claude**: Most reliable for autonomous work. Starts producing output faster than codex/gemini. Best for complex multi-site refactors.
 - **droid**: Fastest (~2min). Excellent for handler changes, validation, straightforward tasks. Minimal indexing overhead.
-- **Strategy**: Wait at least **12-15 minutes** before declaring a worker stalled. Codex and Gemini index extensively — no git diff for 8-12 min is normal startup behavior. Only Droid and Claude start producing output quickly. Check terminal/PTY activity if possible, not just git diff. Only flag as truly stalled if zero terminal activity AND >15 min elapsed.
-
-## Model Performance Notes
-
-### Multi-Agent Verification
-- 3 agents per concern with different models provides reliable consensus
-- All 7 concerns in PR #19 were validated VALID by 3/3 agents (high confidence)
-- Different models catch different aspects - useful for comprehensive analysis
+- **Strategy**: Wait at least **12-15 minutes** before declaring a worker stalled. Codex and Gemini index extensively. Only Droid and Claude start producing output quickly.
 
 ## Hot Files
 Files frequently modified across sessions — pay extra attention:
-- `src-tauri/src/session/controller.rs` — 4200+ lines, prompt templates, state machine, match blocks for every enum. Modified in nearly every session.
-- `src-tauri/src/storage/mod.rs` — Dual storage paths, role defaults, session persistence. Touched for any new role or config.
+- `src-tauri/src/session/controller.rs` — 9000+ lines, prompt templates, state machine, match blocks for every enum, `write_worker_prompt_file`/`add_prompt_to_args`/`to_wsl_path`. Modified in nearly every session.
+- `src-tauri/src/storage/mod.rs` — Dual storage paths, role defaults, session persistence. `default_roles` MUST stay in sync with `src/lib/config/clis.ts`.
+- `src-tauri/src/http/handlers/sessions.rs` — Launch handler request structs, evaluator_config_from_request helper. Touched whenever launch contract changes.
 - `src-tauri/src/http/handlers/` — Each new feature adds or modifies handler files. Validation must be consistent.
 - `src-tauri/src/coordination/injection.rs` — Authority enforcement, inject methods. Critical for security.
+- `src-tauri/src/templates/mod.rs` — heartbeat_snippet() helper; test module imports must include `TemplateError` for the invalid-render test.
+- `src/lib/config/clis.ts` — Frontend source of truth for cliOptions + defaultRoles. Must mirror backend `default_roles`.
+- `src/lib/components/AgentConfigEditor.svelte` — Preset selector defaults to "Custom"; opus branch uses exact equality.
+- `src/lib/components/LaunchDialog.svelte` — Uses `createDefaultConfig` reading from `defaultRoles`; evaluatorConfig pulls from `defaultRoles.evaluator`.
 - `src/lib/stores/sessions.ts` — Frontend type unions must mirror Rust enums exactly.
 
+## Keywords → Files Mapping
+- **launch / evaluator_config**: `LaunchDialog.svelte`, `AgentConfigEditor.svelte`, `http/handlers/sessions.rs`, `clis.ts`
+- **prompt files / worktree**: `controller.rs::write_worker_prompt_file`, `controller.rs::add_prompt_to_args`, `controller.rs::to_wsl_path`
+- **learnings**: `http/handlers/learnings.rs`, `controller.rs` Queen consolidation block, `.ai-docs/learnings.jsonl`, `.hive-manager/{id}/learnings.pending.jsonl`
+- **defaults / role config**: `clis.ts`, `storage/mod.rs::default_roles`, `LaunchDialog.svelte::createDefaultConfig`
+- **heartbeat**: `templates/mod.rs::heartbeat_snippet`, controller prompt strings
+- **QA verdict**: `http/handlers/evaluator.rs`, `coordination/state.rs`, `session/cell_status.rs`, `peer/qa-verdict.json`
+
 ---
-*Curated from learnings.jsonl (23 entries) + 1 hive session payload*
-*Last updated: 2026-03-30*
+*Curated from 50 entries (27 newly synthesized) + earlier hive sessions*
+*Last curated: 2026-05-04*
+*Archive: `.ai-docs/archive/learnings-{ts}.jsonl`*
