@@ -2013,6 +2013,11 @@ impl SessionController {
     /// Add prompt argument to args based on CLI type
     /// Each CLI has different syntax for accepting initial prompts
     fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
+        let prompt_path = if cli == "cursor" {
+            Self::to_wsl_path(prompt_path)
+        } else {
+            prompt_path.to_string()
+        };
         let prompt_arg = format!("Read {} and execute.", prompt_path);
         match cli {
             "claude" | "codex" | "cursor" | "droid" => {
@@ -2490,6 +2495,23 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 
     fn prompt_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
+    }
+
+    fn to_wsl_path(path: &str) -> String {
+        let forward_slash_path = path.replace('\\', "/");
+        let bytes = forward_slash_path.as_bytes();
+
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            let drive = bytes[0].to_ascii_lowercase() as char;
+            let rest = forward_slash_path[2..].trim_start_matches('/');
+            if rest.is_empty() {
+                format!("/mnt/{drive}")
+            } else {
+                format!("/mnt/{drive}/{rest}")
+            }
+        } else {
+            forward_slash_path
+        }
     }
 
     fn worktree_boundary_rules(worktree_path: &str) -> String {
@@ -9852,12 +9874,19 @@ mod tests {
         let prompt_path =
             r"D:\repo\.hive-manager\worktrees\session-123\worker-2\.hive-manager\prompts\worker-2-prompt.md";
         let expected_prompt = format!("Read {} and execute.", prompt_path);
+        let expected_cursor_prompt =
+            "Read /mnt/d/repo/.hive-manager/worktrees/session-123/worker-2/.hive-manager/prompts/worker-2-prompt.md and execute."
+                .to_string();
 
-        for cli in ["claude", "codex", "cursor", "droid"] {
+        for cli in ["claude", "codex", "droid"] {
             let mut args = Vec::new();
             SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
             assert_eq!(args, vec![expected_prompt.clone()], "cli {cli}");
         }
+
+        let mut args = Vec::new();
+        SessionController::add_prompt_to_args("cursor", &mut args, prompt_path);
+        assert_eq!(args, vec![expected_cursor_prompt], "cli cursor");
 
         for cli in ["gemini", "qwen"] {
             let mut args = Vec::new();
@@ -9868,6 +9897,23 @@ mod tests {
                 "cli {cli}"
             );
         }
+    }
+
+    #[test]
+    fn to_wsl_path_converts_windows_drive_paths() {
+        assert_eq!(
+            SessionController::to_wsl_path(r"D:\foo\bar"),
+            "/mnt/d/foo/bar"
+        );
+        assert_eq!(
+            SessionController::to_wsl_path("D:/foo/bar"),
+            "/mnt/d/foo/bar"
+        );
+        assert_eq!(
+            SessionController::to_wsl_path(r"C:\Users\x"),
+            "/mnt/c/Users/x"
+        );
+        assert_eq!(SessionController::to_wsl_path("/tmp/x"), "/tmp/x");
     }
 
     #[test]
