@@ -2013,6 +2013,11 @@ impl SessionController {
     /// Add prompt argument to args based on CLI type
     /// Each CLI has different syntax for accepting initial prompts
     fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
+        let prompt_path = if matches!(cli, "cursor" | "wsl") {
+            Self::to_wsl_path(prompt_path)
+        } else {
+            prompt_path.to_string()
+        };
         let prompt_arg = format!("Read {} and execute.", prompt_path);
         match cli {
             "claude" | "codex" | "cursor" | "droid" => {
@@ -2490,6 +2495,23 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 
     fn prompt_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
+    }
+
+    fn to_wsl_path(path: &str) -> String {
+        let forward_slash_path = path.replace('\\', "/");
+        let bytes = forward_slash_path.as_bytes();
+
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            let drive = bytes[0].to_ascii_lowercase() as char;
+            let rest = forward_slash_path[2..].trim_start_matches('/');
+            if rest.is_empty() {
+                format!("/mnt/{drive}")
+            } else {
+                format!("/mnt/{drive}/{rest}")
+            }
+        } else {
+            forward_slash_path
+        }
     }
 
     fn worktree_boundary_rules(worktree_path: &str) -> String {
@@ -3350,17 +3372,17 @@ You MUST spawn Task agents that call external CLI tools via Bash. This provides 
 
 **Launch ALL scouts in PARALLEL (single message, multiple Task calls):**
 
-### Scout 1 - OpenCode BigPickle (Deep Analysis)
+### Scout 1 - Codex GPT-5.5 Low (Deep Analysis)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: OPENCODE_YOLO=true opencode run --format default -m opencode/big-pickle 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
 
-### Scout 2 - Droid GLM 5.1 (Pattern Recognition)
+### Scout 2 - Codex GPT-5.5 Low (Pattern Recognition)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: droid exec --skip-permissions-unsafe -m glm-5.1 \"Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.\" Return file paths with observations.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.' Return file paths with observations.")
 
-### Scout 3 - Cursor (Quick Search)
+### Scout 3 - Codex GPT-5.5 Medium (Quick Search)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: cursor-cli --print 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"medium\" 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
 
 **CRITICAL RULES:**
 - Replace [TASK] with the actual task description from Phase 0
@@ -3389,7 +3411,7 @@ Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
 [1-2 sentence overview]
 
 ## Investigation Results
-- Scouts Used: 3 (BigPickle, GLM 5.1, cursor-cli)
+- Scouts Used: 3 (Codex GPT-5.5 low, low, medium)
 - Files Identified: [count]
 - Consensus Level: HIGH/MEDIUM/LOW
 
@@ -3573,16 +3595,19 @@ Each Planner will break their domain task into {workers_per} worker subtasks.
 
 Spawn 3 scout agents to investigate the codebase in parallel:
 
-```bash
-# Scout 1 - Code Structure (Gemini)
-gemini -y -i "Analyze the codebase structure for: [TASK]. List relevant files by priority."
+Spawn each scout via the Task tool calling Codex through Bash. Launch all 3 in PARALLEL via a single message with three Task calls.
 
-# Scout 2 - Implementation Patterns (Claude Subagent via Task tool)
-# Use Claude's Task tool with Explore agent
+### Scout 1 - Codex GPT-5.5 Low (Code Structure)
 
-# Scout 3 - Related Code (Cursor)
-cursor-cli --print "Find code related to: [TASK]"
-```
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Analyze the codebase structure for: [TASK]. List relevant files by priority.' Return file paths with priority notes.")
+
+### Scout 2 - Codex GPT-5.5 Low (Implementation Patterns)
+
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Identify implementation patterns relevant to: [TASK]. Focus on existing conventions, helpers, and shared abstractions.' Return file paths with pattern notes.")
+
+### Scout 3 - Codex GPT-5.5 Medium (Related Code)
+
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"medium\" 'Find code related to: [TASK]. Identify entry points, test files, dependencies.' Return file paths with notes.")
 
 ---
 
@@ -4427,23 +4452,59 @@ Worker worktrees are ephemeral. Learnings written directly to `.ai-docs/learning
 
 **a. Primary — flush the session-scoped store (deterministic):**
 ```bash
+mkdir -p .ai-docs
+touch .ai-docs/learnings.jsonl
+
 curl -s "http://localhost:18800/api/sessions/{session_id}/learnings" \
   | jq -c '.learnings[]? // .[]?' \
-  >> .ai-docs/learnings.jsonl
+  | while IFS= read -r line; do grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl; done
 ```
-Deduplicate against existing lines (e.g., by `task` + `insight`) before appending.
+Deduplicate by exact JSONL line before appending.
 
-**b. Fallback sweep — scan worker worktrees for any direct file writes:**
+**b. Fallback sweep — scan worker worktrees for any direct file writes and pending fallback records:**
 ```bash
+case "{session_id}" in
+  *..*|*/*|*\\*) echo "Invalid session id in learning ingest path: {session_id}" >&2; exit 1 ;;
+esac
+
+mkdir -p .ai-docs
+touch .ai-docs/learnings.jsonl
+
+ingest_pending_learnings() {{
+  pending="$1"
+  archive="$2"
+  [ -f "$pending" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    if ! printf '%s\n' "$line" | jq -e '(.date | type == "string" and length > 0) and (.session | type == "string" and length > 0) and (.task | type == "string" and length > 0) and (.insight | type == "string" and length > 0) and (.outcome == "success" or .outcome == "partial" or .outcome == "failed") and (.keywords | type == "array") and (.files_touched | type == "array") and all(.files_touched[]; type == "string" and length > 0 and (contains("..") | not) and (startswith("/") | not) and (contains("\\") | not) and (test("^[A-Za-z]:") | not))' >/dev/null; then
+      echo "Skipping invalid learning JSONL record: $line" >&2
+      continue
+    fi
+    grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl
+    if ! curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
+      -H "Content-Type: application/json" \
+      --data-binary "$line"; then
+      echo "Learning POST failed; preserved via root JSONL fallback" >&2
+    fi
+  done < "$pending"
+  mv "$pending" "$archive"
+}}
+
+# Ingest any pending records that were written from the main checkout.
+ingest_pending_learnings \
+  ".hive-manager/{session_id}/learnings.pending.jsonl" \
+  ".hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+
 for WT in "{worker_worktree_root}"/*; do
   f="$WT/.ai-docs/learnings.jsonl"
-  [ -f "$f" ] || continue
-  # Append only lines not already present in root
-  comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
-done
-# Also scoop session-scoped files
-for f in .hive-manager/{session_id}/learnings*.json .hive-manager/{session_id}/learning-submission.json; do
-  [ -f "$f" ] && echo "Review and merge: $f"
+  if [ -f "$f" ]; then
+    # Append only lines not already present in root
+    comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
+  fi
+
+  ingest_pending_learnings \
+    "$WT/.hive-manager/{session_id}/learnings.pending.jsonl" \
+    "$WT/.hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
 done
 ```
 
@@ -4651,7 +4712,7 @@ You MUST call the curl API first. Only use file fallback if curl fails.
 
 ## Learnings Protocol (MANDATORY)
 
-Before marking your task COMPLETED, submit what you learned **via the HTTP API only**:
+Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
 
 ```bash
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
@@ -4667,6 +4728,24 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 ```
 
 Even if you learned nothing notable, submit with insight "No significant learnings for this task."
+
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, append the learning record to the session-scoped pending JSONL file instead:
+
+```bash
+mkdir -p ".hive-manager/{session_id}"
+jq -nc \
+  --arg date "$(date -u +%Y-%m-%d)" \
+  --arg session "{session_id}" \
+  --arg task "Brief task description" \
+  --arg outcome "success|partial|failed" \
+  --arg insight "What you learned - be specific and actionable" \
+  --argjson keywords '["keyword1","keyword2"]' \
+  --argjson files_touched '["path/to/file.rs"]' \
+  '{{date:$date,session:$session,task:$task,outcome:$outcome,keywords:$keywords,insight:$insight,files_touched:$files_touched}}' \
+  >> ".hive-manager/{session_id}/learnings.pending.jsonl"
+```
 
 ⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
 
@@ -5082,6 +5161,32 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         Ok(file_path)
     }
 
+    /// Write a worker prompt file inside the worker's own worktree.
+    fn write_worker_prompt_file(
+        worktree_root: &Path,
+        worker_index: u8,
+        filename: &str,
+        content: &str,
+    ) -> Result<PathBuf, String> {
+        let prompts_dir = worktree_root.join(".hive-manager").join("prompts");
+        std::fs::create_dir_all(&prompts_dir).map_err(|e| {
+            format!(
+                "Failed to create prompts directory for worker {}: {}",
+                worker_index, e
+            )
+        })?;
+
+        let file_path = prompts_dir.join(filename);
+        std::fs::write(&file_path, content).map_err(|e| {
+            format!(
+                "Failed to write prompt file for worker {}: {}",
+                worker_index, e
+            )
+        })?;
+
+        Ok(file_path)
+    }
+
     /// Write a tool documentation file to the session's tools directory
     fn write_tool_file(project_path: &PathBuf, session_id: &str, filename: &str, content: &str) -> Result<PathBuf, String> {
         let tools_dir = project_path.join(".hive-manager").join(session_id).join("tools");
@@ -5439,7 +5544,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus-4-7`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`) |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -5987,7 +6092,12 @@ Last updated: {timestamp}
             // Write worker prompt to file and pass to CLI
             let worker_prompt = Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
             let filename = format!("worker-{}-prompt.md", index);
-            let prompt_file = match Self::write_prompt_file(&project_path, &session_id, &filename, &worker_prompt) {
+            let prompt_file = match Self::write_worker_prompt_file(
+                Path::new(&worker_cwd),
+                index,
+                &filename,
+                &worker_prompt,
+            ) {
                 Ok(prompt_file) => prompt_file,
                 Err(err) => {
                     self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
@@ -6256,7 +6366,12 @@ Last updated: {timestamp}
                 &cli,
             );
             let prompt_filename = format!("fusion-worker-{}-prompt.md", variant.index);
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, &prompt_filename, &worker_prompt)?;
+            let prompt_file = Self::write_worker_prompt_file(
+                Path::new(&variant.worktree_path),
+                variant.index,
+                &prompt_filename,
+                &worker_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
 
             let (cmd, mut args) = Self::build_command(&variant_agent_config);
@@ -6731,7 +6846,12 @@ Last updated: {timestamp}
                 &cli,
             );
             let prompt_filename = format!("fusion-worker-{}-prompt.md", variant.index);
-            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &prompt_filename, &worker_prompt)?;
+            let prompt_file = Self::write_worker_prompt_file(
+                Path::new(&variant.worktree_path),
+                variant.index,
+                &prompt_filename,
+                &worker_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
 
             let (cmd, mut args) = Self::build_command(&variant_agent_config);
@@ -7013,12 +7133,6 @@ Last updated: {timestamp}
             Some(&worker_cwd),
         );
         let filename = format!("worker-{}-prompt.md", index);
-        let prompt_file_path = session
-            .project_path
-            .join(".hive-manager")
-            .join(session_id)
-            .join("prompts")
-            .join(&filename);
 
         // 2. Write task file (Status: ACTIVE since it's their turn)
         Self::write_task_file_with_status(
@@ -7042,14 +7156,14 @@ Last updated: {timestamp}
         // 3. Write worker prompt to file
         let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
         let prompt_file =
-            Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt)
+            Self::write_worker_prompt_file(Path::new(&worker_cwd), index, &filename, &worker_prompt)
                 .map_err(|err| {
                     Self::rollback_worker_launch_artifacts(
                         &session.project_path,
                         session_id,
                         &worker_cell_name,
                         &task_file_path,
-                        Some(&prompt_file_path),
+                        None,
                     );
                     self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
                     SessionError::ConfigError(err)
@@ -7078,7 +7192,7 @@ Last updated: {timestamp}
                     session_id,
                     &worker_cell_name,
                     &task_file_path,
-                    Some(&prompt_file_path),
+                    Some(&prompt_file),
                 );
                 self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
                 SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e))
@@ -8680,13 +8794,12 @@ Last updated: {timestamp}
         // Write worker prompt to file and add to args
         let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
         let filename = format!("worker-{}-prompt.md", worker_index);
-        let prompt_file_path = session
-            .project_path
-            .join(".hive-manager")
-            .join(session_id)
-            .join("prompts")
-            .join(&filename);
-        let prompt_file = match Self::write_prompt_file(&session.project_path, session_id, &filename, &worker_prompt) {
+        let prompt_file = match Self::write_worker_prompt_file(
+            Path::new(&worker_cwd),
+            worker_index,
+            &filename,
+            &worker_prompt,
+        ) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
                 Self::rollback_worker_launch_artifacts(
@@ -8694,7 +8807,7 @@ Last updated: {timestamp}
                     session_id,
                     &worker_cell_name,
                     &task_file_path,
-                    Some(&prompt_file_path),
+                    None,
                 );
                 return Err(err);
             }
@@ -8947,6 +9060,8 @@ Last updated: {timestamp}
             &config,
             &session.auth_strategy,
         );
+        // QA workers spawned after evaluator launch run from the project root, not
+        // isolated worker worktrees, so their prompts stay in the session prompt dir.
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -9614,8 +9729,8 @@ mod tests {
             Some("gpt-5.5")
         );
         assert_eq!(
-            extract_model_arg(&["--model", "opus-4-7"]).as_deref(),
-            Some("opus-4-7")
+            extract_model_arg(&["--model", "opus"]).as_deref(),
+            Some("opus")
         );
         assert_eq!(
             extract_model_arg(&["--model=gemini-2.5-pro"]).as_deref(),
@@ -9729,6 +9844,84 @@ mod tests {
     }
 
     #[test]
+    fn worker_prompt_file_uses_worktree_local_hive_manager_dir() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let worktree_path = temp_dir.path().join("worker-2");
+        std::fs::create_dir_all(&worktree_path).expect("create worktree");
+
+        let path = SessionController::write_worker_prompt_file(
+            &worktree_path,
+            2,
+            "worker-2-prompt.md",
+            "Prompt body",
+        )
+        .expect("write worker prompt");
+
+        assert_eq!(
+            path,
+            worktree_path
+                .join(".hive-manager")
+                .join("prompts")
+                .join("worker-2-prompt.md")
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read worker prompt"),
+            "Prompt body"
+        );
+    }
+
+    #[test]
+    fn add_prompt_to_args_preserves_worktree_scoped_absolute_prompt_path() {
+        let prompt_path =
+            r"D:\repo\.hive-manager\worktrees\session-123\worker-2\.hive-manager\prompts\worker-2-prompt.md";
+        let expected_prompt = format!("Read {} and execute.", prompt_path);
+        let expected_cursor_prompt =
+            "Read /mnt/d/repo/.hive-manager/worktrees/session-123/worker-2/.hive-manager/prompts/worker-2-prompt.md and execute."
+                .to_string();
+
+        for cli in ["claude", "codex", "droid"] {
+            let mut args = Vec::new();
+            SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
+            assert_eq!(args, vec![expected_prompt.clone()], "cli {cli}");
+        }
+
+        let mut args = Vec::new();
+        SessionController::add_prompt_to_args("cursor", &mut args, prompt_path);
+        assert_eq!(args, vec![expected_cursor_prompt.clone()], "cli cursor");
+
+        let mut args = Vec::new();
+        SessionController::add_prompt_to_args("wsl", &mut args, prompt_path);
+        assert_eq!(args, vec![expected_cursor_prompt], "cli wsl");
+
+        for cli in ["gemini", "qwen"] {
+            let mut args = Vec::new();
+            SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
+            assert_eq!(
+                args,
+                vec!["-i".to_string(), expected_prompt.clone()],
+                "cli {cli}"
+            );
+        }
+    }
+
+    #[test]
+    fn to_wsl_path_converts_windows_drive_paths() {
+        assert_eq!(
+            SessionController::to_wsl_path(r"D:\foo\bar"),
+            "/mnt/d/foo/bar"
+        );
+        assert_eq!(
+            SessionController::to_wsl_path("D:/foo/bar"),
+            "/mnt/d/foo/bar"
+        );
+        assert_eq!(
+            SessionController::to_wsl_path(r"C:\Users\x"),
+            "/mnt/c/Users/x"
+        );
+        assert_eq!(SessionController::to_wsl_path("/tmp/x"), "/tmp/x");
+    }
+
+    #[test]
     fn write_tool_files_includes_spawn_qa_worker_doc() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         SessionController::write_tool_files(
@@ -9779,7 +9972,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-7".to_string()),
+                model: Some("opus".to_string()),
                 ..AgentConfig::default()
             },
             &[QaWorkerConfig {
@@ -9900,7 +10093,7 @@ mod tests {
             "session-123",
             &AgentConfig {
                 cli: "claude".to_string(),
-                model: Some("opus-4-7".to_string()),
+                model: Some("opus".to_string()),
                 ..AgentConfig::default()
             },
             &[],

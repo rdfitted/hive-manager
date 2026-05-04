@@ -80,7 +80,7 @@ describe('sessions store', () => {
         project_path: '/test/path',
         queen_config: { cli: 'claude', flags: [] },
         planner_count: 2,
-        planner_config: { cli: 'claude', model: 'opus-4-7', flags: [] },
+        planner_config: { cli: 'claude', model: 'opus', flags: [] },
         workers_per_planner: [
           { cli: 'claude', flags: [], role: { role_type: 'backend', label: 'Backend', default_cli: 'claude', prompt_template: null } }
         ],
@@ -96,24 +96,30 @@ describe('sessions store', () => {
           planner_count: 2,
           planner_config: expect.objectContaining({
             cli: 'claude',
-            model: 'opus-4-7'
+            model: 'opus'
           }),
           workers_per_planner: expect.any(Array)
         })
       });
     });
 
-    it('includes evaluator fields when with_evaluator is true', async () => {
+    it('propagates evaluator_config to the launch_swarm payload', async () => {
       const config = {
         project_path: '/test/path',
         queen_config: { cli: 'claude', flags: [] },
-        planner_count: 2,
-        planner_config: { cli: 'claude', flags: [] },
-        workers_per_planner: [],
+        planner_count: 1,
+        planner_config: { cli: 'claude', model: 'opus', flags: [] },
+        workers_per_planner: [
+          { cli: 'claude', flags: [], role: { role_type: 'backend', label: 'Backend', default_cli: 'claude', prompt_template: null } }
+        ],
+        prompt: 'test task',
         with_evaluator: true,
-        evaluator_cli: 'qwen',
-        evaluator_model: 'qwen3-coder',
-        qa_workers: [{ specialization: 'ui' as const, cli: 'gemini', flags: [] }]
+        evaluator_config: {
+          cli: 'codex',
+          model: 'gpt-5.5',
+          flags: ['--search'],
+          label: 'Review evaluator'
+        },
       };
 
       await sessions.launchSwarm(config as any);
@@ -121,13 +127,19 @@ describe('sessions store', () => {
       expect(invoke).toHaveBeenCalledWith('launch_swarm', {
         config: expect.objectContaining({
           with_evaluator: true,
-          evaluator_cli: 'qwen',
-          evaluator_model: 'qwen3-coder',
-          qa_workers: expect.arrayContaining([
-            expect.objectContaining({ specialization: 'ui' })
-          ])
+          evaluator_config: expect.objectContaining({
+            cli: 'codex',
+            model: 'gpt-5.5',
+            flags: ['--search'],
+            label: 'Review evaluator'
+          })
         })
       });
+
+      const payload = (invoke as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as any;
+      expect(payload.config).not.toHaveProperty('evaluator_cli');
+      expect(payload.config).not.toHaveProperty('evaluator_model');
     });
+
   });
 });

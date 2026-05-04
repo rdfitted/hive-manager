@@ -14,9 +14,9 @@
   }
 
   const claudePresets: PresetOption[] = [
-    { value: 'opus-4-7-high', label: 'Opus 4.7 (High effort)' },
-    { value: 'opus-4-7-low', label: 'Opus 4.7 (Low effort)' },
-    { value: 'opus-4-7', label: 'Opus 4.7' },
+    { value: 'opus-high', label: 'Opus (High effort)' },
+    { value: 'opus-low', label: 'Opus (Low effort)' },
+    { value: 'opus', label: 'Opus' },
     { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
     { value: 'claude-opus-4-6-low', label: 'Opus 4.6 (Low effort)' },
     { value: 'claude-opus-4-5', label: 'Opus 4.5' },
@@ -82,7 +82,9 @@
 
   $: presetOptions = presetsByCliType[config.cli] ?? [];
 
-  $: selectedPreset = detectPreset(config);
+  // Default the preset selector to "custom" so the current model/flags are preserved
+  // unless the user explicitly chooses a preset.
+  $: selectedPreset = 'custom';
 
   $: presetDescription = config.cli === 'claude'
     ? 'Opus presets add --settings {"effortLevel":"high|low"}'
@@ -109,7 +111,7 @@
     let flags = [...baseFlags];
 
     if (nextCli === 'claude') {
-      model = 'opus-4-7';
+      model = 'opus';
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
       model = 'gpt-5.5';
@@ -142,45 +144,6 @@
       label: target.value || undefined,
     };
     dispatch('change', config);
-  }
-
-  function parseClaudeEffort(flags: string[]): string | undefined {
-    for (let i = 0; i < flags.length; i += 1) {
-      if (flags[i] !== '--settings' || i + 1 >= flags.length) {
-        continue;
-      }
-
-      try {
-        const parsed = JSON.parse(flags[i + 1]) as { effortLevel?: string };
-        if (typeof parsed.effortLevel === 'string') {
-          return parsed.effortLevel.toLowerCase();
-        }
-      } catch {
-        // Ignore non-JSON settings values
-      }
-    }
-
-    return undefined;
-  }
-
-  function parseCodexEffort(flags: string[]): string | undefined {
-    for (let i = 0; i < flags.length; i += 1) {
-      const flag = flags[i];
-      if ((flag !== '-c' && flag !== '--config') || i + 1 >= flags.length) {
-        continue;
-      }
-
-      const setting = flags[i + 1].trim();
-      const match = setting.match(/^model_reasoning_effort\s*=\s*(.+)$/);
-      if (!match) {
-        continue;
-      }
-
-      const raw = match[1].trim();
-      return raw.replace(/^['"]|['"]$/g, '').toLowerCase();
-    }
-
-    return undefined;
   }
 
   function stripManagedEffortFlags(cli: string, flags: string[]): string[] {
@@ -222,99 +185,6 @@
     return cleaned;
   }
 
-  function detectPreset(agent: AgentConfig): string {
-    const flags = agent.flags || [];
-    const model = (agent.model || '').toLowerCase();
-
-    if (agent.cli === 'claude') {
-      const effort = parseClaudeEffort(flags);
-
-      if (model.includes('haiku')) return 'claude-haiku-4-5';
-      if (model.includes('sonnet-4-6') || model.includes('sonnet-4.6')) return 'claude-sonnet-4-6';
-      if (model.includes('sonnet')) return 'claude-sonnet-4-5';
-
-      if (model.includes('opus-4-7') || model.includes('opus-4.7')) {
-        if (effort === 'low') return 'opus-4-7-low';
-        if (effort === 'high') return 'opus-4-7-high';
-        return 'opus-4-7';
-      }
-
-      if (model.includes('opus-4-5') || model.includes('opus-4.5')) return 'claude-opus-4-5';
-
-      if ((model.includes('opus') || model === '') && effort === 'low') {
-        return 'claude-opus-4-6-low';
-      }
-
-      if ((model.includes('opus') || model === '') && effort === 'high') {
-        return 'claude-opus-4-6-high';
-      }
-
-      return 'custom';
-    }
-
-    if (agent.cli === 'codex') {
-      const effort = parseCodexEffort(flags);
-      const isGpt55 = model.includes('gpt-5.5');
-      const isGpt54 = model.includes('gpt-5.4');
-      const isGpt53 = model.includes('gpt-5.3');
-
-      if (isGpt55 && effort === 'low') return 'codex-gpt-5-5-low';
-      if (isGpt55 && effort === 'medium') return 'codex-gpt-5-5-medium';
-      if (isGpt55 && effort === 'high') return 'codex-gpt-5-5-high';
-      if (isGpt55 && effort === 'xhigh') return 'codex-gpt-5-5-xhigh';
-
-      if (isGpt54 && effort === 'low') return 'codex-gpt-5-4-low';
-      if (isGpt54 && effort === 'medium') return 'codex-gpt-5-4-medium';
-      if (isGpt54 && effort === 'high') return 'codex-gpt-5-4-high';
-      if (isGpt54 && effort === 'xhigh') return 'codex-gpt-5-4-xhigh';
-
-      if (isGpt53 && effort === 'low') return 'codex-gpt-5-3-low';
-      if (isGpt53 && effort === 'medium') return 'codex-gpt-5-3-medium';
-      if (isGpt53 && effort === 'high') return 'codex-gpt-5-3-high';
-      if (isGpt53 && effort === 'xhigh') return 'codex-gpt-5-3-xhigh';
-
-      return 'custom';
-    }
-
-    if (agent.cli === 'gemini') {
-      if (model === 'gemini-3.1-pro-preview-customtools') return 'gemini-3.1-pro-preview';
-      if (model === 'gemini-3.1-pro-preview') return 'gemini-3.1-pro-preview';
-      if (model === 'gemini-3-pro-preview') return 'gemini-3-pro-preview';
-      if (model === 'gemini-3-flash-preview') return 'gemini-3-flash-preview';
-      if (model === 'gemini-2.5-pro') return 'gemini-2.5-pro';
-      if (model === 'gemini-2.5-flash') return 'gemini-2.5-flash';
-      if (model === 'gemini-2.5-flash-lite') return 'gemini-2.5-flash-lite';
-      return 'custom';
-    }
-
-    if (agent.cli === 'cursor') {
-      if (model === 'composer-2') return 'composer-2';
-      if (model === 'composer-2-fast') return 'composer-2-fast';
-      if (model === 'composer-1') return 'composer-1';
-      return 'custom';
-    }
-
-    if (agent.cli === 'droid') {
-      if (model.includes('glm-5.1')) return 'glm-5.1';
-      if (model.includes('glm-4.7')) return 'glm-4.7';
-      return 'custom';
-    }
-
-    if (agent.cli === 'opencode') {
-      if (model.includes('big-pickle')) return 'opencode/big-pickle';
-      if (model.includes('grok')) return 'opencode/grok';
-      return 'custom';
-    }
-
-    if (agent.cli === 'qwen') {
-      if (model.includes('qwen3-coder')) return 'qwen3-coder';
-      if (model.includes('qwen2.5-coder')) return 'qwen2.5-coder';
-      return 'custom';
-    }
-
-    return 'custom';
-  }
-
   function applyPreset(preset: string): void {
     if (preset === 'custom') {
       return;
@@ -325,16 +195,16 @@
     let flags = [...cleanedFlags];
 
     switch (preset) {
-      case 'opus-4-7-high':
-        model = 'opus-4-7';
+      case 'opus-high':
+        model = 'opus';
         flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
         break;
-      case 'opus-4-7-low':
-        model = 'opus-4-7';
+      case 'opus-low':
+        model = 'opus';
         flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
         break;
-      case 'opus-4-7':
-        model = 'opus-4-7';
+      case 'opus':
+        model = 'opus';
         break;
       case 'claude-opus-4-6-high':
         model = 'claude-opus-4-6';
@@ -489,12 +359,12 @@
         on:change={handlePresetChange}
         class="cli-select"
       >
+        <option value="custom">Custom (keep current model)</option>
         {#each presetOptions as preset}
           <option value={preset.value}>
             {preset.label}
           </option>
         {/each}
-        <option value="custom">Custom (preserve current)</option>
       </select>
       <span class="cli-description">{presetDescription}</span>
     </div>

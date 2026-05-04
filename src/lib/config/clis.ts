@@ -16,7 +16,7 @@ export interface CliOption {
  * All available CLI options for agent configuration
  */
 export const cliOptions: CliOption[] = [
-  { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude (Opus 4.7)', defaultModel: 'opus-4-7' },
+  { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude', defaultModel: 'opus' },
   { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro', defaultModel: 'gemini-2.5-pro' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model', defaultModel: 'opencode/big-pickle' },
   { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.5', defaultModel: 'gpt-5.5' },
@@ -35,26 +35,26 @@ export interface RoleDefaults {
 }
 
 export const defaultRoles: Record<string, RoleDefaults> = {
-  backend: { cli: 'claude', model: 'opus-4-7' },
+  backend: { cli: 'codex', model: 'gpt-5.5' },
   frontend: { cli: 'gemini', model: 'gemini-2.5-pro' },
-  coherence: { cli: 'droid', model: 'glm-5.1' },
+  coherence: { cli: 'codex', model: 'gpt-5.5' },
   simplify: { cli: 'codex', model: 'gpt-5.5' },
   // Review & QA roles
-  reviewer: { cli: 'claude', model: 'opus-4-7' },
-  'reviewer-quick': { cli: 'claude', model: 'opus-4-7' },
-  resolver: { cli: 'claude', model: 'opus-4-7' },
-  tester: { cli: 'claude', model: 'opus-4-7' },
+  reviewer: { cli: 'codex', model: 'gpt-5.5' },
+  'reviewer-quick': { cli: 'codex', model: 'gpt-5.5' },
+  resolver: { cli: 'codex', model: 'gpt-5.5' },
+  tester: { cli: 'codex', model: 'gpt-5.5' },
   'code-quality': { cli: 'codex', model: 'gpt-5.5' },
   // Evaluator & QA roles - match backend storage/mod.rs default_roles
-  evaluator: { cli: 'qwen', model: 'qwen3-coder' },
-  'qa-worker': { cli: 'gemini', model: 'gemini-2.5-pro' },
+  evaluator: { cli: 'claude', model: 'opus' },
+  'qa-worker': { cli: 'codex', model: 'gpt-5.5' },
   // General purpose
-  general: { cli: 'claude', model: 'opus-4-7' },
+  general: { cli: 'codex', model: 'gpt-5.5' },
 };
 
 /**
  * Get the default model for a CLI
  */
 export function getDefaultModel(cli: string): string {
-  return cliOptions.find(c => c.value === cli)?.defaultModel ?? 'opus-4-7';
+  return cliOptions.find(c => c.value === cli)?.defaultModel ?? 'opus';
 }

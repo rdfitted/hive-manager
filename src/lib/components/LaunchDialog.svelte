@@ -326,19 +326,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   let withPlanning = true;
   let withEvaluator = true;
-  let evaluatorCli = defaultRoles.evaluator.cli;
-  let evaluatorModel = defaultRoles.evaluator.model;
   let evaluatorConfig: AgentConfig = {
     cli: defaultRoles.evaluator.cli,
     model: defaultRoles.evaluator.model,
     flags: [],
     label: 'Evaluator',
   };
-
-  $: {
-    evaluatorConfig.cli = evaluatorCli;
-    evaluatorConfig.model = evaluatorModel || undefined;
-  }
 
   function createDefaultQaWorker(specialization: QaWorkerConfig['specialization'] = 'ui'): QaWorkerConfig {
     return {
@@ -394,8 +387,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           with_planning: withPlanning,
           smoke_test: smokeTest,
           with_evaluator: withEvaluator,
-          evaluator_cli: withEvaluator ? evaluatorCli : undefined,
-          evaluator_model: withEvaluator && evaluatorModel ? evaluatorModel : undefined,
           evaluator_config: withEvaluator ? evaluatorConfig : undefined,
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
@@ -422,8 +413,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           with_planning: true, // Planning is always enabled
           smoke_test: smokeTest,
           with_evaluator: withEvaluator,
-          evaluator_cli: withEvaluator ? evaluatorCli : undefined,
-          evaluator_model: withEvaluator && evaluatorModel ? evaluatorModel : undefined,
           evaluator_config: withEvaluator ? evaluatorConfig : undefined,
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
@@ -629,27 +618,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           {#if withEvaluator}
             <div class="evaluator-config subsection">
               <h4>Evaluator Configuration</h4>
-              <div class="field">
-                <label for="evaluator-cli">Evaluator CLI</label>
-                <select
-                  id="evaluator-cli"
-                  bind:value={evaluatorCli}
-                  class="role-select"
-                >
-                  {#each cliOptions as cli}
-                    <option value={cli.value} title={cli.description}>{cli.label}</option>
-                  {/each}
-                </select>
-              </div>
-              <div class="field">
-                <label for="evaluator-model">Evaluator Model (optional)</label>
-                <input
-                  id="evaluator-model"
-                  type="text"
-                  bind:value={evaluatorModel}
-                  placeholder="e.g. opus-4-7"
-                />
-              </div>
               <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} />
             </div>
 
