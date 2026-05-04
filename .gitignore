@@ -30,6 +30,7 @@ logs/
 .hive/
 .swarm/
 .hive-manager/
+.ai-docs/
 nul
 
 # Local planning docs (not shipped)
