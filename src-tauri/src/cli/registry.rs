@@ -122,7 +122,7 @@ impl CliRegistry {
             "antigravity" => None,
             "opencode" => Some("opencode/big-pickle"),
             "codex" => Some("gpt-5.5"),
-            "cursor" => Some("composer-2"),
+            "cursor" => Some("composer-2.5"),
             "droid" => Some("glm-5.1"),
             "qwen" => Some("qwen3-coder"),
             _ => None,
@@ -218,7 +218,7 @@ mod tests {
             command: "wsl".to_string(),
             auto_approve_flag: Some("--force".to_string()),
             model_flag: None,  // Cursor uses global model setting
-            default_model: "composer-2".to_string(),
+            default_model: "composer-2.5".to_string(),
             env: None,
         });
         clis.insert("droid".to_string(), CliConfig {
@@ -478,6 +478,7 @@ mod tests {
         assert_eq!(CliRegistry::default_model("gemini"), Some("gemini-2.5-pro"));
         assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.5"));
         assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
+        assert_eq!(CliRegistry::default_model("cursor"), Some("composer-2.5"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
         // antigravity has no model flag — None signals the UI to hide the field.
         assert_eq!(CliRegistry::default_model("antigravity"), None);

@@ -55,6 +55,7 @@
   const antigravityPresets: PresetOption[] = [];
 
   const cursorPresets: PresetOption[] = [
+    { value: 'composer-2.5', label: 'Composer 2.5 (latest)' },
     { value: 'composer-2', label: 'Composer 2.0' },
     { value: 'composer-2-fast', label: 'Composer 2.0 Fast' },
     { value: 'composer-1', label: 'Composer 1' },
@@ -132,7 +133,7 @@
     } else if (nextCli === 'droid') {
       model = 'glm-5.1';
     } else if (nextCli === 'cursor') {
-      model = 'composer-2';
+      model = 'composer-2.5';
     } else if (nextCli === 'opencode') {
       model = 'opencode/big-pickle';
     } else if (nextCli === 'qwen') {
@@ -293,6 +294,7 @@
       case 'gemini-2.5-flash-lite':
         model = preset;
         break;
+      case 'composer-2.5':
       case 'composer-2':
       case 'composer-2-fast':
       case 'composer-1':
