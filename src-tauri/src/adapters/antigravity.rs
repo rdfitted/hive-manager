@@ -34,8 +34,12 @@ impl CliAdapter for AntigravityAdapter {
         cmd = cmd.args(spec.flags.iter().cloned());
         cmd = cmd.envs(spec.env.iter().map(|(k, v)| (k.clone(), v.clone())));
 
+        // inline_task is for solo/single-shot mode — use `-p` (--print) for
+        // non-interactive execution, matching SessionController::add_inline_task_to_args.
+        // prompt_file is for worker mode where the agent stays alive watching the
+        // file — use `-i` (--prompt-interactive) so the session continues.
         if let Some(ref task) = spec.inline_task {
-            cmd = cmd.arg("-i").arg(task);
+            cmd = cmd.arg("-p").arg(task);
         } else if let Some(ref prompt_file) = spec.prompt_file {
             let prompt_path = prompt_file.to_string_lossy();
             cmd = cmd.arg("-i").arg(format!("Read {} and execute.", prompt_path));
@@ -154,11 +158,13 @@ mod tests {
     #[test]
     fn test_build_launch_command_uses_agy_binary() {
         let adapter = AntigravityAdapter;
+        // make_spec() has prompt_file set — interactive worker path.
         let spec = make_spec();
         let cmd = adapter.build_launch_command(&spec);
 
         assert_eq!(cmd.binary, "agy");
         assert!(cmd.args.contains(&"--dangerously-skip-permissions".to_string()));
+        // prompt_file path uses -i (interactive); inline_task path uses -p (single-shot).
         assert!(cmd.args.contains(&"-i".to_string()));
     }
 
@@ -183,15 +189,35 @@ mod tests {
     }
 
     #[test]
-    fn test_inline_task_uses_i_flag() {
+    fn test_inline_task_uses_p_flag_for_single_shot() {
+        // inline_task is single-shot/solo mode — agy's -p (--print) runs the
+        // prompt non-interactively. Matches SessionController::add_inline_task_to_args.
         let adapter = AntigravityAdapter;
         let mut spec = make_spec();
         spec.prompt_file = None;
         spec.inline_task = Some("Do the thing".to_string());
         let cmd = adapter.build_launch_command(&spec);
 
-        let i_pos = cmd.args.iter().position(|a| a == "-i").expect("-i present");
-        assert_eq!(cmd.args.get(i_pos + 1), Some(&"Do the thing".to_string()));
+        let p_pos = cmd.args.iter().position(|a| a == "-p").expect("-p present");
+        assert_eq!(cmd.args.get(p_pos + 1), Some(&"Do the thing".to_string()));
+        assert!(
+            !cmd.args.contains(&"-i".to_string()),
+            "inline_task must not use -i; that's reserved for interactive worker mode (prompt_file path)"
+        );
+    }
+
+    #[test]
+    fn test_prompt_file_uses_i_flag_for_interactive_worker() {
+        // prompt_file path keeps the worker alive watching the file — interactive.
+        let adapter = AntigravityAdapter;
+        let spec = make_spec(); // has prompt_file set, no inline_task
+        let cmd = adapter.build_launch_command(&spec);
+
+        assert!(cmd.args.contains(&"-i".to_string()));
+        assert!(
+            !cmd.args.contains(&"-p".to_string()),
+            "prompt_file path must use -i; -p is for single-shot inline_task only"
+        );
     }
 
     #[test]

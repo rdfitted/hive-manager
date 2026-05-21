@@ -152,13 +152,20 @@ fn default_cli() -> String {
 /// deserialized PersistedSession. Sessions saved before the 2026-05 migration
 /// reference the now-defunct gemini CLI; this rewrite makes them launch against
 /// `agy` without touching disk until the next save.
+///
+/// Stale model identifiers (e.g. "gemini-2.5-pro") are also cleared because agy
+/// has no model flag — the model lives in `~/.gemini/antigravity-cli/settings.json`.
+/// Leaving the stale string would also confuse the frontend, which uses an empty
+/// model as the signal to hide the model field.
 fn normalize_legacy_cli_names(session: &mut PersistedSession) {
     if session.default_cli == "gemini" {
         session.default_cli = "antigravity".to_string();
+        session.default_model = None;
     }
     for agent in &mut session.agents {
         if agent.config.cli == "gemini" {
             agent.config.cli = "antigravity".to_string();
+            agent.config.model = None;
         }
     }
 }
@@ -1392,12 +1399,49 @@ mod tests {
     fn test_normalize_legacy_cli_names_rewrites_session() {
         let mut session = sample_persisted_session("test-1");
         session.default_cli = "gemini".to_string();
+        session.default_model = Some("gemini-2.5-pro".to_string());
         session.agents[0].config.cli = "gemini".to_string();
+        session.agents[0].config.model = Some("gemini-2.5-pro".to_string());
 
         normalize_legacy_cli_names(&mut session);
 
         assert_eq!(session.default_cli, "antigravity");
         assert_eq!(session.agents[0].config.cli, "antigravity");
+        assert_eq!(
+            session.default_model, None,
+            "stale gemini model must be cleared (agy uses settings.json)"
+        );
+        assert_eq!(
+            session.agents[0].config.model, None,
+            "stale per-agent gemini model must be cleared"
+        );
+    }
+
+    #[test]
+    fn test_normalize_legacy_cli_names_leaves_non_gemini_agents_alone() {
+        // A legacy session can have a mix: gemini agent + claude agent.
+        // Only the gemini agent's model should be cleared; the claude agent
+        // keeps its model identifier.
+        let mut session = sample_persisted_session("test-mixed");
+        session.default_cli = "claude".to_string();
+        session.default_model = Some("opus".to_string());
+        session.agents[0].config.cli = "claude".to_string();
+        session.agents[0].config.model = Some("opus".to_string());
+        // Add a second agent on gemini.
+        let mut gemini_agent = session.agents[0].clone();
+        gemini_agent.id = "test-mixed-worker-2".to_string();
+        gemini_agent.config.cli = "gemini".to_string();
+        gemini_agent.config.model = Some("gemini-2.5-pro".to_string());
+        session.agents.push(gemini_agent);
+
+        normalize_legacy_cli_names(&mut session);
+
+        assert_eq!(session.default_cli, "claude");
+        assert_eq!(session.default_model, Some("opus".to_string()), "claude model preserved");
+        assert_eq!(session.agents[0].config.cli, "claude");
+        assert_eq!(session.agents[0].config.model, Some("opus".to_string()));
+        assert_eq!(session.agents[1].config.cli, "antigravity");
+        assert_eq!(session.agents[1].config.model, None, "gemini model cleared");
     }
 
     #[test]
