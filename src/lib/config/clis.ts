@@ -8,7 +8,12 @@ export interface CliOption {
   value: string;
   label: string;
   description: string;
-  /** Default model for this CLI (from backend registry.rs::default_model) */
+  /**
+   * Default model for this CLI (from backend registry.rs::default_model).
+   * Empty string means the CLI has no model flag and the UI should hide the
+   * model field (currently: antigravity, whose model lives in
+   * `~/.gemini/antigravity-cli/settings.json`).
+   */
   defaultModel: string;
 }
 
@@ -17,7 +22,7 @@ export interface CliOption {
  */
 export const cliOptions: CliOption[] = [
   { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude', defaultModel: 'opus' },
-  { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro', defaultModel: 'gemini-2.5-pro' },
+  { value: 'antigravity', label: 'Antigravity CLI', description: 'Google Antigravity (agy) — model set in ~/.gemini/antigravity-cli/settings.json', defaultModel: '' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model', defaultModel: 'opencode/big-pickle' },
   { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.5', defaultModel: 'gpt-5.5' },
   { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2)', defaultModel: 'composer-2' },
@@ -36,7 +41,8 @@ export interface RoleDefaults {
 
 export const defaultRoles: Record<string, RoleDefaults> = {
   backend: { cli: 'codex', model: 'gpt-5.5' },
-  frontend: { cli: 'gemini', model: 'gemini-2.5-pro' },
+  // antigravity has no model flag — the UI hides the model field when cli === 'antigravity'.
+  frontend: { cli: 'antigravity', model: '' },
   coherence: { cli: 'codex', model: 'gpt-5.5' },
   simplify: { cli: 'codex', model: 'gpt-5.5' },
   // Review & QA roles

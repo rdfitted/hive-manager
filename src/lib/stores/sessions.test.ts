@@ -29,7 +29,7 @@ describe('sessions store', () => {
         taskDescription: 'test task',
         with_evaluator: true,
         evaluator_config: {
-          cli: 'gemini',
+          cli: 'antigravity',
           flags: ['--test'],
           label: 'Test Evaluator'
         },
@@ -44,7 +44,7 @@ describe('sessions store', () => {
         config: expect.objectContaining({
           with_evaluator: true,
           evaluator_config: expect.objectContaining({
-            cli: 'gemini',
+            cli: 'antigravity',
             label: 'Test Evaluator'
           }),
           qa_workers: expect.arrayContaining([

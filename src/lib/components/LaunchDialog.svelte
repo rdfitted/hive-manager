@@ -41,7 +41,7 @@ Do NOT work on frontend/UI code unless it directly interfaces with your backend 
     {
       type: 'frontend',
       label: 'Frontend',
-      cli: 'gemini',
+      cli: 'antigravity',
       description: 'UI components, styling, UX',
       promptTemplate: `You are the FRONTEND specialist. Focus on:
 - UI components, layouts, and styling

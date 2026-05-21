@@ -17,7 +17,10 @@ pub mod templates;
 use crate::http::error::ApiError;
 use std::collections::HashSet;
 
-const VALID_CLIS: &[&str] = &["claude", "gemini", "codex", "opencode", "cursor", "droid", "qwen"];
+// Note: legacy "gemini" is intentionally NOT in this allowlist. The storage
+// layer rewrites persisted "gemini" entries to "antigravity" on load, and
+// adapters::get_adapter accepts "gemini" as a runtime alias.
+const VALID_CLIS: &[&str] = &["claude", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
 
 /// Validate session_id for path traversal attacks
 pub fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
