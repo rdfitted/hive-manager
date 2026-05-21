@@ -26,7 +26,7 @@ export const cliOptions: CliOption[] = [
   { value: 'antigravity', label: 'Antigravity CLI', description: 'Google Antigravity (agy) — default for the frontend role. Model + verbosity set globally in ~/.gemini/antigravity-cli/settings.json.', defaultModel: '' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model', defaultModel: 'opencode/big-pickle' },
   { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.5', defaultModel: 'gpt-5.5' },
-  { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2)', defaultModel: 'composer-2' },
+  { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2.5)', defaultModel: 'composer-2.5' },
   { value: 'droid', label: 'Droid', description: 'GLM 5.1 (Factory Droid CLI)', defaultModel: 'glm-5.1' },
   { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)', defaultModel: 'qwen3-coder' },
 ];

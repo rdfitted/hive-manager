@@ -558,7 +558,7 @@ impl SessionStorage {
             command: "wsl".to_string(),
             auto_approve_flag: Some("--force".to_string()),
             model_flag: None,  // Cursor uses global model setting
-            default_model: "composer-2".to_string(),
+            default_model: "composer-2.5".to_string(),
             env: None,
         });
 
