@@ -2210,8 +2210,9 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
 
 #[tokio::test]
 async fn test_add_worker_accepts_gemini_cli() {
-    // #113: gemini is back as a first-class CLI (peer to antigravity) and
-    // is the current worker default while the agy injection bug is open.
+    // #113: gemini is back as a first-class CLI (peer to antigravity).
+    // antigravity is the worker default; gemini is retained for selection
+    // until Google deprecates the gemini CLI on 2026-06-18.
     let (app, controller) = setup_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-gemini-cli");

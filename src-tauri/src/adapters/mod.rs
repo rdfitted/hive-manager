@@ -28,12 +28,9 @@ pub use qwen::QwenAdapter;
 
 /// Valid CLI names allowed in the system.
 ///
-/// `gemini` and `antigravity` are both allowed as first-class CLIs. `gemini`
-/// is the current default for the frontend role because the antigravity CLI
-/// (`agy`) does not yet correctly execute task files passed via `-i` (see
-/// the follow-up investigation issue referenced in #113). The legacy Gemini
-/// CLI is deprecated by Google on 2026-06-18; once the agy injection bug is
-/// fixed, the default will flip back to antigravity.
+/// `gemini` and `antigravity` are both first-class CLIs. `antigravity` (`agy`)
+/// is the default for the frontend role; the legacy Gemini CLI is retained as
+/// a selectable peer until Google deprecates it on 2026-06-18.
 pub const VALID_CLIS: &[&str] = &["claude", "gemini", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
 
 /// Validate a CLI name against the allowlist.
@@ -187,11 +184,9 @@ pub trait CliAdapter: Send + Sync {
 
 /// Get the appropriate adapter for a CLI name.
 ///
-/// `gemini` and `antigravity` route to separate adapters. The earlier
-/// gemini->antigravity alias (from PR #112) was removed in #113 because the
-/// antigravity CLI's prompt-injection path was not actually executing task
-/// files; gemini is the current default for the frontend role until that bug
-/// is resolved.
+/// `gemini` and `antigravity` route to separate adapters and are treated as
+/// peers. The PR #112 alias (`get_adapter("gemini") -> AntigravityAdapter`)
+/// was removed in #113 once gemini became a first-class peer again.
 pub fn get_adapter(cli: &str) -> Result<Box<dyn CliAdapter>, String> {
     match cli {
         "claude" => Ok(Box::new(ClaudeCodeAdapter)),

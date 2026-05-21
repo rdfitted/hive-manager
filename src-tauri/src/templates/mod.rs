@@ -159,8 +159,9 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
-                    cli: "gemini".to_string(),
-                    model: Some("gemini-2.5-pro".to_string()),
+                    cli: "antigravity".to_string(),
+                    // agy has no --model flag; model lives in ~/.gemini/antigravity-cli/settings.json
+                    model: None,
                     prompt_template: "roles/frontend".to_string(),
                 },
             ],
@@ -187,8 +188,9 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
-                    cli: "gemini".to_string(),
-                    model: Some("gemini-2.5-pro".to_string()),
+                    cli: "antigravity".to_string(),
+                    // agy has no --model flag; model lives in ~/.gemini/antigravity-cli/settings.json
+                    model: None,
                     prompt_template: "roles/frontend".to_string(),
                 },
                 CellTemplate {
@@ -215,8 +217,8 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
                 CellTemplate {
                     role: "candidate-b".to_string(),
-                    cli: "gemini".to_string(),
-                    model: Some("gemini-2.5-pro".to_string()),
+                    cli: "antigravity".to_string(),
+                    model: None,
                     prompt_template: "fusion-worker".to_string(),
                 },
                 CellTemplate {

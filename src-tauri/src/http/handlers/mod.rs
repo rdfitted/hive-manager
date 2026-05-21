@@ -17,9 +17,9 @@ pub mod templates;
 use crate::http::error::ApiError;
 use std::collections::HashSet;
 
-// gemini and antigravity are peers (see adapters/mod.rs::VALID_CLIS). gemini
-// is the current worker default because agy's -i prompt injection does not
-// execute task files in current builds (see follow-up issue from #113).
+// gemini and antigravity are peers (see adapters/mod.rs::VALID_CLIS).
+// antigravity is the worker default; gemini is retained as a selectable peer
+// until Google deprecates it on 2026-06-18.
 const VALID_CLIS: &[&str] = &["claude", "gemini", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
 
 /// Validate session_id for path traversal attacks

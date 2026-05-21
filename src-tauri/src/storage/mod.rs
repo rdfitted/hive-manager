@@ -529,9 +529,6 @@ impl SessionStorage {
             command: "agy".to_string(),
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             // agy has no --model flag. Model lives in ~/.gemini/antigravity-cli/settings.json.
-            // NOTE: agy's prompt-injection via `-i` does not currently execute task files
-            // (see follow-up issue referenced in #113). Workers should prefer the `gemini`
-            // CLI until that bug is resolved.
             model_flag: None,
             default_model: String::new(),
             env: None,
@@ -587,8 +584,10 @@ impl SessionStorage {
             model: "gpt-5.5".to_string(),
         });
         default_roles.insert("frontend".to_string(), RoleDefaults {
-            cli: "gemini".to_string(),
-            model: "gemini-2.5-pro".to_string(),
+            cli: "antigravity".to_string(),
+            // antigravity uses settings.json for model selection; this field is
+            // retained for serde stability but ignored at launch time.
+            model: String::new(),
         });
         default_roles.insert("coherence".to_string(), RoleDefaults {
             cli: "codex".to_string(),
@@ -1345,8 +1344,9 @@ mod tests {
         }
 
         let frontend = config.default_roles.get("frontend").unwrap();
-        assert_eq!(frontend.cli, "gemini");
-        assert_eq!(frontend.model, "gemini-2.5-pro");
+        assert_eq!(frontend.cli, "antigravity");
+        // antigravity has no model flag; model comes from settings.json.
+        assert_eq!(frontend.model, "");
 
         let evaluator = config.default_roles.get("evaluator").unwrap();
         assert_eq!(evaluator.cli, "claude");

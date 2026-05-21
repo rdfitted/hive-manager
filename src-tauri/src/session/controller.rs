@@ -2043,7 +2043,8 @@ impl SessionController {
                 // build_command remaps `config.cli == "antigravity"` to executable
                 // "agy", and call sites pass &cmd (not &config.cli) here — without
                 // the "agy" arm we'd fall through to the positional branch and
-                // agy would never see -i.
+                // agy would never see -i. (This was the actual root cause of the
+                // bug originally tracked in #115, fixed in #116.)
                 args.push("-i".to_string());
                 args.push(prompt_arg);
             }

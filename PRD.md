@@ -57,7 +57,7 @@ A single-window application that:
 | Worker | CLI | Model | Role |
 |--------|-----|-------|------|
 | Worker 1X (Backend) | `agent` via WSL | Cursor/Opus | Backend implementation |
-| Worker 2X (Frontend) | `gemini` | Gemini 2.5 Pro | Frontend implementation (antigravity once `-i` injection is fixed) |
+| Worker 2X (Frontend) | `antigravity` (agy) | Set in `~/.gemini/antigravity-cli/settings.json` | Frontend implementation |
 | Worker 3X (Coherence) | `opencode` | Grok Code | Cross-cutting coherence |
 | Worker 4X (Simplify) | `codex` | GPT-5.3 | Simplification pass |
 
