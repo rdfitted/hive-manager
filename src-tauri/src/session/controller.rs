@@ -2037,11 +2037,13 @@ impl SessionController {
                 args.push("-i".to_string());
                 args.push(prompt_arg);
             }
-            "gemini" | "antigravity" => {
+            "gemini" | "antigravity" | "agy" => {
                 // Both use -i for initial prompt (gemini: --prompt-file-style;
-                // agy: --prompt-interactive alias). NOTE: agy's -i doesn't actually
-                // execute the prompt file as a user message in current builds —
-                // gemini is the working default for workers until that's fixed.
+                // agy: --prompt-interactive alias). "agy" arm exists because
+                // build_command remaps `config.cli == "antigravity"` to executable
+                // "agy", and call sites pass &cmd (not &config.cli) here — without
+                // the "agy" arm we'd fall through to the positional branch and
+                // agy would never see -i.
                 args.push("-i".to_string());
                 args.push(prompt_arg);
             }
@@ -2071,8 +2073,9 @@ impl SessionController {
                 args.push("-p".to_string());
                 args.push(task.to_string());
             }
-            "antigravity" => {
-                // agy -p (alias for --print) runs a single prompt non-interactively
+            "antigravity" | "agy" => {
+                // agy -p (alias for --print) runs a single prompt non-interactively.
+                // "agy" arm covers callers that pass the remapped executable name.
                 args.push("-p".to_string());
                 args.push(task.to_string());
             }

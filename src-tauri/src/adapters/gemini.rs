@@ -47,13 +47,24 @@ impl CliAdapter for GeminiAdapter {
         let line_lower = line.to_lowercase();
         let trimmed = line.trim_end();
 
-        // Gemini completion patterns
-        if line_lower.contains("task completed") || line_lower.contains("finished") || line_lower.contains("done!") {
+        // Gemini completion patterns. Anchored to trimmed-line equality / prefix
+        // to avoid false termination on substrings like "I have finished reading".
+        let normalized = line_lower.trim();
+        if normalized == "task completed"
+            || normalized == "done!"
+            || normalized.starts_with("task completed:")
+            || normalized.starts_with("task finished:")
+        {
             return Some(AgentSignal::Completed);
         }
 
-        // Error patterns
-        if line_lower.contains("error:") || line_lower.contains("failed") || line_lower.contains("exception") {
+        // Error patterns. "error:" and "task failed" are explicit terminal markers;
+        // bare "failed" is too common in normal agent output (e.g. "failed once but
+        // retrying") to use as a Failed signal.
+        if line_lower.contains("error:")
+            || normalized.contains("task failed")
+            || normalized.contains("exception:")
+        {
             return Some(AgentSignal::Failed {
                 message: line.to_string(),
             });
@@ -185,6 +196,50 @@ mod tests {
             adapter.detect_status_signal("Done!"),
             Some(AgentSignal::Completed)
         );
+
+        assert_eq!(
+            adapter.detect_status_signal("  task completed: wrote handler.rs  "),
+            Some(AgentSignal::Completed)
+        );
+    }
+
+    #[test]
+    fn test_detect_completed_avoids_finished_substring_false_positive() {
+        // Regression guard: "I have finished reading the file" should NOT
+        // emit Completed. Anchored matching prevents premature task termination.
+        let adapter = GeminiAdapter;
+        assert_eq!(
+            adapter.detect_status_signal("I have finished reading the file"),
+            None
+        );
+        assert_eq!(
+            adapter.detect_status_signal("Almost done with the refactor"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_failed_avoids_bare_failed_false_positive() {
+        // Regression guard: bare "failed" inside conversational output should
+        // NOT emit Failed. Only explicit "error:", "task failed", or
+        // "exception:" markers signal genuine failure.
+        let adapter = GeminiAdapter;
+        assert_eq!(
+            adapter.detect_status_signal("The test failed once but I retried successfully"),
+            None
+        );
+
+        match adapter.detect_status_signal("task failed: missing dependency") {
+            Some(AgentSignal::Failed { message }) => {
+                assert!(message.contains("task failed"));
+            }
+            other => panic!("Expected Failed for explicit 'task failed:' marker, got {:?}", other),
+        }
+
+        match adapter.detect_status_signal("error: file not found") {
+            Some(AgentSignal::Failed { .. }) => {}
+            other => panic!("Expected Failed for 'error:' marker, got {:?}", other),
+        }
     }
 
     #[test]

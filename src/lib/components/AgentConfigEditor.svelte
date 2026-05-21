@@ -123,7 +123,9 @@
       model = 'gpt-5.5';
       flags.push('-c', 'model_reasoning_effort="medium"');
     } else if (nextCli === 'gemini') {
-      model = 'gemini-3.1-pro-preview';
+      // Aligns with clis.ts defaultModel, Rust storage::default_config, and
+      // CliRegistry::default_model("gemini") — single source of truth.
+      model = 'gemini-2.5-pro';
     } else if (nextCli === 'antigravity') {
       // agy has no --model flag; model is set globally in settings.json.
       model = undefined;
