@@ -19,7 +19,7 @@ Currently, multi-agent workflows spawn 10-20+ Windows Terminal tabs:
 - Easy to miss agent prompts buried in background tabs
 - Manual tracking of which agent owns which domain/files
 - Coordination logs scattered across files
-- Different CLIs (claude, agent, gemini, opencode, codex) with different behaviors
+- Different CLIs (claude, agent, antigravity, opencode, codex) with different behaviors
 
 ### Solution
 
@@ -57,7 +57,7 @@ A single-window application that:
 | Worker | CLI | Model | Role |
 |--------|-----|-------|------|
 | Worker 1X (Backend) | `agent` via WSL | Cursor/Opus | Backend implementation |
-| Worker 2X (Frontend) | `gemini` | Gemini 3 Pro | Frontend implementation |
+| Worker 2X (Frontend) | `antigravity` (agy) | Set in `~/.gemini/antigravity-cli/settings.json` | Frontend implementation |
 | Worker 3X (Coherence) | `opencode` | Grok Code | Cross-cutting coherence |
 | Worker 4X (Simplify) | `codex` | GPT-5.3 | Simplification pass |
 
@@ -74,7 +74,7 @@ A single-window application that:
 |-----|-------------------|------------|----------|
 | `claude` | `--dangerously-skip-permissions` | `--model opus` | Windows |
 | `agent` | `--force` | (global) | WSL Ubuntu |
-| `gemini` | `-y` | `-m gemini-3-pro-preview` | Windows |
+| `antigravity` (agy) | `--dangerously-skip-permissions` | (none — `~/.gemini/antigravity-cli/settings.json` `"model"`) | Windows |
 | `opencode` | env `OPENCODE_YOLO=true` | `-m opencode/MODEL` | Windows |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m gpt-5.3-codex` | Windows |
 
@@ -154,7 +154,7 @@ Judge (You)
 |----|-------------|----------|
 | F2.1 | Spawn and render `claude` CLI via PTY | P0 |
 | F2.2 | Spawn and render `agent` via WSL PTY | P0 |
-| F2.3 | Spawn and render `gemini` CLI via PTY | P0 |
+| F2.3 | Spawn and render `agy` (Antigravity CLI) via PTY | P0 |
 | F2.4 | Spawn and render `opencode` CLI via PTY | P0 |
 | F2.5 | Spawn and render `codex` CLI via PTY | P0 |
 | F2.6 | Full ANSI color/formatting support | P0 |
@@ -669,7 +669,7 @@ D:/Code Projects/hive-manager/
 │   │   │   ├── mod.rs
 │   │   │   ├── claude.rs
 │   │   │   ├── cursor.rs
-│   │   │   ├── gemini.rs
+│   │   │   ├── antigravity.rs
 │   │   │   ├── opencode.rs
 │   │   │   └── codex.rs
 │   │   ├── watcher/
@@ -761,7 +761,7 @@ regex = "1"
 
 ### M2: Multi-CLI Support
 - [ ] WSL PTY for agent CLI
-- [ ] gemini CLI spawning
+- [ ] antigravity (agy) CLI spawning
 - [ ] opencode CLI spawning
 - [ ] codex CLI spawning
 - [ ] Agent type detection

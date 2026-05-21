@@ -3,11 +3,11 @@
 //! This module provides the `CliAdapter` trait for abstracting CLI-specific
 //! behavior such as command building, signal detection, and bootstrap prompts.
 
+mod antigravity;
 mod claude_code;
 mod codex;
 mod cursor;
 mod droid;
-mod gemini;
 mod opencode;
 mod qwen;
 
@@ -16,16 +16,21 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use antigravity::AntigravityAdapter;
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use cursor::CursorAdapter;
 pub use droid::DroidAdapter;
-pub use gemini::GeminiAdapter;
 pub use opencode::OpenCodeAdapter;
 pub use qwen::QwenAdapter;
 
 /// Valid CLI names allowed in the system.
-pub const VALID_CLIS: &[&str] = &["claude", "gemini", "codex", "opencode", "cursor", "droid", "qwen"];
+///
+/// Note: the legacy name `"gemini"` is intentionally NOT in this allowlist, but
+/// `get_adapter("gemini")` still routes to `AntigravityAdapter` as a runtime
+/// safety net for sessions persisted before the migration. New entries should
+/// always use `"antigravity"`.
+pub const VALID_CLIS: &[&str] = &["claude", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
 
 /// Validate a CLI name against the allowlist.
 pub fn is_valid_cli(cli: &str) -> bool {
@@ -35,9 +40,11 @@ pub fn is_valid_cli(cli: &str) -> bool {
 /// Specification for launching an agent process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentLaunchSpec {
-    /// CLI name (e.g., "claude", "gemini")
+    /// CLI name (e.g., "claude", "antigravity")
     pub cli: String,
-    /// Model identifier (e.g., "opus", "gemini-2.5-pro")
+    /// Model identifier (e.g., "opus", "gpt-5.5"). Ignored by adapters whose
+    /// CLI does not accept a model flag (e.g., antigravity — model lives in
+    /// `~/.gemini/antigravity-cli/settings.json`).
     pub model: Option<String>,
     /// Additional CLI flags
     pub flags: Vec<String>,
@@ -138,14 +145,14 @@ pub struct BootstrapContext {
 
 /// Trait for CLI adapter implementations.
 ///
-/// Each AI agent CLI (Claude, Codex, Gemini, etc.) has different:
+/// Each AI agent CLI (Claude, Codex, Antigravity, etc.) has different:
 /// - Command-line flags for auto-approve and model selection
 /// - Output formats and status signals
 /// - Bootstrap prompt conventions
 ///
 /// This trait normalizes these differences behind a common interface.
 pub trait CliAdapter: Send + Sync {
-    /// Returns the CLI name (e.g., "claude", "gemini").
+    /// Returns the CLI name (e.g., "claude", "antigravity").
     fn cli_name(&self) -> &'static str;
 
     /// Builds the launch command for the agent.
@@ -175,12 +182,15 @@ pub trait CliAdapter: Send + Sync {
 }
 
 /// Get the appropriate adapter for a CLI name.
+///
+/// The legacy name `"gemini"` is accepted as an alias for `"antigravity"` so
+/// sessions persisted before the 2026-05 migration continue to launch.
 pub fn get_adapter(cli: &str) -> Result<Box<dyn CliAdapter>, String> {
     match cli {
         "claude" => Ok(Box::new(ClaudeCodeAdapter)),
         "codex" => Ok(Box::new(CodexAdapter)),
         "cursor" => Ok(Box::new(CursorAdapter)),
-        "gemini" => Ok(Box::new(GeminiAdapter)),
+        "antigravity" | "gemini" => Ok(Box::new(AntigravityAdapter)),
         "droid" => Ok(Box::new(DroidAdapter)),
         "opencode" => Ok(Box::new(OpenCodeAdapter)),
         "qwen" => Ok(Box::new(QwenAdapter)),
@@ -195,13 +205,16 @@ mod tests {
     #[test]
     fn test_valid_clis() {
         assert!(is_valid_cli("claude"));
-        assert!(is_valid_cli("gemini"));
+        assert!(is_valid_cli("antigravity"));
         assert!(is_valid_cli("codex"));
         assert!(is_valid_cli("opencode"));
         assert!(is_valid_cli("cursor"));
         assert!(is_valid_cli("droid"));
         assert!(is_valid_cli("qwen"));
         assert!(!is_valid_cli("unknown"));
+        // Legacy "gemini" is intentionally NOT in VALID_CLIS — but get_adapter
+        // still accepts it as an alias to AntigravityAdapter (see test below).
+        assert!(!is_valid_cli("gemini"));
     }
 
     #[test]
@@ -222,14 +235,21 @@ mod tests {
         let claude = get_adapter("claude").unwrap();
         assert_eq!(claude.cli_name(), "claude");
 
-        let gemini = get_adapter("gemini").unwrap();
-        assert_eq!(gemini.cli_name(), "gemini");
+        let antigravity = get_adapter("antigravity").unwrap();
+        assert_eq!(antigravity.cli_name(), "antigravity");
 
         let cursor = get_adapter("cursor").unwrap();
         assert_eq!(cursor.cli_name(), "cursor");
 
         let qwen = get_adapter("qwen").unwrap();
         assert_eq!(qwen.cli_name(), "qwen");
+    }
+
+    #[test]
+    fn test_legacy_gemini_routes_to_antigravity_adapter() {
+        // Backward compat: sessions persisted with cli: "gemini" still launch.
+        let adapter = get_adapter("gemini").unwrap();
+        assert_eq!(adapter.cli_name(), "antigravity");
     }
 
     #[test]
