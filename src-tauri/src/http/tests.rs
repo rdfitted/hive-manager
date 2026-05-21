@@ -2209,6 +2209,48 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
 }
 
 #[tokio::test]
+async fn test_add_worker_accepts_gemini_cli() {
+    // #113: gemini is back as a first-class CLI (peer to antigravity).
+    // antigravity is the worker default; gemini is retained for selection
+    // until Google deprecates the gemini CLI on 2026-06-18.
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-gemini-cli");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller.read().insert_test_session(make_test_session(
+        "session-gemini",
+        temp_dir.to_str().unwrap(),
+    ));
+
+    let body = serde_json::json!({
+        "role_type": "frontend",
+        "cli": "gemini",
+        "model": "gemini-2.5-pro"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-gemini/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "POST with cli: \"gemini\" must pass VALID_CLIS validation"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_add_worker_accepts_antigravity_cli() {
     // Regression guard for the agy migration: the antigravity CLI name must
     // pass VALID_CLIS validation everywhere (handlers/mod.rs and adapters/mod.rs

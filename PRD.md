@@ -19,7 +19,7 @@ Currently, multi-agent workflows spawn 10-20+ Windows Terminal tabs:
 - Easy to miss agent prompts buried in background tabs
 - Manual tracking of which agent owns which domain/files
 - Coordination logs scattered across files
-- Different CLIs (claude, agent, antigravity, opencode, codex) with different behaviors
+- Different CLIs (claude, agent, gemini, antigravity, opencode, codex) with different behaviors
 
 ### Solution
 
@@ -74,6 +74,7 @@ A single-window application that:
 |-----|-------------------|------------|----------|
 | `claude` | `--dangerously-skip-permissions` | `--model opus` | Windows |
 | `agent` | `--force` | (global) | WSL Ubuntu |
+| `gemini` | `-y` | `-m gemini-2.5-pro` | Windows |
 | `antigravity` (agy) | `--dangerously-skip-permissions` | (none — `~/.gemini/antigravity-cli/settings.json` `"model"`) | Windows |
 | `opencode` | env `OPENCODE_YOLO=true` | `-m opencode/MODEL` | Windows |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `-m gpt-5.3-codex` | Windows |
@@ -669,6 +670,7 @@ D:/Code Projects/hive-manager/
 │   │   │   ├── mod.rs
 │   │   │   ├── claude.rs
 │   │   │   ├── cursor.rs
+│   │   │   ├── gemini.rs
 │   │   │   ├── antigravity.rs
 │   │   │   ├── opencode.rs
 │   │   │   └── codex.rs
@@ -761,6 +763,7 @@ regex = "1"
 
 ### M2: Multi-CLI Support
 - [ ] WSL PTY for agent CLI
+- [ ] gemini CLI spawning
 - [ ] antigravity (agy) CLI spawning
 - [ ] opencode CLI spawning
 - [ ] codex CLI spawning

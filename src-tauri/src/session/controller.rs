@@ -1945,11 +1945,19 @@ impl SessionController {
                     args.push(model.clone());
                 }
             }
-            "antigravity" | "gemini" => {
+            "gemini" => {
+                // Gemini CLI uses -y for auto-approve and -m for model.
+                args.push("-y".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "antigravity" => {
                 // Antigravity CLI (agy) — uses --dangerously-skip-permissions for auto-approve.
                 // No model flag: model is set in ~/.gemini/antigravity-cli/settings.json.
-                // The "gemini" alias preserves backward compat for sessions persisted
-                // before the agy migration.
+                // NOTE: agy's -i prompt-injection does not currently execute task files
+                // (see follow-up issue). gemini is the worker default until that lands.
                 args.push("--dangerously-skip-permissions".to_string());
             }
             "codex" => {
@@ -2002,9 +2010,9 @@ impl SessionController {
 
         // Determine the actual command to run
         let command = match config.cli.as_str() {
-            "cursor" => "wsl".to_string(),               // Cursor runs via WSL
-            "antigravity" | "gemini" => "agy".to_string(), // Antigravity CLI binary is `agy`
-            _ => config.cli.clone(),                      // Others use CLI name as command
+            "cursor" => "wsl".to_string(),    // Cursor runs via WSL
+            "antigravity" => "agy".to_string(), // Antigravity CLI binary is `agy`
+            _ => config.cli.clone(),          // Others (including gemini) use CLI name as command
         };
 
         (command, args)
@@ -2029,9 +2037,14 @@ impl SessionController {
                 args.push("-i".to_string());
                 args.push(prompt_arg);
             }
-            "antigravity" | "gemini" => {
-                // agy uses -i (alias for --prompt-interactive) for initial prompt.
-                // Legacy "gemini" routes here for backward compat.
+            "gemini" | "antigravity" | "agy" => {
+                // Both use -i for initial prompt (gemini: --prompt-file-style;
+                // agy: --prompt-interactive alias). "agy" arm exists because
+                // build_command remaps `config.cli == "antigravity"` to executable
+                // "agy", and call sites pass &cmd (not &config.cli) here — without
+                // the "agy" arm we'd fall through to the positional branch and
+                // agy would never see -i. (This was the actual root cause of the
+                // bug originally tracked in #115, fixed in #116.)
                 args.push("-i".to_string());
                 args.push(prompt_arg);
             }
@@ -2056,8 +2069,14 @@ impl SessionController {
                 // (-p would be non-interactive print mode)
                 args.push(task.to_string());
             }
-            "antigravity" | "gemini" => {
-                // agy -p (alias for --print) runs a single prompt non-interactively
+            "gemini" => {
+                // Solo mode: gemini accepts -p for non-interactive single-shot
+                args.push("-p".to_string());
+                args.push(task.to_string());
+            }
+            "antigravity" | "agy" => {
+                // agy -p (alias for --print) runs a single prompt non-interactively.
+                // "agy" arm covers callers that pass the remapped executable name.
                 args.push("-p".to_string());
                 args.push(task.to_string());
             }
@@ -2089,7 +2108,14 @@ impl SessionController {
                     args.push(model.clone());
                 }
             }
-            "antigravity" | "gemini" => {
+            "gemini" => {
+                args.push("-y".to_string());
+                if let Some(ref model) = config.model {
+                    args.push("-m".to_string());
+                    args.push(model.clone());
+                }
+            }
+            "antigravity" => {
                 // Solo launch via agy: --dangerously-skip-permissions for auto-approve.
                 // No --model flag (settings.json owns the model).
                 args.push("--dangerously-skip-permissions".to_string());
@@ -2140,7 +2166,7 @@ impl SessionController {
 
         let command = match config.cli.as_str() {
             "cursor" => "wsl".to_string(),
-            "antigravity" | "gemini" => "agy".to_string(),
+            "antigravity" => "agy".to_string(),
             _ => config.cli.clone(),
         };
         (command, args)
@@ -5255,7 +5281,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality |
-| cli | string | No | CLI to use: {default_cli} (default), antigravity, codex, opencode, cursor, droid, qwen |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
 | description | string | No | One-line task summary used for deterministic labels |
 | label | string | No | Legacy label field; kept as a fallback input |
@@ -5330,7 +5356,7 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | specialization | string | Yes | QA specialization: `ui`, `api`, or `a11y` |
-| cli | string | No | CLI to use: {default_cli} (default), antigravity, codex, opencode, cursor, droid, qwen |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
 | model | string | No | Optional model override |
 | label | string | No | Custom label for the QA worker |
 | initial_task | string | No | Initial QA assignment |
@@ -5544,8 +5570,8 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
-| cli | string | No | CLI to use: {default_cli} (default), antigravity, codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`). Ignored for `antigravity` — model lives in `~/.gemini/antigravity-cli/settings.json` |
+| cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`). Ignored for `antigravity` — model lives in `~/.gemini/antigravity-cli/settings.json` |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -9734,8 +9760,8 @@ mod tests {
             Some("opus")
         );
         assert_eq!(
-            extract_model_arg(&["--model=gpt-5.5"]).as_deref(),
-            Some("gpt-5.5")
+            extract_model_arg(&["--model=gemini-2.5-pro"]).as_deref(),
+            Some("gemini-2.5-pro")
         );
         assert_eq!(extract_model_arg(&["--model="]), None);
         assert_eq!(extract_model_arg(&["-m"]), None);
@@ -9894,7 +9920,7 @@ mod tests {
         SessionController::add_prompt_to_args("wsl", &mut args, prompt_path);
         assert_eq!(args, vec![expected_cursor_prompt], "cli wsl");
 
-        for cli in ["antigravity", "gemini", "qwen"] {
+        for cli in ["gemini", "antigravity", "qwen"] {
             let mut args = Vec::new();
             SessionController::add_prompt_to_args(cli, &mut args, prompt_path);
             assert_eq!(
@@ -9978,8 +10004,8 @@ mod tests {
             },
             &[QaWorkerConfig {
                 specialization: "ui".to_string(),
-                cli: "antigravity".to_string(),
-                model: None,
+                cli: "gemini".to_string(),
+                model: Some("gemini-2.5-pro".to_string()),
                 label: Some("Visual QA".to_string()),
                 flags: None,
             }],
@@ -9991,7 +10017,7 @@ mod tests {
             SessionController::evaluator_required_protocol("session-123"),
         );
         assert!(prompt.contains("configured QA workers below (1 total) before you grade any criterion"));
-        assert!(prompt.contains(r#""specialization": "ui", "cli": "antigravity""#));
+        assert!(prompt.contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
         assert!(prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:"));
         assert!(!prompt.contains(r#""specialization": "api", "cli": "claude""#));
     }

@@ -8,6 +8,7 @@ mod claude_code;
 mod codex;
 mod cursor;
 mod droid;
+mod gemini;
 mod opencode;
 mod qwen;
 
@@ -21,16 +22,16 @@ pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use cursor::CursorAdapter;
 pub use droid::DroidAdapter;
+pub use gemini::GeminiAdapter;
 pub use opencode::OpenCodeAdapter;
 pub use qwen::QwenAdapter;
 
 /// Valid CLI names allowed in the system.
 ///
-/// Note: the legacy name `"gemini"` is intentionally NOT in this allowlist, but
-/// `get_adapter("gemini")` still routes to `AntigravityAdapter` as a runtime
-/// safety net for sessions persisted before the migration. New entries should
-/// always use `"antigravity"`.
-pub const VALID_CLIS: &[&str] = &["claude", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
+/// `gemini` and `antigravity` are both first-class CLIs. `antigravity` (`agy`)
+/// is the default for the frontend role; the legacy Gemini CLI is retained as
+/// a selectable peer until Google deprecates it on 2026-06-18.
+pub const VALID_CLIS: &[&str] = &["claude", "gemini", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
 
 /// Validate a CLI name against the allowlist.
 pub fn is_valid_cli(cli: &str) -> bool {
@@ -183,14 +184,16 @@ pub trait CliAdapter: Send + Sync {
 
 /// Get the appropriate adapter for a CLI name.
 ///
-/// The legacy name `"gemini"` is accepted as an alias for `"antigravity"` so
-/// sessions persisted before the 2026-05 migration continue to launch.
+/// `gemini` and `antigravity` route to separate adapters and are treated as
+/// peers. The PR #112 alias (`get_adapter("gemini") -> AntigravityAdapter`)
+/// was removed in #113 once gemini became a first-class peer again.
 pub fn get_adapter(cli: &str) -> Result<Box<dyn CliAdapter>, String> {
     match cli {
         "claude" => Ok(Box::new(ClaudeCodeAdapter)),
         "codex" => Ok(Box::new(CodexAdapter)),
         "cursor" => Ok(Box::new(CursorAdapter)),
-        "antigravity" | "gemini" => Ok(Box::new(AntigravityAdapter)),
+        "gemini" => Ok(Box::new(GeminiAdapter)),
+        "antigravity" => Ok(Box::new(AntigravityAdapter)),
         "droid" => Ok(Box::new(DroidAdapter)),
         "opencode" => Ok(Box::new(OpenCodeAdapter)),
         "qwen" => Ok(Box::new(QwenAdapter)),
@@ -205,6 +208,7 @@ mod tests {
     #[test]
     fn test_valid_clis() {
         assert!(is_valid_cli("claude"));
+        assert!(is_valid_cli("gemini"));
         assert!(is_valid_cli("antigravity"));
         assert!(is_valid_cli("codex"));
         assert!(is_valid_cli("opencode"));
@@ -212,9 +216,6 @@ mod tests {
         assert!(is_valid_cli("droid"));
         assert!(is_valid_cli("qwen"));
         assert!(!is_valid_cli("unknown"));
-        // Legacy "gemini" is intentionally NOT in VALID_CLIS — but get_adapter
-        // still accepts it as an alias to AntigravityAdapter (see test below).
-        assert!(!is_valid_cli("gemini"));
     }
 
     #[test]
@@ -235,6 +236,9 @@ mod tests {
         let claude = get_adapter("claude").unwrap();
         assert_eq!(claude.cli_name(), "claude");
 
+        let gemini = get_adapter("gemini").unwrap();
+        assert_eq!(gemini.cli_name(), "gemini");
+
         let antigravity = get_adapter("antigravity").unwrap();
         assert_eq!(antigravity.cli_name(), "antigravity");
 
@@ -246,10 +250,11 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_gemini_routes_to_antigravity_adapter() {
-        // Backward compat: sessions persisted with cli: "gemini" still launch.
-        let adapter = get_adapter("gemini").unwrap();
-        assert_eq!(adapter.cli_name(), "antigravity");
+    fn test_gemini_and_antigravity_are_distinct_adapters() {
+        // #113: gemini and antigravity are peers; one is NOT an alias for the other.
+        let gemini = get_adapter("gemini").unwrap();
+        let antigravity = get_adapter("antigravity").unwrap();
+        assert_ne!(gemini.cli_name(), antigravity.cli_name());
     }
 
     #[test]

@@ -38,6 +38,13 @@ impl CliAdapter for AntigravityAdapter {
         // non-interactive execution, matching SessionController::add_inline_task_to_args.
         // prompt_file is for worker mode where the agent stays alive watching the
         // file — use `-i` (--prompt-interactive) so the session continues.
+        //
+        // KNOWN UPSTREAM ISSUE: google-antigravity/antigravity-cli#76 — `agy -p`
+        // silently drops stdout when run with a non-TTY (pipe, subprocess, redirect).
+        // Hive worker mode is unaffected because PTY-spawned sessions are TTY-like,
+        // but Solo-mode antigravity launches (which use this `-p` branch) may
+        // produce empty output until upstream lands a fix. Until then, prefer
+        // `gemini` for Solo mode if you need captured stdout.
         if let Some(ref task) = spec.inline_task {
             cmd = cmd.arg("-p").arg(task);
         } else if let Some(ref prompt_file) = spec.prompt_file {

@@ -17,10 +17,10 @@ pub mod templates;
 use crate::http::error::ApiError;
 use std::collections::HashSet;
 
-// Note: legacy "gemini" is intentionally NOT in this allowlist. The storage
-// layer rewrites persisted "gemini" entries to "antigravity" on load, and
-// adapters::get_adapter accepts "gemini" as a runtime alias.
-const VALID_CLIS: &[&str] = &["claude", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
+// gemini and antigravity are peers (see adapters/mod.rs::VALID_CLIS).
+// antigravity is the worker default; gemini is retained as a selectable peer
+// until Google deprecates it on 2026-06-18.
+const VALID_CLIS: &[&str] = &["claude", "gemini", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
 
 /// Validate session_id for path traversal attacks
 pub fn validate_session_id(session_id: &str) -> Result<(), ApiError> {

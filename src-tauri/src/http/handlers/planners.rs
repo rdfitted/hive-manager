@@ -19,7 +19,7 @@ pub struct AddPlannerRequest {
     pub domain: String,
     /// Optional custom label for the planner
     pub label: Option<String>,
-    /// CLI to use: claude, antigravity, codex, opencode, cursor, droid, qwen. Defaults to "claude"
+    /// CLI to use: claude, gemini, antigravity, codex, opencode, cursor, droid, qwen. Defaults to "claude"
     pub cli: Option<String>,
     /// Model to use (optional)
     pub model: Option<String>,

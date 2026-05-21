@@ -111,15 +111,15 @@ impl CliRegistry {
 
     /// Get the built-in default model for a CLI.
     ///
-    /// Returns `None` for CLIs that do not support a model flag (e.g.,
-    /// `antigravity`, whose model lives in `~/.gemini/antigravity-cli/settings.json`).
-    /// Frontend uses `None` as the signal to hide the model field.
+    /// Returns `None` for CLIs whose model is set out-of-band (e.g. `antigravity`,
+    /// whose model lives in `~/.gemini/antigravity-cli/settings.json`). Frontend
+    /// uses `None` as the signal to hide the model field.
     pub fn default_model(cli: &str) -> Option<&'static str> {
         match cli {
             "claude" => Some("opus"),
+            "gemini" => Some("gemini-2.5-pro"),
             // antigravity (agy) has no model flag; settings.json owns the model.
-            // "gemini" alias intentionally also returns None.
-            "antigravity" | "gemini" => None,
+            "antigravity" => None,
             "opencode" => Some("opencode/big-pickle"),
             "codex" => Some("gpt-5.5"),
             "cursor" => Some("composer-2"),
@@ -197,6 +197,13 @@ mod tests {
             auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
             model_flag: Some("--model".to_string()),
             default_model: "opus".to_string(),
+            env: None,
+        });
+        clis.insert("gemini".to_string(), CliConfig {
+            command: "gemini".to_string(),
+            auto_approve_flag: Some("-y".to_string()),
+            model_flag: Some("-m".to_string()),
+            default_model: "gemini-2.5-pro".to_string(),
             env: None,
         });
         clis.insert("antigravity".to_string(), CliConfig {
@@ -404,8 +411,8 @@ mod tests {
     #[test]
     fn test_cli_behavior_profiles() {
         assert_eq!(CliRegistry::get_behavior("claude"), CliBehavior::ActionProne);
+        assert_eq!(CliRegistry::get_behavior("gemini"), CliBehavior::ActionProne);
         assert_eq!(CliRegistry::get_behavior("antigravity"), CliBehavior::ActionProne);
-        assert_eq!(CliRegistry::get_behavior("gemini"), CliBehavior::ActionProne); // legacy alias
         assert_eq!(CliRegistry::get_behavior("qwen"), CliBehavior::InstructionFollowing);
         assert_eq!(CliRegistry::get_behavior("codex"), CliBehavior::ExplicitPolling);
         assert_eq!(CliRegistry::get_behavior("opencode"), CliBehavior::ExplicitPolling);
@@ -417,6 +424,7 @@ mod tests {
     #[test]
     fn test_needs_role_hardening() {
         assert!(CliRegistry::needs_role_hardening("claude"));
+        assert!(CliRegistry::needs_role_hardening("gemini"));
         assert!(CliRegistry::needs_role_hardening("antigravity"));
         assert!(!CliRegistry::needs_role_hardening("qwen"));
         assert!(!CliRegistry::needs_role_hardening("codex"));
@@ -467,11 +475,32 @@ mod tests {
     #[test]
     fn test_default_model_lookup() {
         assert_eq!(CliRegistry::default_model("claude"), Some("opus"));
+        assert_eq!(CliRegistry::default_model("gemini"), Some("gemini-2.5-pro"));
         assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.5"));
         assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
         // antigravity has no model flag — None signals the UI to hide the field.
         assert_eq!(CliRegistry::default_model("antigravity"), None);
-        assert_eq!(CliRegistry::default_model("gemini"), None);
+    }
+
+    #[test]
+    fn test_build_gemini_command() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "gemini".to_string(),
+            model: Some("gemini-2.5-pro".to_string()),
+            flags: vec![],
+            label: None,
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert_eq!(built.command, "gemini");
+        assert!(built.args.contains(&"-y".to_string()));
+        assert!(built.args.contains(&"-m".to_string()));
+        assert!(built.args.contains(&"gemini-2.5-pro".to_string()));
     }
 }
