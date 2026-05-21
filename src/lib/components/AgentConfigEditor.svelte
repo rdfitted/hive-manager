@@ -40,6 +40,15 @@
     { value: 'codex-gpt-5-3-xhigh', label: 'GPT-5.3 Codex (Extra high effort)' },
   ];
 
+  const geminiPresets: PresetOption[] = [
+    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+    { value: 'gemini-3-pro-preview', label: 'Gemini 3.0 Pro Preview' },
+    { value: 'gemini-3-flash-preview', label: 'Gemini 3.0 Flash Preview' },
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
+  ];
+
   // Antigravity (agy) has no model-selection flag. Model is read from
   // ~/.gemini/antigravity-cli/settings.json globally. We do not expose a
   // preset dropdown; the UI shows a static note instead.
@@ -69,6 +78,7 @@
   const presetsByCliType: Record<string, PresetOption[]> = {
     claude: claudePresets,
     codex: codexPresets,
+    gemini: geminiPresets,
     antigravity: antigravityPresets,
     cursor: cursorPresets,
     droid: droidPresets,
@@ -86,15 +96,17 @@
     ? 'Opus presets add --settings {"effortLevel":"high|low"}'
     : config.cli === 'codex'
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh"'
-      : config.cli === 'cursor'
-        ? 'Cursor Composer mode selection'
-        : config.cli === 'droid'
-          ? 'Droid GLM model selection'
-          : config.cli === 'opencode'
-            ? 'OpenCode multi-model selection'
-            : config.cli === 'qwen'
-              ? 'Qwen Code CLI model selection'
-              : '';
+      : config.cli === 'gemini'
+        ? 'Gemini model IDs for `gemini -m`'
+        : config.cli === 'cursor'
+          ? 'Cursor Composer mode selection'
+          : config.cli === 'droid'
+            ? 'Droid GLM model selection'
+            : config.cli === 'opencode'
+              ? 'OpenCode multi-model selection'
+              : config.cli === 'qwen'
+                ? 'Qwen Code CLI model selection'
+                : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -110,6 +122,8 @@
     } else if (nextCli === 'codex') {
       model = 'gpt-5.5';
       flags.push('-c', 'model_reasoning_effort="medium"');
+    } else if (nextCli === 'gemini') {
+      model = 'gemini-3.1-pro-preview';
     } else if (nextCli === 'antigravity') {
       // agy has no --model flag; model is set globally in settings.json.
       model = undefined;
@@ -269,6 +283,14 @@
         model = 'gpt-5.3-codex';
         flags.push('-c', 'model_reasoning_effort="xhigh"');
         break;
+      case 'gemini-3.1-pro-preview':
+      case 'gemini-3-pro-preview':
+      case 'gemini-3-flash-preview':
+      case 'gemini-2.5-pro':
+      case 'gemini-2.5-flash':
+      case 'gemini-2.5-flash-lite':
+        model = preset;
+        break;
       case 'composer-2':
       case 'composer-2-fast':
       case 'composer-1':
@@ -346,7 +368,7 @@
         <code>agy</code>.
       </div>
     </div>
-  {:else if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'cursor' || config.cli === 'droid' || config.cli === 'opencode' || config.cli === 'qwen'}
+  {:else if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini' || config.cli === 'cursor' || config.cli === 'droid' || config.cli === 'opencode' || config.cli === 'qwen'}
     <div class="field">
       <label for="preset">Model &amp; Effort</label>
       <select

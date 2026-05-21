@@ -15,7 +15,7 @@
   const predefinedRoles: { type: string; label: string; cli: string; description: string; category: 'dev' | 'review' }[] = [
     // Development roles
     { type: 'backend', label: 'Backend', cli: 'claude', description: 'Server-side logic, APIs, databases', category: 'dev' },
-    { type: 'frontend', label: 'Frontend', cli: 'antigravity', description: 'UI components, state management', category: 'dev' },
+    { type: 'frontend', label: 'Frontend', cli: 'gemini', description: 'UI components, state management', category: 'dev' },
     { type: 'coherence', label: 'Coherence', cli: 'droid', description: 'Code consistency, API contracts', category: 'dev' },
     { type: 'simplify', label: 'Simplify', cli: 'codex', description: 'Code simplification, refactoring', category: 'dev' },
     // Review & QA roles

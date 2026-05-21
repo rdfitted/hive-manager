@@ -1,6 +1,6 @@
 # Hive Manager
 
-A desktop application for orchestrating multi-agent AI coding sessions. Launch coordinated teams of AI coding assistants (Claude, Codex, Antigravity, etc.) that work together on complex software tasks.
+A desktop application for orchestrating multi-agent AI coding sessions. Launch coordinated teams of AI coding assistants (Claude, Codex, Gemini, Antigravity, etc.) that work together on complex software tasks.
 
 ![Hive Manager](https://img.shields.io/badge/version-0.13.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
@@ -14,7 +14,7 @@ A desktop application for orchestrating multi-agent AI coding sessions. Launch c
 - **Swarm Mode**: Hierarchical planners with domain-specific mini-hives
 - **Fusion Mode**: Parallel competing implementations with best-pick resolution
 - **Session Persistence**: Save and resume sessions across app restarts
-- **Multi-CLI Support**: Works with Claude Code, Codex, OpenCode, Antigravity CLI (agy), and more
+- **Multi-CLI Support**: Works with Claude Code, Codex, OpenCode, Gemini CLI, Antigravity CLI (agy), and more
 - **Real-time Monitoring**: Watch all agents work simultaneously with live terminal output
 - **Git Integration**: Automatic branch management and coordination
 
@@ -74,7 +74,8 @@ Launch multiple agents working on the same task in parallel. Compare approaches 
 | CLI | Behavior | Notes |
 |-----|----------|-------|
 | [Claude Code](https://claude.ai/claude-code) | Action-Prone | Anthropic's official CLI. Needs role hardening for worker agents. |
-| [Antigravity CLI](https://www.antigravity.google/docs/cli-using) | Action-Prone | Google's `agy` (successor to the deprecated Gemini CLI). Model + verbosity live in `~/.gemini/antigravity-cli/settings.json` — no `--model` flag. **After installing `agy`, restart Hive Manager** so the spawn environment picks up the new User PATH entry. |
+| [Gemini CLI](https://github.com/google/gemini-cli) | Action-Prone | Google's official CLI. **Default for the frontend role**. Deprecates 2026-06-18; will be replaced by Antigravity CLI once that's worker-ready. |
+| [Antigravity CLI](https://www.antigravity.google/docs/cli-using) | Action-Prone | Google's `agy` (successor to Gemini CLI). Model + verbosity live in `~/.gemini/antigravity-cli/settings.json` — no `--model` flag. ⚠️ **Worker prompt injection is currently broken** — `agy -i` does not execute task files. Selectable but not the default until that bug is fixed. After installing `agy`, restart Hive Manager so the spawn environment picks up the new User PATH entry. |
 | [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Uses bash loops for coordination. |
 | [OpenCode](https://github.com/opencode-ai/opencode) | Explicit-Polling | Open-source alternative. |
 | [Qwen](https://github.com/QwenLM/qwen-agent) | Instruction-Following | Follows instructions literally, respects role boundaries naturally. |

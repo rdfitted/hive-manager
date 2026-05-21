@@ -220,6 +220,7 @@ adapters/
   mod.rs
   claude_code.rs
   codex.rs
+  gemini.rs
   antigravity.rs
   opencode.rs
   droid.rs
