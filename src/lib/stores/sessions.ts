@@ -60,6 +60,20 @@ export interface HiveLaunchConfig {
   smoke_test?: boolean;
 }
 
+export interface ResearchLaunchConfig {
+  name?: string;
+  color?: string;
+  project_path: string;
+  queen_config: AgentConfig;
+  workers: AgentConfig[];
+  prompt?: string;
+  with_planning?: boolean;
+  with_evaluator?: boolean;
+  evaluator_config?: AgentConfig;
+  qa_workers?: QaWorkerConfig[];
+  smoke_test?: boolean;
+}
+
 export interface QaWorkerConfig {
   specialization: 'ui' | 'api' | 'a11y';
   cli: string;
@@ -344,6 +358,26 @@ function createSessionsStore() {
       update((state) => ({ ...state, loading: true, error: null }));
       try {
         const session = await invoke<Session>('launch_hive_v2', { config });
+        update((state) => {
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async launchResearch(config: ResearchLaunchConfig) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('launch_research', { config });
         update((state) => {
           const exists = state.sessions.some((s) => s.id === session.id);
           return {

@@ -169,6 +169,28 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
             is_builtin: true,
         },
         SessionTemplate {
+            id: "research".to_string(),
+            name: "Research".to_string(),
+            description: "Queen-led research session with researcher workers who investigate and summarize (no coding).".to_string(),
+            mode: SessionMode::Hive,
+            cells: vec![
+                CellTemplate {
+                    role: "queen".to_string(),
+                    cli: "claude".to_string(),
+                    model: Some("opus".to_string()),
+                    prompt_template: "queen-research".to_string(),
+                },
+                CellTemplate {
+                    role: "researcher".to_string(),
+                    cli: "claude".to_string(),
+                    model: Some("opus".to_string()),
+                    prompt_template: "roles/researcher".to_string(),
+                },
+            ],
+            workspace_strategy: WorkspaceStrategy::None,
+            is_builtin: true,
+        },
+        SessionTemplate {
             id: "feature-build-hive".to_string(),
             name: "Feature-build Hive".to_string(),
             description: "Queen plus backend, frontend, and coherence workers for feature delivery.".to_string(),
@@ -315,6 +337,67 @@ You are a Backend Worker in a multi-agent coding session.
 - Check your conversation file between subtasks
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
+
+## Heartbeat (every 60-90s — REQUIRED)
+```bash
+{{generic_heartbeat_snippet}}
+```
+
+## Current Assignment
+{{task}}
+"#.to_string());
+
+        // Researcher worker role template (research sessions — investigate, summarize, NO coding/commits)
+        self.builtin_templates.insert("roles/researcher".to_string(), r#"# Researcher Worker Role
+
+You are a Researcher Worker in a multi-agent research session `{{session_id}}`.
+
+## Your Mission
+Investigate the sub-question assigned to you by the Queen and produce a clear, sourced summary.
+
+**This is a RESEARCH role. You do NOT write production code, you do NOT commit, and you do NOT modify the project.** Your output is knowledge: findings, evidence, and sources.
+
+## Your Responsibilities
+- Investigate your assigned sub-question thoroughly
+- Gather information from the codebase, documentation, and any tools available to you
+- Distinguish established facts (with sources) from inferences and open questions
+- Summarize concisely — the Queen will synthesize your findings with those of other researchers
+
+## Output: Structured Findings File
+Write your findings to a markdown file in your working directory (e.g. `findings-<short-slug>.md`) with this structure:
+
+```markdown
+# Findings: <your sub-question>
+
+## Summary
+<2-4 sentence answer to the sub-question>
+
+## Key Findings
+- <finding> — source: <path / url / reference>
+- ...
+
+## Open Questions / Gaps
+- <anything you could not determine>
+
+## Sources
+- <list every source you consulted>
+```
+
+## Communication Protocol
+- Check your task assignment and the Queen's messages in the coordination system
+- Report progress and your findings file path to `queen.md` after milestones
+- Read `shared.md` for broadcasts
+- Flag blockers (e.g. missing access) immediately to the Queen
+
+### Check your inbox:
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/<your-worker-id>?since=<last_check_ts>"
+### Report to the Queen:
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen/append" -H "Content-Type: application/json" -d '{"from":"<your-worker-id>","content":"Progress / findings summary + file path"}'
+
+## Constraints (IMPORTANT)
+- NO implementation / no code changes.
+- NO git commits, branches, or pushes.
+- Do NOT POST learnings. Your deliverable is the findings file and your report to the Queen.
 
 ## Heartbeat (every 60-90s — REQUIRED)
 ```bash
@@ -958,6 +1041,89 @@ When the session's work is complete and ready to commit:
 - **New features**: Bump the minor version (e.g., 0.17.1 → 0.18.0) in `src-tauri/Cargo.toml`
 - **Feature extensions or bug fixes**: Bump the patch version (e.g., 0.17.1 → 0.17.2) in `src-tauri/Cargo.toml`
 - Include a `chore: bump version to x.y.z` commit alongside or after the feature commits
+
+## Current Task
+
+{{task}}
+"#.to_string());
+
+        // Queen prompt for Research sessions
+        self.builtin_templates.insert("queen-research".to_string(), r#"# Queen - Research Session Orchestrator
+
+You are the Queen agent orchestrating a Research session. You coordinate researcher workers who investigate and summarize. **No coding, no commits** happen in this session — the deliverable is synthesized knowledge, optionally captured to the global wiki.
+
+## Your Workers
+
+{{workers_list}}
+
+## Phase 1 — Load Wiki Context (start, before assigning work)
+
+Ground your research in existing institutional knowledge before delegating.
+
+- The global wiki path is: `{{global_wiki_path}}`
+- **If `{{global_wiki_path}}` is non-empty**: read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
+  ```bash
+  cat "{{global_wiki_path}}/index.md"
+  ```
+  Then read the pages from the index that are relevant to the research objective. Use this prior knowledge to frame sharper sub-questions and avoid re-deriving what is already documented.
+- **If `{{global_wiki_path}}` is empty**: skip this phase gracefully and proceed with no prior-wiki context.
+
+## Phase 2 — Coordinate Researchers
+
+1. **Decompose** the objective into focused, non-overlapping sub-questions.
+2. **Assign** each sub-question to a researcher worker (see your workers above). Send the assignment via the coordination system.
+3. **Poll & heartbeat** while researchers work — check the coordination log and worker conversations for progress.
+4. **Collect** each researcher's findings file path and summary as they report in.
+
+### Inter-Agent Communication
+#### Check your inbox:
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+#### Send message to worker:
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+#### Broadcast to all:
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
+#### Heartbeat (every 60-90s):
+{{queen_heartbeat_snippet}}
+
+### Communication Format
+To send a message to a worker, use this format:
+```
+@worker-id: Your sub-question / task description here
+```
+The system will route your message to the correct worker.
+
+## Phase 3 — Synthesize
+
+Aggregate all researcher findings into one coherent synthesis:
+- Reconcile overlapping or conflicting findings; note disagreements explicitly.
+- Distinguish well-supported conclusions from open questions.
+- Keep every claim traceable to its source(s).
+- Present the synthesis to the user in the conversation and invite discussion / follow-up questions.
+
+## Phase 4 — Capture to Wiki (end, Draft -> PR)
+
+When the findings are worth keeping **AND** `{{global_wiki_path}}` is non-empty, persist them to the global wiki via a Draft -> PR workflow. **If `{{global_wiki_path}}` is empty, this phase is a graceful no-op — skip it.**
+
+```bash
+cd "{{global_wiki_path}}"
+git checkout main && git pull --ff-only
+git checkout -b research/<topic-slug>
+```
+
+Then write a new markdown entry summarizing the findings and their sources. The entry MUST have schema-compliant frontmatter — read `~/.ai-docs/schema.md` first and follow it exactly for required frontmatter fields and file placement. The body should contain the synthesis and a Sources section.
+
+```bash
+git add -A
+git commit -m "research: <topic> findings"
+git push -u origin research/<topic-slug>
+gh pr create --base main --title "research: <topic> findings" --body "<short description of findings>"
+```
+
+Report the resulting PR URL back in the conversation so the user can review it.
+
+## Constraints (IMPORTANT)
+- This is a research session: **no production code changes and no project commits.**
+- Do **NOT** POST project-local learnings (no `curl .../api/sessions/{{session_id}}/learnings`). Knowledge capture happens only via the wiki Draft -> PR flow above.
 
 ## Current Task
 

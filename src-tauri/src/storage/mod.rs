@@ -637,6 +637,7 @@ impl SessionStorage {
                 enabled: true,
                 port: 18800,
             },
+            global_wiki_path: default_global_wiki_path(),
         }
     }
 
@@ -1274,6 +1275,16 @@ pub struct AppConfig {
     /// HTTP API configuration
     #[serde(default)]
     pub api: ApiConfig,
+    /// Path to the global LLM wiki, surfaced to Research-mode Queens via the
+    /// `{{global_wiki_path}}` prompt variable. Defaulted so existing config.json
+    /// files (written before this field existed) still deserialize.
+    #[serde(default = "default_global_wiki_path")]
+    pub global_wiki_path: Option<String>,
+}
+
+/// Default location of the global LLM wiki used by Research mode.
+fn default_global_wiki_path() -> Option<String> {
+    Some("~/.ai-docs/wiki/".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

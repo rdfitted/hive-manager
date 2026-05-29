@@ -325,6 +325,54 @@ pub struct HiveLaunchConfig {
     pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 }
 
+/// Launch config for **Research** mode.
+///
+/// Research mode is a UI/launch *profile* that reuses the Hive launch path under
+/// the hood (exactly like Solo mode reuses it). It is NOT a distinct
+/// `SessionType`/`SessionMode` variant. It produces a Queen + N "researcher"
+/// workers, renders the research-flavored `queen-research` / `roles/researcher`
+/// prompts, and always launches with planning and evaluator disabled.
+///
+/// Mirrors the shape of [`HiveLaunchConfig`] so the frontend can build it the
+/// same way it builds a Hive launch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchLaunchConfig {
+    pub project_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    pub queen_config: AgentConfig,
+    pub workers: Vec<AgentConfig>,
+    pub prompt: Option<String>,
+}
+
+/// Expand a leading `~` in a path to the user's home directory so the value can
+/// be safely embedded in a shell command (a tilde inside quotes is NOT expanded
+/// by the shell). Returns the input unchanged if it doesn't start with `~` or
+/// the home directory cannot be determined.
+fn expand_tilde(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_string();
+    };
+    let home = if cfg!(windows) {
+        std::env::var("USERPROFILE").ok()
+    } else {
+        std::env::var("HOME").ok()
+    };
+    match home {
+        Some(home) => {
+            let rest = rest.trim_start_matches(['/', '\\']);
+            if rest.is_empty() {
+                home
+            } else {
+                format!("{}/{}", home.trim_end_matches(['/', '\\']), rest)
+            }
+        }
+        None => path.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmLaunchConfig {
     pub project_path: String,
@@ -4109,6 +4157,59 @@ This tests that:
     }
 
     /// Build the Queen's master prompt with worker information
+    /// Render a Queen prompt from a named template (e.g. `queen-research`),
+    /// supplying the standard Queen template variables plus any caller-provided
+    /// extras (e.g. `global_wiki_path`).
+    ///
+    /// Standard variables match those used by the `queen-hive` template:
+    /// `session_id`, `api_base_url`, `workers_list`, `queen_heartbeat_snippet`,
+    /// and `task`. Caller extras win on key collision.
+    fn build_templated_queen_prompt(
+        template_name: &str,
+        session_id: &str,
+        workers: &[AgentConfig],
+        user_prompt: Option<&str>,
+        extra_vars: HashMap<String, String>,
+    ) -> String {
+        const API_BASE_URL: &str = "http://localhost:18800";
+
+        // Build the workers table (matches build_queen_master_prompt's columns).
+        let mut workers_list = String::from("| ID | Role | CLI |\n|----|------|-----|\n");
+        for (i, worker_config) in workers.iter().enumerate() {
+            let index = i + 1;
+            let worker_id = format!("{}-worker-{}", session_id, index);
+            let role_label = worker_config
+                .role
+                .as_ref()
+                .map(|r| format!("Worker {} ({})", index, r.label))
+                .unwrap_or_else(|| format!("Worker {}", index));
+            workers_list.push_str(&format!(
+                "| {} | {} | {} |\n",
+                worker_id, role_label, worker_config.cli
+            ));
+        }
+
+        let mut variables = HashMap::new();
+        variables.insert("api_base_url".to_string(), API_BASE_URL.to_string());
+        variables.insert("workers_list".to_string(), workers_list);
+        variables.insert(
+            "queen_heartbeat_snippet".to_string(),
+            heartbeat_snippet(API_BASE_URL, session_id, "queen", "working", "Coordinating researchers"),
+        );
+        variables.insert(
+            "task".to_string(),
+            user_prompt
+                .unwrap_or("Coordinate the researchers and synthesize their findings.")
+                .to_string(),
+        );
+        // Caller-provided extras (e.g. global_wiki_path) take precedence.
+        for (k, v) in extra_vars {
+            variables.insert(k, v);
+        }
+
+        Self::render_named_prompt(template_name, session_id, user_prompt.map(|s| s.to_string()), variables)
+    }
+
     fn build_queen_master_prompt(
         cli: &str,
         project_path: &Path,
@@ -4622,6 +4723,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
                 "tester" => "Run test suite, fix failures, document difficulties that couldn't be resolved.",
                 "code-quality" => "Resolve PR comments from external reviewers, ensure code meets quality standards.",
                 "reconciler" => "Deep-think reconciliation: collect Evaluator QA verdicts, CodeRabbit comments, and Gemini findings. Triage conflicts, deduplicate, and produce a unified fix list with priorities.",
+                "researcher" => "Focused research: gather, read, and synthesize sources; capture findings and citations for the Queen to consolidate.",
                 _ => "General development tasks as assigned.",
             })
             .unwrap_or("General development tasks as assigned.");
@@ -5976,6 +6078,30 @@ Last updated: {timestamp}
     }
 
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        self.launch_hive_internal(config, None, HashMap::new(), true)
+    }
+
+    /// Shared Hive launch path. `launch_hive_v2` and `launch_research` both
+    /// funnel through here so we keep a single orchestration body.
+    ///
+    /// Override hooks (used by Research mode):
+    /// - `queen_template_override`: when `Some(name)`, the Queen prompt is rendered
+    ///   from the named prompt template (e.g. `"queen-research"`) via
+    ///   `render_named_prompt` instead of the hand-built `build_queen_master_prompt`.
+    /// - `extra_queen_vars`: additional template variables merged into the
+    ///   templated Queen prompt (e.g. `global_wiki_path`). Ignored when
+    ///   `queen_template_override` is `None`.
+    /// - `use_worktrees`: when `true` (Hive/Solo), each cell gets an isolated git
+    ///   worktree + branch off a fresh base. When `false` (Research), no git is
+    ///   touched: every agent runs directly in `project_path`, so the launch
+    ///   succeeds even on a non-git folder and never creates branches/worktrees.
+    fn launch_hive_internal(
+        &self,
+        config: HiveLaunchConfig,
+        queen_template_override: Option<&str>,
+        extra_queen_vars: HashMap<String, String>,
+        use_worktrees: bool,
+    ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
         let project_path = PathBuf::from(&config.project_path);
@@ -5993,21 +6119,32 @@ Last updated: {timestamp}
         }
 
         // Fetch latest from origin so all worktrees branch from the most
-        // recent remote state, avoiding stale-base divergence.
-        let base_ref = resolve_fresh_base(&project_path);
+        // recent remote state, avoiding stale-base divergence. Skipped in
+        // no-worktree mode (Research), which may run on a non-git folder.
+        let base_ref = if use_worktrees {
+            resolve_fresh_base(&project_path)
+        } else {
+            String::new()
+        };
 
         // Create Queen agent
         let queen_id = format!("{}-queen", session_id);
         let (cmd, mut args) = Self::build_command(&config.queen_config);
         let queen_branch = format!("hive/{}/queen", session_id);
-        let (_, queen_cwd) = create_session_worktree(
-            &session_id,
-            "queen",
-            &queen_branch,
-            &base_ref,
-            &project_path,
-        )?;
-        created_cells.push(("queen".to_string(), queen_branch.clone()));
+        let queen_cwd = if use_worktrees {
+            let (_, cwd) = create_session_worktree(
+                &session_id,
+                "queen",
+                &queen_branch,
+                &base_ref,
+                &project_path,
+            )?;
+            created_cells.push(("queen".to_string(), queen_branch.clone()));
+            cwd
+        } else {
+            // No-worktree mode: the Queen runs directly in the project directory.
+            project_path.to_string_lossy().to_string()
+        };
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -6019,17 +6156,30 @@ Last updated: {timestamp}
         let plan_path = project_path.join(".hive-manager").join(&session_id).join("plan.md");
         let has_plan = plan_path.exists();
 
-        // Write Queen prompt to file and pass to CLI
-        let master_prompt = Self::build_queen_master_prompt(
-            &config.queen_config.cli,
-            &project_path,
-            queen_cwd.as_ref(),
-            &session_id,
-            &config.workers,
-            config.prompt.as_deref(),
-            has_plan,
-            config.with_evaluator,
-        );
+        // Write Queen prompt to file and pass to CLI.
+        //
+        // Research mode renders a research-flavored Queen prompt from a named
+        // template; the default Hive path uses the hand-built master prompt.
+        let master_prompt = if let Some(template_name) = queen_template_override {
+            Self::build_templated_queen_prompt(
+                template_name,
+                &session_id,
+                &config.workers,
+                config.prompt.as_deref(),
+                extra_queen_vars,
+            )
+        } else {
+            Self::build_queen_master_prompt(
+                &config.queen_config.cli,
+                &project_path,
+                queen_cwd.as_ref(),
+                &session_id,
+                &config.workers,
+                config.prompt.as_deref(),
+                has_plan,
+                config.with_evaluator,
+            )
+        };
         let prompt_file = match Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
@@ -6087,20 +6237,26 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&worker_config);
             let worker_branch = format!("hive/{}/worker-{}", session_id, index);
             let worker_cell_id = format!("worker-{}", index);
-            let (_, worker_cwd) = match create_session_worktree(
-                &session_id,
-                &worker_cell_id,
-                &worker_branch,
-                &base_ref,
-                &project_path,
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
-                    return Err(err);
-                }
+            let worker_cwd = if use_worktrees {
+                let (_, cwd) = match create_session_worktree(
+                    &session_id,
+                    &worker_cell_id,
+                    &worker_branch,
+                    &base_ref,
+                    &project_path,
+                ) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                        return Err(err);
+                    }
+                };
+                created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
+                cwd
+            } else {
+                // No-worktree mode: workers run directly in the project directory.
+                project_path.to_string_lossy().to_string()
             };
-            created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
             self.emit_workspace_created(
                 &session_id,
                 PRIMARY_CELL_ID,
@@ -6182,7 +6338,11 @@ Last updated: {timestamp}
             qa_timeout_secs,
             auth_strategy,
             worktree_path: Some(queen_cwd.clone()),
-            worktree_branch: Some(queen_branch.clone()),
+            worktree_branch: if use_worktrees {
+                Some(queen_branch.clone())
+            } else {
+                None
+            },
         };
 
         {
@@ -6226,6 +6386,65 @@ Last updated: {timestamp}
         })?;
 
         Ok(session)
+    }
+
+    /// Launch a **Research** session.
+    ///
+    /// Research mode is a Hive profile (see [`ResearchLaunchConfig`]): it reuses
+    /// the shared Hive launch path with research-specific overrides:
+    /// - The Queen prompt is rendered from the `queen-research` template, with the
+    ///   `global_wiki_path` variable (read from `AppConfig`) injected alongside the
+    ///   standard Queen variables. The Queen drives wiki load/capture via prompt.
+    /// - Workers without an explicit role are assigned the `researcher` role, which
+    ///   resolves worker prompts/heartbeats to the `researcher` role type
+    ///   (template key `roles/researcher`).
+    /// - Planning and the evaluator are always disabled.
+    pub fn launch_research(&self, config: ResearchLaunchConfig) -> Result<Session, String> {
+        // Assign the "researcher" role to any worker that doesn't already carry one,
+        // so role-driven prompt/heartbeat resolution lands on roles/researcher.
+        let workers = config
+            .workers
+            .into_iter()
+            .map(|mut worker| {
+                if worker.role.is_none() {
+                    worker.role = Some(WorkerRole::new("researcher", "Researcher", &worker.cli));
+                }
+                worker
+            })
+            .collect();
+
+        let hive_config = HiveLaunchConfig {
+            project_path: config.project_path,
+            name: config.name,
+            color: config.color,
+            queen_config: config.queen_config,
+            workers,
+            prompt: config.prompt,
+            with_planning: false,
+            with_evaluator: false,
+            evaluator_config: None,
+            qa_workers: None,
+            smoke_test: false,
+        };
+
+        // Resolve the global wiki path from AppConfig (falls back to the documented
+        // default if config is unavailable or the field is unset).
+        let global_wiki_path = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.load_config().ok())
+            .and_then(|cfg| cfg.global_wiki_path)
+            .unwrap_or_else(|| "~/.ai-docs/wiki/".to_string());
+        // Expand a leading `~` so the path works inside the queen-research
+        // template's quoted shell commands (`cd "{{global_wiki_path}}"`).
+        let global_wiki_path = expand_tilde(&global_wiki_path);
+
+        let mut extra_queen_vars = HashMap::new();
+        extra_queen_vars.insert("global_wiki_path".to_string(), global_wiki_path);
+
+        // Research never touches git: no worktrees, no branches. Agents run
+        // directly in project_path, so it also works on non-repo folders.
+        self.launch_hive_internal(hive_config, Some("queen-research"), extra_queen_vars, false)
     }
 
     pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {

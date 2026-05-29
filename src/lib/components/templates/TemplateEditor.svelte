@@ -1,7 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher } from 'svelte';
     import { templates } from '../../stores/templates';
-    import type { SessionTemplate, CellTemplate } from '../../types/domain';
+    import type { SessionTemplate, CellTemplate, SessionMode } from '../../types/domain';
     import AgentConfigEditor from '../AgentConfigEditor.svelte';
 
     export let template: SessionTemplate | null = null;
@@ -11,7 +11,7 @@
     let id = template?.is_builtin ? '' : (template?.id || '');
     let name = template?.name || '';
     let description = template?.description || '';
-    let mode: 'hive' | 'fusion' = template?.mode || 'hive';
+    let mode: SessionMode = template?.mode || 'hive';
     let cells: CellTemplate[] = template?.cells ? JSON.parse(JSON.stringify(template.cells)) : [];
     let workspace_strategy: SessionTemplate['workspace_strategy'] = template?.workspace_strategy || 'shared_cell';
     let is_builtin = template?.is_builtin || false;
