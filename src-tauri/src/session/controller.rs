@@ -355,6 +355,12 @@ fn expand_tilde(path: &str) -> String {
     let Some(rest) = path.strip_prefix('~') else {
         return path.to_string();
     };
+    // Only expand the current user's home (`~`, `~/...`, `~\...`). A bare `~user`
+    // form refers to another user's home and is not something we resolve — leave
+    // it untouched rather than mangling it into `<home>/user`.
+    if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\') {
+        return path.to_string();
+    }
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE").ok()
     } else {
@@ -4743,14 +4749,99 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             Some(&activation_wait_heartbeat),
         );
 
+        // Research workers are read-only investigators: no implementation authority,
+        // no commits, and crucially NO project-local learnings POST (Research mode's
+        // knowledge capture happens only via the Queen's wiki Draft->PR flow).
+        let is_research = config
+            .role
+            .as_ref()
+            .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+            .unwrap_or(false);
+
+        let role_section = if is_research {
+            "## Your Role: RESEARCHER\n\nYou investigate, read, and synthesize sources. You do NOT write production code, modify project files, or commit anything. Your deliverable is findings reported to the Queen."
+        } else {
+            "## Your Role: EXECUTOR\n\nYou have full implementation authority within your specialization."
+        };
+
+        let important_rules = if is_research {
+            format!(
+"1. **Stay in your lane** - Focus on your research assignment ({role_name})
+2. **Do not modify the project** - No code changes and no commits; report findings to the Queen
+3. **Update your task file** - Always update status when done or blocked
+4. **Ask for clarification** - If the assignment is unclear, note it in the task file",
+                role_name = role_name
+            )
+        } else {
+            format!(
+"1. **Stay in your lane** - Focus on your specialization ({role_name})
+2. **Don't push to git** - Only the Queen commits and pushes
+3. **Update your task file** - Always update status when done or blocked
+4. **Ask for clarification** - If task is unclear, note it in the task file",
+                role_name = role_name
+            )
+        };
+
+        let learnings_section = if is_research {
+            String::new()
+        } else {
+            format!(
+r#"## Learnings Protocol (MANDATORY)
+
+Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
+
+```bash
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "session": "{session_id}",
+    "task": "Brief task description",
+    "outcome": "success|partial|failed",
+    "keywords": ["keyword1", "keyword2"],
+    "insight": "What you learned - be specific and actionable",
+    "files_touched": ["path/to/file.rs"]
+  }}'
+```
+
+Even if you learned nothing notable, submit with insight "No significant learnings for this task."
+
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, append the learning record to the session-scoped pending JSONL file instead:
+
+```bash
+mkdir -p ".hive-manager/{session_id}"
+jq -nc \
+  --arg date "$(date -u +%Y-%m-%d)" \
+  --arg session "{session_id}" \
+  --arg task "Brief task description" \
+  --arg outcome "success|partial|failed" \
+  --arg insight "What you learned - be specific and actionable" \
+  --argjson keywords '["keyword1","keyword2"]' \
+  --argjson files_touched '["path/to/file.rs"]' \
+  '{{date:$date,session:$session,task:$task,outcome:$outcome,keywords:$keywords,insight:$insight,files_touched:$files_touched}}' \
+  >> ".hive-manager/{session_id}/learnings.pending.jsonl"
+```
+
+⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
+
+"#,
+                session_id = session_id
+            )
+        };
+
+        let project_context_section = if is_research {
+            String::new()
+        } else {
+            "## Project Context\n\nReview `.ai-docs/project-dna.md` for patterns and conventions learned from previous sessions.\n\n".to_string()
+        };
+
         format!(
 r#"# Worker {index} ({role_name}) - Hive Session
 
 You are a **Worker** in a multi-agent Hive session, coordinated by the Queen.
 
-## Your Role: EXECUTOR
-
-You have full implementation authority within your specialization.
+{role_section}
 
 ## Your Specialization
 
@@ -4785,10 +4876,7 @@ Your task assignments are in: `{task_file}`
 
 ## Important Rules
 
-1. **Stay in your lane** - Focus on your specialization ({role_name})
-2. **Don't push to git** - Only the Queen commits and pushes
-3. **Update your task file** - Always update status when done or blocked
-4. **Ask for clarification** - If task is unclear, note it in the task file
+{important_rules}
 
 ## Coordinator
 
@@ -4839,57 +4927,18 @@ cat ".hive-manager/{session_id}/conversations/shared.md"
 
 You MUST call the curl API first. Only use file fallback if curl fails.
 
-## Learnings Protocol (MANDATORY)
-
-Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
-
-```bash
-curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
-  -H "Content-Type: application/json" \
-  -d '{{
-    "session": "{session_id}",
-    "task": "Brief task description",
-    "outcome": "success|partial|failed",
-    "keywords": ["keyword1", "keyword2"],
-    "insight": "What you learned - be specific and actionable",
-    "files_touched": ["path/to/file.rs"]
-  }}'
-```
-
-Even if you learned nothing notable, submit with insight "No significant learnings for this task."
-
-### File-Based Fallback
-
-If curl returns exit code 7 (connection refused) or any non-zero exit, append the learning record to the session-scoped pending JSONL file instead:
-
-```bash
-mkdir -p ".hive-manager/{session_id}"
-jq -nc \
-  --arg date "$(date -u +%Y-%m-%d)" \
-  --arg session "{session_id}" \
-  --arg task "Brief task description" \
-  --arg outcome "success|partial|failed" \
-  --arg insight "What you learned - be specific and actionable" \
-  --argjson keywords '["keyword1","keyword2"]' \
-  --argjson files_touched '["path/to/file.rs"]' \
-  '{{date:$date,session:$session,task:$task,outcome:$outcome,keywords:$keywords,insight:$insight,files_touched:$files_touched}}' \
-  >> ".hive-manager/{session_id}/learnings.pending.jsonl"
-```
-
-⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
-
-## Project Context
-
-Review `.ai-docs/project-dna.md` for patterns and conventions learned from previous sessions.
-
-## Task Coordination
+{learnings_section}{project_context_section}## Task Coordination
 Read {task_file}. Begin work only when Status is ACTIVE.
 Use the interactive interface to monitor your task file.
 
 After completing your task, transition to IDLE state. Continue checking your conversation file on heartbeat cadence.{polling_instructions}"#,
             index = index,
             role_name = role_name,
+            role_section = role_section,
             role_description = role_description,
+            important_rules = important_rules,
+            learnings_section = learnings_section,
+            project_context_section = project_context_section,
             queen_id = queen_id,
             session_id = session_id,
             scope_block = scope_block,

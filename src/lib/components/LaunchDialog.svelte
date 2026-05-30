@@ -647,6 +647,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           </div>
         {/if}
 
+        {#if mode !== 'research'}
         <div class="form-section">
           <h3>Orchestration Options</h3>
           {#if mode !== 'solo'}
@@ -714,6 +715,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             </div>
           {/if}
         </div>
+        {/if}
 
         {#if mode === 'hive'}
           <div class="form-section">
@@ -983,15 +985,17 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <button type="button" class="cancel-button" on:click={handleClose} disabled={launching}>
             Cancel
           </button>
-          <button
-            type="button"
-            class="smoke-test-button"
-            on:click={handleSmokeTest}
-            disabled={launching || !projectPath.trim()}
-            title="Quick test to validate the entire flow: planning phase, task check-off, and agent spawning"
-          >
-            Smoke Test
-          </button>
+          {#if mode !== 'research'}
+            <button
+              type="button"
+              class="smoke-test-button"
+              on:click={handleSmokeTest}
+              disabled={launching || !projectPath.trim()}
+              title="Quick test to validate the entire flow: planning phase, task check-off, and agent spawning"
+            >
+              Smoke Test
+            </button>
+          {/if}
           <button type="submit" class="submit-button" disabled={launching || !projectPath.trim()}>
             {launching ? 'Launching...' : 'Launch'}
           </button>

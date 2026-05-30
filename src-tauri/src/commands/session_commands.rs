@@ -108,6 +108,16 @@ fn validate_research_launch_config(config: &ResearchLaunchConfig) -> Result<(), 
     validate_session_color(config.color.as_deref())?;
     validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
 
+    // Research requires at least one researcher. With zero workers the Hive launch
+    // path falls through to launch_solo, which would silently drop the Queen +
+    // research orchestration. Bound it like the launch dialog does (1..=6).
+    if !(1..=6).contains(&config.workers.len()) {
+        return Err(format!(
+            "Research sessions require 1 to 6 researchers (got {}).",
+            config.workers.len()
+        ));
+    }
+
     for worker in &config.workers {
         validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
     }

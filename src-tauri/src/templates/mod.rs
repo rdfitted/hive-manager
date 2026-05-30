@@ -168,28 +168,13 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
             workspace_strategy: WorkspaceStrategy::SharedCell,
             is_builtin: true,
         },
-        SessionTemplate {
-            id: "research".to_string(),
-            name: "Research".to_string(),
-            description: "Queen-led research session with researcher workers who investigate and summarize (no coding).".to_string(),
-            mode: SessionMode::Hive,
-            cells: vec![
-                CellTemplate {
-                    role: "queen".to_string(),
-                    cli: "claude".to_string(),
-                    model: Some("opus".to_string()),
-                    prompt_template: "queen-research".to_string(),
-                },
-                CellTemplate {
-                    role: "researcher".to_string(),
-                    cli: "claude".to_string(),
-                    model: Some("opus".to_string()),
-                    prompt_template: "roles/researcher".to_string(),
-                },
-            ],
-            workspace_strategy: WorkspaceStrategy::None,
-            is_builtin: true,
-        },
+        // NOTE: Research mode is intentionally NOT exposed as a builtin SessionTemplate.
+        // The template picker routes purely on SessionTemplate.mode, and the Rust
+        // SessionMode enum only has Hive/Fusion — so a "research" template would be
+        // forced to mode: Hive and launch through launch_hive_v2 (worktrees + queen-hive),
+        // bypassing the no-git launch_research path. Research is launched from its own
+        // dedicated tab in LaunchDialog (exactly like Solo mode, which is also not a
+        // builtin template). See PR #121 review.
         SessionTemplate {
             id: "feature-build-hive".to_string(),
             name: "Feature-build Hive".to_string(),
@@ -347,66 +332,12 @@ You are a Backend Worker in a multi-agent coding session.
 {{task}}
 "#.to_string());
 
-        // Researcher worker role template (research sessions — investigate, summarize, NO coding/commits)
-        self.builtin_templates.insert("roles/researcher".to_string(), r#"# Researcher Worker Role
-
-You are a Researcher Worker in a multi-agent research session `{{session_id}}`.
-
-## Your Mission
-Investigate the sub-question assigned to you by the Queen and produce a clear, sourced summary.
-
-**This is a RESEARCH role. You do NOT write production code, you do NOT commit, and you do NOT modify the project.** Your output is knowledge: findings, evidence, and sources.
-
-## Your Responsibilities
-- Investigate your assigned sub-question thoroughly
-- Gather information from the codebase, documentation, and any tools available to you
-- Distinguish established facts (with sources) from inferences and open questions
-- Summarize concisely — the Queen will synthesize your findings with those of other researchers
-
-## Output: Structured Findings File
-Write your findings to a markdown file in your working directory (e.g. `findings-<short-slug>.md`) with this structure:
-
-```markdown
-# Findings: <your sub-question>
-
-## Summary
-<2-4 sentence answer to the sub-question>
-
-## Key Findings
-- <finding> — source: <path / url / reference>
-- ...
-
-## Open Questions / Gaps
-- <anything you could not determine>
-
-## Sources
-- <list every source you consulted>
-```
-
-## Communication Protocol
-- Check your task assignment and the Queen's messages in the coordination system
-- Report progress and your findings file path to `queen.md` after milestones
-- Read `shared.md` for broadcasts
-- Flag blockers (e.g. missing access) immediately to the Queen
-
-### Check your inbox:
-curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/<your-worker-id>?since=<last_check_ts>"
-### Report to the Queen:
-curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen/append" -H "Content-Type: application/json" -d '{"from":"<your-worker-id>","content":"Progress / findings summary + file path"}'
-
-## Constraints (IMPORTANT)
-- NO implementation / no code changes.
-- NO git commits, branches, or pushes.
-- Do NOT POST learnings. Your deliverable is the findings file and your report to the Queen.
-
-## Heartbeat (every 60-90s — REQUIRED)
-```bash
-{{generic_heartbeat_snippet}}
-```
-
-## Current Assignment
-{{task}}
-"#.to_string());
+        // NOTE: No `roles/researcher` builtin template. Research workers are launched
+        // via launch_research, which (like all v2 Hive launches) builds worker prompts
+        // through controller::build_worker_prompt — that function special-cases the
+        // `researcher` role (no EXECUTOR framing, no Learnings POST, no commits, report
+        // findings to the Queen via the conversation API). A standalone role template
+        // here would be dead code and was removed in PR #121 review.
 
         // Frontend worker role template
         self.builtin_templates.insert("roles/frontend".to_string(), r#"# Frontend Worker Role
@@ -1073,7 +1004,7 @@ Ground your research in existing institutional knowledge before delegating.
 1. **Decompose** the objective into focused, non-overlapping sub-questions.
 2. **Assign** each sub-question to a researcher worker (see your workers above). Send the assignment via the coordination system.
 3. **Poll & heartbeat** while researchers work — check the coordination log and worker conversations for progress.
-4. **Collect** each researcher's findings file path and summary as they report in.
+4. **Collect** each researcher's findings summary as they report in via the conversation API (researchers report findings to you directly — they do not write files into the project).
 
 ### Inter-Agent Communication
 #### Check your inbox:
