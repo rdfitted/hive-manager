@@ -2607,6 +2607,13 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         format!("## Scope\n\n{}", Self::worktree_boundary_rules(worktree_path))
     }
 
+    /// Read-only scope block for research workers. They investigate and report;
+    /// they must not mutate the project or its git state. Used for BOTH the worker
+    /// prompt and the task file so the two surfaces stay consistent.
+    fn scope_block_read_only() -> String {
+        "## Scope (Read-Only)\n\nThis is a research role. You MUST NOT create, modify, move, or delete any files, and you MUST NOT run commands that mutate the project or its git state. Read freely and investigate, then report your findings to the Queen via the conversation API — your only deliverable is knowledge.".to_string()
+    }
+
     fn queen_quality_reconciliation_log_lines(has_evaluator: bool) -> &'static str {
         if has_evaluator {
             QUEEN_QUALITY_RECONCILIATION_LOG_LINES
@@ -4715,7 +4722,20 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
         let role_name = config.role.as_ref()
             .map(|r| r.label.clone())
             .unwrap_or_else(|| format!("Worker {}", index));
-        let scope_block = Self::scope_block(".");
+        // Research workers are read-only investigators: no implementation authority,
+        // no commits, and NO project-local learnings POST (Research mode captures
+        // knowledge only via the Queen's wiki Draft->PR flow). Every write-capable
+        // surface (scope block, role framing, task file) must reflect that.
+        let is_research = config
+            .role
+            .as_ref()
+            .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+            .unwrap_or(false);
+        let scope_block = if is_research {
+            Self::scope_block_read_only()
+        } else {
+            Self::scope_block(".")
+        };
 
         let role_description = config.role.as_ref()
             .map(|r| match r.role_type.to_lowercase().as_str() {
@@ -4748,15 +4768,6 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             config.role.as_ref().map(|role| role.role_type.as_str()),
             Some(&activation_wait_heartbeat),
         );
-
-        // Research workers are read-only investigators: no implementation authority,
-        // no commits, and crucially NO project-local learnings POST (Research mode's
-        // knowledge capture happens only via the Queen's wiki Draft->PR flow).
-        let is_research = config
-            .role
-            .as_ref()
-            .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
-            .unwrap_or(false);
 
         let role_section = if is_research {
             "## Your Role: RESEARCHER\n\nYou investigate, read, and synthesize sources. You do NOT write production code, modify project files, or commit anything. Your deliverable is findings reported to the Queen."
@@ -5823,24 +5834,40 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
     }
 
     /// Write a task file for a worker (ACTIVE when pre-seeded with a task, otherwise STANDBY)
-    fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>) -> Result<PathBuf, String> {
+    fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>, read_only: bool) -> Result<PathBuf, String> {
         let status = initial_task.map(|_| "ACTIVE");
-        Self::write_task_file_with_status(worktree_path, worker_index, initial_task, status)
+        Self::write_task_file_with_status(worktree_path, worker_index, initial_task, status, read_only)
     }
 
-    /// Write a task file with an optional status override (used for sequential spawning)
+    /// Write a task file with an optional status override (used for sequential spawning).
+    /// `read_only` => research worker: read-only scope + role constraints (no
+    /// implementation, no project mutation), matching build_worker_prompt.
     fn write_task_file_with_status(
         worktree_path: &Path,
         worker_index: u8,
         initial_task: Option<&str>,
         status: Option<&str>,
+        read_only: bool,
     ) -> Result<PathBuf, String> {
         let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
         let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
-        let scope_block = Self::scope_block(".");
+        let scope_block = if read_only {
+            Self::scope_block_read_only()
+        } else {
+            Self::scope_block(".")
+        };
+        let role_constraints = if read_only {
+            "- **RESEARCHER (READ-ONLY)**: Investigate and synthesize; you have NO authority to implement, edit, or create project files.
+- **SCOPE**: Stay within your assigned research sub-question.
+- **NO MUTATION**: No code changes, no commits, no branches. Report findings to the Queen via the conversation API."
+        } else {
+            "- **EXECUTOR**: You have full authority to implement and fix issues.
+- **SCOPE**: Stay within your assigned domain/specialization.
+- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate."
+        };
         let status = status.unwrap_or("STANDBY");
 
         let task_content = if let Some(task) = initial_task {
@@ -5857,9 +5884,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
 
 ## Role Constraints
 
-- **EXECUTOR**: You have full authority to implement and fix issues.
-- **SCOPE**: Stay within your assigned domain/specialization.
-- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
+{role_constraints}
 
 {scope_block}
 
@@ -5880,6 +5905,7 @@ Last updated: {timestamp}
 ",
             worker_index = worker_index,
             status = status,
+            role_constraints = role_constraints,
             scope_block = scope_block,
             task_content = task_content,
             timestamp = timestamp
@@ -6313,9 +6339,15 @@ Last updated: {timestamp}
                 Some(&worker_cwd),
             );
 
-            // Write task file for this worker (STANDBY or with initial task)
+            // Write task file for this worker (STANDBY or with initial task).
+            // Researcher workers get a read-only task file (no implementation authority).
+            let worker_read_only = worker_config
+                .role
+                .as_ref()
+                .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+                .unwrap_or(false);
             if let Err(err) =
-                Self::write_task_file(Path::new(&worker_cwd), index, worker_config.initial_prompt.as_deref())
+                Self::write_task_file(Path::new(&worker_cwd), index, worker_config.initial_prompt.as_deref(), worker_read_only)
             {
                 self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
                 return Err(err);
@@ -10288,6 +10320,41 @@ mod tests {
         assert!(prompt.contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
         assert!(prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:"));
         assert!(!prompt.contains(r#""specialization": "api", "cli": "claude""#));
+    }
+
+    #[test]
+    fn research_worker_surfaces_are_read_only() {
+        let session_id = "session-research-readonly";
+        let worktree_path =
+            PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
+        let _ = std::fs::create_dir_all(&worktree_path);
+
+        let cfg = AgentConfig {
+            role: Some(WorkerRole::new("researcher", "Researcher", "claude")),
+            ..AgentConfig::default()
+        };
+
+        // Worker prompt: read-only framing, no EXECUTOR, no learnings POST.
+        let prompt = SessionController::build_worker_prompt(1, &cfg, "queen", session_id);
+        assert!(prompt.contains("RESEARCHER"));
+        assert!(prompt.contains("Read-Only"));
+        assert!(!prompt.contains("## Your Role: EXECUTOR"));
+        assert!(!prompt.contains("Learnings Protocol (MANDATORY)"));
+
+        // Task file (read_only=true): read-only role constraints, no EXECUTOR.
+        let task_path = SessionController::write_task_file_with_status(
+            &worktree_path,
+            1,
+            Some("investigate the sub-question"),
+            Some("ACTIVE"),
+            true,
+        )
+        .expect("write research task file");
+        let task = std::fs::read_to_string(&task_path).unwrap();
+        assert!(task.contains("RESEARCHER (READ-ONLY)"));
+        assert!(!task.contains("EXECUTOR"));
+
+        let _ = std::fs::remove_dir_all(format!(".hive-manager/worktrees/{session_id}"));
     }
 
     #[test]
