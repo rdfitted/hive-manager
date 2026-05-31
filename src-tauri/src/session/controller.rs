@@ -7467,6 +7467,11 @@ Last updated: {timestamp}
             index,
             worker_config.initial_prompt.as_deref(),
             Some("ACTIVE"),
+            worker_config
+                .role
+                .as_ref()
+                .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+                .unwrap_or(false),
         )
         .map_err(|err| {
             Self::rollback_worker_launch_artifacts(
@@ -9104,6 +9109,11 @@ Last updated: {timestamp}
             Path::new(&worker_cwd),
             worker_index,
             config_with_role.initial_prompt.as_deref(),
+            config_with_role
+                .role
+                .as_ref()
+                .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+                .unwrap_or(false),
         ) {
             Ok(task_file) => task_file,
             Err(err) => {
@@ -10392,6 +10402,7 @@ mod tests {
             1,
             Some("Test task"),
             Some("ACTIVE"),
+            false,
         )
         .expect("write task file");
         let task_file = std::fs::read_to_string(&task_file_path).expect("read task file");
