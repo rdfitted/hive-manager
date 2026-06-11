@@ -122,8 +122,14 @@
     }
   }
 
-  function handleDialogKeydown(event: KeyboardEvent) {
+  function handleCloseDialogKeydown(event: KeyboardEvent) {
     event.stopPropagation();
+    if (event.key === 'Escape') dismissCloseConfirm();
+  }
+
+  function handleForceFailDialogKeydown(event: KeyboardEvent) {
+    event.stopPropagation();
+    if (event.key === 'Escape') dismissForceFailConfirm();
   }
 
   // Operator controls — use HTTP API (Tauri commands not yet registered)
@@ -302,7 +308,7 @@
           <div
             class="confirm-dialog"
             onclick={(e) => e.stopPropagation()}
-            onkeydown={handleDialogKeydown}
+            onkeydown={handleCloseDialogKeydown}
             role="dialog"
             aria-modal="true"
             tabindex="-1"
@@ -330,7 +336,7 @@
           <div
             class="confirm-dialog"
             onclick={(e) => e.stopPropagation()}
-            onkeydown={handleDialogKeydown}
+            onkeydown={handleForceFailDialogKeydown}
             role="dialog"
             aria-modal="true"
             tabindex="-1"

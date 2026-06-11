@@ -52,7 +52,7 @@
       aria-label="Keyboard shortcuts"
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
+      onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') onClose(); }}
     >
       <div class="dialog-header">
         <span class="dialog-icon"><Keyboard size={18} weight="light" /></span>

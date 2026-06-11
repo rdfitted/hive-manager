@@ -113,20 +113,21 @@
     showAddWorkerDialog = false;
   }
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts (Ctrl on Windows/Linux, Cmd on macOS)
   function handleKeydown(event: KeyboardEvent) {
+    const mod = event.ctrlKey || event.metaKey;
     // Ctrl+B to toggle the left sidebar
-    if (event.ctrlKey && event.key === 'b') {
+    if (mod && event.key === 'b') {
       event.preventDefault();
       layout.toggleLeft();
     }
     // Ctrl+J to toggle the right panel
-    if (event.ctrlKey && event.key === 'j') {
+    if (mod && event.key === 'j') {
       event.preventDefault();
       layout.toggleRight();
     }
     // Ctrl+/ to toggle the shortcuts overlay; Esc closes it
-    if (event.ctrlKey && event.key === '/') {
+    if (mod && event.key === '/') {
       event.preventDefault();
       showShortcuts = !showShortcuts;
     }

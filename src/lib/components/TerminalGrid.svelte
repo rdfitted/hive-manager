@@ -52,16 +52,24 @@
   {#each agents as agent (agent.id)}
     {@const status = serdeEnumVariantName(agent.status)}
     {@const roleLabel = getRoleLabel(agent)}
-    <!-- Selection is a convenience; the header/terminal inside remain keyboard-reachable -->
+    <!-- Container click is a convenience; the header below carries the accessible
+         button semantics so we don't nest interactive roles around the terminal. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
       class="terminal-item"
       class:focused={agent.id === focusedAgentId}
-      role="button"
-      tabindex="0"
       onclick={() => onSelect(agent.id)}
-      onkeydown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) { e.preventDefault(); onSelect(agent.id); } }}
     >
-      <div class="terminal-header" style:border-top-color={$activeSession?.color || 'transparent'} style:border-top-width={$activeSession?.color ? '3px' : '0'}>
+      <div
+        class="terminal-header"
+        role="button"
+        tabindex="0"
+        aria-label={`Focus ${roleLabel}`}
+        onclick={() => onSelect(agent.id)}
+        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(agent.id); } }}
+        style:border-top-color={$activeSession?.color || 'transparent'}
+        style:border-top-width={$activeSession?.color ? '3px' : '0'}
+      >
         <span class="role-label" title={roleLabel}>{roleLabel}</span>
         <div class="terminal-meta">
           <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>

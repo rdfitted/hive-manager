@@ -540,7 +540,7 @@
     <div
       class="confirm-dialog"
       onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
+      onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') dismissCloseConfirm(); }}
       role="dialog"
       aria-modal="true"
       tabindex="-1"

@@ -45,6 +45,7 @@
         <CaretLeft size={14} weight="light" />
       </button>
       {#each TABS as tab (tab.id)}
+        {@const Icon = tab.icon}
         <button
           type="button"
           class="rail-button"
@@ -53,7 +54,7 @@
           title={tab.label}
           aria-label={tab.label}
         >
-          <tab.icon size={18} weight="light" />
+          <Icon size={18} weight="light" />
         </button>
       {/each}
     </div>
@@ -61,6 +62,7 @@
     <div class="panel-header">
       <nav class="tab-bar" aria-label="Panel tabs">
         {#each TABS as tab (tab.id)}
+          {@const Icon = tab.icon}
           <button
             type="button"
             class="tab"
@@ -68,7 +70,7 @@
             onclick={() => layout.setRightTab(tab.id)}
             title={tab.label}
           >
-            <tab.icon size={15} weight="light" />
+            <Icon size={15} weight="light" />
             <span class="tab-label">{tab.label}</span>
           </button>
         {/each}
