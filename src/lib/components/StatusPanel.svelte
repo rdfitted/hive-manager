@@ -1,14 +1,11 @@
 <script lang="ts">
-  import { CaretDown, CaretRight, ChartBar, Warning } from 'phosphor-svelte';
+  import { CaretDown, CaretRight, Warning } from 'phosphor-svelte';
   import { activeSession, activeAgents, sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import { apiUrl } from '$lib/config';
-  import AgentTree from './AgentTree.svelte';
   import QaFeedbackPanel from './QaFeedbackPanel.svelte';
   import { invoke } from '@tauri-apps/api/core';
 
-  let collapsed = $state(true);
-  let agentsCollapsed = $state(false);
   let alertsCollapsed = $state(false);
   let infoCollapsed = $state(true);
   let showCloseConfirm = $state<string | null>(null);
@@ -179,22 +176,7 @@
   }
 </script>
 
-<aside class="status-panel" class:collapsed>
-  <button class="panel-header" onclick={() => collapsed = !collapsed} title={collapsed ? "Expand Status" : "Collapse Status"}>
-    <span class="panel-icon">
-      <ChartBar size={18} weight="light" />
-    </span>
-    {#if !collapsed}
-      <h2>Status</h2>
-      {#if totalMilestones > 0}
-        <div class="milestone-badge" title="Milestone Progress">
-          {completedMilestones}/{totalMilestones}
-        </div>
-      {/if}
-    {/if}
-  </button>
-
-  {#if !collapsed}
+<div class="status-content">
     {#if !$activeSession}
       <div class="empty-state">
         <p>No session selected</p>
@@ -207,24 +189,6 @@
             <QaFeedbackPanel />
           </section>
         {/if}
-
-        <section class="section">
-          <button class="section-header" onclick={() => agentsCollapsed = !agentsCollapsed}>
-            <span class="chevron" class:collapsed={agentsCollapsed}>
-              {#if agentsCollapsed}
-                <CaretRight size={12} weight="light" />
-              {:else}
-                <CaretDown size={12} weight="light" />
-              {/if}
-            </span>
-            <h3>Agents ({$activeAgents.length})</h3>
-          </button>
-          {#if !agentsCollapsed}
-            <div class="section-content">
-              <AgentTree agents={$activeAgents} selectedId={null} />
-            </div>
-          {/if}
-        </section>
 
         <section class="section">
           <button class="section-header" onclick={() => alertsCollapsed = !alertsCollapsed}>
@@ -291,6 +255,12 @@
                   {getSessionStateText($activeSession.state)}
                 </span>
               </div>
+              {#if totalMilestones > 0}
+                <div class="info-item">
+                  <span class="info-label">Milestones</span>
+                  <span class="info-value">{completedMilestones}/{totalMilestones}</span>
+                </div>
+              {/if}
             </div>
           {/if}
         </section>
@@ -377,61 +347,16 @@
         </div>
       {/if}
     {/if}
-  {/if}
-</aside>
+</div>
 
 <style>
-  .status-panel {
-    width: 240px;
-    min-width: 240px;
+  .status-content {
+    position: relative;
+    flex: 1;
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg-surface);
-    border-left: 1px solid var(--border-structural);
-    transition: width 0.2s ease, min-width 0.2s ease;
-  }
-
-  .status-panel.collapsed {
-    width: 52px;
-    min-width: 52px;
-  }
-
-  .panel-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 16px;
-    border-bottom: 1px solid var(--border-structural);
-    background: none;
-    border-left: none;
-    border-right: none;
-    border-top: none;
-    cursor: pointer;
-    width: 100%;
-    text-align: left;
-  }
-
-  .panel-header:hover {
-    background: var(--bg-elevated);
-  }
-
-  .panel-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    color: var(--accent-cyan);
-  }
-
-  .panel-header h2 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
+    overflow: hidden;
   }
 
   .panel-content {
@@ -500,11 +425,6 @@
 
   .chevron.collapsed {
     transform: rotate(-90deg);
-  }
-
-  .section-content {
-    max-height: 300px;
-    overflow-y: auto;
   }
 
   .alerts {
