@@ -4,6 +4,7 @@
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
+  import ShortcutsOverlay from '$lib/components/ShortcutsOverlay.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
   import FusionPanel from '$lib/components/FusionPanel.svelte';
   import SessionOverview from '$lib/components/session/SessionOverview.svelte';
@@ -13,6 +14,7 @@
   import { layout } from '$lib/stores/layout';
 
   let showAddWorkerDialog = $state(false);
+  let showShortcuts = $state(false);
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
@@ -123,6 +125,14 @@
       event.preventDefault();
       layout.toggleRight();
     }
+    // Ctrl+/ to toggle the shortcuts overlay; Esc closes it
+    if (event.ctrlKey && event.key === '/') {
+      event.preventDefault();
+      showShortcuts = !showShortcuts;
+    }
+    if (event.key === 'Escape' && showShortcuts) {
+      showShortcuts = false;
+    }
     // Navigate agents with arrow keys — skip when user is typing in inputs, textareas,
     // contenteditable regions, or terminal panes so we don't hijack their keystrokes.
     const target = event.target as HTMLElement | null;
@@ -191,6 +201,7 @@
             </div>
           </div>
           <p class="cta">Click <strong>New Session</strong> in the sidebar to get started</p>
+          <p class="cta hint">Press <strong>Ctrl+/</strong> for keyboard shortcuts</p>
         </div>
       </div>
     {:else}
@@ -214,6 +225,7 @@
 </div>
 
 <AddWorkerDialog bind:open={showAddWorkerDialog} on:close={closeAddWorkerDialog} />
+<ShortcutsOverlay open={showShortcuts} onClose={() => showShortcuts = false} />
 <UpdateChecker />
 
 <style>
@@ -306,6 +318,12 @@
 
   .cta strong {
     color: var(--color-accent);
+  }
+
+  .cta.hint {
+    margin-top: 8px;
+    font-size: 12px;
+    opacity: 0.8;
   }
 
   .terminal-area {
