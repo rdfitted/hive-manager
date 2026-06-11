@@ -52,10 +52,14 @@
   {#each agents as agent (agent.id)}
     {@const status = serdeEnumVariantName(agent.status)}
     {@const roleLabel = getRoleLabel(agent)}
-    <div 
-      class="terminal-item" 
+    <!-- Selection is a convenience; the header/terminal inside remain keyboard-reachable -->
+    <div
+      class="terminal-item"
       class:focused={agent.id === focusedAgentId}
+      role="button"
+      tabindex="0"
       onclick={() => onSelect(agent.id)}
+      onkeydown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) { e.preventDefault(); onSelect(agent.id); } }}
     >
       <div class="terminal-header" style:border-top-color={$activeSession?.color || 'transparent'} style:border-top-width={$activeSession?.color ? '3px' : '0'}>
         <span class="role-label" title={roleLabel}>{roleLabel}</span>
