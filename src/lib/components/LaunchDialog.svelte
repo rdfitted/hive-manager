@@ -546,7 +546,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             />
           </div>
           <div class="form-group flex-1">
-            <label>Session Color</label>
+            <span class="group-label">Session Color</span>
             <div class="color-picker-inline">
               {#each COLORS as color}
                 <button
@@ -992,7 +992,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     margin-bottom: 16px;
   }
 
-  .form-group label {
+  .form-group label,
+  .form-group .group-label {
     display: block;
     margin-bottom: 6px;
     font-size: 13px;
@@ -1174,15 +1175,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 11px;
   }
 
-  .workers-list,
-  .planners-list {
+  .workers-list {
     display: flex;
     flex-direction: column;
     gap: 12px;
   }
 
-  .worker-card,
-  .planner-card {
+  .worker-card {
     padding: 12px;
     background: var(--bg-surface);
     border: 1px solid var(--border-structural);
@@ -1191,14 +1190,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .qa-worker-card {
     border-left: 3px solid var(--accent-cyan);
-  }
-
-  .worker-mini-card {
-    padding: 10px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    margin-top: 8px;
   }
 
   .card-header {
@@ -1255,12 +1246,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 10px;
   }
 
-  .planner-workers {
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border-structural);
-  }
-
   .field {
     display: flex;
     flex-direction: column;
@@ -1272,21 +1257,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
-  }
-
-  .field input {
-    width: 100%;
-    padding: 8px 10px;
-    font-size: 13px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-  }
-
-  .field input:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
   }
 
   .dialog-actions {

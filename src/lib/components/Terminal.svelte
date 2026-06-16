@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { CheckSquare, ClipboardText, FileText, X } from 'phosphor-svelte';
-  import { onMount, onDestroy } from 'svelte';
+  import { ArrowDown, Broom, CaretDown, CaretUp, CheckSquare, ClipboardText, FileText, MagnifyingGlass, X } from 'phosphor-svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { Terminal as XTerm } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebglAddon } from '@xterm/addon-webgl';
@@ -10,6 +10,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
   import { activeAgents } from '$lib/stores/sessions';
+  import { settings } from '$lib/stores/settings';
   import '@xterm/xterm/css/xterm.css';
 
   interface Props {
@@ -24,6 +25,7 @@
   let term: XTerm | null = null;
   let fitAddon: FitAddon | null = null;
   let webglAddon: WebglAddon | null = null;
+  let searchAddon: SearchAddon | null = null;
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenDragDrop: UnlistenFn | null = null;
@@ -40,6 +42,17 @@
   let hasSelection = $state(false);
   let isDragActive = $state(false);
   let isWindows = $state(false);
+
+  // Find bar state
+  let showSearch = $state(false);
+  let searchQuery = $state('');
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+  let searchResultIndex = $state(-1);
+  let searchResultCount = $state(0);
+
+  const FONT_SIZE_MIN = 8;
+  const FONT_SIZE_MAX = 28;
+  const FONT_SIZE_DEFAULT = 14;
 
   // Track agent status from store
   let agent = $derived($activeAgents.find(a => a.id === agentId));
@@ -221,6 +234,114 @@
     term?.focus();
   }
 
+  // Handle resize. Guard: skip fit if terminal is hidden (visibility: hidden returns
+  // 0x0 dimensions, corrupting xterm's scroll state) unless force-fitting.
+  function handleResize(forceFit = false) {
+    if (fitAddon && term) {
+      if (!forceFit) {
+        const rect = terminalContainer.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+          // Terminal is hidden, skip fit to prevent corruption
+          return;
+        }
+      }
+      try {
+        fitAddon.fit();
+        const dims = fitAddon.proposeDimensions();
+        if (dims && dims.cols > 0 && dims.rows > 0) {
+          if (dims.cols !== lastDims.cols || dims.rows !== lastDims.rows) {
+            lastDims = { cols: dims.cols, rows: dims.rows };
+            invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to fit terminal:', e);
+      }
+    }
+  }
+
+  // Live-apply persisted font preferences to the running terminal.
+  $effect(() => {
+    const { fontSize, fontFamily } = $settings;
+    if (term && (term.options.fontSize !== fontSize || term.options.fontFamily !== fontFamily)) {
+      term.options.fontSize = fontSize;
+      term.options.fontFamily = fontFamily;
+      handleResize();
+    }
+  });
+
+  function adjustFontSize(delta: number) {
+    const current = $settings.fontSize ?? FONT_SIZE_DEFAULT;
+    const next = Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, current + delta));
+    settings.update({ fontSize: next });
+  }
+
+  function resetFontSize() {
+    settings.update({ fontSize: FONT_SIZE_DEFAULT });
+  }
+
+  // ── Find-in-terminal (SearchAddon) ────────────────────────────────
+  const searchDecorations = {
+    matchBackground: '#33467c',
+    matchOverviewRuler: '#7aa2f7',
+    activeMatchBackground: '#e0af68',
+    activeMatchColorOverviewRuler: '#e0af68',
+  };
+
+  async function openSearch() {
+    showSearch = true;
+    closeContextMenu();
+    await tick();
+    searchInputEl?.focus();
+    searchInputEl?.select();
+  }
+
+  function closeSearch() {
+    showSearch = false;
+    searchResultIndex = -1;
+    searchResultCount = 0;
+    searchAddon?.clearDecorations();
+    term?.focus();
+  }
+
+  function runSearch(direction: 'next' | 'previous', incremental = false) {
+    if (!searchAddon || !searchQuery) {
+      searchAddon?.clearDecorations();
+      searchResultIndex = -1;
+      searchResultCount = 0;
+      return;
+    }
+    const options = { incremental, decorations: searchDecorations };
+    if (direction === 'next') {
+      searchAddon.findNext(searchQuery, options);
+    } else {
+      searchAddon.findPrevious(searchQuery, options);
+    }
+  }
+
+  function handleSearchKeydown(event: KeyboardEvent) {
+    event.stopPropagation();
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      runSearch(event.shiftKey ? 'previous' : 'next');
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSearch();
+    }
+  }
+
+  function handleClearTerminal() {
+    term?.clear();
+    closeContextMenu();
+    term?.focus();
+  }
+
+  function handleScrollToBottom() {
+    term?.scrollToBottom();
+    closeContextMenu();
+    term?.focus();
+  }
+
   function handleContextMenu(event: MouseEvent) {
     event.preventDefault();
     hasSelection = !!(term?.getSelection());
@@ -346,8 +467,8 @@
     // Create terminal instance
     term = new XTerm({
       theme: tokyoNightTheme,
-      fontFamily: 'Cascadia Code, Consolas, monospace',
-      fontSize: 14,
+      fontFamily: $settings.fontFamily,
+      fontSize: $settings.fontSize,
       lineHeight: 1.2,
       cursorBlink: true,
       cursorStyle: 'block',
@@ -359,8 +480,12 @@
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
 
-    const searchAddon = new SearchAddon();
+    searchAddon = new SearchAddon();
     term.loadAddon(searchAddon);
+    searchAddon.onDidChangeResults((results) => {
+      searchResultIndex = results?.resultIndex ?? -1;
+      searchResultCount = results?.resultCount ?? 0;
+    });
 
     // Open terminal in container
     term.open(terminalContainer);
@@ -396,6 +521,26 @@
     // Custom key handler for special keys
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
+
+      // Ctrl+F opens the find bar
+      if (event.ctrlKey && !event.shiftKey && (event.key === 'f' || event.key === 'F')) {
+        openSearch();
+        return false;
+      }
+
+      // Ctrl+= / Ctrl++ / Ctrl+- / Ctrl+0 adjust terminal font size
+      if (event.ctrlKey && (event.key === '=' || event.key === '+')) {
+        adjustFontSize(1);
+        return false;
+      }
+      if (event.ctrlKey && event.key === '-') {
+        adjustFontSize(-1);
+        return false;
+      }
+      if (event.ctrlKey && event.key === '0') {
+        resetFontSize();
+        return false;
+      }
 
       // Shift+Enter inserts newline without submitting
       // Use bracketed paste mode so CLIs treat it as literal text, not command submission
@@ -487,36 +632,6 @@
       }
     });
 
-    // Handle resize
-    // Guard: skip fit if terminal is hidden (visibility: hidden returns 0x0 dimensions,
-    // corrupting xterm's scroll state). offsetParent is null when element or any ancestor
-    // has display:none, but visibility:hidden elements still have offsetParent.
-    // We check both offsetParent AND getBoundingClientRect to catch visibility:hidden.
-    const handleResize = (forceFit = false) => {
-      if (fitAddon && term) {
-        // Skip resize if terminal is hidden unless force-fitting (e.g., after becoming visible)
-        if (!forceFit) {
-          const rect = terminalContainer.getBoundingClientRect();
-          if (rect.width === 0 || rect.height === 0) {
-            // Terminal is hidden, skip fit to prevent corruption
-            return;
-          }
-        }
-        try {
-          fitAddon.fit();
-          const dims = fitAddon.proposeDimensions();
-          if (dims && dims.cols > 0 && dims.rows > 0) {
-            if (dims.cols !== lastDims.cols || dims.rows !== lastDims.rows) {
-              lastDims = { cols: dims.cols, rows: dims.rows };
-              invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
-            }
-          }
-        } catch (e) {
-          console.error('Failed to fit terminal:', e);
-        }
-      }
-    };
-
     resizeObserver = new ResizeObserver(() => {
       if (resizeTimeout) clearTimeout(resizeTimeout);
       resizeTimeout = setTimeout(handleResize, 100);
@@ -550,7 +665,7 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 <div
   class="terminal-wrapper"
   bind:this={terminalContainer}
@@ -570,6 +685,38 @@
     </div>
   {/if}
 
+  {#if showSearch}
+    <div class="search-bar" role="search">
+      <span class="search-icon">
+        <MagnifyingGlass size={14} weight="light" />
+      </span>
+      <input
+        type="text"
+        bind:this={searchInputEl}
+        bind:value={searchQuery}
+        oninput={() => runSearch('next', true)}
+        onkeydown={handleSearchKeydown}
+        placeholder="Find in terminal"
+        aria-label="Find in terminal"
+        spellcheck="false"
+      />
+      <span class="search-count" class:no-results={searchQuery !== '' && searchResultCount === 0}>
+        {#if searchQuery !== ''}
+          {searchResultCount > 0 ? `${searchResultIndex + 1}/${searchResultCount}` : 'No results'}
+        {/if}
+      </span>
+      <button class="search-btn" onclick={() => runSearch('previous')} title="Previous match (Shift+Enter)" aria-label="Previous match" type="button">
+        <CaretUp size={14} weight="light" />
+      </button>
+      <button class="search-btn" onclick={() => runSearch('next')} title="Next match (Enter)" aria-label="Next match" type="button">
+        <CaretDown size={14} weight="light" />
+      </button>
+      <button class="search-btn" onclick={closeSearch} title="Close (Esc)" aria-label="Close find bar" type="button">
+        <X size={14} weight="light" />
+      </button>
+    </div>
+  {/if}
+
   {#if isWaiting}
     <div class="quick-response-overlay">
       <div class="quick-response-bar">
@@ -583,7 +730,7 @@
   {/if}
 
   {#if showContextMenu}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
       class="context-menu"
       style="left: {contextMenuX}px; top: {contextMenuY}px;"
@@ -602,6 +749,26 @@
         </span>
         Paste
         <span class="context-shortcut">Ctrl+V</span>
+      </button>
+      <div class="context-divider"></div>
+      <button class="context-item" onclick={openSearch}>
+        <span class="context-icon">
+          <MagnifyingGlass size={14} weight="light" />
+        </span>
+        Find
+        <span class="context-shortcut">Ctrl+F</span>
+      </button>
+      <button class="context-item" onclick={handleScrollToBottom}>
+        <span class="context-icon">
+          <ArrowDown size={14} weight="light" />
+        </span>
+        Scroll to Bottom
+      </button>
+      <button class="context-item" onclick={handleClearTerminal}>
+        <span class="context-icon">
+          <Broom size={14} weight="light" />
+        </span>
+        Clear Terminal
       </button>
       <div class="context-divider"></div>
       <button class="context-item" onclick={handleSelectAll}>
@@ -679,6 +846,73 @@
     color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.4;
+  }
+
+  .search-bar {
+    position: absolute;
+    top: 8px;
+    right: 16px;
+    z-index: 15;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .search-icon {
+    display: flex;
+    align-items: center;
+    color: var(--text-secondary);
+    padding-left: 2px;
+  }
+
+  .search-bar input {
+    width: 180px;
+    background: var(--bg-void);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 12px;
+    padding: 4px 8px;
+    outline: none;
+  }
+
+  .search-bar input:focus {
+    border-color: var(--accent-cyan);
+  }
+
+  .search-count {
+    min-width: 56px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .search-count.no-results {
+    color: var(--status-error);
+  }
+
+  .search-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .search-btn:hover {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
   }
 
   .quick-response-overlay {

@@ -1,23 +1,20 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
-  import { ChartBar, ChatCenteredText, Crown, GearSix, TreeStructure } from 'phosphor-svelte';
+  import { ChartBar, ChatCenteredText, Crown, GearSix } from 'phosphor-svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
-  import StatusPanel from '$lib/components/StatusPanel.svelte';
-  import AgentTree from '$lib/components/AgentTree.svelte';
-  import RightDrawer from '$lib/components/RightDrawer.svelte';
-  import QueenControls from '$lib/components/QueenControls.svelte';
+  import RightPanel from '$lib/components/RightPanel.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
+  import ShortcutsOverlay from '$lib/components/ShortcutsOverlay.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
   import FusionPanel from '$lib/components/FusionPanel.svelte';
   import SessionOverview from '$lib/components/session/SessionOverview.svelte';
   import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
+  import { layout } from '$lib/stores/layout';
 
-  let showStatusPanel = $state(true);
-  let showCoordinationPanel = $state(true);
   let showAddWorkerDialog = $state(false);
-  let hierarchyCollapsed = $state(true);
+  let showShortcuts = $state(false);
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
@@ -108,14 +105,6 @@
     await sessions.launchFusion(config);
   }
 
-  function toggleStatusPanel() {
-    showStatusPanel = !showStatusPanel;
-  }
-
-  function toggleCoordinationPanel() {
-    showCoordinationPanel = !showCoordinationPanel;
-  }
-
   function openAddWorkerDialog() {
     showAddWorkerDialog = true;
   }
@@ -124,27 +113,26 @@
     showAddWorkerDialog = false;
   }
 
-  function handleAgentSelect(e: CustomEvent<string>) {
-    ui.setFocusedAgent(e.detail);
-    ui.setSelectedAgent(e.detail);
-  }
-
-  // Keyboard shortcuts
+  // Keyboard shortcuts (Ctrl on Windows/Linux, Cmd on macOS)
   function handleKeydown(event: KeyboardEvent) {
-    // Ctrl+J to toggle status panel
-    if (event.ctrlKey && event.key === 'j') {
+    const mod = event.ctrlKey || event.metaKey;
+    // Ctrl+B to toggle the left sidebar
+    if (mod && event.key === 'b') {
       event.preventDefault();
-      toggleStatusPanel();
+      layout.toggleLeft();
     }
-    // Ctrl+K to toggle coordination panel
-    if (event.ctrlKey && event.key === 'k') {
+    // Ctrl+J to toggle the right panel
+    if (mod && event.key === 'j') {
       event.preventDefault();
-      toggleCoordinationPanel();
+      layout.toggleRight();
     }
-    // Ctrl+N for new session
-    if (event.ctrlKey && event.key === 'n') {
+    // Ctrl+/ to toggle the shortcuts overlay; Esc closes it
+    if (mod && event.key === '/') {
       event.preventDefault();
-      // Focus the new session button - handled by SessionSidebar
+      showShortcuts = !showShortcuts;
+    }
+    if (event.key === 'Escape' && showShortcuts) {
+      showShortcuts = false;
     }
     // Navigate agents with arrow keys — skip when user is typing in inputs, textareas,
     // contenteditable regions, or terminal panes so we don't hijack their keystrokes.
@@ -168,8 +156,6 @@
       }
     }
   }
-
-  let focusedAgent = $derived($activeAgents.find(a => a.id === focusedAgentId));
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -180,32 +166,8 @@
     onLaunchHiveV2={handleLaunchHiveV2}
     onLaunchSwarm={handleLaunchSwarm}
     onLaunchFusion={handleLaunchFusion}
+    onOpenAddWorker={openAddWorkerDialog}
   />
-
-  {#if $activeSession}
-    <aside class="hierarchy-sidebar" class:collapsed={hierarchyCollapsed}>
-      <button class="sidebar-header" onclick={() => hierarchyCollapsed = !hierarchyCollapsed} title={hierarchyCollapsed ? "Expand Hierarchy" : "Collapse Hierarchy"}>
-        <span class="sidebar-icon">
-          <TreeStructure size={18} weight="light" />
-        </span>
-        {#if !hierarchyCollapsed}
-          <h2>Hierarchy</h2>
-        {/if}
-      </button>
-      {#if !hierarchyCollapsed}
-        <div class="sidebar-content">
-          <AgentTree
-            agents={$activeAgents}
-            selectedId={focusedAgentId}
-            on:select={handleAgentSelect}
-          />
-        </div>
-        <div class="queen-controls-section">
-          <QueenControls on:openAddWorker={openAddWorkerDialog} />
-        </div>
-      {/if}
-    </aside>
-  {/if}
 
   <main class="main-content">
     {#if !$activeSession}
@@ -240,6 +202,7 @@
             </div>
           </div>
           <p class="cta">Click <strong>New Session</strong> in the sidebar to get started</p>
+          <p class="cta hint">Press <strong>Ctrl+/</strong> for keyboard shortcuts</p>
         </div>
       </div>
     {:else}
@@ -257,18 +220,13 @@
     {/if}
   </main>
 
-  {#if showStatusPanel}
-    <StatusPanel />
-  {/if}
-
-  {#if showCoordinationPanel && $activeSession}
-    <aside class="coordination-sidebar">
-      <RightDrawer />
-    </aside>
+  {#if $activeSession}
+    <RightPanel />
   {/if}
 </div>
 
 <AddWorkerDialog bind:open={showAddWorkerDialog} on:close={closeAddWorkerDialog} />
+<ShortcutsOverlay open={showShortcuts} onClose={() => showShortcuts = false} />
 <UpdateChecker />
 
 <style>
@@ -289,65 +247,6 @@
     background: var(--color-bg);
     color: var(--color-text);
     font-family: var(--font-body);
-  }
-
-  .hierarchy-sidebar {
-    width: 200px;
-    min-width: 200px;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    background: var(--color-surface);
-    border-right: 1px solid var(--color-border);
-    transition: width 0.2s ease, min-width 0.2s ease;
-  }
-
-  .hierarchy-sidebar.collapsed {
-    width: 52px;
-    min-width: 52px;
-  }
-
-  .hierarchy-sidebar .sidebar-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 16px;
-    border-bottom: 1px solid var(--color-border);
-    background: none;
-    border-left: none;
-    border-right: none;
-    border-top: none;
-    cursor: pointer;
-    width: 100%;
-    text-align: left;
-  }
-
-  .hierarchy-sidebar .sidebar-header:hover {
-    background: var(--color-surface-hover);
-  }
-
-  .hierarchy-sidebar .sidebar-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    color: var(--accent-cyan);
-  }
-
-  .hierarchy-sidebar .sidebar-header h2 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    white-space: nowrap;
-  }
-
-  .hierarchy-sidebar .sidebar-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 8px;
   }
 
   .main-content {
@@ -422,6 +321,12 @@
     color: var(--color-accent);
   }
 
+  .cta.hint {
+    margin-top: 8px;
+    font-size: 12px;
+    opacity: 0.8;
+  }
+
   .terminal-area {
     flex: 1;
     position: relative;
@@ -435,29 +340,5 @@
     align-items: center;
     justify-content: center;
     color: var(--color-text-muted);
-  }
-
-  .queen-controls-section {
-    border-top: 1px solid var(--color-border);
-    padding: 8px;
-  }
-
-  .coordination-sidebar {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    background: var(--color-surface);
-    border-left: 1px solid var(--color-border);
-  }
-
-  .coordination-sidebar :global(.right-drawer) {
-    width: 320px;
-    min-width: 320px;
-    transition: width 0.2s ease, min-width 0.2s ease;
-  }
-
-  .coordination-sidebar :global(.right-drawer.collapsed) {
-    width: 52px;
-    min-width: 52px;
   }
 </style>
