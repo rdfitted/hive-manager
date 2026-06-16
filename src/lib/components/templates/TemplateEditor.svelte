@@ -117,23 +117,23 @@
                     
                     <div class="form-row">
                         <div class="form-group">
-                            <label>Role</label>
-                            <input type="text" bind:value={cell.role} placeholder="e.g. backend" />
+                            <label for="cell-role-{i}">Role</label>
+                            <input id="cell-role-{i}" type="text" bind:value={cell.role} placeholder="e.g. backend" />
                         </div>
                         <div class="form-group">
-                            <label>CLI</label>
-                            <input type="text" bind:value={cell.cli} placeholder="e.g. claude" />
+                            <label for="cell-cli-{i}">CLI</label>
+                            <input id="cell-cli-{i}" type="text" bind:value={cell.cli} placeholder="e.g. claude" />
                         </div>
                     </div>
 
                     <div class="form-group">
-                        <label>Model (optional)</label>
-                        <input type="text" bind:value={cell.model} placeholder="e.g. opus" />
+                        <label for="cell-model-{i}">Model (optional)</label>
+                        <input id="cell-model-{i}" type="text" bind:value={cell.model} placeholder="e.g. opus" />
                     </div>
 
                     <div class="form-group">
-                        <label>Prompt Template Key</label>
-                        <input type="text" bind:value={cell.prompt_template} placeholder="e.g. backend" />
+                        <label for="cell-prompt-{i}">Prompt Template Key</label>
+                        <input id="cell-prompt-{i}" type="text" bind:value={cell.prompt_template} placeholder="e.g. backend" />
                     </div>
                 </div>
             {/each}

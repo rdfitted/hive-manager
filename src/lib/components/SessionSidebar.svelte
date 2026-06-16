@@ -1,13 +1,20 @@
 <script lang="ts">
   import { CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
-  import { sessions, activeSession, serdeEnumVariantName, type Session, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
+  import { layout, RAIL_WIDTH } from '$lib/stores/layout';
+  import { ui } from '$lib/stores/ui';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import LaunchDialog from './LaunchDialog.svelte';
+  import AgentTree from './AgentTree.svelte';
+  import QueenControls from './QueenControls.svelte';
+  import ResizeHandle from './ResizeHandle.svelte';
 
   let closingSessionId = $state<string | null>(null);
   let showCloseConfirm = $state<string | null>(null);
   let closing = $state(false);
+  let resizing = $state(false);
 
   function handleCloseSession(e: Event, sessionId: string) {
     e.stopPropagation();
@@ -37,7 +44,6 @@
       closingSessionId = null;
     }
   }
-  import LaunchDialog from './LaunchDialog.svelte';
 
   interface Props {
     onLaunch: (projectPath: string, workerCount: number, command: string, prompt?: string) => Promise<void>;
@@ -46,6 +52,7 @@
     onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
     onLaunchFusion?: (config: FusionLaunchConfig) => Promise<void>;
     onLaunchSolo?: (config: SoloLaunchConfig) => Promise<void>;
+    onOpenAddWorker?: () => void;
   }
 
   interface SessionSummary {
@@ -58,16 +65,16 @@
     state: string;
   }
 
-  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo }: Props = $props();
+  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onOpenAddWorker }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
-  let sidebarCollapsed = $state(true);
-  let activeCollapsed = $state(false);
-  let recentCollapsed = $state(true);
   let persistedSessions = $state<SessionSummary[]>([]);
   let loadingPersisted = $state(false);
   let currentDirectory = $state<string | null>(null);
+
+  let collapsed = $derived($layout.leftCollapsed);
+  let sidebarWidth = $derived(collapsed ? RAIL_WIDTH : $layout.leftWidth);
 
   onMount(async () => {
     // Get current working directory first
@@ -131,6 +138,11 @@
       event.preventDefault();
       selectSession(sessionId);
     }
+  }
+
+  function handleAgentSelect(e: CustomEvent<string>) {
+    ui.setFocusedAgent(e.detail);
+    ui.setSelectedAgent(e.detail);
   }
 
   async function handleResumeSession(sessionId: string) {
@@ -275,11 +287,23 @@
       cancelEdit();
     }
   }
+
+  /** Focus the rename input when it appears, without the a11y-flagged autofocus attribute. */
+  function focusOnMount(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
 </script>
 
-<aside class="sidebar" class:collapsed={sidebarCollapsed}>
-  <div class="sidebar-header" class:collapsed={sidebarCollapsed}>
-    <nav class="view-toggle" class:collapsed={sidebarCollapsed} aria-label="View switcher">
+<aside
+  class="sidebar"
+  class:collapsed
+  class:resizing
+  style:width={`${sidebarWidth}px`}
+  style:min-width={`${sidebarWidth}px`}
+>
+  <div class="sidebar-header" class:collapsed>
+    <nav class="view-toggle" class:collapsed aria-label="View switcher">
       {#each [
         { path: '/', icon: House, label: 'Sessions' },
         { path: '/dashboard', icon: Kanban, label: 'Dashboard' }
@@ -299,11 +323,11 @@
     <button
       type="button"
       class="collapse-chevron"
-      onclick={() => sidebarCollapsed = !sidebarCollapsed}
-      title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-      aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      onclick={() => layout.toggleLeft()}
+      title={collapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
+      aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
     >
-      {#if sidebarCollapsed}
+      {#if collapsed}
         <CaretRight size={14} weight="light" />
       {:else}
         <CaretLeft size={14} weight="light" />
@@ -311,12 +335,12 @@
     </button>
   </div>
 
-  {#if !sidebarCollapsed}
+  {#if !collapsed}
   <div class="sidebar-content">
     <section class="section">
-      <button class="section-header" onclick={() => activeCollapsed = !activeCollapsed}>
-        <span class="chevron" class:collapsed={activeCollapsed}>
-          {#if activeCollapsed}
+      <button class="section-header" onclick={() => layout.toggleSection('sessionsCollapsed')}>
+        <span class="chevron" class:collapsed={$layout.sessionsCollapsed}>
+          {#if $layout.sessionsCollapsed}
             <CaretRight size={12} weight="light" />
           {:else}
             <CaretDown size={12} weight="light" />
@@ -324,7 +348,7 @@
         </span>
         <h3>Active</h3>
       </button>
-      {#if !activeCollapsed}
+      {#if !$layout.sessionsCollapsed}
         {#if $sessions.sessions.filter(s => isActiveState(s.state)).length === 0}
           <p class="empty-state">No active sessions</p>
         {:else}
@@ -340,14 +364,19 @@
                     onkeydown={(event) => handleSessionButtonKeydown(event, session.id)}
                   >
                     {#if editingSessionId === session.id}
-                      <div class="edit-container" onclick={e => e.stopPropagation()}>
+                      <div
+                        class="edit-container"
+                        role="presentation"
+                        onclick={e => e.stopPropagation()}
+                        onkeydown={e => e.stopPropagation()}
+                      >
                         <input
                           type="text"
                           bind:value={editName}
                           onkeydown={handleKeydown}
                           placeholder="Session Name"
                           aria-label="Session Name"
-                          autofocus
+                          use:focusOnMount
                         />
                         <div class="edit-actions">
                           <button
@@ -425,9 +454,9 @@
     </section>
 
     <section class="section">
-      <button class="section-header" onclick={() => recentCollapsed = !recentCollapsed}>
-        <span class="chevron" class:collapsed={recentCollapsed}>
-          {#if recentCollapsed}
+      <button class="section-header" onclick={() => layout.toggleSection('recentCollapsed')}>
+        <span class="chevron" class:collapsed={$layout.recentCollapsed}>
+          {#if $layout.recentCollapsed}
             <CaretRight size={12} weight="light" />
           {:else}
             <CaretDown size={12} weight="light" />
@@ -435,7 +464,7 @@
         </span>
         <h3>Recent</h3>
       </button>
-      {#if !recentCollapsed}
+      {#if !$layout.recentCollapsed}
         {#if loadingPersisted}
           <p class="empty-state">Loading...</p>
         {:else if persistedSessions.length === 0}
@@ -462,17 +491,50 @@
         {/if}
       {/if}
     </section>
+
+    {#if $activeSession}
+      <section class="section">
+        <button class="section-header" onclick={() => layout.toggleSection('agentsCollapsed')}>
+          <span class="chevron" class:collapsed={$layout.agentsCollapsed}>
+            {#if $layout.agentsCollapsed}
+              <CaretRight size={12} weight="light" />
+            {:else}
+              <CaretDown size={12} weight="light" />
+            {/if}
+          </span>
+          <h3>Agents ({$activeAgents.length})</h3>
+        </button>
+        {#if !$layout.agentsCollapsed}
+          <AgentTree
+            agents={$activeAgents}
+            selectedId={$ui.focusedAgentId}
+            on:select={handleAgentSelect}
+          />
+          <div class="queen-controls-section">
+            <QueenControls on:openAddWorker={() => onOpenAddWorker?.()} />
+          </div>
+        {/if}
+      </section>
+    {/if}
   </div>
   {/if}
 
   <div class="sidebar-footer">
     <button class="launch-button" onclick={() => showLaunchDialog = true} title="New Session">
       <span class="icon">+</span>
-      {#if !sidebarCollapsed}
+      {#if !collapsed}
         New Session
       {/if}
     </button>
   </div>
+
+  {#if !collapsed}
+    <ResizeHandle
+      label="Resize sidebar"
+      onResize={(clientX) => layout.setLeftWidth(clientX)}
+      onDragChange={(d) => resizing = d}
+    />
+  {/if}
 </aside>
 
 <LaunchDialog
@@ -487,8 +549,20 @@
 
 <!-- Close confirmation dialog -->
 {#if showCloseConfirm}
-  <div class="confirm-overlay" onclick={dismissCloseConfirm} role="presentation">
-    <div class="confirm-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+  <div
+    class="confirm-overlay"
+    onclick={dismissCloseConfirm}
+    onkeydown={(event) => event.key === 'Escape' && dismissCloseConfirm()}
+    role="presentation"
+  >
+    <div
+      class="confirm-dialog"
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') dismissCloseConfirm(); }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+    >
       <h3>Close Session?</h3>
       <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
       <div class="confirm-actions">
@@ -503,8 +577,7 @@
 
 <style>
   .sidebar {
-    width: 220px;
-    min-width: 220px;
+    position: relative;
     height: 100%;
     display: flex;
     flex-direction: column;
@@ -513,9 +586,12 @@
     transition: width 0.2s ease, min-width 0.2s ease;
   }
 
-  .sidebar.collapsed {
-    width: 52px;
-    min-width: 52px;
+  .sidebar.resizing {
+    transition: none;
+  }
+
+  .sidebar :global(.resize-handle) {
+    right: -3px;
   }
 
   .sidebar-header {
@@ -864,6 +940,12 @@
     background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
     color: var(--accent-cyan);
     border-color: color-mix(in srgb, var(--accent-cyan) 30%, transparent);
+  }
+
+  .queen-controls-section {
+    margin-top: 8px;
+    border-top: 1px solid var(--border-structural);
+    padding-top: 8px;
   }
 
   .sidebar-footer {
