@@ -434,7 +434,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           prompt: prompt || undefined,
           with_planning: false,
           with_evaluator: false,
-          smoke_test: false,
+          smoke_test: smokeTest,
         };
         dispatch('launchResearch', config);
       } else if (mode === 'swarm') {
@@ -761,12 +761,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         {:else if mode === 'research'}
           <div class="form-section">
             <div class="section-header">
-              <h3>Researchers ({researchWorkers.length})</h3>
+              <h3>Researcher Roster ({researchWorkers.length})</h3>
               <button type="button" class="add-button" on:click={addResearchWorker} disabled={researchWorkers.length >= 6}>
                 + Add
               </button>
             </div>
-            <p class="section-description">Each researcher runs with its own selectable model.</p>
+            <p class="section-description">A roster the Queen spawns from on demand — none launch up front. Each runs with its own selectable model; the Queen decides how many to spawn based on the objective.</p>
             <div class="workers-list">
               {#each researchWorkers as worker, i (i)}
                 <div class="worker-card">
@@ -985,17 +985,17 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <button type="button" class="cancel-button" on:click={handleClose} disabled={launching}>
             Cancel
           </button>
-          {#if mode !== 'research'}
-            <button
-              type="button"
-              class="smoke-test-button"
-              on:click={handleSmokeTest}
-              disabled={launching || !projectPath.trim()}
-              title="Quick test to validate the entire flow: planning phase, task check-off, and agent spawning"
-            >
-              Smoke Test
-            </button>
-          {/if}
+          <button
+            type="button"
+            class="smoke-test-button"
+            on:click={handleSmokeTest}
+            disabled={launching || !projectPath.trim()}
+            title={mode === 'research'
+              ? 'Quick smoke test: the Queen spawns one researcher with a trivial task and reports back — no wiki load or capture'
+              : 'Quick test to validate the entire flow: planning phase, task check-off, and agent spawning'}
+          >
+            Smoke Test
+          </button>
           <button type="submit" class="submit-button" disabled={launching || !projectPath.trim()}>
             {launching ? 'Launching...' : 'Launch'}
           </button>

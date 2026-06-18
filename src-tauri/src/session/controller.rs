@@ -345,6 +345,11 @@ pub struct ResearchLaunchConfig {
     pub queen_config: AgentConfig,
     pub workers: Vec<AgentConfig>,
     pub prompt: Option<String>,
+    /// Minimal-plumbing smoke test: the Queen spawns exactly ONE researcher with a
+    /// trivial canned task, confirms the round-trip, and reports — skipping the wiki
+    /// load and the Draft -> PR capture (no side effects).
+    #[serde(default)]
+    pub smoke_test: bool,
 }
 
 /// Expand a leading `~` in a path to the user's home directory so the value can
@@ -512,6 +517,12 @@ pub struct Session {
     pub worktree_path: Option<String>,
     #[serde(default)]
     pub worktree_branch: Option<String>,
+    /// No-git sessions (Research) never create worktrees or branches: every agent,
+    /// including workers spawned later by the Queen, runs directly in `project_path`.
+    /// Used by `add_worker` to skip worktree creation so on-demand spawning works on
+    /// non-repo folders and honors the research "no git" contract.
+    #[serde(default)]
+    pub no_git: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -850,6 +861,7 @@ impl SessionController {
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -4186,19 +4198,26 @@ This tests that:
     ) -> String {
         const API_BASE_URL: &str = "http://localhost:18800";
 
-        // Build the workers table (matches build_queen_master_prompt's columns).
-        let mut workers_list = String::from("| ID | Role | CLI |\n|----|------|-----|\n");
+        // Build the researcher roster table. These workers are NOT pre-spawned: the
+        // Queen spawns the ones it needs on demand via the spawn-worker tool, so the
+        // table lists roster slots with the CLI + model to spawn each with, rather than
+        // live worker IDs (which the system assigns sequentially at spawn time).
+        let mut workers_list =
+            String::from("| Slot | Role | CLI | Model |\n|------|------|-----|-------|\n");
         for (i, worker_config) in workers.iter().enumerate() {
-            let index = i + 1;
-            let worker_id = format!("{}-worker-{}", session_id, index);
+            let slot = i + 1;
             let role_label = worker_config
                 .role
                 .as_ref()
-                .map(|r| format!("Worker {} ({})", index, r.label))
-                .unwrap_or_else(|| format!("Worker {}", index));
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| "Researcher".to_string());
+            let model = worker_config
+                .model
+                .clone()
+                .unwrap_or_else(|| "(session default)".to_string());
             workers_list.push_str(&format!(
-                "| {} | {} | {} |\n",
-                worker_id, role_label, worker_config.cli
+                "| {} | {} | {} | {} |\n",
+                slot, role_label, worker_config.cli, model
             ));
         }
 
@@ -5432,6 +5451,7 @@ Content-Type: application/json
 {{
   "role_type": "backend",
   "cli": "{default_cli}",
+  "model": "opus",
   "name": "Worker 2 (Frontend)",
   "description": "One-line task summary",
   "initial_task": "Optional task description"
@@ -5442,8 +5462,9 @@ Content-Type: application/json
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality |
+| role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
+| model | string | No | Model to staff this worker with (e.g. opus, sonnet, gemini-3-pro). Defaults to the session default. Use this to honor a roster's per-worker model. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
 | description | string | No | One-line task summary used for deterministic labels |
 | label | string | No | Legacy label field; kept as a fallback input |
@@ -6077,6 +6098,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: Some(solo_cwd.clone()),
             worktree_branch: Some(solo_branch.clone()),
+            no_git: false,
         };
 
         {
@@ -6153,7 +6175,7 @@ Last updated: {timestamp}
     }
 
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
-        self.launch_hive_internal(config, None, HashMap::new(), true)
+        self.launch_hive_internal(config, None, HashMap::new(), true, true)
     }
 
     /// Shared Hive launch path. `launch_hive_v2` and `launch_research` both
@@ -6176,6 +6198,7 @@ Last updated: {timestamp}
         queen_template_override: Option<&str>,
         extra_queen_vars: HashMap<String, String>,
         use_worktrees: bool,
+        pre_spawn_workers: bool,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
@@ -6188,8 +6211,10 @@ Last updated: {timestamp}
             return self.launch_planning_phase(session_id, config);
         }
 
-        // Solo mode: skip orchestration and launch one agent directly.
-        if config.workers.is_empty() {
+        // Solo mode: skip orchestration and launch one agent directly. Only applies
+        // when pre-spawning the worker pool. Roster launches (Research) keep the Queen
+        // even though no workers come up at launch, so they never fall through to Solo.
+        if pre_spawn_workers && config.workers.is_empty() {
             return self.launch_solo(config);
         }
 
@@ -6300,8 +6325,14 @@ Last updated: {timestamp}
             base_commit_sha: None,
         });
 
-        // Create Worker agents
-        for (i, worker_config) in config.workers.iter().enumerate() {
+        // Create Worker agents.
+        //
+        // Roster mode (Research, `pre_spawn_workers == false`): `workers_to_spawn` is
+        // empty, so nothing comes up here at launch. The configured workers are a
+        // roster rendered into the Queen prompt; the Queen spawns the ones it needs on
+        // demand via the spawn-worker tool (`POST /api/sessions/{id}/workers`).
+        let workers_to_spawn: &[AgentConfig] = if pre_spawn_workers { &config.workers } else { &[] };
+        for (i, worker_config) in workers_to_spawn.iter().enumerate() {
             let index = (i + 1) as u8;
             let worker_id = format!("{}-worker-{}", session_id, index);
             let worker_role = worker_config.role.clone().unwrap_or_else(|| {
@@ -6406,7 +6437,11 @@ Last updated: {timestamp}
             id: session_id.clone(),
             name: config.name.clone(),
             color: config.color.clone(),
-            session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
+            session_type: SessionType::Hive {
+                // Roster mode starts with zero live workers; the count grows as the
+                // Queen spawns researchers on demand.
+                worker_count: if pre_spawn_workers { config.workers.len() as u8 } else { 0 },
+            },
             project_path: project_path.clone(),
             state: SessionState::Running,
             created_at: Utc::now(),
@@ -6424,6 +6459,7 @@ Last updated: {timestamp}
             } else {
                 None
             },
+            no_git: !use_worktrees,
         };
 
         {
@@ -6481,6 +6517,8 @@ Last updated: {timestamp}
     ///   (template key `roles/researcher`).
     /// - Planning and the evaluator are always disabled.
     pub fn launch_research(&self, config: ResearchLaunchConfig) -> Result<Session, String> {
+        let smoke_test = config.smoke_test;
+
         // Assign the "researcher" role to any worker that doesn't already carry one,
         // so role-driven prompt/heartbeat resolution lands on roles/researcher.
         let workers = config
@@ -6505,6 +6543,8 @@ Last updated: {timestamp}
             with_evaluator: false,
             evaluator_config: None,
             qa_workers: None,
+            // Research smoke is driven entirely by the Queen prompt (see `smoke_directive`
+            // below); it must NOT trigger the evaluator-based smoke path.
             smoke_test: false,
         };
 
@@ -6522,10 +6562,47 @@ Last updated: {timestamp}
 
         let mut extra_queen_vars = HashMap::new();
         extra_queen_vars.insert("global_wiki_path".to_string(), global_wiki_path);
+        // `smoke_directive` is rendered near the top of the queen-research prompt. It is
+        // empty for a normal run and a hard override for a smoke run (spawn ONE
+        // researcher, trivial canned task, no wiki load/capture).
+        extra_queen_vars.insert(
+            "smoke_directive".to_string(),
+            if smoke_test {
+                Self::research_smoke_directive()
+            } else {
+                String::new()
+            },
+        );
 
-        // Research never touches git: no worktrees, no branches. Agents run
-        // directly in project_path, so it also works on non-repo folders.
-        self.launch_hive_internal(hive_config, Some("queen-research"), extra_queen_vars, false)
+        // Research never touches git: no worktrees, no branches, and no pre-spawned
+        // workers. The Queen comes up alone and spawns researchers from the roster on
+        // demand, so it also works on non-repo folders.
+        self.launch_hive_internal(hive_config, Some("queen-research"), extra_queen_vars, false, false)
+    }
+
+    /// Hard-override banner injected at the top of the queen-research prompt for a
+    /// smoke run. Keeps the smoke flow to the minimal end-to-end plumbing check the
+    /// product owner asked for: one researcher, a trivial task, no wiki side effects.
+    fn research_smoke_directive() -> String {
+        r#"## ⚠️ SMOKE TEST MODE — OVERRIDES EVERYTHING BELOW
+
+This is a **minimal plumbing smoke test**, not real research. Ignore the normal
+phases and do EXACTLY this, then stop:
+
+1. **Skip Phase 1 (wiki load) and Phase 4 (wiki capture).** Do not read or write the
+   global wiki. No git, no PR.
+2. **Spawn exactly ONE researcher** from the roster (slot #1) using the spawn-worker
+   tool, with this trivial `initial_task`:
+   > "Smoke test: reply in the conversation with the literal text `RESEARCH SMOKE OK`,
+   > your current working directory, and today's date. Do not investigate anything else."
+3. **Wait** for that researcher to report back in the conversation.
+4. **Report the result:** post `RESEARCH SMOKE PASS` to the conversation if the
+   researcher replied with `RESEARCH SMOKE OK`, otherwise post `RESEARCH SMOKE FAIL`
+   followed by what went wrong. Then stop — do not spawn any further researchers.
+
+---
+"#
+        .to_string()
     }
 
     pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {
@@ -6606,6 +6683,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: variants.first().map(|v| v.worktree_path.clone()),
             worktree_branch: variants.first().map(|v| v.branch.clone()),
+            no_git: false,
         };
 
         {
@@ -6875,6 +6953,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -6973,6 +7052,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -7356,6 +7436,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -8737,6 +8818,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: persisted.worktree_path.clone(),
             worktree_branch: persisted.worktree_branch.clone(),
+            no_git: persisted.no_git,
         })
     }
 
@@ -8977,6 +9059,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -9085,15 +9168,24 @@ Last updated: {timestamp}
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
-        // Late-spawned workers should branch from the most recent session-integrated commit when possible.
-        let base_ref = Self::resolve_worker_base_ref(&session, "add_worker", worker_index);
-        let (_, worker_cwd) = create_session_worktree(
-            session_id,
-            &format!("worker-{}", worker_index),
-            &worker_branch,
-            &base_ref,
-            &session.project_path,
-        )?;
+        // Research (no-git) sessions never create worktrees or branches: the worker
+        // runs directly in the project directory, mirroring the no-worktree launch path
+        // in `launch_hive_internal`. This keeps the Queen's on-demand spawning working
+        // on non-repo folders and honors the research "no git" contract.
+        let worker_cwd = if session.no_git {
+            session.project_path.to_string_lossy().to_string()
+        } else {
+            // Late-spawned workers should branch from the most recent session-integrated commit when possible.
+            let base_ref = Self::resolve_worker_base_ref(&session, "add_worker", worker_index);
+            let (_, cwd) = create_session_worktree(
+                session_id,
+                &format!("worker-{}", worker_index),
+                &worker_branch,
+                &base_ref,
+                &session.project_path,
+            )?;
+            cwd
+        };
         self.emit_workspace_created(
             session_id,
             PRIMARY_CELL_ID,
@@ -9680,6 +9772,7 @@ Last updated: {timestamp}
             auth_strategy: auth_strategy.persist_value(),
             worktree_path: session.worktree_path.clone(),
             worktree_branch: session.worktree_branch.clone(),
+            no_git: session.no_git,
         }
     }
 
@@ -10582,6 +10675,7 @@ mod tests {
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         }
     }
 
@@ -10628,6 +10722,7 @@ mod tests {
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         }
     }
 
@@ -10864,6 +10959,7 @@ mod tests {
             auth_strategy: AuthStrategy::default(),
             worktree_path: None, // Key: no session worktree for planning/swarm
             worktree_branch: None,
+            no_git: false,
         };
 
         assert!(session.worktree_path.is_none());

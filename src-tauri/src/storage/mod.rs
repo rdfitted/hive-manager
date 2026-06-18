@@ -142,6 +142,10 @@ pub struct PersistedSession {
     pub worktree_path: Option<String>,
     #[serde(default)]
     pub worktree_branch: Option<String>,
+    /// Mirror of `Session::no_git` so restored Research sessions stay no-git across
+    /// app restarts (defaults to false for sessions persisted before this field).
+    #[serde(default)]
+    pub no_git: bool,
 }
 
 fn default_cli() -> String {
@@ -1416,6 +1420,7 @@ mod tests {
             auth_strategy: String::new(),
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         }
     }
 
