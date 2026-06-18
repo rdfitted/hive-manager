@@ -4,7 +4,7 @@
   import AgentConfigEditor from './AgentConfigEditor.svelte';
   import TemplatePicker from './templates/TemplatePicker.svelte';
   import { Crown, CaretDown, CaretRight } from 'phosphor-svelte';
-  import type { AgentConfig, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
   import { templates, selectedTemplate } from '$lib/stores/templates';
   import { cliOptions, defaultRoles } from '$lib/config/clis';
@@ -14,12 +14,13 @@
   const dispatch = createEventDispatcher<{
     close: void;
     launchHive: HiveLaunchConfig;
+    launchResearch: ResearchLaunchConfig;
     launchSwarm: SwarmLaunchConfig;
     launchFusion: FusionLaunchConfig;
     launchSolo: SoloLaunchConfig;
   }>();
 
-  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'swarm';
+  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'swarm' | 'research';
   type LaunchWorkerConfig = AgentConfig & { selectedRole: string; promptTemplateOverride?: string | null };
 
   // ... (predefinedRoles same)
@@ -180,6 +181,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     createDefaultConfig('resolver'),
   ];
 
+  // Research workers (researchers) - each with its own selectable model
+  let researchWorkers: LaunchWorkerConfig[] = [
+    createDefaultConfig('general'),
+    createDefaultConfig('general'),
+  ];
+
   // Simplified Swarm config - same config for all planners
   let plannerCount = 2;
   let plannerConfig: AgentConfig = { cli: 'claude', flags: [], label: undefined };
@@ -301,6 +308,18 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     }
   }
 
+  function addResearchWorker() {
+    if (researchWorkers.length < 6) {
+      researchWorkers = [...researchWorkers, createDefaultConfig('general')];
+    }
+  }
+
+  function removeResearchWorker(index: number) {
+    if (researchWorkers.length > 1) {
+      researchWorkers = researchWorkers.filter((_, i) => i !== index);
+    }
+  }
+
   function addSwarmWorker() {
     if (workersPerPlanner.length < 4) {
       workersPerPlanner = [...workersPerPlanner, createDefaultConfig('general')];
@@ -391,6 +410,33 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
         dispatch('launchHive', config);
+      } else if (mode === 'research') {
+        // Build researcher worker configs (each keeps its own cli + model)
+        const researchers: AgentConfig[] = researchWorkers.map((w, i) => ({
+          cli: w.cli,
+          model: w.model,
+          flags: w.flags,
+          label: w.label ?? `Researcher ${i + 1}`,
+          role: {
+            role_type: 'researcher',
+            label: 'Researcher',
+            default_cli: w.cli,
+            prompt_template: w.promptTemplateOverride ?? null,
+          },
+        }));
+
+        const config: ResearchLaunchConfig = {
+          name: sessionName.trim() || undefined,
+          color: sessionColor || undefined,
+          project_path: projectPath,
+          queen_config: queenConfig,
+          workers: researchers,
+          prompt: prompt || undefined,
+          with_planning: false,
+          with_evaluator: false,
+          smoke_test: smokeTest,
+        };
+        dispatch('launchResearch', config);
       } else if (mode === 'swarm') {
         // Build workers config with roles
         const workersWithRoles: AgentConfig[] = workersPerPlanner.map((w) => ({
@@ -512,6 +558,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         </button>
         <button
           class="mode-tab"
+          class:active={mode === 'research'}
+          on:click={() => (mode = 'research')}
+          type="button"
+        >
+          Research
+        </button>
+        <button
+          class="mode-tab"
           class:active={mode === 'solo'}
           on:click={() => (mode = 'solo')}
           type="button"
@@ -593,6 +647,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           </div>
         {/if}
 
+        {#if mode !== 'research'}
         <div class="form-section">
           <h3>Orchestration Options</h3>
           {#if mode !== 'solo'}
@@ -660,6 +715,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             </div>
           {/if}
         </div>
+        {/if}
 
         {#if mode === 'hive'}
           <div class="form-section">
@@ -696,6 +752,34 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                         <option value={role.type} title={role.description}>{role.label}</option>
                       {/each}
                     </select>
+                  </div>
+                  <AgentConfigEditor bind:config={worker} showLabel={true} />
+                </div>
+              {/each}
+            </div>
+          </div>
+        {:else if mode === 'research'}
+          <div class="form-section">
+            <div class="section-header">
+              <h3>Researcher Roster ({researchWorkers.length})</h3>
+              <button type="button" class="add-button" on:click={addResearchWorker} disabled={researchWorkers.length >= 6}>
+                + Add
+              </button>
+            </div>
+            <p class="section-description">A roster the Queen spawns from on demand — none launch up front. Each runs with its own selectable model; the Queen decides how many to spawn based on the objective.</p>
+            <div class="workers-list">
+              {#each researchWorkers as worker, i (i)}
+                <div class="worker-card">
+                  <div class="card-header">
+                    <span class="card-title">Researcher {i + 1}</span>
+                    <button
+                      type="button"
+                      class="remove-button"
+                      on:click={() => removeResearchWorker(i)}
+                      disabled={researchWorkers.length <= 1}
+                    >
+                      Remove
+                    </button>
                   </div>
                   <AgentConfigEditor bind:config={worker} showLabel={true} />
                 </div>
@@ -906,7 +990,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             class="smoke-test-button"
             on:click={handleSmokeTest}
             disabled={launching || !projectPath.trim()}
-            title="Quick test to validate the entire flow: planning phase, task check-off, and agent spawning"
+            title={mode === 'research'
+              ? 'Quick smoke test: the Queen spawns one researcher with a trivial task and reports back — no wiki load or capture'
+              : 'Quick test to validate the entire flow: planning phase, task check-off, and agent spawning'}
           >
             Smoke Test
           </button>

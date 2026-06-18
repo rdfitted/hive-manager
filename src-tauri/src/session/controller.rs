@@ -325,6 +325,65 @@ pub struct HiveLaunchConfig {
     pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
 }
 
+/// Launch config for **Research** mode.
+///
+/// Research mode is a UI/launch *profile* that reuses the Hive launch path under
+/// the hood (exactly like Solo mode reuses it). It is NOT a distinct
+/// `SessionType`/`SessionMode` variant. It produces a Queen + N "researcher"
+/// workers, renders the research-flavored `queen-research` / `roles/researcher`
+/// prompts, and always launches with planning and evaluator disabled.
+///
+/// Mirrors the shape of [`HiveLaunchConfig`] so the frontend can build it the
+/// same way it builds a Hive launch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchLaunchConfig {
+    pub project_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    pub queen_config: AgentConfig,
+    pub workers: Vec<AgentConfig>,
+    pub prompt: Option<String>,
+    /// Minimal-plumbing smoke test: the Queen spawns exactly ONE researcher with a
+    /// trivial canned task, confirms the round-trip, and reports — skipping the wiki
+    /// load and the Draft -> PR capture (no side effects).
+    #[serde(default)]
+    pub smoke_test: bool,
+}
+
+/// Expand a leading `~` in a path to the user's home directory so the value can
+/// be safely embedded in a shell command (a tilde inside quotes is NOT expanded
+/// by the shell). Returns the input unchanged if it doesn't start with `~` or
+/// the home directory cannot be determined.
+fn expand_tilde(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_string();
+    };
+    // Only expand the current user's home (`~`, `~/...`, `~\...`). A bare `~user`
+    // form refers to another user's home and is not something we resolve — leave
+    // it untouched rather than mangling it into `<home>/user`.
+    if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\') {
+        return path.to_string();
+    }
+    let home = if cfg!(windows) {
+        std::env::var("USERPROFILE").ok()
+    } else {
+        std::env::var("HOME").ok()
+    };
+    match home {
+        Some(home) => {
+            let rest = rest.trim_start_matches(['/', '\\']);
+            if rest.is_empty() {
+                home
+            } else {
+                format!("{}/{}", home.trim_end_matches(['/', '\\']), rest)
+            }
+        }
+        None => path.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmLaunchConfig {
     pub project_path: String,
@@ -458,6 +517,12 @@ pub struct Session {
     pub worktree_path: Option<String>,
     #[serde(default)]
     pub worktree_branch: Option<String>,
+    /// No-git sessions (Research) never create worktrees or branches: every agent,
+    /// including workers spawned later by the Queen, runs directly in `project_path`.
+    /// Used by `add_worker` to skip worktree creation so on-demand spawning works on
+    /// non-repo folders and honors the research "no git" contract.
+    #[serde(default)]
+    pub no_git: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -796,6 +861,7 @@ impl SessionController {
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -2553,6 +2619,13 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         format!("## Scope\n\n{}", Self::worktree_boundary_rules(worktree_path))
     }
 
+    /// Read-only scope block for research workers. They investigate and report;
+    /// they must not mutate the project or its git state. Used for BOTH the worker
+    /// prompt and the task file so the two surfaces stay consistent.
+    fn scope_block_read_only() -> String {
+        "## Scope (Read-Only)\n\nThis is a research role. You MUST NOT create, modify, move, or delete any files, and you MUST NOT run commands that mutate the project or its git state. Read freely and investigate, then report your findings to the Queen via the conversation API — your only deliverable is knowledge.".to_string()
+    }
+
     fn queen_quality_reconciliation_log_lines(has_evaluator: bool) -> &'static str {
         if has_evaluator {
             QUEEN_QUALITY_RECONCILIATION_LOG_LINES
@@ -4109,6 +4182,66 @@ This tests that:
     }
 
     /// Build the Queen's master prompt with worker information
+    /// Render a Queen prompt from a named template (e.g. `queen-research`),
+    /// supplying the standard Queen template variables plus any caller-provided
+    /// extras (e.g. `global_wiki_path`).
+    ///
+    /// Standard variables match those used by the `queen-hive` template:
+    /// `session_id`, `api_base_url`, `workers_list`, `queen_heartbeat_snippet`,
+    /// and `task`. Caller extras win on key collision.
+    fn build_templated_queen_prompt(
+        template_name: &str,
+        session_id: &str,
+        workers: &[AgentConfig],
+        user_prompt: Option<&str>,
+        extra_vars: HashMap<String, String>,
+    ) -> String {
+        const API_BASE_URL: &str = "http://localhost:18800";
+
+        // Build the researcher roster table. These workers are NOT pre-spawned: the
+        // Queen spawns the ones it needs on demand via the spawn-worker tool, so the
+        // table lists roster slots with the CLI + model to spawn each with, rather than
+        // live worker IDs (which the system assigns sequentially at spawn time).
+        let mut workers_list =
+            String::from("| Slot | Role | CLI | Model |\n|------|------|-----|-------|\n");
+        for (i, worker_config) in workers.iter().enumerate() {
+            let slot = i + 1;
+            let role_label = worker_config
+                .role
+                .as_ref()
+                .map(|r| r.label.clone())
+                .unwrap_or_else(|| "Researcher".to_string());
+            let model = worker_config
+                .model
+                .clone()
+                .unwrap_or_else(|| "(session default)".to_string());
+            workers_list.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                slot, role_label, worker_config.cli, model
+            ));
+        }
+
+        let mut variables = HashMap::new();
+        variables.insert("api_base_url".to_string(), API_BASE_URL.to_string());
+        variables.insert("workers_list".to_string(), workers_list);
+        variables.insert(
+            "queen_heartbeat_snippet".to_string(),
+            heartbeat_snippet(API_BASE_URL, session_id, "queen", "working", "Coordinating researchers"),
+        );
+        variables.insert(
+            "task".to_string(),
+            user_prompt
+                .unwrap_or("Coordinate the researchers and synthesize their findings.")
+                .to_string(),
+        );
+        // Caller-provided extras (e.g. global_wiki_path) take precedence.
+        for (k, v) in extra_vars {
+            variables.insert(k, v);
+        }
+
+        Self::render_named_prompt(template_name, session_id, user_prompt.map(|s| s.to_string()), variables)
+    }
+
     fn build_queen_master_prompt(
         cli: &str,
         project_path: &Path,
@@ -4608,7 +4741,20 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
         let role_name = config.role.as_ref()
             .map(|r| r.label.clone())
             .unwrap_or_else(|| format!("Worker {}", index));
-        let scope_block = Self::scope_block(".");
+        // Research workers are read-only investigators: no implementation authority,
+        // no commits, and NO project-local learnings POST (Research mode captures
+        // knowledge only via the Queen's wiki Draft->PR flow). Every write-capable
+        // surface (scope block, role framing, task file) must reflect that.
+        let is_research = config
+            .role
+            .as_ref()
+            .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+            .unwrap_or(false);
+        let scope_block = if is_research {
+            Self::scope_block_read_only()
+        } else {
+            Self::scope_block(".")
+        };
 
         let role_description = config.role.as_ref()
             .map(|r| match r.role_type.to_lowercase().as_str() {
@@ -4622,6 +4768,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
                 "tester" => "Run test suite, fix failures, document difficulties that couldn't be resolved.",
                 "code-quality" => "Resolve PR comments from external reviewers, ensure code meets quality standards.",
                 "reconciler" => "Deep-think reconciliation: collect Evaluator QA verdicts, CodeRabbit comments, and Gemini findings. Triage conflicts, deduplicate, and produce a unified fix list with priorities.",
+                "researcher" => "Focused research: gather, read, and synthesize sources; capture findings and citations for the Queen to consolidate.",
                 _ => "General development tasks as assigned.",
             })
             .unwrap_or("General development tasks as assigned.");
@@ -4641,14 +4788,90 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             Some(&activation_wait_heartbeat),
         );
 
+        let role_section = if is_research {
+            "## Your Role: RESEARCHER\n\nYou investigate, read, and synthesize sources. You do NOT write production code, modify project files, or commit anything. Your deliverable is findings reported to the Queen."
+        } else {
+            "## Your Role: EXECUTOR\n\nYou have full implementation authority within your specialization."
+        };
+
+        let important_rules = if is_research {
+            format!(
+"1. **Stay in your lane** - Focus on your research assignment ({role_name})
+2. **Do not modify the project** - No code changes and no commits; report findings to the Queen
+3. **Update your task file** - Always update status when done or blocked
+4. **Ask for clarification** - If the assignment is unclear, note it in the task file",
+                role_name = role_name
+            )
+        } else {
+            format!(
+"1. **Stay in your lane** - Focus on your specialization ({role_name})
+2. **Don't push to git** - Only the Queen commits and pushes
+3. **Update your task file** - Always update status when done or blocked
+4. **Ask for clarification** - If task is unclear, note it in the task file",
+                role_name = role_name
+            )
+        };
+
+        let learnings_section = if is_research {
+            String::new()
+        } else {
+            format!(
+r#"## Learnings Protocol (MANDATORY)
+
+Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
+
+```bash
+curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "session": "{session_id}",
+    "task": "Brief task description",
+    "outcome": "success|partial|failed",
+    "keywords": ["keyword1", "keyword2"],
+    "insight": "What you learned - be specific and actionable",
+    "files_touched": ["path/to/file.rs"]
+  }}'
+```
+
+Even if you learned nothing notable, submit with insight "No significant learnings for this task."
+
+### File-Based Fallback
+
+If curl returns exit code 7 (connection refused) or any non-zero exit, append the learning record to the session-scoped pending JSONL file instead:
+
+```bash
+mkdir -p ".hive-manager/{session_id}"
+jq -nc \
+  --arg date "$(date -u +%Y-%m-%d)" \
+  --arg session "{session_id}" \
+  --arg task "Brief task description" \
+  --arg outcome "success|partial|failed" \
+  --arg insight "What you learned - be specific and actionable" \
+  --argjson keywords '["keyword1","keyword2"]' \
+  --argjson files_touched '["path/to/file.rs"]' \
+  '{{date:$date,session:$session,task:$task,outcome:$outcome,keywords:$keywords,insight:$insight,files_touched:$files_touched}}' \
+  >> ".hive-manager/{session_id}/learnings.pending.jsonl"
+```
+
+⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
+
+"#,
+                session_id = session_id
+            )
+        };
+
+        let project_context_section = if is_research {
+            String::new()
+        } else {
+            "## Project Context\n\nReview `.ai-docs/project-dna.md` for patterns and conventions learned from previous sessions.\n\n".to_string()
+        };
+
         format!(
 r#"# Worker {index} ({role_name}) - Hive Session
 
 You are a **Worker** in a multi-agent Hive session, coordinated by the Queen.
 
-## Your Role: EXECUTOR
-
-You have full implementation authority within your specialization.
+{role_section}
 
 ## Your Specialization
 
@@ -4683,10 +4906,7 @@ Your task assignments are in: `{task_file}`
 
 ## Important Rules
 
-1. **Stay in your lane** - Focus on your specialization ({role_name})
-2. **Don't push to git** - Only the Queen commits and pushes
-3. **Update your task file** - Always update status when done or blocked
-4. **Ask for clarification** - If task is unclear, note it in the task file
+{important_rules}
 
 ## Coordinator
 
@@ -4737,57 +4957,18 @@ cat ".hive-manager/{session_id}/conversations/shared.md"
 
 You MUST call the curl API first. Only use file fallback if curl fails.
 
-## Learnings Protocol (MANDATORY)
-
-Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
-
-```bash
-curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
-  -H "Content-Type: application/json" \
-  -d '{{
-    "session": "{session_id}",
-    "task": "Brief task description",
-    "outcome": "success|partial|failed",
-    "keywords": ["keyword1", "keyword2"],
-    "insight": "What you learned - be specific and actionable",
-    "files_touched": ["path/to/file.rs"]
-  }}'
-```
-
-Even if you learned nothing notable, submit with insight "No significant learnings for this task."
-
-### File-Based Fallback
-
-If curl returns exit code 7 (connection refused) or any non-zero exit, append the learning record to the session-scoped pending JSONL file instead:
-
-```bash
-mkdir -p ".hive-manager/{session_id}"
-jq -nc \
-  --arg date "$(date -u +%Y-%m-%d)" \
-  --arg session "{session_id}" \
-  --arg task "Brief task description" \
-  --arg outcome "success|partial|failed" \
-  --arg insight "What you learned - be specific and actionable" \
-  --argjson keywords '["keyword1","keyword2"]' \
-  --argjson files_touched '["path/to/file.rs"]' \
-  '{{date:$date,session:$session,task:$task,outcome:$outcome,keywords:$keywords,insight:$insight,files_touched:$files_touched}}' \
-  >> ".hive-manager/{session_id}/learnings.pending.jsonl"
-```
-
-⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
-
-## Project Context
-
-Review `.ai-docs/project-dna.md` for patterns and conventions learned from previous sessions.
-
-## Task Coordination
+{learnings_section}{project_context_section}## Task Coordination
 Read {task_file}. Begin work only when Status is ACTIVE.
 Use the interactive interface to monitor your task file.
 
 After completing your task, transition to IDLE state. Continue checking your conversation file on heartbeat cadence.{polling_instructions}"#,
             index = index,
             role_name = role_name,
+            role_section = role_section,
             role_description = role_description,
+            important_rules = important_rules,
+            learnings_section = learnings_section,
+            project_context_section = project_context_section,
             queen_id = queen_id,
             session_id = session_id,
             scope_block = scope_block,
@@ -5270,6 +5451,7 @@ Content-Type: application/json
 {{
   "role_type": "backend",
   "cli": "{default_cli}",
+  "model": "opus",
   "name": "Worker 2 (Frontend)",
   "description": "One-line task summary",
   "initial_task": "Optional task description"
@@ -5280,8 +5462,9 @@ Content-Type: application/json
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality |
+| role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
+| model | string | No | Model to staff this worker with (e.g. opus, sonnet, gemini-3-pro). Defaults to the session default. Use this to honor a roster's per-worker model. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
 | description | string | No | One-line task summary used for deterministic labels |
 | label | string | No | Legacy label field; kept as a fallback input |
@@ -5672,24 +5855,40 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
     }
 
     /// Write a task file for a worker (ACTIVE when pre-seeded with a task, otherwise STANDBY)
-    fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>) -> Result<PathBuf, String> {
+    fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>, read_only: bool) -> Result<PathBuf, String> {
         let status = initial_task.map(|_| "ACTIVE");
-        Self::write_task_file_with_status(worktree_path, worker_index, initial_task, status)
+        Self::write_task_file_with_status(worktree_path, worker_index, initial_task, status, read_only)
     }
 
-    /// Write a task file with an optional status override (used for sequential spawning)
+    /// Write a task file with an optional status override (used for sequential spawning).
+    /// `read_only` => research worker: read-only scope + role constraints (no
+    /// implementation, no project mutation), matching build_worker_prompt.
     fn write_task_file_with_status(
         worktree_path: &Path,
         worker_index: u8,
         initial_task: Option<&str>,
         status: Option<&str>,
+        read_only: bool,
     ) -> Result<PathBuf, String> {
         let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
         let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
-        let scope_block = Self::scope_block(".");
+        let scope_block = if read_only {
+            Self::scope_block_read_only()
+        } else {
+            Self::scope_block(".")
+        };
+        let role_constraints = if read_only {
+            "- **RESEARCHER (READ-ONLY)**: Investigate and synthesize; you have NO authority to implement, edit, or create project files.
+- **SCOPE**: Stay within your assigned research sub-question.
+- **NO MUTATION**: No code changes, no commits, no branches. Report findings to the Queen via the conversation API."
+        } else {
+            "- **EXECUTOR**: You have full authority to implement and fix issues.
+- **SCOPE**: Stay within your assigned domain/specialization.
+- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate."
+        };
         let status = status.unwrap_or("STANDBY");
 
         let task_content = if let Some(task) = initial_task {
@@ -5706,9 +5905,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
 
 ## Role Constraints
 
-- **EXECUTOR**: You have full authority to implement and fix issues.
-- **SCOPE**: Stay within your assigned domain/specialization.
-- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate.
+{role_constraints}
 
 {scope_block}
 
@@ -5729,6 +5926,7 @@ Last updated: {timestamp}
 ",
             worker_index = worker_index,
             status = status,
+            role_constraints = role_constraints,
             scope_block = scope_block,
             task_content = task_content,
             timestamp = timestamp
@@ -5900,6 +6098,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: Some(solo_cwd.clone()),
             worktree_branch: Some(solo_branch.clone()),
+            no_git: false,
         };
 
         {
@@ -5976,6 +6175,31 @@ Last updated: {timestamp}
     }
 
     pub fn launch_hive_v2(&self, config: HiveLaunchConfig) -> Result<Session, String> {
+        self.launch_hive_internal(config, None, HashMap::new(), true, true)
+    }
+
+    /// Shared Hive launch path. `launch_hive_v2` and `launch_research` both
+    /// funnel through here so we keep a single orchestration body.
+    ///
+    /// Override hooks (used by Research mode):
+    /// - `queen_template_override`: when `Some(name)`, the Queen prompt is rendered
+    ///   from the named prompt template (e.g. `"queen-research"`) via
+    ///   `render_named_prompt` instead of the hand-built `build_queen_master_prompt`.
+    /// - `extra_queen_vars`: additional template variables merged into the
+    ///   templated Queen prompt (e.g. `global_wiki_path`). Ignored when
+    ///   `queen_template_override` is `None`.
+    /// - `use_worktrees`: when `true` (Hive/Solo), each cell gets an isolated git
+    ///   worktree + branch off a fresh base. When `false` (Research), no git is
+    ///   touched: every agent runs directly in `project_path`, so the launch
+    ///   succeeds even on a non-git folder and never creates branches/worktrees.
+    fn launch_hive_internal(
+        &self,
+        config: HiveLaunchConfig,
+        queen_template_override: Option<&str>,
+        extra_queen_vars: HashMap<String, String>,
+        use_worktrees: bool,
+        pre_spawn_workers: bool,
+    ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let mut agents = Vec::new();
         let project_path = PathBuf::from(&config.project_path);
@@ -5987,27 +6211,40 @@ Last updated: {timestamp}
             return self.launch_planning_phase(session_id, config);
         }
 
-        // Solo mode: skip orchestration and launch one agent directly.
-        if config.workers.is_empty() {
+        // Solo mode: skip orchestration and launch one agent directly. Only applies
+        // when pre-spawning the worker pool. Roster launches (Research) keep the Queen
+        // even though no workers come up at launch, so they never fall through to Solo.
+        if pre_spawn_workers && config.workers.is_empty() {
             return self.launch_solo(config);
         }
 
         // Fetch latest from origin so all worktrees branch from the most
-        // recent remote state, avoiding stale-base divergence.
-        let base_ref = resolve_fresh_base(&project_path);
+        // recent remote state, avoiding stale-base divergence. Skipped in
+        // no-worktree mode (Research), which may run on a non-git folder.
+        let base_ref = if use_worktrees {
+            resolve_fresh_base(&project_path)
+        } else {
+            String::new()
+        };
 
         // Create Queen agent
         let queen_id = format!("{}-queen", session_id);
         let (cmd, mut args) = Self::build_command(&config.queen_config);
         let queen_branch = format!("hive/{}/queen", session_id);
-        let (_, queen_cwd) = create_session_worktree(
-            &session_id,
-            "queen",
-            &queen_branch,
-            &base_ref,
-            &project_path,
-        )?;
-        created_cells.push(("queen".to_string(), queen_branch.clone()));
+        let queen_cwd = if use_worktrees {
+            let (_, cwd) = create_session_worktree(
+                &session_id,
+                "queen",
+                &queen_branch,
+                &base_ref,
+                &project_path,
+            )?;
+            created_cells.push(("queen".to_string(), queen_branch.clone()));
+            cwd
+        } else {
+            // No-worktree mode: the Queen runs directly in the project directory.
+            project_path.to_string_lossy().to_string()
+        };
         self.emit_workspace_created(
             &session_id,
             PRIMARY_CELL_ID,
@@ -6019,17 +6256,30 @@ Last updated: {timestamp}
         let plan_path = project_path.join(".hive-manager").join(&session_id).join("plan.md");
         let has_plan = plan_path.exists();
 
-        // Write Queen prompt to file and pass to CLI
-        let master_prompt = Self::build_queen_master_prompt(
-            &config.queen_config.cli,
-            &project_path,
-            queen_cwd.as_ref(),
-            &session_id,
-            &config.workers,
-            config.prompt.as_deref(),
-            has_plan,
-            config.with_evaluator,
-        );
+        // Write Queen prompt to file and pass to CLI.
+        //
+        // Research mode renders a research-flavored Queen prompt from a named
+        // template; the default Hive path uses the hand-built master prompt.
+        let master_prompt = if let Some(template_name) = queen_template_override {
+            Self::build_templated_queen_prompt(
+                template_name,
+                &session_id,
+                &config.workers,
+                config.prompt.as_deref(),
+                extra_queen_vars,
+            )
+        } else {
+            Self::build_queen_master_prompt(
+                &config.queen_config.cli,
+                &project_path,
+                queen_cwd.as_ref(),
+                &session_id,
+                &config.workers,
+                config.prompt.as_deref(),
+                has_plan,
+                config.with_evaluator,
+            )
+        };
         let prompt_file = match Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
@@ -6075,8 +6325,14 @@ Last updated: {timestamp}
             base_commit_sha: None,
         });
 
-        // Create Worker agents
-        for (i, worker_config) in config.workers.iter().enumerate() {
+        // Create Worker agents.
+        //
+        // Roster mode (Research, `pre_spawn_workers == false`): `workers_to_spawn` is
+        // empty, so nothing comes up here at launch. The configured workers are a
+        // roster rendered into the Queen prompt; the Queen spawns the ones it needs on
+        // demand via the spawn-worker tool (`POST /api/sessions/{id}/workers`).
+        let workers_to_spawn: &[AgentConfig] = if pre_spawn_workers { &config.workers } else { &[] };
+        for (i, worker_config) in workers_to_spawn.iter().enumerate() {
             let index = (i + 1) as u8;
             let worker_id = format!("{}-worker-{}", session_id, index);
             let worker_role = worker_config.role.clone().unwrap_or_else(|| {
@@ -6087,20 +6343,26 @@ Last updated: {timestamp}
             let (cmd, mut args) = Self::build_command(&worker_config);
             let worker_branch = format!("hive/{}/worker-{}", session_id, index);
             let worker_cell_id = format!("worker-{}", index);
-            let (_, worker_cwd) = match create_session_worktree(
-                &session_id,
-                &worker_cell_id,
-                &worker_branch,
-                &base_ref,
-                &project_path,
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
-                    return Err(err);
-                }
+            let worker_cwd = if use_worktrees {
+                let (_, cwd) = match create_session_worktree(
+                    &session_id,
+                    &worker_cell_id,
+                    &worker_branch,
+                    &base_ref,
+                    &project_path,
+                ) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                        return Err(err);
+                    }
+                };
+                created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
+                cwd
+            } else {
+                // No-worktree mode: workers run directly in the project directory.
+                project_path.to_string_lossy().to_string()
             };
-            created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
             self.emit_workspace_created(
                 &session_id,
                 PRIMARY_CELL_ID,
@@ -6108,9 +6370,15 @@ Last updated: {timestamp}
                 Some(&worker_cwd),
             );
 
-            // Write task file for this worker (STANDBY or with initial task)
+            // Write task file for this worker (STANDBY or with initial task).
+            // Researcher workers get a read-only task file (no implementation authority).
+            let worker_read_only = worker_config
+                .role
+                .as_ref()
+                .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+                .unwrap_or(false);
             if let Err(err) =
-                Self::write_task_file(Path::new(&worker_cwd), index, worker_config.initial_prompt.as_deref())
+                Self::write_task_file(Path::new(&worker_cwd), index, worker_config.initial_prompt.as_deref(), worker_read_only)
             {
                 self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
                 return Err(err);
@@ -6169,7 +6437,11 @@ Last updated: {timestamp}
             id: session_id.clone(),
             name: config.name.clone(),
             color: config.color.clone(),
-            session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
+            session_type: SessionType::Hive {
+                // Roster mode starts with zero live workers; the count grows as the
+                // Queen spawns researchers on demand.
+                worker_count: if pre_spawn_workers { config.workers.len() as u8 } else { 0 },
+            },
             project_path: project_path.clone(),
             state: SessionState::Running,
             created_at: Utc::now(),
@@ -6182,7 +6454,12 @@ Last updated: {timestamp}
             qa_timeout_secs,
             auth_strategy,
             worktree_path: Some(queen_cwd.clone()),
-            worktree_branch: Some(queen_branch.clone()),
+            worktree_branch: if use_worktrees {
+                Some(queen_branch.clone())
+            } else {
+                None
+            },
+            no_git: !use_worktrees,
         };
 
         {
@@ -6226,6 +6503,106 @@ Last updated: {timestamp}
         })?;
 
         Ok(session)
+    }
+
+    /// Launch a **Research** session.
+    ///
+    /// Research mode is a Hive profile (see [`ResearchLaunchConfig`]): it reuses
+    /// the shared Hive launch path with research-specific overrides:
+    /// - The Queen prompt is rendered from the `queen-research` template, with the
+    ///   `global_wiki_path` variable (read from `AppConfig`) injected alongside the
+    ///   standard Queen variables. The Queen drives wiki load/capture via prompt.
+    /// - Workers without an explicit role are assigned the `researcher` role, which
+    ///   resolves worker prompts/heartbeats to the `researcher` role type
+    ///   (template key `roles/researcher`).
+    /// - Planning and the evaluator are always disabled.
+    pub fn launch_research(&self, config: ResearchLaunchConfig) -> Result<Session, String> {
+        let smoke_test = config.smoke_test;
+
+        // Assign the "researcher" role to any worker that doesn't already carry one,
+        // so role-driven prompt/heartbeat resolution lands on roles/researcher.
+        let workers = config
+            .workers
+            .into_iter()
+            .map(|mut worker| {
+                if worker.role.is_none() {
+                    worker.role = Some(WorkerRole::new("researcher", "Researcher", &worker.cli));
+                }
+                worker
+            })
+            .collect();
+
+        let hive_config = HiveLaunchConfig {
+            project_path: config.project_path,
+            name: config.name,
+            color: config.color,
+            queen_config: config.queen_config,
+            workers,
+            prompt: config.prompt,
+            with_planning: false,
+            with_evaluator: false,
+            evaluator_config: None,
+            qa_workers: None,
+            // Research smoke is driven entirely by the Queen prompt (see `smoke_directive`
+            // below); it must NOT trigger the evaluator-based smoke path.
+            smoke_test: false,
+        };
+
+        // Resolve the global wiki path from AppConfig (falls back to the documented
+        // default if config is unavailable or the field is unset).
+        let global_wiki_path = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.load_config().ok())
+            .and_then(|cfg| cfg.global_wiki_path)
+            .unwrap_or_else(|| "~/.ai-docs/wiki/".to_string());
+        // Expand a leading `~` so the path works inside the queen-research
+        // template's quoted shell commands (`cd "{{global_wiki_path}}"`).
+        let global_wiki_path = expand_tilde(&global_wiki_path);
+
+        let mut extra_queen_vars = HashMap::new();
+        extra_queen_vars.insert("global_wiki_path".to_string(), global_wiki_path);
+        // `smoke_directive` is rendered near the top of the queen-research prompt. It is
+        // empty for a normal run and a hard override for a smoke run (spawn ONE
+        // researcher, trivial canned task, no wiki load/capture).
+        extra_queen_vars.insert(
+            "smoke_directive".to_string(),
+            if smoke_test {
+                Self::research_smoke_directive()
+            } else {
+                String::new()
+            },
+        );
+
+        // Research never touches git: no worktrees, no branches, and no pre-spawned
+        // workers. The Queen comes up alone and spawns researchers from the roster on
+        // demand, so it also works on non-repo folders.
+        self.launch_hive_internal(hive_config, Some("queen-research"), extra_queen_vars, false, false)
+    }
+
+    /// Hard-override banner injected at the top of the queen-research prompt for a
+    /// smoke run. Keeps the smoke flow to the minimal end-to-end plumbing check the
+    /// product owner asked for: one researcher, a trivial task, no wiki side effects.
+    fn research_smoke_directive() -> String {
+        r#"## ⚠️ SMOKE TEST MODE — OVERRIDES EVERYTHING BELOW
+
+This is a **minimal plumbing smoke test**, not real research. Ignore the normal
+phases and do EXACTLY this, then stop:
+
+1. **Skip Phase 1 (wiki load) and Phase 4 (wiki capture).** Do not read or write the
+   global wiki. No git, no PR.
+2. **Spawn exactly ONE researcher** from the roster (slot #1) using the spawn-worker
+   tool, with this trivial `initial_task`:
+   > "Smoke test: reply in the conversation with the literal text `RESEARCH SMOKE OK`,
+   > your current working directory, and today's date. Do not investigate anything else."
+3. **Wait** for that researcher to report back in the conversation.
+4. **Report the result:** post `RESEARCH SMOKE PASS` to the conversation if the
+   researcher replied with `RESEARCH SMOKE OK`, otherwise post `RESEARCH SMOKE FAIL`
+   followed by what went wrong. Then stop — do not spawn any further researchers.
+
+---
+"#
+        .to_string()
     }
 
     pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {
@@ -6306,6 +6683,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: variants.first().map(|v| v.worktree_path.clone()),
             worktree_branch: variants.first().map(|v| v.branch.clone()),
+            no_git: false,
         };
 
         {
@@ -6575,6 +6953,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -6673,6 +7052,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -7056,6 +7436,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -7167,6 +7548,11 @@ Last updated: {timestamp}
             index,
             worker_config.initial_prompt.as_deref(),
             Some("ACTIVE"),
+            worker_config
+                .role
+                .as_ref()
+                .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+                .unwrap_or(false),
         )
         .map_err(|err| {
             Self::rollback_worker_launch_artifacts(
@@ -8432,6 +8818,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: persisted.worktree_path.clone(),
             worktree_branch: persisted.worktree_branch.clone(),
+            no_git: persisted.no_git,
         })
     }
 
@@ -8672,6 +9059,7 @@ Last updated: {timestamp}
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         };
 
         {
@@ -8780,15 +9168,24 @@ Last updated: {timestamp}
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
-        // Late-spawned workers should branch from the most recent session-integrated commit when possible.
-        let base_ref = Self::resolve_worker_base_ref(&session, "add_worker", worker_index);
-        let (_, worker_cwd) = create_session_worktree(
-            session_id,
-            &format!("worker-{}", worker_index),
-            &worker_branch,
-            &base_ref,
-            &session.project_path,
-        )?;
+        // Research (no-git) sessions never create worktrees or branches: the worker
+        // runs directly in the project directory, mirroring the no-worktree launch path
+        // in `launch_hive_internal`. This keeps the Queen's on-demand spawning working
+        // on non-repo folders and honors the research "no git" contract.
+        let worker_cwd = if session.no_git {
+            session.project_path.to_string_lossy().to_string()
+        } else {
+            // Late-spawned workers should branch from the most recent session-integrated commit when possible.
+            let base_ref = Self::resolve_worker_base_ref(&session, "add_worker", worker_index);
+            let (_, cwd) = create_session_worktree(
+                session_id,
+                &format!("worker-{}", worker_index),
+                &worker_branch,
+                &base_ref,
+                &session.project_path,
+            )?;
+            cwd
+        };
         self.emit_workspace_created(
             session_id,
             PRIMARY_CELL_ID,
@@ -8804,6 +9201,11 @@ Last updated: {timestamp}
             Path::new(&worker_cwd),
             worker_index,
             config_with_role.initial_prompt.as_deref(),
+            config_with_role
+                .role
+                .as_ref()
+                .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
+                .unwrap_or(false),
         ) {
             Ok(task_file) => task_file,
             Err(err) => {
@@ -9370,6 +9772,7 @@ Last updated: {timestamp}
             auth_strategy: auth_strategy.persist_value(),
             worktree_path: session.worktree_path.clone(),
             worktree_branch: session.worktree_branch.clone(),
+            no_git: session.no_git,
         }
     }
 
@@ -10023,6 +10426,41 @@ mod tests {
     }
 
     #[test]
+    fn research_worker_surfaces_are_read_only() {
+        let session_id = "session-research-readonly";
+        let worktree_path =
+            PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
+        let _ = std::fs::create_dir_all(&worktree_path);
+
+        let cfg = AgentConfig {
+            role: Some(WorkerRole::new("researcher", "Researcher", "claude")),
+            ..AgentConfig::default()
+        };
+
+        // Worker prompt: read-only framing, no EXECUTOR, no learnings POST.
+        let prompt = SessionController::build_worker_prompt(1, &cfg, "queen", session_id);
+        assert!(prompt.contains("RESEARCHER"));
+        assert!(prompt.contains("Read-Only"));
+        assert!(!prompt.contains("## Your Role: EXECUTOR"));
+        assert!(!prompt.contains("Learnings Protocol (MANDATORY)"));
+
+        // Task file (read_only=true): read-only role constraints, no EXECUTOR.
+        let task_path = SessionController::write_task_file_with_status(
+            &worktree_path,
+            1,
+            Some("investigate the sub-question"),
+            Some("ACTIVE"),
+            true,
+        )
+        .expect("write research task file");
+        let task = std::fs::read_to_string(&task_path).unwrap();
+        assert!(task.contains("RESEARCHER (READ-ONLY)"));
+        assert!(!task.contains("EXECUTOR"));
+
+        let _ = std::fs::remove_dir_all(format!(".hive-manager/worktrees/{session_id}"));
+    }
+
+    #[test]
     fn scope_block_is_identical_across_worker_and_task_surfaces() {
         let session_id = "session-scope-equality";
         let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
@@ -10057,6 +10495,7 @@ mod tests {
             1,
             Some("Test task"),
             Some("ACTIVE"),
+            false,
         )
         .expect("write task file");
         let task_file = std::fs::read_to_string(&task_file_path).expect("read task file");
@@ -10236,6 +10675,7 @@ mod tests {
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         }
     }
 
@@ -10282,6 +10722,7 @@ mod tests {
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         }
     }
 
@@ -10518,6 +10959,7 @@ mod tests {
             auth_strategy: AuthStrategy::default(),
             worktree_path: None, // Key: no session worktree for planning/swarm
             worktree_branch: None,
+            no_git: false,
         };
 
         assert!(session.worktree_path.is_none());

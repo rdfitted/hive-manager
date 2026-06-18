@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::http::handlers::{validate_cli, validate_project_path};
 use crate::pty::AgentConfig;
-use crate::session::{Session, SessionController, HiveLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig};
+use crate::session::{Session, SessionController, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig};
 
 pub struct SessionControllerState(pub Arc<RwLock<SessionController>>);
 
@@ -97,6 +97,29 @@ fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(), String> 
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_research_launch_config(config: &ResearchLaunchConfig) -> Result<(), String> {
+    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
+    validate_session_name(config.name.as_deref())?;
+    validate_session_color(config.color.as_deref())?;
+    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
+
+    // Research requires a roster of 1..=6 researchers. These are NOT pre-spawned:
+    // the Queen spawns them on demand, so the roster must list at least one entry for
+    // the Queen to draw from (and is capped like the launch dialog does at 6).
+    if !(1..=6).contains(&config.workers.len()) {
+        return Err(format!(
+            "Research sessions require 1 to 6 researchers (got {}).",
+            config.workers.len()
+        ));
+    }
+
+    for worker in &config.workers {
+        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
     }
 
     Ok(())
@@ -218,6 +241,16 @@ pub async fn launch_hive_v2(
     validate_hive_launch_config(&config)?;
     let controller = state.0.read();
     controller.launch_hive_v2(config)
+}
+
+#[tauri::command]
+pub async fn launch_research(
+    state: State<'_, SessionControllerState>,
+    config: ResearchLaunchConfig,
+) -> Result<Session, String> {
+    validate_research_launch_config(&config)?;
+    let controller = state.0.read();
+    controller.launch_research(config)
 }
 
 #[tauri::command]

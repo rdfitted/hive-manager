@@ -265,6 +265,7 @@ mod tests {
             auth_strategy: AuthStrategy::None,
             worktree_path: None,
             worktree_branch: None,
+            no_git: false,
         }
     }
 

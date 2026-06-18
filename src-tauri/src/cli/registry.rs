@@ -261,6 +261,7 @@ mod tests {
                 enabled: true,
                 port: 18800,
             },
+            global_wiki_path: None,
         }
     }
 

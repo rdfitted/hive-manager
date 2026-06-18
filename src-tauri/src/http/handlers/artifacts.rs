@@ -125,6 +125,7 @@ fn session_from_persisted(persisted: PersistedSession) -> Session {
         auth_strategy: AuthStrategy::default(),
         worktree_path: persisted.worktree_path,
         worktree_branch: persisted.worktree_branch,
+        no_git: persisted.no_git,
     }
 }
 

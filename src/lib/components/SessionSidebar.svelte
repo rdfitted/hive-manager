@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
-  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { invoke } from '@tauri-apps/api/core';
@@ -48,6 +48,7 @@
   interface Props {
     onLaunch: (projectPath: string, workerCount: number, command: string, prompt?: string) => Promise<void>;
     onLaunchHiveV2?: (config: HiveLaunchConfig) => Promise<void>;
+    onLaunchResearch?: (config: ResearchLaunchConfig) => Promise<void>;
     onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
     onLaunchFusion?: (config: FusionLaunchConfig) => Promise<void>;
     onLaunchSolo?: (config: SoloLaunchConfig) => Promise<void>;
@@ -64,7 +65,7 @@
     state: string;
   }
 
-  let { onLaunch, onLaunchHiveV2, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onOpenAddWorker }: Props = $props();
+  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onOpenAddWorker }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
@@ -167,6 +168,22 @@
           e.detail.queen_config.cli,
           e.detail.prompt
         );
+      }
+      showLaunchDialog = false;
+    } catch (err) {
+      console.error('Launch failed:', err);
+    } finally {
+      launching = false;
+    }
+  }
+
+  async function handleLaunchResearch(e: CustomEvent<ResearchLaunchConfig>) {
+    launching = true;
+    try {
+      if (onLaunchResearch) {
+        await onLaunchResearch(e.detail);
+      } else {
+        await sessions.launchResearch(e.detail);
       }
       showLaunchDialog = false;
     } catch (err) {
@@ -524,6 +541,7 @@
   show={showLaunchDialog}
   on:close={() => showLaunchDialog = false}
   on:launchHive={handleLaunchHive}
+  on:launchResearch={handleLaunchResearch}
   on:launchSwarm={handleLaunchSwarm}
   on:launchFusion={handleLaunchFusion}
   on:launchSolo={handleLaunchSolo}
