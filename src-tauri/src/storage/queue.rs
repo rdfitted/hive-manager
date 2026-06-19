@@ -193,6 +193,15 @@ impl QueueRepo {
     /// stale (older than `stuck_cutoff_ms`) or absent. Returns `true` iff THIS call won
     /// the claim (`conn.changes() == 1`). Because the statement is atomic and runs under
     /// the process mutex, exactly one of N concurrent claimers wins.
+    ///
+    /// The claim STAMPS `heartbeat_at = now_ms` on the won row. This is load-bearing for
+    /// the no-double-spawn invariant: without it, a just-claimed row keeps `heartbeat_at`
+    /// NULL (every `enqueue` inserts NULL), and a second concurrent claimer would re-match
+    /// the `status='running' AND heartbeat_at IS NULL` branch and ALSO win — a double spawn.
+    /// Stamping the heartbeat makes the freshly-claimed row fresh, so the loser sees a
+    /// non-NULL, non-stale heartbeat and matches 0 rows. The worker's own heartbeats then
+    /// keep the row fresh; if its first heartbeat never arrives within `stuck_cutoff_ms`,
+    /// the row legitimately becomes reclaimable again (the stuck-detection path).
     pub fn try_claim(
         &self,
         id: &str,
@@ -202,7 +211,10 @@ impl QueueRepo {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
-                 SET status = 'running', attempts = attempts + 1, updated_at = ?2
+                 SET status = 'running',
+                     attempts = attempts + 1,
+                     updated_at = ?2,
+                     heartbeat_at = ?2
                  WHERE id = ?1
                    AND (status = 'queued'
                         OR (status = 'running'
