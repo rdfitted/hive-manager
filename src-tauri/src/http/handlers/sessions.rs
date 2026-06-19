@@ -999,6 +999,10 @@ pub async fn get_run_journal(
 
     let store = crate::storage::RunJournalStore::new(Arc::clone(&state.app_state_db));
     let response = tokio::task::spawn_blocking(move || -> Result<RunJournalResponse, crate::storage::StorageError> {
+        // Defensive: ensure the journal/ledger tables exist (idempotent CREATE TABLE IF NOT
+        // EXISTS). Production creates them at startup, but a fresh/in-memory DB (e.g. tests)
+        // may not have run that path, in which case read_journal would hit "no such table".
+        store.ensure_schema()?;
         let journal = store.read_journal(&id)?;
         let ledger = store.read_ledger(&id)?;
         Ok(RunJournalResponse { journal, ledger })
