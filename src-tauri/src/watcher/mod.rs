@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::{mpsc::channel, Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use crate::tauri_shim::{AppHandle, Emitter};
 
 #[derive(Clone, Serialize)]
 struct WorkerCompletedPayload {

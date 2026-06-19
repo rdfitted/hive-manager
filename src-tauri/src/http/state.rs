@@ -1,6 +1,6 @@
 use parking_lot::RwLock as PLRwLock;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use crate::tauri_shim::{AppHandle, Emitter};
 use tokio::sync::RwLock;
 
 use crate::actions::render::envelope_for_content;

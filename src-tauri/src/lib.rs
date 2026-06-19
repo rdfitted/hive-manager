@@ -1,8 +1,9 @@
+#[cfg(not(test))]
+mod commands;
 pub mod actions;
 pub mod adapters;
 pub mod artifacts;
 pub mod cli;
-mod commands;
 mod coordination;
 pub mod domain;
 pub mod events;
@@ -12,21 +13,33 @@ mod pty;
 pub mod runtime;
 mod session;
 mod storage;
+mod tauri_shim;
 mod templates;
 mod watcher;
 pub mod workspace;
 
-use crate::actions::ActionRegistry;
-use crate::domain::event::EventType;
-use crate::http::handlers::cells::build_cells;
-use crate::http::state::AppState;
-use parking_lot::RwLock;
+#[cfg(not(test))]
 use std::collections::HashSet;
+#[cfg(not(test))]
 use std::sync::Arc;
+#[cfg(not(test))]
 use std::time::Duration;
+#[cfg(not(test))]
+use parking_lot::RwLock;
+#[cfg(not(test))]
+use crate::actions::ActionRegistry;
+#[cfg(not(test))]
+use crate::domain::event::EventType;
+#[cfg(not(test))]
+use crate::http::handlers::cells::build_cells;
+#[cfg(not(test))]
+use crate::http::state::AppState;
+#[cfg(not(test))]
 use tauri::{Emitter, Manager};
+#[cfg(not(test))]
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[cfg(not(test))]
 use commands::{
     add_worker_to_session, assign_task, close_session, continue_after_planning, create_pty,
     get_app_config, get_coordination_log, get_current_branch, get_current_directory,
@@ -39,12 +52,18 @@ use commands::{
     stop_agent, stop_session, switch_branch, update_app_config, update_session_metadata,
     write_to_pty, CoordinationState, PtyManagerState, SessionControllerState, StorageState,
 };
-use coordination::InjectionManager;
-use events::EventBus;
+#[cfg(not(test))]
 use pty::PtyManager;
+#[cfg(not(test))]
 use session::SessionController;
+#[cfg(not(test))]
 use storage::{ApplicationStateDb, SessionStorage};
+#[cfg(not(test))]
+use coordination::InjectionManager;
+#[cfg(not(test))]
+use events::EventBus;
 
+#[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize tracing
@@ -575,3 +594,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+pub fn run() {}

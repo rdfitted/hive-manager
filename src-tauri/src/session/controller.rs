@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use crate::tauri_shim::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::artifacts::collector::ArtifactCollector;

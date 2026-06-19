@@ -1,0 +1,42 @@
+name: Rust Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - "feat/**"
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-test:
+    name: Cargo test
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        working-directory: src-tauri
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Cargo check tests
+        run: cargo check --tests
+
+      - name: Cargo clippy
+        run: cargo clippy
+
+      - name: Cargo test
+        run: cargo test
