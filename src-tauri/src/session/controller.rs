@@ -1,35 +1,35 @@
+use chrono::{DateTime, Utc};
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
-use crate::cli::{CliRegistry, CliBehavior};
+use crate::artifacts::collector::ArtifactCollector;
+use crate::cli::{CliBehavior, CliRegistry};
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
+use crate::domain::ArtifactBundle;
 use crate::events::{EventBus, EventEmitter};
-use crate::pty::{AgentRole, AgentStatus, AgentConfig, PtyManager, WorkerRole};
-use crate::storage::{SessionStorage, StorageError};
+use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager, WorkerRole};
 use crate::session::cell_status::{
-    agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids, variant_to_cell_id,
-    PRIMARY_CELL_ID, RESOLVER_CELL_ID,
+    agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids,
+    variant_to_cell_id, PRIMARY_CELL_ID, RESOLVER_CELL_ID,
 };
 use crate::session::polling_intervals::{
     format_poll_label, ACTIVATION_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL,
     SMOKE_EVALUATOR_FIRST_POLL_INTERVAL, SMOKE_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL,
     STANDARD_EVALUATOR_FIRST_POLL_INTERVAL, STANDARD_IDLE_POLL_INTERVAL,
 };
+use crate::storage::{SessionStorage, StorageError};
 use crate::templates::{heartbeat_snippet, PromptContext, TemplateEngine};
 use crate::watcher::TaskFileWatcher;
-use crate::artifacts::collector::ArtifactCollector;
-use crate::domain::ArtifactBundle;
 use crate::workspace::git::{
-    cleanup_session_worktrees, create_session_worktree, remove_session_worktree_cell,
-    current_head, resolve_fresh_base,
+    cleanup_session_worktrees, create_session_worktree, current_head, remove_session_worktree_cell,
+    resolve_fresh_base,
 };
 
 /// Example `coordination.log` lines for Queen quality-reconciliation (quiescence-based; no iteration cap).
@@ -67,6 +67,7 @@ pub enum SessionType {
     Hive { worker_count: u8 },
     Swarm { planner_count: u8 },
     Fusion { variants: Vec<String> },
+    Debate { variants: Vec<String> },
     Solo { cli: String, model: Option<String> },
 }
 
@@ -101,6 +102,7 @@ pub const DEFAULT_MAX_QA_ITERATIONS: u8 = 20;
 const DEFAULT_QA_TIMEOUT_SECS: u64 = 300;
 const MAX_PRIMARY_CELL_BRANCHES: usize = 4;
 const MAX_PRIMARY_CELL_DIFF_SUMMARY_LEN: usize = 4_096;
+const MAX_DEBATE_ROUNDS: u8 = 20;
 
 /// Authentication strategy for QA workers accessing the session
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,11 +143,7 @@ impl AuthStrategy {
         }
     }
 
-    fn apply_prompt_variables(
-        &self,
-        session_id: &str,
-        variables: &mut HashMap<String, String>,
-    ) {
+    fn apply_prompt_variables(&self, session_id: &str, variables: &mut HashMap<String, String>) {
         match self {
             Self::DevBypass { token } => {
                 variables.insert(
@@ -158,7 +156,10 @@ impl AuthStrategy {
                 variables.insert("auth_bypass_token".to_string(), token.clone());
             }
             Self::None => {
-                variables.insert("auth_bypass_url".to_string(), "(not configured)".to_string());
+                variables.insert(
+                    "auth_bypass_url".to_string(),
+                    "(not configured)".to_string(),
+                );
                 variables.insert("auth_bypass_token".to_string(), String::new());
             }
         }
@@ -177,7 +178,11 @@ pub struct CompletionBlockedError {
 
 impl CompletionBlockedError {
     /// Create error for state mismatch (evaluator-backed session not in QaPassed).
-    pub fn state_blocked(_session_id: &str, current_state: &SessionState, requires_evaluator: bool) -> Self {
+    pub fn state_blocked(
+        _session_id: &str,
+        current_state: &SessionState,
+        requires_evaluator: bool,
+    ) -> Self {
         let (error, unblock_paths) = if requires_evaluator {
             (
                 "Session completion blocked: evaluator-backed session must be in QaPassed state".to_string(),
@@ -188,7 +193,8 @@ impl CompletionBlockedError {
             )
         } else {
             (
-                "Session completion blocked: session must be in Running or QaPassed state".to_string(),
+                "Session completion blocked: session must be in Running or QaPassed state"
+                    .to_string(),
                 vec![],
             )
         };
@@ -258,6 +264,8 @@ pub enum SessionState {
     WaitingForPlanner(u8),
     SpawningFusionVariant(u8),
     WaitingForFusionVariants,
+    SpawningDebateRound(u8),
+    WaitingForDebateRound(u8),
     SpawningJudge,
     Judging,
     AwaitingVerdictSelection,
@@ -314,7 +322,7 @@ pub struct HiveLaunchConfig {
     pub workers: Vec<AgentConfig>,
     pub prompt: Option<String>,
     #[serde(default)]
-    pub with_planning: bool,  // If true, spawn Master Planner first
+    pub with_planning: bool, // If true, spawn Master Planner first
     #[serde(default)]
     pub with_evaluator: bool,
     #[serde(default)]
@@ -322,7 +330,7 @@ pub struct HiveLaunchConfig {
     #[serde(default)]
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
     #[serde(default)]
-    pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
+    pub smoke_test: bool, // If true, create a minimal test plan without real investigation
 }
 
 /// Launch config for **Research** mode.
@@ -392,12 +400,12 @@ pub struct SwarmLaunchConfig {
     #[serde(default)]
     pub color: Option<String>,
     pub queen_config: AgentConfig,
-    pub planner_count: u8,                    // How many planners
-    pub planner_config: AgentConfig,          // Config shared by all planners
+    pub planner_count: u8,                     // How many planners
+    pub planner_config: AgentConfig,           // Config shared by all planners
     pub workers_per_planner: Vec<AgentConfig>, // Workers shared config (applied to each planner)
     pub prompt: Option<String>,
     #[serde(default)]
-    pub with_planning: bool,  // If true, spawn Master Planner first
+    pub with_planning: bool, // If true, spawn Master Planner first
     #[serde(default)]
     pub with_evaluator: bool,
     #[serde(default)]
@@ -405,7 +413,7 @@ pub struct SwarmLaunchConfig {
     #[serde(default)]
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
     #[serde(default)]
-    pub smoke_test: bool,     // If true, create a minimal test plan without real investigation
+    pub smoke_test: bool, // If true, create a minimal test plan without real investigation
 
     // Legacy support - if planners vec is provided, use it instead
     #[serde(default)]
@@ -454,6 +462,10 @@ fn default_fusion_cli() -> String {
     "claude".to_string()
 }
 
+fn default_debate_rounds() -> u8 {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FusionVariantConfig {
     pub name: String,
@@ -487,6 +499,69 @@ struct FusionVariantMetadata {
 pub struct FusionVariantStatus {
     pub index: u8,
     pub name: String,
+    pub branch: String,
+    pub worktree_path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DebateLaunchConfig {
+    pub project_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    pub debaters: Vec<DebateDebaterConfig>,
+    pub topic: String,
+    #[serde(default = "default_debate_rounds")]
+    pub rounds: u8,
+    pub judge_config: AgentConfig,
+    #[serde(default)]
+    pub queen_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub with_planning: bool,
+    #[serde(default = "default_fusion_cli")]
+    pub default_cli: String,
+    pub default_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DebateDebaterConfig {
+    pub name: String,
+    #[serde(default)]
+    pub stance: Option<String>,
+    pub cli: String,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DebateSessionMetadata {
+    base_branch: String,
+    debaters: Vec<DebateDebaterMetadata>,
+    judge_config: AgentConfig,
+    topic: String,
+    rounds: u8,
+    verdict_file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DebateDebaterMetadata {
+    index: u8,
+    name: String,
+    stance: Option<String>,
+    slug: String,
+    branch: String,
+    worktree_path: String,
+    config: AgentConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebateDebaterStatus {
+    pub index: u8,
+    pub name: String,
+    pub stance: Option<String>,
     pub branch: String,
     pub worktree_path: String,
     pub status: String,
@@ -603,7 +678,7 @@ fn cell_type_for_id(cell_id: &str) -> &'static str {
 
 fn agent_cell_id(session: &Session, agent: &AgentInfo) -> String {
     match &session.session_type {
-        SessionType::Fusion { .. } => match &agent.role {
+        SessionType::Fusion { .. } | SessionType::Debate { .. } => match &agent.role {
             AgentRole::Fusion { variant } => variant_to_cell_id(variant),
             _ => RESOLVER_CELL_ID.to_string(),
         },
@@ -734,7 +809,13 @@ impl SessionController {
         match store.record_step_started(run_id, kind, ordinal, detail) {
             Ok(step_id) => Some(step_id),
             Err(e) => {
-                tracing::warn!(run_id, ?kind, ordinal, "Failed to journal step start: {}", e);
+                tracing::warn!(
+                    run_id,
+                    ?kind,
+                    ordinal,
+                    "Failed to journal step start: {}",
+                    e
+                );
                 None
             }
         }
@@ -765,8 +846,9 @@ impl SessionController {
         let Some(store) = self.run_journal.as_ref() else {
             return false;
         };
-        let step_id =
-            crate::domain::run_journal::RunJournalEntry::deterministic_step_id(run_id, kind, ordinal);
+        let step_id = crate::domain::run_journal::RunJournalEntry::deterministic_step_id(
+            run_id, kind, ordinal,
+        );
         match store.read_journal(run_id) {
             Ok(entries) => entries.iter().any(|e| {
                 e.step_id == step_id
@@ -830,7 +912,12 @@ impl SessionController {
                 queen_args.push(&prompt_str);
             }
 
-            tracing::info!("Launching Queen agent: {} {:?} in {:?}", cmd, queen_args, project_path);
+            tracing::info!(
+                "Launching Queen agent: {} {:?} in {:?}",
+                cmd,
+                queen_args,
+                project_path
+            );
 
             pty_manager
                 .create_session(
@@ -874,12 +961,21 @@ impl SessionController {
                 let worker_id = format!("{}-worker-{}", session_id, i);
                 let worker_args = base_args.clone();
 
-                tracing::info!("Launching Worker {} agent: {} {:?} in {:?}", i, cmd, worker_args, project_path);
+                tracing::info!(
+                    "Launching Worker {} agent: {} {:?} in {:?}",
+                    i,
+                    cmd,
+                    worker_args,
+                    project_path
+                );
 
                 pty_manager
                     .create_session(
                         worker_id.clone(),
-                        AgentRole::Worker { index: i, parent: None },
+                        AgentRole::Worker {
+                            index: i,
+                            parent: None,
+                        },
                         cmd,
                         &worker_args.iter().map(|s| *s).collect::<Vec<_>>(),
                         Some(cwd),
@@ -905,7 +1001,10 @@ impl SessionController {
 
                 agents.push(AgentInfo {
                     id: worker_id.clone(),
-                    role: AgentRole::Worker { index: i, parent: Some(format!("{}-queen", session_id)) },
+                    role: AgentRole::Worker {
+                        index: i,
+                        parent: Some(format!("{}-queen", session_id)),
+                    },
                     status: AgentStatus::Running,
                     config: worker_config,
                     parent_id: Some(format!("{}-queen", session_id)),
@@ -946,9 +1045,12 @@ impl SessionController {
         self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         self.init_session_storage(&session);
@@ -1163,7 +1265,10 @@ impl SessionController {
         if Self::session_requires_internal_evaluator(session) {
             matches!(session.state, SessionState::QaPassed)
         } else {
-            matches!(session.state, SessionState::Running | SessionState::QaPassed)
+            matches!(
+                session.state,
+                SessionState::Running | SessionState::QaPassed
+            )
         }
     }
 
@@ -1175,22 +1280,22 @@ impl SessionController {
                 .storage
                 .as_ref()
                 .ok_or_else(|| CompletionError::not_found(session_id))?;
-            let persisted = storage
-                .load_session(session_id)
-                .map_err(|err| match err {
-                    StorageError::SessionNotFound(_) => CompletionError::not_found(session_id),
-                    _ => CompletionError::storage(format!("Storage error: {}", err)),
-                })?;
+            let persisted = storage.load_session(session_id).map_err(|err| match err {
+                StorageError::SessionNotFound(_) => CompletionError::not_found(session_id),
+                _ => CompletionError::storage(format!("Storage error: {}", err)),
+            })?;
             self.session_from_persisted(&persisted)
                 .map_err(CompletionError::storage)?
         };
 
         if !Self::state_allows_completion(&session) {
-            return Err(CompletionError::Blocked(CompletionBlockedError::state_blocked(
-                session_id,
-                &session.state,
-                Self::session_requires_internal_evaluator(&session),
-            )));
+            return Err(CompletionError::Blocked(
+                CompletionBlockedError::state_blocked(
+                    session_id,
+                    &session.state,
+                    Self::session_requires_internal_evaluator(&session),
+                ),
+            ));
         }
 
         let quiet_for = Utc::now() - session.last_activity_at;
@@ -1249,12 +1354,15 @@ impl SessionController {
         let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
         if status_changed {
             if let Some(ref app_handle) = self.app_handle {
-                let _ = app_handle.emit("heartbeat-status-changed", serde_json::json!({
-                    "session_id": session_id,
-                    "agent_id": agent_id,
-                    "status": status,
-                    "summary": summary,
-                }));
+                let _ = app_handle.emit(
+                    "heartbeat-status-changed",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "agent_id": agent_id,
+                        "status": status,
+                        "summary": summary,
+                    }),
+                );
             }
         }
         Ok(())
@@ -1288,10 +1396,7 @@ impl SessionController {
     /// Get heartbeat info for a session (for active sessions endpoint).
     pub fn get_heartbeat_info(&self, session_id: &str) -> HashMap<String, AgentHeartbeatInfo> {
         let heartbeats = self.agent_heartbeats.read();
-        heartbeats
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default()
+        heartbeats.get(session_id).cloned().unwrap_or_default()
     }
 
     fn emit_session_update(&self, session_id: &str) {
@@ -1313,7 +1418,10 @@ impl SessionController {
         let cell_id = cell_id.to_string();
         let cell_type = cell_type_for_id(&cell_id).to_string();
         tokio::spawn(async move {
-            if let Err(error) = emitter.emit_cell_created(&session_id, &cell_id, &cell_type).await {
+            if let Err(error) = emitter
+                .emit_cell_created(&session_id, &cell_id, &cell_type)
+                .await
+            {
                 tracing::debug!("Failed to emit cell created event: {}", error);
             }
         });
@@ -1337,7 +1445,10 @@ impl SessionController {
         });
     }
 
-    fn merge_primary_cell_artifact_bundles(existing: ArtifactBundle, incoming: ArtifactBundle) -> ArtifactBundle {
+    fn merge_primary_cell_artifact_bundles(
+        existing: ArtifactBundle,
+        incoming: ArtifactBundle,
+    ) -> ArtifactBundle {
         let mut commits = existing.commits.clone();
         for c in incoming.commits {
             if !commits.iter().any(|x| x == &c) {
@@ -1350,7 +1461,10 @@ impl SessionController {
                 changed_files.push(f);
             }
         }
-        let branch = Self::merge_primary_cell_branch_labels([existing.branch.clone(), incoming.branch.clone()]);
+        let branch = Self::merge_primary_cell_branch_labels([
+            existing.branch.clone(),
+            incoming.branch.clone(),
+        ]);
         let summary = match (existing.summary, incoming.summary) {
             (Some(a), Some(b)) if a != b => Some(format!("{} · {}", a, b)),
             (Some(a), _) => Some(a),
@@ -1406,7 +1520,10 @@ impl SessionController {
             0 => String::new(),
             1 => unique.into_iter().next().unwrap_or_default(),
             len if len > MAX_PRIMARY_CELL_BRANCHES => {
-                let mut limited = unique.into_iter().take(MAX_PRIMARY_CELL_BRANCHES).collect::<Vec<_>>();
+                let mut limited = unique
+                    .into_iter()
+                    .take(MAX_PRIMARY_CELL_BRANCHES)
+                    .collect::<Vec<_>>();
                 limited.push(format!("+{} more", len - MAX_PRIMARY_CELL_BRANCHES));
                 limited.join(" | ")
             }
@@ -1445,18 +1562,31 @@ impl SessionController {
         Some(format!("{truncated}\n...[truncated]"))
     }
 
-    fn agent_git_worktree_path_for_artifacts(session: &Session, agent: &AgentInfo) -> Option<PathBuf> {
+    fn agent_git_worktree_path_for_artifacts(
+        session: &Session,
+        agent: &AgentInfo,
+    ) -> Option<PathBuf> {
         match &agent.role {
-            AgentRole::Fusion { variant } => {
-                Self::read_fusion_metadata(&session.project_path, &session.id)
+            AgentRole::Fusion { variant } => match &session.session_type {
+                SessionType::Debate { .. } => {
+                    Self::read_debate_metadata(&session.project_path, &session.id)
+                        .ok()
+                        .and_then(|meta| {
+                            meta.debaters
+                                .iter()
+                                .find(|d| &d.name == variant)
+                                .map(|d| PathBuf::from(&d.worktree_path))
+                        })
+                }
+                _ => Self::read_fusion_metadata(&session.project_path, &session.id)
                     .ok()
                     .and_then(|meta| {
                         meta.variants
                             .iter()
                             .find(|v| &v.name == variant || v.agent_id == agent.id)
                             .map(|v| PathBuf::from(&v.worktree_path))
-                    })
-            }
+                    }),
+            },
             AgentRole::Queen => Some(
                 session
                     .project_path
@@ -1503,11 +1633,13 @@ impl SessionController {
         let session_id = session.id.as_str();
         if cell_id == PRIMARY_CELL_ID {
             let incoming_bundle = bundle;
-            if let Err(err) = storage.atomic_update_artifact(session_id, &cell_id, move |existing| {
-                existing.map_or(incoming_bundle.clone(), |existing_bundle| {
-                    Self::merge_primary_cell_artifact_bundles(existing_bundle, incoming_bundle)
+            if let Err(err) =
+                storage.atomic_update_artifact(session_id, &cell_id, move |existing| {
+                    existing.map_or(incoming_bundle.clone(), |existing_bundle| {
+                        Self::merge_primary_cell_artifact_bundles(existing_bundle, incoming_bundle)
+                    })
                 })
-            }) {
+            {
                 tracing::warn!(
                     "Failed to persist artifacts for session {} cell {}: {}",
                     session_id,
@@ -1702,7 +1834,9 @@ impl SessionController {
                 })
             };
 
-            if let Some(((previous_session_state, previous_auth_strategy), changes)) = previous_state {
+            if let Some(((previous_session_state, previous_auth_strategy), changes)) =
+                previous_state
+            {
                 if let Err(err) = self.persist_then_emit_session_update(id, changes) {
                     let mut sessions = self.sessions.write();
                     if let Some(session) = sessions.get_mut(id) {
@@ -1733,14 +1867,14 @@ impl SessionController {
         };
 
         if let Some(((previous_session_state, previous_auth_strategy), changes)) = previous_state {
-                if let Err(err) = self.update_session_storage_checked(session_id) {
-                    let mut sessions = self.sessions.write();
-                    if let Some(session) = sessions.get_mut(session_id) {
-                        session.state = previous_session_state;
-                        session.auth_strategy = previous_auth_strategy;
-                    }
-                    return Err(CompletionError::storage(err));
+            if let Err(err) = self.update_session_storage_checked(session_id) {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    session.state = previous_session_state;
+                    session.auth_strategy = previous_auth_strategy;
                 }
+                return Err(CompletionError::storage(err));
+            }
 
             self.emit_cell_status_changes(session_id, changes);
             self.emit_session_update(session_id);
@@ -1751,20 +1885,15 @@ impl SessionController {
             .storage
             .as_ref()
             .ok_or_else(|| CompletionError::not_found(session_id))?;
-        let mut persisted = storage
-            .load_session(session_id)
-            .map_err(|err| match err {
-                StorageError::SessionNotFound(_) => CompletionError::not_found(session_id),
-                _ => CompletionError::storage(format!("Storage error: {}", err)),
-            })?;
+        let mut persisted = storage.load_session(session_id).map_err(|err| match err {
+            StorageError::SessionNotFound(_) => CompletionError::not_found(session_id),
+            _ => CompletionError::storage(format!("Storage error: {}", err)),
+        })?;
         persisted.state = serialize_session_state(&SessionState::Completed);
         persisted.auth_strategy = AuthStrategy::None.persist_value();
-        storage
-            .save_session(&persisted)
-            .map_err(|e| CompletionError::storage(format!(
-                "Failed to persist session completion: {}",
-                e
-            )))?;
+        storage.save_session(&persisted).map_err(|e| {
+            CompletionError::storage(format!("Failed to persist session completion: {}", e))
+        })?;
 
         Ok(())
     }
@@ -1840,7 +1969,11 @@ impl SessionController {
         }
         self.emit_session_update(id);
         if !kill_errors.is_empty() {
-            tracing::warn!("Session {} closed with PTY kill errors: {}", id, kill_errors.join(" | "));
+            tracing::warn!(
+                "Session {} closed with PTY kill errors: {}",
+                id,
+                kill_errors.join(" | ")
+            );
         }
         Ok(())
     }
@@ -1945,15 +2078,15 @@ impl SessionController {
                 tracing::warn!(
                     "Rollback failed to delete branch {}: {}",
                     branch_name,
-                    if message.is_empty() { "git branch -D failed".to_string() } else { message }
+                    if message.is_empty() {
+                        "git branch -D failed".to_string()
+                    } else {
+                        message
+                    }
                 );
             }
             Err(err) => {
-                tracing::warn!(
-                    "Rollback failed to delete branch {}: {}",
-                    branch_name,
-                    err
-                );
+                tracing::warn!("Rollback failed to delete branch {}: {}", branch_name, err);
             }
         }
     }
@@ -1965,9 +2098,9 @@ impl SessionController {
     ) {
         let changes = {
             let mut sessions = self.sessions.write();
-            sessions.get_mut(session_id).map(|session| {
-                self.set_session_state_with_events(session, previous_state.clone())
-            })
+            sessions
+                .get_mut(session_id)
+                .map(|session| self.set_session_state_with_events(session, previous_state.clone()))
         };
 
         if let Some(changes) = changes {
@@ -2120,8 +2253,8 @@ impl SessionController {
                 args.push("-d".to_string());
                 args.push("Ubuntu".to_string());
                 args.push("/root/.local/bin/agent".to_string());
-                args.push("--force".to_string());  // Auto-approve commands
-                // Cursor uses global model setting, no --model flag
+                args.push("--force".to_string()); // Auto-approve commands
+                                                  // Cursor uses global model setting, no --model flag
             }
             "droid" => {
                 // Droid CLI - interactive TUI mode
@@ -2130,7 +2263,7 @@ impl SessionController {
             }
             "qwen" => {
                 // Qwen Code CLI - interactive mode with auto-approve
-                args.push("-y".to_string());  // YOLO mode for auto-approve
+                args.push("-y".to_string()); // YOLO mode for auto-approve
                 if let Some(ref model) = config.model {
                     args.push("-m".to_string());
                     args.push(model.clone());
@@ -2150,9 +2283,9 @@ impl SessionController {
 
         // Determine the actual command to run
         let command = match config.cli.as_str() {
-            "cursor" => "wsl".to_string(),    // Cursor runs via WSL
+            "cursor" => "wsl".to_string(),      // Cursor runs via WSL
             "antigravity" => "agy".to_string(), // Antigravity CLI binary is `agy`
-            _ => config.cli.clone(),          // Others (including gemini) use CLI name as command
+            _ => config.cli.clone(),            // Others (including gemini) use CLI name as command
         };
 
         (command, args)
@@ -2314,7 +2447,10 @@ impl SessionController {
 
     fn run_git_in_dir(project_path: &PathBuf, args: &[&str]) -> Result<String, String> {
         if !project_path.exists() {
-            return Err(format!("Project path does not exist: {}", project_path.display()));
+            return Err(format!(
+                "Project path does not exist: {}",
+                project_path.display()
+            ));
         }
 
         let mut cmd = Command::new("git");
@@ -2361,17 +2497,41 @@ impl SessionController {
         }
 
         let out = out.trim_matches('-').to_string();
-        if out.is_empty() { "variant".to_string() } else { out }
+        if out.is_empty() {
+            "variant".to_string()
+        } else {
+            out
+        }
     }
 
     fn unique_variant_slug(name: &str, seen: &mut HashMap<String, u16>) -> String {
         let base = Self::slugify_variant_name(name);
-        let count = seen.entry(base.clone()).and_modify(|v| *v += 1).or_insert(1);
+        let count = seen
+            .entry(base.clone())
+            .and_modify(|v| *v += 1)
+            .or_insert(1);
         if *count == 1 {
             base
         } else {
             format!("{}-{}", base, count)
         }
+    }
+
+    fn validate_debate_rounds(rounds: u8) -> Result<u8, String> {
+        if rounds == 0 {
+            return Err("Debate launch requires at least one round".to_string());
+        }
+        if rounds > MAX_DEBATE_ROUNDS {
+            return Err(format!(
+                "Debate launch supports at most {} rounds",
+                MAX_DEBATE_ROUNDS
+            ));
+        }
+        Ok(rounds)
+    }
+
+    fn debate_round_agent_id(session_id: &str, debater_index: u8, round: u8) -> String {
+        format!("{}-debate-{}-r{}", session_id, debater_index, round)
     }
 
     fn fusion_metadata_path(project_path: &PathBuf, session_id: &str) -> PathBuf {
@@ -2398,12 +2558,58 @@ impl SessionController {
             .map_err(|e| format!("Failed to write fusion metadata: {}", e))
     }
 
-    fn read_fusion_metadata(project_path: &PathBuf, session_id: &str) -> Result<FusionSessionMetadata, String> {
+    fn read_fusion_metadata(
+        project_path: &PathBuf,
+        session_id: &str,
+    ) -> Result<FusionSessionMetadata, String> {
         let metadata_path = Self::fusion_metadata_path(project_path, session_id);
-        let json = std::fs::read_to_string(&metadata_path)
-            .map_err(|e| format!("Failed to read fusion metadata {}: {}", metadata_path.display(), e))?;
-        serde_json::from_str(&json)
-            .map_err(|e| format!("Failed to parse fusion metadata: {}", e))
+        let json = std::fs::read_to_string(&metadata_path).map_err(|e| {
+            format!(
+                "Failed to read fusion metadata {}: {}",
+                metadata_path.display(),
+                e
+            )
+        })?;
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse fusion metadata: {}", e))
+    }
+
+    fn debate_metadata_path(project_path: &PathBuf, session_id: &str) -> PathBuf {
+        project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("debate-config.json")
+    }
+
+    fn write_debate_metadata(
+        project_path: &PathBuf,
+        session_id: &str,
+        metadata: &DebateSessionMetadata,
+    ) -> Result<(), String> {
+        let metadata_path = Self::debate_metadata_path(project_path, session_id);
+        if let Some(parent) = metadata_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create debate metadata dir: {}", e))?;
+        }
+
+        let json = serde_json::to_string_pretty(metadata)
+            .map_err(|e| format!("Failed to serialize debate metadata: {}", e))?;
+        std::fs::write(&metadata_path, json)
+            .map_err(|e| format!("Failed to write debate metadata: {}", e))
+    }
+
+    fn read_debate_metadata(
+        project_path: &PathBuf,
+        session_id: &str,
+    ) -> Result<DebateSessionMetadata, String> {
+        let metadata_path = Self::debate_metadata_path(project_path, session_id);
+        let json = std::fs::read_to_string(&metadata_path).map_err(|e| {
+            format!(
+                "Failed to read debate metadata {}: {}",
+                metadata_path.display(),
+                e
+            )
+        })?;
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse debate metadata: {}", e))
     }
 
     fn parse_task_status(content: &str) -> Option<String> {
@@ -2448,7 +2654,7 @@ impl SessionController {
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
 
         let content = format!(
-r#"# Task Assignment - Fusion Variant {variant_index} ({variant_name})
+            r#"# Task Assignment - Fusion Variant {variant_index} ({variant_name})
 
 ## Status: ACTIVE
 
@@ -2489,6 +2695,31 @@ Last updated: {timestamp}
             .join(".hive-manager")
             .join("tasks")
             .join(format!("fusion-variant-{}-task.md", variant_index))
+    }
+
+    fn debate_round_task_file_path(worktree_path: &Path, debater_index: u8, round: u8) -> PathBuf {
+        worktree_path
+            .join(".hive-manager")
+            .join("tasks")
+            .join(format!(
+                "debate-debater-{}-round-{}-task.md",
+                debater_index, round
+            ))
+    }
+
+    fn debate_round_argument_file_path(
+        project_path: &Path,
+        session_id: &str,
+        round: u8,
+        debater_slug: &str,
+    ) -> PathBuf {
+        project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("debate")
+            .join("rounds")
+            .join(format!("round-{}", round))
+            .join(format!("{}.md", debater_slug))
     }
 
     fn qa_task_file_path(project_path: &Path, session_id: &str, worker_index: usize) -> PathBuf {
@@ -2536,7 +2767,10 @@ Last updated: {timestamp}
         task_description: &str,
         cli: &str,
     ) -> String {
-        let task_file = format!(".hive-manager/tasks/fusion-variant-{}-task.md", variant_index);
+        let task_file = format!(
+            ".hive-manager/tasks/fusion-variant-{}-task.md",
+            variant_index
+        );
         let agent_id = format!("{}-fusion-{}", session_id, variant_index);
         let startup_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
@@ -2557,7 +2791,7 @@ Last updated: {timestamp}
         let scope_block = Self::scope_block(".");
 
         format!(
-r#"You are a Fusion worker implementing variant "{variant_name}".
+            r#"You are a Fusion worker implementing variant "{variant_name}".
 Working directory: {worktree_path}
 Branch: {branch}
 
@@ -2607,7 +2841,7 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#
             .join("\n");
 
         format!(
-r#"You are the Judge evaluating {variant_count} competing implementations.
+            r#"You are the Judge evaluating {variant_count} competing implementations.
 
 ## Variants
 {variant_list}
@@ -2660,6 +2894,218 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         )
     }
 
+    fn write_debate_round_task_file(
+        worktree_path: &Path,
+        debater: &DebateDebaterMetadata,
+        topic: &str,
+        round: u8,
+        total_rounds: u8,
+        argument_file: &Path,
+        opponent_files: &str,
+    ) -> Result<PathBuf, String> {
+        let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
+        std::fs::create_dir_all(&tasks_dir)
+            .map_err(|e| format!("Failed to create debate tasks directory: {}", e))?;
+
+        let file_path = Self::debate_round_task_file_path(worktree_path, debater.index, round);
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let stance = debater
+            .stance
+            .as_deref()
+            .unwrap_or("No explicit stance provided");
+        let argument_file = Self::prompt_path(argument_file);
+        let content = format!(
+            r#"# Task Assignment - Debate Debater {debater_index} ({debater_name}) Round {round}
+
+## Status: ACTIVE
+
+## Role Constraints
+
+- **DEBATER**: Argue your assigned position only.
+- **SCOPE**: Do not edit production source code. Write only your debate argument file and this task file.
+- **GIT**: Do NOT commit or push.
+
+## Debate Topic
+
+{topic}
+
+## Your Stance
+
+{stance}
+
+## Round
+
+Round {round} of {total_rounds}
+
+## Opponent Prior-Round Arguments
+
+{opponent_files}
+
+## Deliverable
+
+Write your argument or rebuttal to:
+
+`{argument_file}`
+
+## Completion Protocol
+
+When the argument file is written:
+1. Change Status to: COMPLETED
+2. Add a short Result section summarizing your position
+
+If blocked, change Status to: BLOCKED and describe the issue.
+
+---
+Last updated: {timestamp}
+"#,
+            debater_index = debater.index,
+            debater_name = debater.name,
+            round = round,
+            total_rounds = total_rounds,
+            topic = topic,
+            stance = stance,
+            opponent_files = opponent_files,
+            argument_file = argument_file,
+            timestamp = timestamp,
+        );
+
+        std::fs::write(&file_path, content)
+            .map_err(|e| format!("Failed to write debate task file: {}", e))?;
+        Ok(file_path)
+    }
+
+    fn build_debate_debater_prompt(
+        session_id: &str,
+        debater: &DebateDebaterMetadata,
+        topic: &str,
+        round: u8,
+        total_rounds: u8,
+        argument_file: &Path,
+        previous_round_dir: Option<&Path>,
+        opponent_files: &str,
+        task_file: &Path,
+    ) -> String {
+        let mut variables = HashMap::new();
+        let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
+        variables.insert(
+            "api_base_url".to_string(),
+            "http://localhost:18800".to_string(),
+        );
+        variables.insert("agent_id".to_string(), agent_id);
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert(
+            "heartbeat_summary".to_string(),
+            format!("Debating round {} as {}", round, debater.name),
+        );
+        variables.insert("debater_name".to_string(), debater.name.clone());
+        variables.insert(
+            "stance".to_string(),
+            debater
+                .stance
+                .clone()
+                .unwrap_or_else(|| "No explicit stance provided".to_string()),
+        );
+        variables.insert("round".to_string(), round.to_string());
+        variables.insert("total_rounds".to_string(), total_rounds.to_string());
+        variables.insert("worktree_path".to_string(), debater.worktree_path.clone());
+        variables.insert("branch".to_string(), debater.branch.clone());
+        variables.insert(
+            "argument_file".to_string(),
+            Self::prompt_path(argument_file),
+        );
+        variables.insert(
+            "previous_round_dir".to_string(),
+            previous_round_dir
+                .map(Self::prompt_path)
+                .unwrap_or_else(|| "(none; this is the opening round)".to_string()),
+        );
+        variables.insert("opponent_files".to_string(), opponent_files.to_string());
+        variables.insert("task_file".to_string(), Self::prompt_path(task_file));
+
+        let engine = TemplateEngine::default();
+        let context = PromptContext {
+            session_id: session_id.to_string(),
+            project_path: debater.worktree_path.clone(),
+            task: Some(topic.to_string()),
+            variables,
+            ..PromptContext::default()
+        };
+
+        engine.render_debater_prompt(&context).unwrap_or_else(|_| {
+            format!(
+                "Debate debater prompt failed to render for session {}",
+                session_id
+            )
+        })
+    }
+
+    fn build_debate_judge_prompt(
+        session_id: &str,
+        metadata: &DebateSessionMetadata,
+        global_wiki_path: &str,
+    ) -> String {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "api_base_url".to_string(),
+            "http://localhost:18800".to_string(),
+        );
+        variables.insert("agent_id".to_string(), format!("{}-judge", session_id));
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert(
+            "heartbeat_summary".to_string(),
+            "Judging debate".to_string(),
+        );
+        variables.insert("topic".to_string(), metadata.topic.clone());
+        variables.insert(
+            "topic_slug".to_string(),
+            Self::slugify_variant_name(&metadata.topic),
+        );
+        variables.insert("rounds".to_string(), metadata.rounds.to_string());
+        variables.insert("verdict_file".to_string(), metadata.verdict_file.clone());
+        variables.insert("global_wiki_path".to_string(), global_wiki_path.to_string());
+
+        let debater_list = metadata
+            .debaters
+            .iter()
+            .map(|d| {
+                let stance = d.stance.as_deref().unwrap_or("No explicit stance");
+                format!("- {}: {} ({})", d.name, stance, d.worktree_path)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        variables.insert("debater_list".to_string(), debater_list);
+
+        let round_files = (1..=metadata.rounds)
+            .flat_map(|round| {
+                metadata.debaters.iter().map(move |debater| {
+                    format!(
+                        "- Round {} / {}: .hive-manager/{}/debate/rounds/round-{}/{}.md",
+                        round, debater.name, session_id, round, debater.slug
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        variables.insert("round_files".to_string(), round_files);
+
+        let engine = TemplateEngine::default();
+        let context = PromptContext {
+            session_id: session_id.to_string(),
+            task: Some(metadata.topic.clone()),
+            variables,
+            ..PromptContext::default()
+        };
+
+        engine
+            .render_debate_judge_prompt(&context)
+            .unwrap_or_else(|_| {
+                format!(
+                    "Debate judge prompt failed to render for session {}",
+                    session_id
+                )
+            })
+    }
+
     fn prompt_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
     }
@@ -2690,7 +3136,10 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
     }
 
     fn scope_block(worktree_path: &str) -> String {
-        format!("## Scope\n\n{}", Self::worktree_boundary_rules(worktree_path))
+        format!(
+            "## Scope\n\n{}",
+            Self::worktree_boundary_rules(worktree_path)
+        )
     }
 
     /// Read-only scope block for research workers. They investigate and report;
@@ -2720,8 +3169,7 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
 
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
-        let qa_verdict_path =
-            Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
 
         format!(
             r#"## Required Protocol
@@ -2751,11 +3199,14 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
         )
     }
 
-    fn queen_post_workers_protocol(session_id: &str, session_root: &Path, has_evaluator: bool) -> String {
+    fn queen_post_workers_protocol(
+        session_id: &str,
+        session_root: &Path,
+        has_evaluator: bool,
+    ) -> String {
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
-        let qa_verdict_path =
-            Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
 
         if !has_evaluator {
             return format!(
@@ -2867,10 +3318,12 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
                 .as_deref()
                 .unwrap_or(Self::qa_worker_label(&worker.specialization));
             let payload = serde_json::to_string(worker)
-                .unwrap_or_else(|_| format!(
-                    r#"{{"specialization":"{}","cli":"{}"}}"#,
-                    worker.specialization, worker.cli
-                ))
+                .unwrap_or_else(|_| {
+                    format!(
+                        r#"{{"specialization":"{}","cli":"{}"}}"#,
+                        worker.specialization, worker.cli
+                    )
+                })
                 .replace('\'', "'\\''");
 
             command_block.push_str(&format!(
@@ -2889,12 +3342,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
                 configured_workers.len()
             )
         };
-        let spawn_plan = format!(
-            "```bash\n{}   ```",
-            command_block,
-        );
+        let spawn_plan = format!("```bash\n{}   ```", command_block,);
         let coverage_rule = if qa_workers.is_empty() {
-            "You MUST NOT skip any specialization. Every milestone requires full coverage.".to_string()
+            "You MUST NOT skip any specialization. Every milestone requires full coverage."
+                .to_string()
         } else {
             "You MUST NOT skip any configured QA specialization. Every milestone requires the requested coverage.".to_string()
         };
@@ -2933,7 +3384,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         let required_protocol = Self::evaluator_required_protocol(session_id);
 
         let mut variables = HashMap::new();
-        variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
+        variables.insert(
+            "custom_instructions".to_string(),
+            custom_instructions.to_string(),
+        );
         variables.insert("default_cli".to_string(), config.cli.clone());
         variables.insert("default_model".to_string(), default_model.to_string());
         variables.insert("default_model_field".to_string(), default_model_field);
@@ -3029,10 +3483,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             ),
         };
 
-        let custom_instructions = config
-            .initial_prompt
-            .as_deref()
-            .unwrap_or(default_guidance);
+        let custom_instructions = config.initial_prompt.as_deref().unwrap_or(default_guidance);
 
         let mut variables = HashMap::new();
         variables.insert("qa_worker_index".to_string(), index.to_string());
@@ -3040,7 +3491,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             "qa_worker_agent_id".to_string(),
             format!("{}-qa-worker-{}", session_id, index),
         );
-        variables.insert("custom_instructions".to_string(), custom_instructions.to_string());
+        variables.insert(
+            "custom_instructions".to_string(),
+            custom_instructions.to_string(),
+        );
         variables.insert(
             "supports_chrome".to_string(),
             (specialization == "ui" && config.cli == "claude").to_string(),
@@ -3076,7 +3530,12 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
 
         engine
             .render_template(template_name, &context)
-            .unwrap_or_else(|_| format!("Template '{}' failed to render for session {}", template_name, session_id))
+            .unwrap_or_else(|_| {
+                format!(
+                    "Template '{}' failed to render for session {}",
+                    template_name, session_id
+                )
+            })
     }
 
     /// Build the Master Planner's prompt for Fusion planning phase
@@ -3089,13 +3548,18 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         let mut variant_table = String::new();
         for (i, v) in variants.iter().enumerate() {
             let index = i + 1;
-            let name = if v.name.trim().is_empty() { format!("Variant {}", index) } else { v.name.trim().to_string() };
+            let name = if v.name.trim().is_empty() {
+                format!("Variant {}", index)
+            } else {
+                v.name.trim().to_string()
+            };
             variant_table.push_str(&format!("| {} | {} | {} |\n", index, name, v.cli));
         }
 
         // Determine phase 0 based on whether a task was provided
         let phase0 = if task_description.trim().is_empty() {
-            String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
+            String::from(
+                r#"## PHASE 0: Gather Task (FIRST STEP)
 
 **No task was provided.** You must first ask the user what they want to work on.
 
@@ -3113,10 +3577,14 @@ Ask the user: "What would you like the Fusion variants to compete on? You can:
 
 ---
 
-"#)
-        } else if task_description.trim().starts_with('#') || task_description.trim().parse::<u32>().is_ok() {
+"#,
+            )
+        } else if task_description.trim().starts_with('#')
+            || task_description.trim().parse::<u32>().is_ok()
+        {
             let issue_num = task_description.trim().trim_start_matches('#');
-            format!(r#"## PHASE 0: Fetch GitHub Issue
+            format!(
+                r#"## PHASE 0: Fetch GitHub Issue
 
 The user wants to work on GitHub issue: **#{}**
 
@@ -3134,9 +3602,12 @@ Extract from the response:
 
 ---
 
-"#, issue_num, issue_num)
+"#,
+                issue_num, issue_num
+            )
         } else {
-            format!(r#"## PHASE 0: Task Provided
+            format!(
+                r#"## PHASE 0: Task Provided
 
 The user wants to work on:
 
@@ -3146,11 +3617,13 @@ The user wants to work on:
 
 ---
 
-"#, task_description)
+"#,
+                task_description
+            )
         };
 
         format!(
-r#"# Master Planner - Fusion Mode
+            r#"# Master Planner - Fusion Mode
 
 You are the **Master Planner** for a Fusion session. Your job is to analyze the task and create a plan that documents how multiple independent variants will each tackle the same problem.
 
@@ -3219,6 +3692,85 @@ Write the plan in this structure:
         )
     }
 
+    fn build_debate_master_planner_prompt(
+        session_id: &str,
+        topic: &str,
+        debaters: &[DebateDebaterConfig],
+        rounds: u8,
+    ) -> String {
+        let debater_table = debaters
+            .iter()
+            .enumerate()
+            .map(|(idx, debater)| {
+                let name = if debater.name.trim().is_empty() {
+                    format!("Debater {}", idx + 1)
+                } else {
+                    debater.name.trim().to_string()
+                };
+                let stance = debater
+                    .stance
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("No explicit stance");
+                format!("| {} | {} | {} | {} |", idx + 1, name, stance, debater.cli)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            r#"# Master Planner - Debate Mode
+
+You are the Master Planner for a Debate session.
+
+## Session Info
+
+- Session ID: {session_id}
+- Mode: Debate
+- Rounds: {rounds}
+- Plan Output: `.hive-manager/{session_id}/plan.md`
+
+## Topic
+
+{topic}
+
+## Debaters
+
+| # | Name | Stance | CLI |
+|---|------|--------|-----|
+{debater_table}
+
+## Mission
+
+Write a concise debate plan to `.hive-manager/{session_id}/plan.md`:
+
+```markdown
+# Debate Plan
+
+## Topic
+[topic]
+
+## Debater Stances
+[stance framing]
+
+## Round Plan
+[what each round should focus on]
+
+## Judging Criteria
+- [ ] Argument quality
+- [ ] Rebuttal strength
+- [ ] Evidence and specificity
+- [ ] Consistency
+```
+
+Do not run the debate. Stop after writing the plan.
+"#,
+            session_id = session_id,
+            rounds = rounds,
+            topic = topic,
+            debater_table = debater_table,
+        )
+    }
+
     /// Build the Fusion Queen's prompt — monitors variants, spawns Judge when all complete
     fn build_fusion_queen_prompt(
         cli: &str,
@@ -3233,8 +3785,14 @@ Write the plan in this structure:
         let mut variant_info = String::new();
         let mut task_files = String::new();
         for v in variants {
-            variant_info.push_str(&format!("| {} | {} | {} | {} |\n", v.index, v.name, v.branch, v.worktree_path));
-            task_files.push_str(&format!("- Variant {} ({}): `{}`\n", v.index, v.name, v.task_file));
+            variant_info.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                v.index, v.name, v.branch, v.worktree_path
+            ));
+            task_files.push_str(&format!(
+                "- Variant {} ({}): `{}`\n",
+                v.index, v.name, v.task_file
+            ));
         }
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
         let qa_milestone_handoff = if has_evaluator {
@@ -3290,7 +3848,7 @@ You are the QUEEN - the top-level coordinator. You do NOT implement.
         };
 
         format!(
-r#"# Queen Agent - Fusion Session
+            r#"# Queen Agent - Fusion Session
 
 You are the **Queen** monitoring a Fusion session where {variant_count} variants compete to implement the same task.
 {hardening}
@@ -3385,13 +3943,13 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
         let peer_dir = Self::prompt_path(&session_root.join("peer"));
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
-        let qa_verdict_path =
-            Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
         let contracts_dir = Self::prompt_path(&session_root.join("contracts"));
-        let contract_path = Self::prompt_path(&session_root.join("contracts").join("milestone-1.md"));
+        let contract_path =
+            Self::prompt_path(&session_root.join("contracts").join("milestone-1.md"));
 
         format!(
-r#"## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
+            r#"## QA Milestone Handoff (CRITICAL — Evaluator waits for this)
 
 When ALL {completion_scope} have completed, you MUST signal the existing Evaluator:
 
@@ -3430,12 +3988,18 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
     }
 
     /// Build the Master Planner's prompt for initial planning phase
-    fn build_master_planner_prompt(session_id: &str, user_prompt: &str, workers: &[AgentConfig]) -> String {
+    fn build_master_planner_prompt(
+        session_id: &str,
+        user_prompt: &str,
+        workers: &[AgentConfig],
+    ) -> String {
         // Build worker info section
         let mut worker_table = String::new();
         for (i, worker_config) in workers.iter().enumerate() {
             let index = i + 1;
-            let role_label = worker_config.role.as_ref()
+            let role_label = worker_config
+                .role
+                .as_ref()
                 .map(|r| r.label.clone())
                 .unwrap_or_else(|| format!("Worker {}", index));
             let cli = &worker_config.cli;
@@ -3449,7 +4013,8 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
 
         // Determine phase 0 based on whether a task was provided
         let phase0 = if user_prompt.trim().is_empty() {
-            String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
+            String::from(
+                r#"## PHASE 0: Gather Task (FIRST STEP)
 
 **No task was provided.** You must first ask the user what they want to work on.
 
@@ -3467,11 +4032,13 @@ Ask the user: "What would you like me to help you with today? You can:
 
 ---
 
-"#)
+"#,
+            )
         } else if user_prompt.trim().starts_with('#') || user_prompt.trim().parse::<u32>().is_ok() {
             // Looks like a GitHub issue number
             let issue_num = user_prompt.trim().trim_start_matches('#');
-            format!(r#"## PHASE 0: Fetch GitHub Issue
+            format!(
+                r#"## PHASE 0: Fetch GitHub Issue
 
 The user wants to work on GitHub issue: **#{}**
 
@@ -3489,9 +4056,12 @@ Extract from the response:
 
 ---
 
-"#, issue_num, issue_num)
+"#,
+                issue_num, issue_num
+            )
         } else {
-            format!(r#"## PHASE 0: Task Provided
+            format!(
+                r#"## PHASE 0: Task Provided
 
 The user wants to work on:
 
@@ -3501,11 +4071,13 @@ The user wants to work on:
 
 ---
 
-"#, user_prompt)
+"#,
+                user_prompt
+            )
         };
 
         format!(
-r#"# Master Planner - Multi-Agent Codebase Investigation
+            r#"# Master Planner - Multi-Agent Codebase Investigation
 
 You are the **Master Planner** orchestrating a multi-agent investigation to create a detailed implementation plan.
 
@@ -3631,13 +4203,27 @@ The user may approve or request refinements. Stay ready to update the plan.
     }
 
     /// Build the Master Planner's prompt for Swarm mode with planner and worker information
-    fn build_swarm_master_planner_prompt(session_id: &str, user_prompt: &str, planner_count: u8, workers_per_planner: &[AgentConfig]) -> String {
+    fn build_swarm_master_planner_prompt(
+        session_id: &str,
+        user_prompt: &str,
+        planner_count: u8,
+        workers_per_planner: &[AgentConfig],
+    ) -> String {
         let workers_per = workers_per_planner.len();
         let total_workers = planner_count as usize * workers_per;
 
         // Build planner table
         let mut planner_table = String::new();
-        let domains = ["backend", "frontend", "testing", "infrastructure", "documentation", "security", "performance", "integration"];
+        let domains = [
+            "backend",
+            "frontend",
+            "testing",
+            "infrastructure",
+            "documentation",
+            "security",
+            "performance",
+            "integration",
+        ];
 
         for i in 0..planner_count {
             let index = i + 1;
@@ -3652,7 +4238,9 @@ The user may approve or request refinements. Stay ready to update the plan.
         let mut worker_info = String::new();
         for (i, worker_config) in workers_per_planner.iter().enumerate() {
             let index = i + 1;
-            let role_label = worker_config.role.as_ref()
+            let role_label = worker_config
+                .role
+                .as_ref()
                 .map(|r| r.label.clone())
                 .unwrap_or_else(|| format!("Worker {}", index));
             worker_info.push_str(&format!(
@@ -3663,7 +4251,8 @@ The user may approve or request refinements. Stay ready to update the plan.
 
         // Determine phase 0 based on whether a task was provided
         let phase0 = if user_prompt.trim().is_empty() {
-            String::from(r#"## PHASE 0: Gather Task (FIRST STEP)
+            String::from(
+                r#"## PHASE 0: Gather Task (FIRST STEP)
 
 **No task was provided.** You must first ask the user what they want to work on.
 
@@ -3681,10 +4270,12 @@ Ask the user: "What would you like me to help you with today? You can:
 
 ---
 
-"#)
+"#,
+            )
         } else if user_prompt.trim().starts_with('#') || user_prompt.trim().parse::<u32>().is_ok() {
             let issue_num = user_prompt.trim().trim_start_matches('#');
-            format!(r#"## PHASE 0: Fetch GitHub Issue
+            format!(
+                r#"## PHASE 0: Fetch GitHub Issue
 
 The user wants to work on GitHub issue: **#{}**
 
@@ -3702,9 +4293,12 @@ Extract from the response:
 
 ---
 
-"#, issue_num, issue_num)
+"#,
+                issue_num, issue_num
+            )
         } else {
-            format!(r#"## PHASE 0: Task Provided
+            format!(
+                r#"## PHASE 0: Task Provided
 
 The user wants to work on:
 
@@ -3714,11 +4308,13 @@ The user wants to work on:
 
 ---
 
-"#, user_prompt)
+"#,
+                user_prompt
+            )
         };
 
         format!(
-r#"# Master Planner - Swarm Multi-Agent Investigation
+            r#"# Master Planner - Swarm Multi-Agent Investigation
 
 You are the **Master Planner** orchestrating a Swarm investigation to create a detailed implementation plan.
 
@@ -3867,7 +4463,9 @@ Write to `.hive-manager/{session_id}/plan.md`:
 
         for (i, worker_config) in workers.iter().enumerate() {
             let index = i + 1;
-            let role_label = worker_config.role.as_ref()
+            let role_label = worker_config
+                .role
+                .as_ref()
                 .map(|r| r.label.clone())
                 .unwrap_or_else(|| format!("Worker {}", index));
             let cli = &worker_config.cli;
@@ -3877,7 +4475,13 @@ Write to `.hive-manager/{session_id}/plan.md`:
                 index, role_label, cli
             ));
 
-            let priority = if index == 1 { "HIGH" } else if index == 2 { "MEDIUM" } else { "LOW" };
+            let priority = if index == 1 {
+                "HIGH"
+            } else if index == 2 {
+                "MEDIUM"
+            } else {
+                "LOW"
+            };
             let task_desc = match index {
                 1 => format!("Send a message to queen via conversation API, send heartbeat, then read shared conversation -> Worker {}", index),
                 2 => format!("Read queen conversation for messages, post to shared conversation, send heartbeat with summary -> Worker {}", index),
@@ -3889,7 +4493,11 @@ Write to `.hive-manager/{session_id}/plan.md`:
             ));
 
             if index > 1 {
-                dependencies.push_str(&format!("- Task {} depends on Task {} completing.\n", index, index - 1));
+                dependencies.push_str(&format!(
+                    "- Task {} depends on Task {} completing.\n",
+                    index,
+                    index - 1
+                ));
             }
         }
 
@@ -3904,8 +4512,14 @@ Write to `.hive-manager/{session_id}/plan.md`:
             let mut qa_tasks = String::new();
             for (i, qw) in qa_list.iter().enumerate() {
                 let idx = i + 1;
-                let label = qw.label.as_deref().unwrap_or(Self::qa_worker_label(&qw.specialization));
-                qa_table.push_str(&format!("| QA Worker {} | {} | {} | {} |\n", idx, label, qw.specialization, qw.cli));
+                let label = qw
+                    .label
+                    .as_deref()
+                    .unwrap_or(Self::qa_worker_label(&qw.specialization));
+                qa_table.push_str(&format!(
+                    "| QA Worker {} | {} | {} | {} |\n",
+                    idx, label, qw.specialization, qw.cli
+                ));
                 qa_tasks.push_str(&format!(
                     "### QA Worker {} ({} - {}):\n\
                      1. Read the evaluator prompt: `curl -s \"http://localhost:18800/api/sessions/{}/evaluators\"`\n\
@@ -3920,7 +4534,7 @@ Write to `.hive-manager/{session_id}/plan.md`:
                 qa_tasks = "No QA workers configured. Evaluator will self-assess.\n".to_string();
             }
             format!(
-r#"
+                r#"
 
 ## Evaluator & QA Configuration
 
@@ -3962,7 +4576,7 @@ After all worker tasks complete, the Evaluator will:
         };
 
         format!(
-r#"# Smoke Test - Quick Flow Validation
+            r#"# Smoke Test - Quick Flow Validation
 
 You are running a **SMOKE TEST** to validate the Hive Manager flow.
 
@@ -4086,7 +4700,16 @@ This tests that:
         let mut planner_table = String::new();
         let mut domain_tasks = String::new();
 
-        let domains = ["backend", "frontend", "testing", "infrastructure", "documentation", "security", "performance", "integration"];
+        let domains = [
+            "backend",
+            "frontend",
+            "testing",
+            "infrastructure",
+            "documentation",
+            "security",
+            "performance",
+            "integration",
+        ];
 
         for i in 0..planner_count {
             let index = i + 1;
@@ -4096,7 +4719,13 @@ This tests that:
                 index, domain, workers_per
             ));
 
-            let priority = if index == 1 { "HIGH" } else if index == 2 { "MEDIUM" } else { "LOW" };
+            let priority = if index == 1 {
+                "HIGH"
+            } else if index == 2 {
+                "MEDIUM"
+            } else {
+                "LOW"
+            };
             domain_tasks.push_str(&format!(
                 "- [ ] [{}] Domain {}: {} smoke test tasks (will be broken into {} worker tasks)\n",
                 priority, index, domain, workers_per
@@ -4108,11 +4737,16 @@ This tests that:
         for pi in 0..planner_count {
             let planner_index = pi + 1;
             let domain = domains.get(pi as usize).unwrap_or(&"general");
-            worker_breakdown.push_str(&format!("\n### Planner {} - {} Domain\n\n", planner_index, domain));
+            worker_breakdown.push_str(&format!(
+                "\n### Planner {} - {} Domain\n\n",
+                planner_index, domain
+            ));
 
             for (wi, worker_config) in workers_per_planner.iter().enumerate() {
                 let worker_index = wi + 1;
-                let role_label = worker_config.role.as_ref()
+                let role_label = worker_config
+                    .role
+                    .as_ref()
                     .map(|r| r.label.clone())
                     .unwrap_or_else(|| format!("Worker {}", worker_index));
                 worker_breakdown.push_str(&format!(
@@ -4127,14 +4761,23 @@ This tests that:
             let qa_list = qa_workers.unwrap_or(&[]);
             let mut qa_info = String::new();
             for (i, qw) in qa_list.iter().enumerate() {
-                let label = qw.label.as_deref().unwrap_or(Self::qa_worker_label(&qw.specialization));
-                qa_info.push_str(&format!("| QA Worker {} | {} | {} | {} |\n", i + 1, label, qw.specialization, qw.cli));
+                let label = qw
+                    .label
+                    .as_deref()
+                    .unwrap_or(Self::qa_worker_label(&qw.specialization));
+                qa_info.push_str(&format!(
+                    "| QA Worker {} | {} | {} | {} |\n",
+                    i + 1,
+                    label,
+                    qw.specialization,
+                    qw.cli
+                ));
             }
             if qa_info.is_empty() {
                 qa_info = "| (no QA workers configured) | - | - | - |\n".to_string();
             }
             format!(
-r#"
+                r#"
 
 ## Evaluator & QA Configuration
 
@@ -4167,7 +4810,7 @@ After all planner domains complete, the Evaluator will:
         };
 
         format!(
-r#"# Swarm Smoke Test - Quick Flow Validation
+            r#"# Swarm Smoke Test - Quick Flow Validation
 
 You are running a **SMOKE TEST** to validate the Swarm Manager flow.
 
@@ -4300,7 +4943,13 @@ This tests that:
         variables.insert("workers_list".to_string(), workers_list);
         variables.insert(
             "queen_heartbeat_snippet".to_string(),
-            heartbeat_snippet(API_BASE_URL, session_id, "queen", "working", "Coordinating researchers"),
+            heartbeat_snippet(
+                API_BASE_URL,
+                session_id,
+                "queen",
+                "working",
+                "Coordinating researchers",
+            ),
         );
         variables.insert(
             "task".to_string(),
@@ -4313,7 +4962,12 @@ This tests that:
             variables.insert(k, v);
         }
 
-        Self::render_named_prompt(template_name, session_id, user_prompt.map(|s| s.to_string()), variables)
+        Self::render_named_prompt(
+            template_name,
+            session_id,
+            user_prompt.map(|s| s.to_string()),
+            variables,
+        )
     }
 
     fn build_queen_master_prompt(
@@ -4337,8 +4991,12 @@ This tests that:
         let plan_path = Self::prompt_path(&session_root.join("plan.md"));
         let lessons_dir = Self::prompt_path(&session_root.join("lessons"));
         let coordination_log_path = Self::prompt_path(&session_root.join("coordination.log"));
-        let worker_worktree_root =
-            Self::prompt_path(&project_path.join(".hive-manager").join("worktrees").join(session_id));
+        let worker_worktree_root = Self::prompt_path(
+            &project_path
+                .join(".hive-manager")
+                .join("worktrees")
+                .join(session_id),
+        );
         let queen_scope_rules =
             Self::worktree_boundary_rules(&Self::prompt_path(queen_workspace_path));
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
@@ -4349,7 +5007,6 @@ This tests that:
         } else {
             ""
         };
-
 
         let mut worker_list = String::new();
         for (i, worker_config) in workers.iter().enumerate() {
@@ -4367,7 +5024,10 @@ This tests that:
         }
 
         let worker_worktrees_dir = Self::prompt_path(
-            &project_path.join(".hive-manager").join("worktrees").join(session_id),
+            &project_path
+                .join(".hive-manager")
+                .join("worktrees")
+                .join(session_id),
         );
         let worker_task_file_example = Self::prompt_path(
             &project_path
@@ -4453,7 +5113,7 @@ Do NOT assign worker tasks until the branch exists!
         };
 
         format!(
-r#"# Queen Agent - Hive Manager Session
+            r#"# Queen Agent - Hive Manager Session
 
 You are the **Queen** orchestrating a multi-agent Hive session. You have full Claude Code capabilities plus coordination tools.
 {hardening}
@@ -4811,8 +5471,15 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
     }
 
     /// Build a worker's role prompt
-    fn build_worker_prompt(index: u8, config: &AgentConfig, queen_id: &str, session_id: &str) -> String {
-        let role_name = config.role.as_ref()
+    fn build_worker_prompt(
+        index: u8,
+        config: &AgentConfig,
+        queen_id: &str,
+        session_id: &str,
+    ) -> String {
+        let role_name = config
+            .role
+            .as_ref()
             .map(|r| r.label.clone())
             .unwrap_or_else(|| format!("Worker {}", index));
         // Research workers are read-only investigators: no implementation authority,
@@ -4870,7 +5537,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
 
         let important_rules = if is_research {
             format!(
-"1. **Stay in your lane** - Focus on your research assignment ({role_name})
+                "1. **Stay in your lane** - Focus on your research assignment ({role_name})
 2. **Do not modify the project** - No code changes and no commits; report findings to the Queen
 3. **Update your task file** - Always update status when done or blocked
 4. **Ask for clarification** - If the assignment is unclear, note it in the task file",
@@ -4878,7 +5545,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             )
         } else {
             format!(
-"1. **Stay in your lane** - Focus on your specialization ({role_name})
+                "1. **Stay in your lane** - Focus on your specialization ({role_name})
 2. **Don't push to git** - Only the Queen commits and pushes
 3. **Update your task file** - Always update status when done or blocked
 4. **Ask for clarification** - If task is unclear, note it in the task file",
@@ -4890,7 +5557,7 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             String::new()
         } else {
             format!(
-r#"## Learnings Protocol (MANDATORY)
+                r#"## Learnings Protocol (MANDATORY)
 
 Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
 
@@ -4941,7 +5608,7 @@ jq -nc \
         };
 
         format!(
-r#"# Worker {index} ({role_name}) - Hive Session
+            r#"# Worker {index} ({role_name}) - Hive Session
 
 You are a **Worker** in a multi-agent Hive session, coordinated by the Queen.
 
@@ -5073,11 +5740,16 @@ After completing your task, transition to IDLE state. Continue checking your con
         let mut worker_info = String::new();
         for (i, worker_config) in config.workers.iter().enumerate() {
             let worker_index = i + 1;
-            let role_label = worker_config.role.as_ref()
+            let role_label = worker_config
+                .role
+                .as_ref()
                 .map(|r| r.label.clone())
                 .unwrap_or_else(|| format!("Worker {}", worker_index));
             let cli_name = &worker_config.cli;
-            worker_info.push_str(&format!("| {} | {} | {} |\n", worker_index, role_label, cli_name));
+            worker_info.push_str(&format!(
+                "| {} | {} | {} |\n",
+                worker_index, role_label, cli_name
+            ));
         }
         let worker_task_file_example = project_path
             .join(".hive-manager")
@@ -5221,8 +5893,10 @@ Awaiting task assignment from the Queen."#,
         for (i, planner_config) in planners.iter().enumerate() {
             let index = i + 1;
             let worker_count = planner_config.workers.len();
-            planner_info.push_str(&format!("| {} | {} | {} workers |\n",
-                index, planner_config.domain, worker_count));
+            planner_info.push_str(&format!(
+                "| {} | {} | {} workers |\n",
+                index, planner_config.domain, worker_count
+            ));
         }
 
         let hardening = if CliRegistry::needs_role_hardening(cli) {
@@ -5256,7 +5930,7 @@ If you find yourself about to edit code, STOP. Assign work to a Planner instead.
         };
 
         format!(
-r#"# Queen Agent - Swarm Session
+            r#"# Queen Agent - Swarm Session
 
 You are the **Queen** orchestrating a multi-agent Swarm session. You spawn and coordinate Planners who each manage their own domain.
 {hardening}
@@ -5431,8 +6105,16 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
     }
 
     /// Write a prompt file to the session's prompts directory
-    fn write_prompt_file(project_path: &PathBuf, session_id: &str, filename: &str, content: &str) -> Result<PathBuf, String> {
-        let prompts_dir = project_path.join(".hive-manager").join(session_id).join("prompts");
+    fn write_prompt_file(
+        project_path: &PathBuf,
+        session_id: &str,
+        filename: &str,
+        content: &str,
+    ) -> Result<PathBuf, String> {
+        let prompts_dir = project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("prompts");
         std::fs::create_dir_all(&prompts_dir)
             .map_err(|e| format!("Failed to create prompts directory: {}", e))?;
 
@@ -5470,8 +6152,16 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
     }
 
     /// Write a tool documentation file to the session's tools directory
-    fn write_tool_file(project_path: &PathBuf, session_id: &str, filename: &str, content: &str) -> Result<PathBuf, String> {
-        let tools_dir = project_path.join(".hive-manager").join(session_id).join("tools");
+    fn write_tool_file(
+        project_path: &PathBuf,
+        session_id: &str,
+        filename: &str,
+        content: &str,
+    ) -> Result<PathBuf, String> {
+        let tools_dir = project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("tools");
         std::fs::create_dir_all(&tools_dir)
             .map_err(|e| format!("Failed to create tools directory: {}", e))?;
 
@@ -5483,7 +6173,11 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
     }
 
     /// Write all standard tool documentation files for a session
-    fn write_tool_files(project_path: &PathBuf, session_id: &str, default_cli: &str) -> Result<(), String> {
+    fn write_tool_files(
+        project_path: &PathBuf,
+        session_id: &str,
+        default_cli: &str,
+    ) -> Result<(), String> {
         let worker_task_file_example = project_path
             .join(".hive-manager")
             .join("worktrees")
@@ -5494,7 +6188,8 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             .join("worker-N-task.md")
             .to_string_lossy()
             .to_string();
-        let qa_task_file_example = format!(".hive-manager/{}/tasks/qa-worker-N-task.md", session_id);
+        let qa_task_file_example =
+            format!(".hive-manager/{}/tasks/qa-worker-N-task.md", session_id);
         let worker_one_task_file_example = project_path
             .join(".hive-manager")
             .join("worktrees")
@@ -5507,7 +6202,8 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             .to_string();
 
         // Spawn Worker tool
-        let spawn_worker_tool = format!(r#"# Spawn Worker Tool
+        let spawn_worker_tool = format!(
+            r#"# Spawn Worker Tool
 
 Spawn a new worker agent in a visible terminal window.
 
@@ -5582,11 +6278,21 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 - Each worker's own task file lives at `.hive-manager/tasks/worker-N-task.md` inside that worker's worktree
 - Workers poll their task files for ACTIVE status
 - Use this to spawn workers sequentially as tasks complete
-"#, session_id = session_id, default_cli = default_cli, worker_task_file_example = worker_task_file_example);
+"#,
+            session_id = session_id,
+            default_cli = default_cli,
+            worker_task_file_example = worker_task_file_example
+        );
 
-        Self::write_tool_file(project_path, session_id, "spawn-worker.md", &spawn_worker_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "spawn-worker.md",
+            &spawn_worker_tool,
+        )?;
 
-        let spawn_qa_worker_tool = format!(r#"# Spawn QA Worker Tool
+        let spawn_qa_worker_tool = format!(
+            r#"# Spawn QA Worker Tool
 
 Spawn a QA worker for the Evaluator.
 
@@ -5642,12 +6348,22 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/qa-workers" \
   "task_file": "{qa_task_file_example}"
 }}
 ```
-"#, session_id = session_id, default_cli = default_cli, qa_task_file_example = qa_task_file_example);
+"#,
+            session_id = session_id,
+            default_cli = default_cli,
+            qa_task_file_example = qa_task_file_example
+        );
 
-        Self::write_tool_file(project_path, session_id, "spawn-qa-worker.md", &spawn_qa_worker_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "spawn-qa-worker.md",
+            &spawn_qa_worker_tool,
+        )?;
 
         // List Workers tool
-        let list_workers_tool = format!(r#"# List Workers Tool
+        let list_workers_tool = format!(
+            r#"# List Workers Tool
 
 Get a list of all workers in the current session.
 
@@ -5678,9 +6394,18 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
   "count": 1
 }}
 ```
-"#, session_id = session_id, default_cli = default_cli, worker_one_task_file_example = worker_one_task_file_example);
+"#,
+            session_id = session_id,
+            default_cli = default_cli,
+            worker_one_task_file_example = worker_one_task_file_example
+        );
 
-        Self::write_tool_file(project_path, session_id, "list-workers.md", &list_workers_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "list-workers.md",
+            &list_workers_tool,
+        )?;
 
         // Submit Learning tool
         let submit_learning_tool = r#"# Submit Learning Tool
@@ -5728,7 +6453,12 @@ curl -X POST "http://localhost:18800/api/sessions/{{session_id}}/learnings" \
 ```
 "#;
 
-        Self::write_tool_file(project_path, session_id, "submit-learning.md", submit_learning_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "submit-learning.md",
+            submit_learning_tool,
+        )?;
 
         // List Learnings tool
         let list_learnings_tool = r#"# List Learnings Tool
@@ -5760,7 +6490,12 @@ curl "http://localhost:18800/api/sessions/{{session_id}}/learnings?keywords=api,
 ```
 "#;
 
-        Self::write_tool_file(project_path, session_id, "list-learnings.md", list_learnings_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "list-learnings.md",
+            list_learnings_tool,
+        )?;
 
         // Delete Learning tool
         let delete_learning_tool = r#"# Delete Learning Tool
@@ -5789,18 +6524,29 @@ curl -X DELETE "http://localhost:18800/api/sessions/{{session_id}}/learnings/abc
 - **404 Not Found** - Learning ID not found
 "#;
 
-        Self::write_tool_file(project_path, session_id, "delete-learning.md", delete_learning_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "delete-learning.md",
+            delete_learning_tool,
+        )?;
 
         Ok(())
     }
 
     /// Write tool documentation files for Swarm mode (includes planner tools)
-    fn write_swarm_tool_files(project_path: &PathBuf, session_id: &str, planner_count: u8, default_cli: &str) -> Result<(), String> {
+    fn write_swarm_tool_files(
+        project_path: &PathBuf,
+        session_id: &str,
+        planner_count: u8,
+        default_cli: &str,
+    ) -> Result<(), String> {
         // First write standard worker tools
         Self::write_tool_files(project_path, session_id, default_cli)?;
 
         // Spawn Planner tool
-        let spawn_planner_tool = format!(r#"# Spawn Planner Tool
+        let spawn_planner_tool = format!(
+            r#"# Spawn Planner Tool
 
 Spawn a new planner agent in a visible terminal window. Planners manage a domain and spawn workers.
 
@@ -5884,12 +6630,22 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/planners" \
 - Each planner knows how to spawn its own workers sequentially
 - Wait for `[DOMAIN_COMPLETE]` signal from planner before committing and spawning next
 - Commit between each planner to create clean git history
-"#, session_id = session_id, planner_count = planner_count, default_cli = default_cli);
+"#,
+            session_id = session_id,
+            planner_count = planner_count,
+            default_cli = default_cli
+        );
 
-        Self::write_tool_file(project_path, session_id, "spawn-planner.md", &spawn_planner_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "spawn-planner.md",
+            &spawn_planner_tool,
+        )?;
 
         // List Planners tool
-        let list_planners_tool = format!(r#"# List Planners Tool
+        let list_planners_tool = format!(
+            r#"# List Planners Tool
 
 Get a list of all planners in the current Swarm session.
 
@@ -5921,17 +6677,36 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
   "count": 1
 }}
 ```
-"#, session_id = session_id, default_cli = default_cli);
+"#,
+            session_id = session_id,
+            default_cli = default_cli
+        );
 
-        Self::write_tool_file(project_path, session_id, "list-planners.md", &list_planners_tool)?;
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "list-planners.md",
+            &list_planners_tool,
+        )?;
 
         Ok(())
     }
 
     /// Write a task file for a worker (ACTIVE when pre-seeded with a task, otherwise STANDBY)
-    fn write_task_file(worktree_path: &Path, worker_index: u8, initial_task: Option<&str>, read_only: bool) -> Result<PathBuf, String> {
+    fn write_task_file(
+        worktree_path: &Path,
+        worker_index: u8,
+        initial_task: Option<&str>,
+        read_only: bool,
+    ) -> Result<PathBuf, String> {
         let status = initial_task.map(|_| "ACTIVE");
-        Self::write_task_file_with_status(worktree_path, worker_index, initial_task, status, read_only)
+        Self::write_task_file_with_status(
+            worktree_path,
+            worker_index,
+            initial_task,
+            status,
+            read_only,
+        )
     }
 
     /// Write a task file with an optional status override (used for sequential spawning).
@@ -5973,7 +6748,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
 
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let content = format!(
-"# Task Assignment - Worker {worker_index}
+            "# Task Assignment - Worker {worker_index}
 
 ## Status: {status}
 
@@ -6019,7 +6794,10 @@ Last updated: {timestamp}
         specialization: &str,
         initial_task: Option<&str>,
     ) -> Result<PathBuf, String> {
-        let tasks_dir = project_path.join(".hive-manager").join(session_id).join("tasks");
+        let tasks_dir = project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("tasks");
         std::fs::create_dir_all(&tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
@@ -6029,12 +6807,16 @@ Last updated: {timestamp}
         let (status, task_content) = if let Some(task) = initial_task {
             ("ACTIVE", task.to_string())
         } else {
-            ("STANDBY", "Awaiting QA assignment from the Evaluator. Monitor this file for updates.".to_string())
+            (
+                "STANDBY",
+                "Awaiting QA assignment from the Evaluator. Monitor this file for updates."
+                    .to_string(),
+            )
         };
 
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let content = format!(
-"# Task Assignment - QA Worker {worker_index} ({specialization})
+            "# Task Assignment - QA Worker {worker_index} ({specialization})
 
 ## Status: {status}
 
@@ -6098,12 +6880,7 @@ Last updated: {timestamp}
             &project_path,
         )?;
         created_cells.push(("worker-1".to_string(), solo_branch.clone()));
-        self.emit_workspace_created(
-            &session_id,
-            PRIMARY_CELL_ID,
-            &solo_branch,
-            Some(&solo_cwd),
-        );
+        self.emit_workspace_created(&session_id, PRIMARY_CELL_ID, &solo_branch, Some(&solo_cwd));
         let solo_name = "Solo Worker".to_string();
         let solo_description = Self::summarize_prompt_line(task_description.as_deref())
             .unwrap_or_else(|| "Solo session".to_string());
@@ -6124,7 +6901,10 @@ Last updated: {timestamp}
             let pty_manager = self.pty_manager.read();
             if let Err(e) = pty_manager.create_session(
                 solo_id.clone(),
-                AgentRole::Worker { index: 1, parent: None },
+                AgentRole::Worker {
+                    index: 1,
+                    parent: None,
+                },
                 &cmd,
                 &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 Some(&solo_cwd),
@@ -6157,7 +6937,10 @@ Last updated: {timestamp}
             last_activity_at: Utc::now(),
             agents: vec![AgentInfo {
                 id: solo_id,
-                role: AgentRole::Worker { index: 1, parent: None },
+                role: AgentRole::Worker {
+                    index: 1,
+                    parent: None,
+                },
                 status: AgentStatus::Running,
                 config: solo_config.clone(),
                 parent_id: None,
@@ -6184,9 +6967,12 @@ Last updated: {timestamp}
         self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         self.init_session_storage(&session);
@@ -6328,7 +7114,10 @@ Last updated: {timestamp}
         );
 
         // Check if plan.md exists (from previous planning phase)
-        let plan_path = project_path.join(".hive-manager").join(&session_id).join("plan.md");
+        let plan_path = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("plan.md");
         let has_plan = plan_path.exists();
 
         // Write Queen prompt to file and pass to CLI.
@@ -6355,10 +7144,20 @@ Last updated: {timestamp}
                 config.with_evaluator,
             )
         };
-        let prompt_file = match Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt) {
+        let prompt_file = match Self::write_prompt_file(
+            &project_path,
+            &session_id,
+            "queen-prompt.md",
+            &master_prompt,
+        ) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
-                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                self.rollback_launch_allocations(
+                    &project_path,
+                    &session_id,
+                    &created_cells,
+                    &spawned_agent_ids,
+                );
                 return Err(err);
             }
         };
@@ -6366,12 +7165,24 @@ Last updated: {timestamp}
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         // Write tool documentation files
-        if let Err(err) = Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli) {
-            self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+        if let Err(err) =
+            Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli)
+        {
+            self.rollback_launch_allocations(
+                &project_path,
+                &session_id,
+                &created_cells,
+                &spawned_agent_ids,
+            );
             return Err(err);
         }
 
-        tracing::info!("Launching Queen agent (v2): {} {:?} in {:?}", cmd, args, queen_cwd);
+        tracing::info!(
+            "Launching Queen agent (v2): {} {:?} in {:?}",
+            cmd,
+            args,
+            queen_cwd
+        );
 
         {
             let pty_manager = self.pty_manager.read();
@@ -6384,7 +7195,12 @@ Last updated: {timestamp}
                 120,
                 30,
             ) {
-                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                self.rollback_launch_allocations(
+                    &project_path,
+                    &session_id,
+                    &created_cells,
+                    &spawned_agent_ids,
+                );
                 return Err(format!("Failed to spawn Queen: {}", e));
             }
         }
@@ -6406,13 +7222,18 @@ Last updated: {timestamp}
         // empty, so nothing comes up here at launch. The configured workers are a
         // roster rendered into the Queen prompt; the Queen spawns the ones it needs on
         // demand via the spawn-worker tool (`POST /api/sessions/{id}/workers`).
-        let workers_to_spawn: &[AgentConfig] = if pre_spawn_workers { &config.workers } else { &[] };
+        let workers_to_spawn: &[AgentConfig] = if pre_spawn_workers {
+            &config.workers
+        } else {
+            &[]
+        };
         for (i, worker_config) in workers_to_spawn.iter().enumerate() {
             let index = (i + 1) as u8;
             let worker_id = format!("{}-worker-{}", session_id, index);
-            let worker_role = worker_config.role.clone().unwrap_or_else(|| {
-                WorkerRole::new("general", "Worker", &worker_config.cli)
-            });
+            let worker_role = worker_config
+                .role
+                .clone()
+                .unwrap_or_else(|| WorkerRole::new("general", "Worker", &worker_config.cli));
             let worker_config =
                 Self::apply_worker_identity(index, &worker_role, worker_config.clone());
             let (cmd, mut args) = Self::build_command(&worker_config);
@@ -6428,7 +7249,12 @@ Last updated: {timestamp}
                 ) {
                     Ok(result) => result,
                     Err(err) => {
-                        self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                        self.rollback_launch_allocations(
+                            &project_path,
+                            &session_id,
+                            &created_cells,
+                            &spawned_agent_ids,
+                        );
                         return Err(err);
                     }
                 };
@@ -6452,15 +7278,24 @@ Last updated: {timestamp}
                 .as_ref()
                 .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
                 .unwrap_or(false);
-            if let Err(err) =
-                Self::write_task_file(Path::new(&worker_cwd), index, worker_config.initial_prompt.as_deref(), worker_read_only)
-            {
-                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+            if let Err(err) = Self::write_task_file(
+                Path::new(&worker_cwd),
+                index,
+                worker_config.initial_prompt.as_deref(),
+                worker_read_only,
+            ) {
+                self.rollback_launch_allocations(
+                    &project_path,
+                    &session_id,
+                    &created_cells,
+                    &spawned_agent_ids,
+                );
                 return Err(err);
             }
 
             // Write worker prompt to file and pass to CLI
-            let worker_prompt = Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
+            let worker_prompt =
+                Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
             let filename = format!("worker-{}-prompt.md", index);
             let prompt_file = match Self::write_worker_prompt_file(
                 Path::new(&worker_cwd),
@@ -6470,27 +7305,46 @@ Last updated: {timestamp}
             ) {
                 Ok(prompt_file) => prompt_file,
                 Err(err) => {
-                    self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                    self.rollback_launch_allocations(
+                        &project_path,
+                        &session_id,
+                        &created_cells,
+                        &spawned_agent_ids,
+                    );
                     return Err(err);
                 }
             };
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-            tracing::info!("Launching Worker {} agent (v2): {} {:?} in {:?}", index, cmd, args, worker_cwd);
+            tracing::info!(
+                "Launching Worker {} agent (v2): {} {:?} in {:?}",
+                index,
+                cmd,
+                args,
+                worker_cwd
+            );
 
             {
                 let pty_manager = self.pty_manager.read();
                 if let Err(e) = pty_manager.create_session(
                     worker_id.clone(),
-                    AgentRole::Worker { index, parent: Some(queen_id.clone()) },
+                    AgentRole::Worker {
+                        index,
+                        parent: Some(queen_id.clone()),
+                    },
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     Some(&worker_cwd),
                     120,
                     30,
                 ) {
-                    self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+                    self.rollback_launch_allocations(
+                        &project_path,
+                        &session_id,
+                        &created_cells,
+                        &spawned_agent_ids,
+                    );
                     return Err(format!("Failed to spawn Worker {}: {}", index, e));
                 }
             }
@@ -6498,7 +7352,10 @@ Last updated: {timestamp}
 
             agents.push(AgentInfo {
                 id: worker_id,
-                role: AgentRole::Worker { index, parent: Some(queen_id.clone()) },
+                role: AgentRole::Worker {
+                    index,
+                    parent: Some(queen_id.clone()),
+                },
                 status: AgentStatus::Running,
                 config: worker_config.clone(),
                 parent_id: Some(queen_id.clone()),
@@ -6515,7 +7372,11 @@ Last updated: {timestamp}
             session_type: SessionType::Hive {
                 // Roster mode starts with zero live workers; the count grows as the
                 // Queen spawns researchers on demand.
-                worker_count: if pre_spawn_workers { config.workers.len() as u8 } else { 0 },
+                worker_count: if pre_spawn_workers {
+                    config.workers.len() as u8
+                } else {
+                    0
+                },
             },
             project_path: project_path.clone(),
             state: SessionState::Running,
@@ -6546,9 +7407,12 @@ Last updated: {timestamp}
         self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         // Initialize session storage
@@ -6574,7 +7438,12 @@ Last updated: {timestamp}
                 let mut sessions = self.sessions.write();
                 sessions.remove(&session.id);
             }
-            self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &spawned_agent_ids);
+            self.rollback_launch_allocations(
+                &project_path,
+                &session_id,
+                &created_cells,
+                &spawned_agent_ids,
+            );
             err
         })?;
 
@@ -6653,7 +7522,13 @@ Last updated: {timestamp}
         // Research never touches git: no worktrees, no branches, and no pre-spawned
         // workers. The Queen comes up alone and spawns researchers from the roster on
         // demand, so it also works on non-repo folders.
-        self.launch_hive_internal(hive_config, Some("queen-research"), extra_queen_vars, false, false)
+        self.launch_hive_internal(
+            hive_config,
+            Some("queen-research"),
+            extra_queen_vars,
+            false,
+            false,
+        )
     }
 
     /// Hard-override banner injected at the top of the queen-research prompt for a
@@ -6682,8 +7557,12 @@ phases and do EXACTLY this, then stop:
     }
 
     pub fn launch_fusion(&self, config: FusionLaunchConfig) -> Result<Session, String> {
-        tracing::info!("launch_fusion called: with_planning={}, variants={}, task={}",
-            config.with_planning, config.variants.len(), &config.task_description);
+        tracing::info!(
+            "launch_fusion called: with_planning={}, variants={}, task={}",
+            config.with_planning,
+            config.variants.len(),
+            &config.task_description
+        );
 
         if config.variants.is_empty() {
             return Err("Fusion launch requires at least one variant".to_string());
@@ -6720,12 +7599,10 @@ phases and do EXACTLY this, then stop:
                 .join(format!("variant-{}", slug))
                 .to_string_lossy()
                 .to_string();
-            let task_file = Self::fusion_variant_task_file_path(
-                Path::new(&worktree_path),
-                index as usize,
-            )
-            .to_string_lossy()
-            .to_string();
+            let task_file =
+                Self::fusion_variant_task_file_path(Path::new(&worktree_path), index as usize)
+                    .to_string_lossy()
+                    .to_string();
 
             variants.push(FusionVariantMetadata {
                 index,
@@ -6829,7 +7706,10 @@ phases and do EXACTLY this, then stop:
             };
             let variant_agent_config = AgentConfig {
                 cli: cli.clone(),
-                model: source_variant.model.clone().or(config.default_model.clone()),
+                model: source_variant
+                    .model
+                    .clone()
+                    .or(config.default_model.clone()),
                 flags: source_variant.flags.clone(),
                 label: Some(format!("Fusion {}", variant.name)),
                 name: None,
@@ -6881,7 +7761,9 @@ phases and do EXACTLY this, then stop:
                         120,
                         30,
                     )
-                    .map_err(|e| format!("Failed to spawn Fusion variant {}: {}", variant.name, e))?;
+                    .map_err(|e| {
+                        format!("Failed to spawn Fusion variant {}: {}", variant.name, e)
+                    })?;
             }
 
             let agent_info = AgentInfo {
@@ -6896,19 +7778,20 @@ phases and do EXACTLY this, then stop:
                 base_commit_sha: None,
             };
 
-            let waiting_changes = {
-                let mut sessions = self.sessions.write();
-                if let Some(s) = sessions.get_mut(&session_id) {
-                    s.agents.push(agent_info.clone());
-                    self.emit_agent_launched(s, &agent_info);
-                    Some(self.set_session_state_with_events(
-                        s,
-                        SessionState::WaitingForFusionVariants,
-                    ))
-                } else {
-                    None
-                }
-            };
+            let waiting_changes =
+                {
+                    let mut sessions = self.sessions.write();
+                    if let Some(s) = sessions.get_mut(&session_id) {
+                        s.agents.push(agent_info.clone());
+                        self.emit_agent_launched(s, &agent_info);
+                        Some(self.set_session_state_with_events(
+                            s,
+                            SessionState::WaitingForFusionVariants,
+                        ))
+                    } else {
+                        None
+                    }
+                };
             if let Some(changes) = waiting_changes {
                 self.emit_cell_status_changes(&session_id, changes);
             }
@@ -6949,8 +7832,401 @@ phases and do EXACTLY this, then stop:
         Ok(session)
     }
 
+    pub fn launch_debate(&self, mut config: DebateLaunchConfig) -> Result<Session, String> {
+        tracing::info!(
+            "launch_debate called: with_planning={}, debaters={}, rounds={}, topic={}",
+            config.with_planning,
+            config.debaters.len(),
+            config.rounds,
+            &config.topic
+        );
+
+        if config.debaters.is_empty() {
+            return Err("Debate launch requires at least one debater".to_string());
+        }
+        config.rounds = Self::validate_debate_rounds(config.rounds)?;
+        if config.topic.trim().is_empty() {
+            return Err("Debate launch requires a non-empty topic".to_string());
+        }
+
+        if config.with_planning {
+            let session_id = Uuid::new_v4().to_string();
+            return self.launch_debate_planning_phase(session_id, config);
+        }
+
+        let session_id = Uuid::new_v4().to_string();
+        let project_path = PathBuf::from(&config.project_path);
+        let default_cli = if config.default_cli.trim().is_empty() {
+            "claude".to_string()
+        } else {
+            config.default_cli.trim().to_string()
+        };
+        let debaters =
+            Self::build_debate_debater_metadata(&session_id, &project_path, &config, &default_cli);
+
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
+        let session = Session {
+            id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
+            session_type: SessionType::Debate {
+                variants: debaters.iter().map(|d| d.name.clone()).collect(),
+            },
+            project_path: project_path.clone(),
+            state: SessionState::Starting,
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents: Vec::new(),
+            default_cli: default_cli.clone(),
+            default_model: config.default_model.clone(),
+            qa_workers: Vec::new(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
+            worktree_path: debaters.first().map(|d| d.worktree_path.clone()),
+            worktree_branch: debaters.first().map(|d| d.branch.clone()),
+            no_git: false,
+            resume_report: None,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session);
+        }
+        self.emit_session_update(&session_id);
+
+        let fresh_base = resolve_fresh_base(&project_path);
+        let base_branch = format!("debate/{}/base", session_id);
+        Self::run_git_in_dir(&project_path, &["branch", &base_branch, &fresh_base])?;
+        Self::create_debate_worktrees(&project_path, &session_id, &base_branch, &debaters, self)?;
+
+        let verdict_file = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("evaluation")
+            .join("verdict.md")
+            .to_string_lossy()
+            .to_string();
+        if let Some(parent) = Path::new(&verdict_file).parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create debate evaluation directory: {}", e))?;
+        }
+        std::fs::create_dir_all(
+            project_path
+                .join(".hive-manager")
+                .join(&session_id)
+                .join("debate")
+                .join("rounds"),
+        )
+        .map_err(|e| format!("Failed to create debate rounds directory: {}", e))?;
+
+        let metadata = DebateSessionMetadata {
+            base_branch,
+            debaters,
+            judge_config: config.judge_config,
+            topic: config.topic,
+            rounds: config.rounds,
+            verdict_file,
+        };
+        Self::write_debate_metadata(&project_path, &session_id, &metadata)?;
+
+        self.spawn_debate_round(&session_id, 1)?;
+
+        let session = self
+            .get_session(&session_id)
+            .ok_or_else(|| "Failed to read debate session after launch".to_string())?;
+        self.init_session_storage(&session);
+        self.update_session_storage(&session_id);
+        self.ensure_task_watcher(&session_id, &project_path);
+
+        Ok(session)
+    }
+
+    fn build_debate_debater_metadata(
+        session_id: &str,
+        project_path: &Path,
+        config: &DebateLaunchConfig,
+        default_cli: &str,
+    ) -> Vec<DebateDebaterMetadata> {
+        let mut seen_slugs: HashMap<String, u16> = HashMap::new();
+
+        config
+            .debaters
+            .iter()
+            .enumerate()
+            .map(|(idx, debater)| {
+                let index = (idx + 1) as u8;
+                let name = if debater.name.trim().is_empty() {
+                    format!("debater-{}", index)
+                } else {
+                    debater.name.trim().to_string()
+                };
+                let slug = Self::unique_variant_slug(&name, &mut seen_slugs);
+                let branch = format!("debate/{}/{}", session_id, slug);
+                let worktree_path = project_path
+                    .join(".hive-debate")
+                    .join(session_id)
+                    .join(format!("debater-{}", slug))
+                    .to_string_lossy()
+                    .to_string();
+                let cli = if debater.cli.trim().is_empty() {
+                    default_cli.to_string()
+                } else {
+                    debater.cli.trim().to_string()
+                };
+                let agent_config = AgentConfig {
+                    cli,
+                    model: debater.model.clone().or(config.default_model.clone()),
+                    flags: debater.flags.clone(),
+                    label: Some(format!("Debate {}", name)),
+                    name: None,
+                    description: debater.stance.clone(),
+                    role: None,
+                    initial_prompt: Some(config.topic.clone()),
+                };
+
+                DebateDebaterMetadata {
+                    index,
+                    name,
+                    stance: debater.stance.clone(),
+                    slug,
+                    branch,
+                    worktree_path,
+                    config: agent_config,
+                }
+            })
+            .collect()
+    }
+
+    fn create_debate_worktrees(
+        project_path: &PathBuf,
+        session_id: &str,
+        base_branch: &str,
+        debaters: &[DebateDebaterMetadata],
+        controller: &SessionController,
+    ) -> Result<(), String> {
+        for debater in debaters {
+            let worktree_path = PathBuf::from(&debater.worktree_path);
+            if let Some(parent) = worktree_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create debate worktree parent dir: {}", e))?;
+            }
+
+            Self::run_git_in_dir(
+                project_path,
+                &[
+                    "worktree",
+                    "add",
+                    &debater.worktree_path,
+                    "-b",
+                    &debater.branch,
+                    base_branch,
+                ],
+            )?;
+            controller.emit_workspace_created(
+                session_id,
+                &variant_to_cell_id(&debater.name),
+                &debater.branch,
+                Some(&debater.worktree_path),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn debate_opponent_files(
+        project_path: &Path,
+        session_id: &str,
+        metadata: &DebateSessionMetadata,
+        debater_index: u8,
+        round: u8,
+    ) -> String {
+        if round <= 1 {
+            return "No prior opponent arguments. This is the opening round.".to_string();
+        }
+
+        metadata
+            .debaters
+            .iter()
+            .filter(|debater| debater.index != debater_index)
+            .map(|debater| {
+                let path = Self::debate_round_argument_file_path(
+                    project_path,
+                    session_id,
+                    round - 1,
+                    &debater.slug,
+                );
+                format!("- {}: `{}`", debater.name, Self::prompt_path(&path))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn spawn_debate_round(&self, session_id: &str, round: u8) -> Result<(), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Debate { .. }) {
+            return Err(format!("Session {} is not a Debate session", session_id));
+        }
+
+        let metadata = Self::read_debate_metadata(&session.project_path, session_id)?;
+        if round == 0 || round > metadata.rounds {
+            return Err(format!(
+                "Invalid debate round {} for session {}",
+                round, session_id
+            ));
+        }
+
+        let previous_round_dir = if round > 1 {
+            Some(
+                session
+                    .project_path
+                    .join(".hive-manager")
+                    .join(session_id)
+                    .join("debate")
+                    .join("rounds")
+                    .join(format!("round-{}", round - 1)),
+            )
+        } else {
+            None
+        };
+
+        let mut new_agents = Vec::new();
+        for debater in &metadata.debaters {
+            let spawning_changes = {
+                let mut sessions = self.sessions.write();
+                sessions.get_mut(session_id).map(|s| {
+                    self.set_session_state_with_events(s, SessionState::SpawningDebateRound(round))
+                })
+            };
+            if let Some(changes) = spawning_changes {
+                self.emit_cell_status_changes(session_id, changes);
+            }
+            self.emit_session_update(session_id);
+
+            let worktree_path = PathBuf::from(&debater.worktree_path);
+            let argument_file = Self::debate_round_argument_file_path(
+                &session.project_path,
+                session_id,
+                round,
+                &debater.slug,
+            );
+            if let Some(parent) = argument_file.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create debate argument directory: {}", e))?;
+            }
+            let opponent_files = Self::debate_opponent_files(
+                &session.project_path,
+                session_id,
+                &metadata,
+                debater.index,
+                round,
+            );
+            let task_file = Self::write_debate_round_task_file(
+                &worktree_path,
+                debater,
+                &metadata.topic,
+                round,
+                metadata.rounds,
+                &argument_file,
+                &opponent_files,
+            )?;
+            let prompt = Self::build_debate_debater_prompt(
+                session_id,
+                debater,
+                &metadata.topic,
+                round,
+                metadata.rounds,
+                &argument_file,
+                previous_round_dir.as_deref(),
+                &opponent_files,
+                &task_file,
+            );
+            let prompt_filename =
+                format!("debate-debater-{}-round-{}-prompt.md", debater.index, round);
+            let prompt_file = Self::write_worker_prompt_file(
+                &worktree_path,
+                debater.index,
+                &prompt_filename,
+                &prompt,
+            )?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+
+            let agent_config = debater.config.clone();
+            let (cmd, mut args) = Self::build_command(&agent_config);
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
+            {
+                let pty_manager = self.pty_manager.read();
+                pty_manager
+                    .create_session(
+                        agent_id.clone(),
+                        AgentRole::Fusion {
+                            variant: debater.name.clone(),
+                        },
+                        &cmd,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        Some(&debater.worktree_path),
+                        120,
+                        30,
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "Failed to spawn Debate debater {} round {}: {}",
+                            debater.name, round, e
+                        )
+                    })?;
+            }
+
+            new_agents.push(AgentInfo {
+                id: agent_id,
+                role: AgentRole::Fusion {
+                    variant: debater.name.clone(),
+                },
+                status: AgentStatus::Running,
+                config: agent_config,
+                parent_id: None,
+                commit_sha: None,
+                base_commit_sha: None,
+            });
+        }
+
+        let (updated_session, changes) = {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.extend(new_agents.clone());
+                self.emit_agent_batch_launched(s, &new_agents);
+                let changes = self
+                    .set_session_state_with_events(s, SessionState::WaitingForDebateRound(round));
+                (s.clone(), changes)
+            } else {
+                return Err("Session disappeared".to_string());
+            }
+        };
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: updated_session,
+                },
+            );
+        }
+        self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+
+        Ok(())
+    }
+
     /// Launch the planning phase - spawns Master Planner only
-    fn launch_planning_phase(&self, session_id: String, config: HiveLaunchConfig) -> Result<Session, String> {
+    fn launch_planning_phase(
+        &self,
+        session_id: String,
+        config: HiveLaunchConfig,
+    ) -> Result<Session, String> {
         let project_path = PathBuf::from(&config.project_path);
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
@@ -6958,7 +8234,12 @@ phases and do EXACTLY this, then stop:
         // Build the appropriate prompt based on mode
         let planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
-            Self::build_smoke_test_prompt(&session_id, &config.workers, config.with_evaluator, config.qa_workers.as_deref())
+            Self::build_smoke_test_prompt(
+                &session_id,
+                &config.workers,
+                config.with_evaluator,
+                config.qa_workers.as_deref(),
+            )
         } else {
             // Pass workers info to Master Planner so it knows how many tasks to create
             let prompt = config.prompt.as_deref().unwrap_or("");
@@ -6973,7 +8254,12 @@ phases and do EXACTLY this, then stop:
             let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
 
             // Write Master Planner prompt to file
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
+            let prompt_file = Self::write_prompt_file(
+                &project_path,
+                &session_id,
+                "master-planner-prompt.md",
+                &planner_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -7003,7 +8289,10 @@ phases and do EXACTLY this, then stop:
         }
 
         // Store the pending config for later continuation
-        let pending_config_path = project_path.join(".hive-manager").join(&session_id).join("pending-config.json");
+        let pending_config_path = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("pending-config.json");
         std::fs::create_dir_all(pending_config_path.parent().unwrap())
             .map_err(|e| format!("Failed to create session directory: {}", e))?;
         let config_json = serde_json::to_string_pretty(&config)
@@ -7016,7 +8305,9 @@ phases and do EXACTLY this, then stop:
             id: session_id.clone(),
             name: config.name.clone(),
             color: config.color.clone(),
-            session_type: SessionType::Hive { worker_count: config.workers.len() as u8 },
+            session_type: SessionType::Hive {
+                worker_count: config.workers.len() as u8,
+            },
             project_path,
             state: SessionState::Planning,
             created_at: Utc::now(),
@@ -7042,9 +8333,12 @@ phases and do EXACTLY this, then stop:
         self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         self.init_session_storage(&session);
@@ -7054,7 +8348,11 @@ phases and do EXACTLY this, then stop:
     }
 
     /// Launch the planning phase for Fusion - spawns Master Planner only
-    fn launch_fusion_planning_phase(&self, session_id: String, config: FusionLaunchConfig) -> Result<Session, String> {
+    fn launch_fusion_planning_phase(
+        &self,
+        session_id: String,
+        config: FusionLaunchConfig,
+    ) -> Result<Session, String> {
         let project_path = PathBuf::from(&config.project_path);
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
@@ -7072,11 +8370,21 @@ phases and do EXACTLY this, then stop:
             let queen_cfg = config.queen_config.as_ref().unwrap_or(&config.judge_config);
             let (cmd, mut args) = Self::build_command(queen_cfg);
 
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
+            let prompt_file = Self::write_prompt_file(
+                &project_path,
+                &session_id,
+                "master-planner-prompt.md",
+                &planner_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-            tracing::info!("Launching Master Planner (fusion): {} {:?} in {:?}", cmd, args, cwd);
+            tracing::info!(
+                "Launching Master Planner (fusion): {} {:?} in {:?}",
+                cmd,
+                args,
+                cwd
+            );
 
             pty_manager
                 .create_session(
@@ -7102,7 +8410,10 @@ phases and do EXACTLY this, then stop:
         }
 
         // Store the pending Fusion config for later continuation
-        let pending_config_path = project_path.join(".hive-manager").join(&session_id).join("pending-fusion-config.json");
+        let pending_config_path = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("pending-fusion-config.json");
         std::fs::create_dir_all(pending_config_path.parent().unwrap())
             .map_err(|e| format!("Failed to create session directory: {}", e))?;
         let config_json = serde_json::to_string_pretty(&config)
@@ -7116,13 +8427,19 @@ phases and do EXACTLY this, then stop:
             id: session_id.clone(),
             name: config.name.clone(),
             color: config.color.clone(),
-            session_type: SessionType::Fusion { variants: variant_names },
+            session_type: SessionType::Fusion {
+                variants: variant_names,
+            },
             project_path: project_path.clone(),
             state: SessionState::Planning,
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents,
-            default_cli: if config.default_cli.trim().is_empty() { "claude".to_string() } else { config.default_cli.trim().to_string() },
+            default_cli: if config.default_cli.trim().is_empty() {
+                "claude".to_string()
+            } else {
+                config.default_cli.trim().to_string()
+            },
             default_model: config.default_model.clone(),
             qa_workers: Vec::new(),
             max_qa_iterations,
@@ -7142,9 +8459,137 @@ phases and do EXACTLY this, then stop:
         self.emit_agent_batch_launched(&session, &session.agents);
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
+        }
+
+        self.init_session_storage(&session);
+        self.ensure_task_watcher(&session.id, &session.project_path);
+
+        Ok(session)
+    }
+
+    fn launch_debate_planning_phase(
+        &self,
+        session_id: String,
+        config: DebateLaunchConfig,
+    ) -> Result<Session, String> {
+        let project_path = PathBuf::from(&config.project_path);
+        let cwd = config.project_path.as_str();
+        let mut agents = Vec::new();
+
+        let planner_prompt = Self::build_debate_master_planner_prompt(
+            &session_id,
+            &config.topic,
+            &config.debaters,
+            config.rounds,
+        );
+
+        {
+            let pty_manager = self.pty_manager.read();
+
+            let planner_id = format!("{}-master-planner", session_id);
+            let queen_cfg = config.queen_config.as_ref().unwrap_or(&config.judge_config);
+            let (cmd, mut args) = Self::build_command(queen_cfg);
+
+            let prompt_file = Self::write_prompt_file(
+                &project_path,
+                &session_id,
+                "master-planner-prompt.md",
+                &planner_prompt,
+            )?;
+            let prompt_path = prompt_file.to_string_lossy().to_string();
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+            tracing::info!(
+                "Launching Master Planner (debate): {} {:?} in {:?}",
+                cmd,
+                args,
+                cwd
+            );
+
+            pty_manager
+                .create_session(
+                    planner_id.clone(),
+                    AgentRole::MasterPlanner,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
+
+            agents.push(AgentInfo {
+                id: planner_id,
+                role: AgentRole::MasterPlanner,
+                status: AgentStatus::Running,
+                config: queen_cfg.clone(),
+                parent_id: None,
+                commit_sha: None,
+                base_commit_sha: None,
             });
+        }
+
+        let pending_config_path = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("pending-debate-config.json");
+        std::fs::create_dir_all(pending_config_path.parent().unwrap())
+            .map_err(|e| format!("Failed to create session directory: {}", e))?;
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        std::fs::write(&pending_config_path, config_json)
+            .map_err(|e| format!("Failed to write pending config: {}", e))?;
+
+        let debater_names: Vec<String> = config.debaters.iter().map(|v| v.name.clone()).collect();
+        let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
+        let session = Session {
+            id: session_id.clone(),
+            name: config.name.clone(),
+            color: config.color.clone(),
+            session_type: SessionType::Debate {
+                variants: debater_names,
+            },
+            project_path: project_path.clone(),
+            state: SessionState::Planning,
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents,
+            default_cli: if config.default_cli.trim().is_empty() {
+                "claude".to_string()
+            } else {
+                config.default_cli.trim().to_string()
+            },
+            default_model: config.default_model.clone(),
+            qa_workers: Vec::new(),
+            max_qa_iterations,
+            qa_timeout_secs,
+            auth_strategy,
+            worktree_path: None,
+            worktree_branch: None,
+            no_git: false,
+            resume_report: None,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session_id.clone(), session.clone());
+        }
+
+        self.emit_agent_batch_launched(&session, &session.agents);
+
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         self.init_session_storage(&session);
@@ -7154,11 +8599,19 @@ phases and do EXACTLY this, then stop:
     }
 
     /// Continue a Fusion session after planning phase - spawns Queen + Variants
-    fn continue_fusion_after_planning(&self, session_id: &str, session: &Session) -> Result<Session, String> {
+    fn continue_fusion_after_planning(
+        &self,
+        session_id: &str,
+        session: &Session,
+    ) -> Result<Session, String> {
         let cwd = session.project_path.to_str().unwrap_or(".");
 
         // Load the pending Fusion config
-        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-fusion-config.json");
+        let pending_config_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("pending-fusion-config.json");
         let config_json = std::fs::read_to_string(&pending_config_path)
             .map_err(|e| format!("Failed to read pending fusion config: {}", e))?;
         let config: FusionLaunchConfig = serde_json::from_str(&config_json)
@@ -7169,7 +8622,10 @@ phases and do EXACTLY this, then stop:
         if let Err(e) = self.stop_agent(session_id, &planner_id) {
             tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
         } else {
-            tracing::info!("Stopped Master Planner {} before spawning Fusion Queen", planner_id);
+            tracing::info!(
+                "Stopped Master Planner {} before spawning Fusion Queen",
+                planner_id
+            );
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 s.agents.retain(|a| a.id != planner_id);
@@ -7195,18 +8651,17 @@ phases and do EXACTLY this, then stop:
             };
             let slug = Self::unique_variant_slug(&name, &mut seen_slugs);
             let branch = format!("fusion/{}/{}", session_id, slug);
-            let worktree_path = session.project_path
+            let worktree_path = session
+                .project_path
                 .join(".hive-fusion")
                 .join(session_id)
                 .join(format!("variant-{}", slug))
                 .to_string_lossy()
                 .to_string();
-            let task_file = Self::fusion_variant_task_file_path(
-                Path::new(&worktree_path),
-                index as usize,
-            )
-            .to_string_lossy()
-            .to_string();
+            let task_file =
+                Self::fusion_variant_task_file_path(Path::new(&worktree_path), index as usize)
+                    .to_string_lossy()
+                    .to_string();
 
             variants.push(FusionVariantMetadata {
                 index,
@@ -7222,12 +8677,19 @@ phases and do EXACTLY this, then stop:
         // Create git base branch and worktrees
         let fresh_base = resolve_fresh_base(&session.project_path);
         let base_branch = format!("fusion/{}/base", session_id);
-        Self::run_git_in_dir(&session.project_path, &["branch", &base_branch, &fresh_base])?;
+        Self::run_git_in_dir(
+            &session.project_path,
+            &["branch", &base_branch, &fresh_base],
+        )?;
 
         let mut new_agents = Vec::new();
 
         // Spawn Queen agent
-        let queen_cfg = config.queen_config.as_ref().unwrap_or(&config.judge_config).clone();
+        let queen_cfg = config
+            .queen_config
+            .as_ref()
+            .unwrap_or(&config.judge_config)
+            .clone();
         {
             let pty_manager = self.pty_manager.read();
 
@@ -7242,7 +8704,12 @@ phases and do EXACTLY this, then stop:
                 &config.task_description,
                 false, // Fusion sessions never launch an Evaluator
             );
-            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "fusion-queen-prompt.md", &queen_prompt)?;
+            let prompt_file = Self::write_prompt_file(
+                &session.project_path,
+                session_id,
+                "fusion-queen-prompt.md",
+                &queen_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -7285,9 +8752,11 @@ phases and do EXACTLY this, then stop:
             Self::run_git_in_dir(
                 &session.project_path,
                 &[
-                    "worktree", "add",
+                    "worktree",
+                    "add",
                     &variant.worktree_path,
-                    "-b", &variant.branch,
+                    "-b",
+                    &variant.branch,
                     &base_branch,
                 ],
             )?;
@@ -7313,7 +8782,10 @@ phases and do EXACTLY this, then stop:
             };
             let variant_agent_config = AgentConfig {
                 cli: cli.clone(),
-                model: source_variant.model.clone().or(config.default_model.clone()),
+                model: source_variant
+                    .model
+                    .clone()
+                    .or(config.default_model.clone()),
                 flags: source_variant.flags.clone(),
                 label: Some(format!("Fusion {}", variant.name)),
                 name: None,
@@ -7345,7 +8817,10 @@ phases and do EXACTLY this, then stop:
 
             tracing::info!(
                 "Launching Fusion variant {} ({}) on branch {} in {}",
-                variant.index, variant.name, variant.branch, variant.worktree_path
+                variant.index,
+                variant.name,
+                variant.branch,
+                variant.worktree_path
             );
 
             {
@@ -7353,19 +8828,25 @@ phases and do EXACTLY this, then stop:
                 pty_manager
                     .create_session(
                         variant.agent_id.clone(),
-                        AgentRole::Fusion { variant: variant.name.clone() },
+                        AgentRole::Fusion {
+                            variant: variant.name.clone(),
+                        },
                         &cmd,
                         &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                         Some(&variant.worktree_path),
                         120,
                         30,
                     )
-                    .map_err(|e| format!("Failed to spawn Fusion variant {}: {}", variant.name, e))?;
+                    .map_err(|e| {
+                        format!("Failed to spawn Fusion variant {}: {}", variant.name, e)
+                    })?;
             }
 
             new_agents.push(AgentInfo {
                 id: variant.agent_id.clone(),
-                role: AgentRole::Fusion { variant: variant.name.clone() },
+                role: AgentRole::Fusion {
+                    variant: variant.name.clone(),
+                },
                 status: AgentStatus::Running,
                 config: variant_agent_config,
                 parent_id: None,
@@ -7375,14 +8856,16 @@ phases and do EXACTLY this, then stop:
         }
 
         // Create evaluation directory
-        let evaluation_dir = session.project_path
+        let evaluation_dir = session
+            .project_path
             .join(".hive-manager")
             .join(session_id)
             .join("evaluation");
         std::fs::create_dir_all(&evaluation_dir)
             .map_err(|e| format!("Failed to create fusion evaluation directory: {}", e))?;
 
-        let decision_file = session.project_path
+        let decision_file = session
+            .project_path
             .join(".hive-manager")
             .join(session_id)
             .join("evaluation")
@@ -7418,9 +8901,12 @@ phases and do EXACTLY this, then stop:
         };
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: updated_session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: updated_session.clone(),
+                },
+            );
         }
 
         self.update_session_storage(session_id);
@@ -7433,21 +8919,153 @@ phases and do EXACTLY this, then stop:
         Ok(updated_session)
     }
 
+    fn continue_debate_after_planning(
+        &self,
+        session_id: &str,
+        session: &Session,
+    ) -> Result<Session, String> {
+        let pending_config_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("pending-debate-config.json");
+        let config_json = std::fs::read_to_string(&pending_config_path)
+            .map_err(|e| format!("Failed to read pending debate config: {}", e))?;
+        let mut config: DebateLaunchConfig = serde_json::from_str(&config_json)
+            .map_err(|e| format!("Failed to parse pending debate config: {}", e))?;
+        config.rounds = Self::validate_debate_rounds(config.rounds)?;
+
+        let planner_id = format!("{}-master-planner", session_id);
+        if let Err(e) = self.stop_agent(session_id, &planner_id) {
+            tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
+        } else {
+            tracing::info!(
+                "Stopped Master Planner {} before spawning Debate debaters",
+                planner_id
+            );
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agents.retain(|a| a.id != planner_id);
+            }
+        }
+
+        let default_cli = if config.default_cli.trim().is_empty() {
+            "claude".to_string()
+        } else {
+            config.default_cli.trim().to_string()
+        };
+        let debaters = Self::build_debate_debater_metadata(
+            session_id,
+            &session.project_path,
+            &config,
+            &default_cli,
+        );
+
+        let fresh_base = resolve_fresh_base(&session.project_path);
+        let base_branch = format!("debate/{}/base", session_id);
+        Self::run_git_in_dir(
+            &session.project_path,
+            &["branch", &base_branch, &fresh_base],
+        )?;
+        Self::create_debate_worktrees(
+            &session.project_path,
+            session_id,
+            &base_branch,
+            &debaters,
+            self,
+        )?;
+
+        let verdict_file = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("evaluation")
+            .join("verdict.md")
+            .to_string_lossy()
+            .to_string();
+        if let Some(parent) = Path::new(&verdict_file).parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create debate evaluation directory: {}", e))?;
+        }
+        std::fs::create_dir_all(
+            session
+                .project_path
+                .join(".hive-manager")
+                .join(session_id)
+                .join("debate")
+                .join("rounds"),
+        )
+        .map_err(|e| format!("Failed to create debate rounds directory: {}", e))?;
+
+        let metadata = DebateSessionMetadata {
+            base_branch,
+            debaters: debaters.clone(),
+            judge_config: config.judge_config.clone(),
+            topic: config.topic,
+            rounds: config.rounds,
+            verdict_file,
+        };
+        Self::write_debate_metadata(&session.project_path, session_id, &metadata)?;
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                if let Some(d) = debaters.first() {
+                    s.worktree_path = Some(d.worktree_path.clone());
+                    s.worktree_branch = Some(d.branch.clone());
+                }
+            }
+        }
+
+        self.spawn_debate_round(session_id, 1)?;
+
+        let updated_session = self
+            .get_session(session_id)
+            .ok_or_else(|| "Session disappeared".to_string())?;
+        self.ensure_task_watcher(session_id, &updated_session.project_path);
+        let _ = std::fs::remove_file(&pending_config_path);
+
+        Ok(updated_session)
+    }
+
     /// Launch the planning phase for Swarm - spawns Master Planner only
-    fn launch_swarm_planning_phase(&self, session_id: String, config: SwarmLaunchConfig) -> Result<Session, String> {
+    fn launch_swarm_planning_phase(
+        &self,
+        session_id: String,
+        config: SwarmLaunchConfig,
+    ) -> Result<Session, String> {
         let project_path = PathBuf::from(&config.project_path);
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
 
         // Build the appropriate prompt based on mode
-        let planner_count = if config.planners.is_empty() { config.planner_count } else { config.planners.len() as u8 };
+        let planner_count = if config.planners.is_empty() {
+            config.planner_count
+        } else {
+            config.planners.len() as u8
+        };
         let planner_prompt = if config.smoke_test {
-            tracing::info!("Running in SMOKE TEST mode (swarm) - {} planners, {} workers each", planner_count, config.workers_per_planner.len());
-            Self::build_swarm_smoke_test_prompt(&session_id, planner_count, &config.workers_per_planner, config.with_evaluator, config.qa_workers.as_deref())
+            tracing::info!(
+                "Running in SMOKE TEST mode (swarm) - {} planners, {} workers each",
+                planner_count,
+                config.workers_per_planner.len()
+            );
+            Self::build_swarm_smoke_test_prompt(
+                &session_id,
+                planner_count,
+                &config.workers_per_planner,
+                config.with_evaluator,
+                config.qa_workers.as_deref(),
+            )
         } else {
             // Pass planners and workers info to Master Planner so it knows the full scope
             let prompt = config.prompt.as_deref().unwrap_or("");
-            Self::build_swarm_master_planner_prompt(&session_id, prompt, planner_count, &config.workers_per_planner)
+            Self::build_swarm_master_planner_prompt(
+                &session_id,
+                prompt,
+                planner_count,
+                &config.workers_per_planner,
+            )
         };
 
         {
@@ -7458,11 +9076,21 @@ phases and do EXACTLY this, then stop:
             let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
 
             // Write Master Planner prompt to file
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "master-planner-prompt.md", &planner_prompt)?;
+            let prompt_file = Self::write_prompt_file(
+                &project_path,
+                &session_id,
+                "master-planner-prompt.md",
+                &planner_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-            tracing::info!("Launching Master Planner (swarm): {} {:?} in {:?}", cmd, args, cwd);
+            tracing::info!(
+                "Launching Master Planner (swarm): {} {:?} in {:?}",
+                cmd,
+                args,
+                cwd
+            );
 
             pty_manager
                 .create_session(
@@ -7488,7 +9116,10 @@ phases and do EXACTLY this, then stop:
         }
 
         // Store the pending Swarm config for later continuation
-        let pending_config_path = project_path.join(".hive-manager").join(&session_id).join("pending-swarm-config.json");
+        let pending_config_path = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("pending-swarm-config.json");
         std::fs::create_dir_all(pending_config_path.parent().unwrap())
             .map_err(|e| format!("Failed to create session directory: {}", e))?;
         let config_json = serde_json::to_string_pretty(&config)
@@ -7501,7 +9132,13 @@ phases and do EXACTLY this, then stop:
             id: session_id.clone(),
             name: config.name.clone(),
             color: config.color.clone(),
-            session_type: SessionType::Swarm { planner_count: if config.planners.is_empty() { config.planner_count } else { config.planners.len() as u8 } },
+            session_type: SessionType::Swarm {
+                planner_count: if config.planners.is_empty() {
+                    config.planner_count
+                } else {
+                    config.planners.len() as u8
+                },
+            },
             project_path,
             state: SessionState::Planning,
             created_at: Utc::now(),
@@ -7525,9 +9162,12 @@ phases and do EXACTLY this, then stop:
         }
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         self.init_session_storage(&session);
@@ -7537,8 +9177,15 @@ phases and do EXACTLY this, then stop:
     }
 
     /// Spawn the next worker sequentially
-    async fn spawn_next_worker(&self, session_id: &str, worker_index: usize, config: &HiveLaunchConfig, queen_id: &str) -> Result<(), SessionError> {
-        let session = self.get_session(session_id)
+    async fn spawn_next_worker(
+        &self,
+        session_id: &str,
+        worker_index: usize,
+        config: &HiveLaunchConfig,
+        queen_id: &str,
+    ) -> Result<(), SessionError> {
+        let session = self
+            .get_session(session_id)
             .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
 
         if worker_index >= config.workers.len() {
@@ -7563,7 +9210,11 @@ phases and do EXACTLY this, then stop:
         // #125 resume guard: if this worker-spawn write-step is already journaled
         // Completed, a prior run already created its worktree/branch — do NOT re-run the
         // destructive spawn. Advance to the next worker instead.
-        if self.is_write_step_completed(session_id, crate::domain::run_journal::StepKind::WorkerSpawn, index as u64) {
+        if self.is_write_step_completed(
+            session_id,
+            crate::domain::run_journal::StepKind::WorkerSpawn,
+            index as u64,
+        ) {
             tracing::info!(
                 session_id,
                 worker_index = index,
@@ -7590,10 +9241,7 @@ phases and do EXACTLY this, then stop:
         let spawning_changes = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                Some(self.set_session_state_with_events(
-                    s,
-                    SessionState::SpawningWorker(index),
-                ))
+                Some(self.set_session_state_with_events(s, SessionState::SpawningWorker(index)))
             } else {
                 None
             }
@@ -7619,7 +9267,8 @@ phases and do EXACTLY this, then stop:
             self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
             SessionError::ConfigError(err)
         })?;
-        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), index as usize);
+        let task_file_path =
+            Self::task_file_path_for_worker(Path::new(&worker_cwd), index as usize);
         let worker_base_commit_sha = current_head(Path::new(&worker_cwd)).map_err(|err| {
             Self::rollback_worker_launch_artifacts(
                 &session.project_path,
@@ -7668,19 +9317,23 @@ phases and do EXACTLY this, then stop:
 
         // 3. Write worker prompt to file
         let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
-        let prompt_file =
-            Self::write_worker_prompt_file(Path::new(&worker_cwd), index, &filename, &worker_prompt)
-                .map_err(|err| {
-                    Self::rollback_worker_launch_artifacts(
-                        &session.project_path,
-                        session_id,
-                        &worker_cell_name,
-                        &task_file_path,
-                        None,
-                    );
-                    self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
-                    SessionError::ConfigError(err)
-                })?;
+        let prompt_file = Self::write_worker_prompt_file(
+            Path::new(&worker_cwd),
+            index,
+            &filename,
+            &worker_prompt,
+        )
+        .map_err(|err| {
+            Self::rollback_worker_launch_artifacts(
+                &session.project_path,
+                session_id,
+                &worker_cell_name,
+                &task_file_path,
+                None,
+            );
+            self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
+            SessionError::ConfigError(err)
+        })?;
         let prompt_path = prompt_file.to_string_lossy().to_string();
 
         // 4. Build command with prompt
@@ -7692,7 +9345,10 @@ phases and do EXACTLY this, then stop:
         pty_manager
             .create_session(
                 worker_id.clone(),
-                AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
+                AgentRole::Worker {
+                    index,
+                    parent: Some(queen_id.to_string()),
+                },
                 &cmd,
                 &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                 Some(&worker_cwd),
@@ -7717,7 +9373,10 @@ phases and do EXACTLY this, then stop:
             if let Some(s) = sessions.get_mut(session_id) {
                 let agent = AgentInfo {
                     id: worker_id,
-                    role: AgentRole::Worker { index, parent: Some(queen_id.to_string()) },
+                    role: AgentRole::Worker {
+                        index,
+                        parent: Some(queen_id.to_string()),
+                    },
                     status: AgentStatus::Running,
                     config: worker_config.clone(),
                     parent_id: Some(queen_id.to_string()),
@@ -7726,10 +9385,7 @@ phases and do EXACTLY this, then stop:
                 };
                 s.agents.push(agent.clone());
                 self.emit_agent_launched(s, &agent);
-                Some(self.set_session_state_with_events(
-                    s,
-                    SessionState::WaitingForWorker(index),
-                ))
+                Some(self.set_session_state_with_events(s, SessionState::WaitingForWorker(index)))
             } else {
                 None
             }
@@ -7843,14 +9499,28 @@ phases and do EXACTLY this, then stop:
         };
 
         if let Some(base_commit_sha) = Self::worker_base_commit_sha(session, worker_id) {
-            return if head == base_commit_sha { None } else { Some(head) };
+            return if head == base_commit_sha {
+                None
+            } else {
+                Some(head)
+            };
         }
 
-        let base_ref = Self::resolve_worker_base_ref(session, "worker_completion_commit_sha", worker_id);
-        if head == base_ref { None } else { Some(head) }
+        let base_ref =
+            Self::resolve_worker_base_ref(session, "worker_completion_commit_sha", worker_id);
+        if head == base_ref {
+            None
+        } else {
+            Some(head)
+        }
     }
 
-    pub(crate) fn sync_agent_commit_sha(&self, session_id: &str, agent_id: &str, commit_sha: Option<String>) {
+    pub(crate) fn sync_agent_commit_sha(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        commit_sha: Option<String>,
+    ) {
         let updated = {
             let mut sessions = self.sessions.write();
             let Some(session) = sessions.get_mut(session_id) else {
@@ -7881,7 +9551,11 @@ phases and do EXACTLY this, then stop:
         commit_sha: Option<&str>,
     ) -> (SessionState, Vec<(String, String, String)>) {
         if let Some(evaluator_id) = evaluator_id {
-            if let Some(agent) = session.agents.iter_mut().find(|agent| agent.id == evaluator_id) {
+            if let Some(agent) = session
+                .agents
+                .iter_mut()
+                .find(|agent| agent.id == evaluator_id)
+            {
                 agent.commit_sha = commit_sha.map(str::to_string);
             }
         }
@@ -7900,8 +9574,8 @@ phases and do EXACTLY this, then stop:
                         session.id,
                         session.max_qa_iterations
                     );
-                    let changes =
-                        self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
+                    let changes = self
+                        .set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                     session.auth_strategy = AuthStrategy::None;
                     (SessionState::QaMaxRetriesExceeded, changes)
                 } else {
@@ -7961,7 +9635,8 @@ phases and do EXACTLY this, then stop:
         };
 
         if let Some(storage) = self.storage.as_ref() {
-            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id) {
+            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id)
+            {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
                     *session = previous_session;
@@ -7989,13 +9664,22 @@ phases and do EXACTLY this, then stop:
     }
 
     /// Called when worker-completed event received
-    pub async fn on_worker_completed(&self, session_id: &str, worker_id: u8) -> Result<(), SessionError> {
-        let session = self.get_session(session_id)
+    pub async fn on_worker_completed(
+        &self,
+        session_id: &str,
+        worker_id: u8,
+    ) -> Result<(), SessionError> {
+        let session = self
+            .get_session(session_id)
             .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
 
         // Verify we're in sequential mode and this is the expected worker
         if session.state != SessionState::WaitingForWorker(worker_id) {
-            tracing::warn!("Worker {} completed but session in state {:?}", worker_id, session.state);
+            tracing::warn!(
+                "Worker {} completed but session in state {:?}",
+                worker_id,
+                session.state
+            );
             return Ok(());
         }
 
@@ -8055,16 +9739,22 @@ phases and do EXACTLY this, then stop:
         }
 
         // Load config - if it doesn't exist, workers may have been spawned via HTTP API
-        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-config.json");
+        let pending_config_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("pending-config.json");
         if !pending_config_path.exists() {
             tracing::info!("No pending config found for session {} - workers may have been spawned via HTTP API", session_id);
             return Ok(());
         }
 
-        let config_json = std::fs::read_to_string(&pending_config_path)
-            .map_err(|e| SessionError::ConfigError(format!("Failed to read pending config: {}", e)))?;
-        let config: HiveLaunchConfig = serde_json::from_str(&config_json)
-            .map_err(|e| SessionError::ConfigError(format!("Failed to parse pending config: {}", e)))?;
+        let config_json = std::fs::read_to_string(&pending_config_path).map_err(|e| {
+            SessionError::ConfigError(format!("Failed to read pending config: {}", e))
+        })?;
+        let config: HiveLaunchConfig = serde_json::from_str(&config_json).map_err(|e| {
+            SessionError::ConfigError(format!("Failed to parse pending config: {}", e))
+        })?;
 
         // Get queen_id
         let queen_id = format!("{}-queen", session_id);
@@ -8074,7 +9764,8 @@ phases and do EXACTLY this, then stop:
 
         // 2. Spawn next worker
         let next_worker_index = worker_id as usize;
-        self.spawn_next_worker(session_id, next_worker_index, &config, &queen_id).await?;
+        self.spawn_next_worker(session_id, next_worker_index, &config, &queen_id)
+            .await?;
 
         Ok(())
     }
@@ -8191,10 +9882,13 @@ phases and do EXACTLY this, then stop:
 
         // Emit qa-timeout event
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("qa-timeout", serde_json::json!({
-                "session_id": session_id,
-                "action": "pass-with-warning"
-            }));
+            let _ = app_handle.emit(
+                "qa-timeout",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "action": "pass-with-warning"
+                }),
+            );
         }
 
         Ok(())
@@ -8225,7 +9919,11 @@ phases and do EXACTLY this, then stop:
             };
 
             if is_qa {
-                tracing::warn!("QA timeout fired for session {} after {}s — auto-passing", sid, timeout_secs);
+                tracing::warn!(
+                    "QA timeout fired for session {} after {}s — auto-passing",
+                    sid,
+                    timeout_secs
+                );
 
                 // A timeout auto-pass should leave the session in QaPassed so the server can enforce
                 // the same quiescence gate as an explicit evaluator PASS.
@@ -8233,7 +9931,8 @@ phases and do EXACTLY this, then stop:
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
                         let previous_state = session.state.clone();
-                        let changes = cell_status_changes_for_transition(session, &SessionState::QaPassed);
+                        let changes =
+                            cell_status_changes_for_transition(session, &SessionState::QaPassed);
                         session.state = SessionState::QaPassed;
                         Some((previous_state, changes, session.clone()))
                     } else {
@@ -8243,10 +9942,16 @@ phases and do EXACTLY this, then stop:
 
                 if let Some((previous_state, changes, updated_session)) = transition {
                     if let Some(storage) = storage.as_ref() {
-                        if let Err(error) =
-                            SessionController::persist_session_snapshot(storage, &updated_session, &sid)
-                        {
-                            tracing::warn!("Failed to persist QA timeout state for {}: {}", sid, error);
+                        if let Err(error) = SessionController::persist_session_snapshot(
+                            storage,
+                            &updated_session,
+                            &sid,
+                        ) {
+                            tracing::warn!(
+                                "Failed to persist QA timeout state for {}: {}",
+                                sid,
+                                error
+                            );
                             let mut sessions = sessions.write();
                             if let Some(session) = sessions.get_mut(&sid) {
                                 session.state = previous_state;
@@ -8260,13 +9965,19 @@ phases and do EXACTLY this, then stop:
                     }
 
                     if let Some(ref app_handle) = app_handle {
-                        let _ = app_handle.emit("session-update", SessionUpdate {
-                            session: updated_session,
-                        });
-                        let _ = app_handle.emit("qa-timeout", serde_json::json!({
-                            "session_id": sid,
-                            "action": "pass-with-warning"
-                        }));
+                        let _ = app_handle.emit(
+                            "session-update",
+                            SessionUpdate {
+                                session: updated_session,
+                            },
+                        );
+                        let _ = app_handle.emit(
+                            "qa-timeout",
+                            serde_json::json!({
+                                "session_id": sid,
+                                "action": "pass-with-warning"
+                            }),
+                        );
                     }
                 }
             }
@@ -8285,7 +9996,11 @@ phases and do EXACTLY this, then stop:
         }
     }
 
-    pub async fn on_fusion_variant_completed(&self, session_id: &str, variant_index: u8) -> Result<(), SessionError> {
+    pub async fn on_fusion_variant_completed(
+        &self,
+        session_id: &str,
+        variant_index: u8,
+    ) -> Result<(), SessionError> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
@@ -8300,19 +10015,32 @@ phases and do EXACTLY this, then stop:
             .variants
             .iter()
             .find(|v| v.index == variant_index)
-            .ok_or_else(|| SessionError::ConfigError(format!("Unknown fusion variant index: {}", variant_index)))?;
+            .ok_or_else(|| {
+                SessionError::ConfigError(format!(
+                    "Unknown fusion variant index: {}",
+                    variant_index
+                ))
+            })?;
 
         {
             let pty_manager = self.pty_manager.read();
             if let Err(e) = pty_manager.kill(&variant.agent_id) {
-                tracing::warn!("Failed to stop fusion variant PTY {}: {}", variant.agent_id, e);
+                tracing::warn!(
+                    "Failed to stop fusion variant PTY {}: {}",
+                    variant.agent_id,
+                    e
+                );
             }
         }
 
         let completed_agent = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
-                if let Some(index) = s.agents.iter().position(|agent| agent.id == variant.agent_id) {
+                if let Some(index) = s
+                    .agents
+                    .iter()
+                    .position(|agent| agent.id == variant.agent_id)
+                {
                     s.agents[index].status = AgentStatus::Completed;
                     Some((s.clone(), s.agents[index].clone()))
                 } else {
@@ -8329,22 +10057,29 @@ phases and do EXACTLY this, then stop:
 
         let already_judging = {
             let sessions = self.sessions.read();
-            sessions.get(session_id).map(|s| {
-                matches!(
-                    s.state,
-                    SessionState::SpawningJudge
-                        | SessionState::Judging
-                        | SessionState::AwaitingVerdictSelection
-                        | SessionState::MergingWinner
-                        | SessionState::Completed
-                )
-            }).unwrap_or(false)
+            sessions
+                .get(session_id)
+                .map(|s| {
+                    matches!(
+                        s.state,
+                        SessionState::SpawningJudge
+                            | SessionState::Judging
+                            | SessionState::AwaitingVerdictSelection
+                            | SessionState::MergingWinner
+                            | SessionState::Completed
+                    )
+                })
+                .unwrap_or(false)
         };
         if already_judging {
             return Ok(());
         }
 
-        if metadata.variants.iter().all(|v| Self::is_task_completed(&v.task_file)) {
+        if metadata
+            .variants
+            .iter()
+            .all(|v| Self::is_task_completed(&v.task_file))
+        {
             self.spawn_fusion_judge(session_id)
                 .map_err(SessionError::SpawnError)?;
         }
@@ -8388,7 +10123,11 @@ phases and do EXACTLY this, then stop:
         }
         self.emit_session_update(session_id);
 
-        let judge_prompt = Self::build_fusion_judge_prompt(session_id, &metadata.variants, &metadata.decision_file);
+        let judge_prompt = Self::build_fusion_judge_prompt(
+            session_id,
+            &metadata.variants,
+            &metadata.decision_file,
+        );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -8456,7 +10195,10 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
-    pub fn get_fusion_variant_statuses(&self, session_id: &str) -> Result<Vec<FusionVariantStatus>, String> {
+    pub fn get_fusion_variant_statuses(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<FusionVariantStatus>, String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -8479,7 +10221,10 @@ phases and do EXACTLY this, then stop:
             .collect())
     }
 
-    pub fn get_fusion_evaluation(&self, session_id: &str) -> Result<(String, Option<String>), String> {
+    pub fn get_fusion_evaluation(
+        &self,
+        session_id: &str,
+    ) -> Result<(String, Option<String>), String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -8521,6 +10266,312 @@ phases and do EXACTLY this, then stop:
         Ok((metadata.decision_file, report))
     }
 
+    pub async fn on_debate_round_completed(
+        &self,
+        session_id: &str,
+        debater_index: u8,
+        round: u8,
+    ) -> Result<(), SessionError> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", session_id)))?;
+
+        if !matches!(session.session_type, SessionType::Debate { .. }) {
+            return Ok(());
+        }
+
+        let metadata = Self::read_debate_metadata(&session.project_path, session_id)
+            .map_err(SessionError::ConfigError)?;
+        let debater = metadata
+            .debaters
+            .iter()
+            .find(|d| d.index == debater_index)
+            .ok_or_else(|| {
+                SessionError::ConfigError(format!(
+                    "Unknown debate debater index: {}",
+                    debater_index
+                ))
+            })?;
+        let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
+
+        {
+            let pty_manager = self.pty_manager.read();
+            if let Err(e) = pty_manager.kill(&agent_id) {
+                tracing::warn!("Failed to stop debate debater PTY {}: {}", agent_id, e);
+            }
+        }
+
+        let completed_agent = {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                if let Some(index) = s.agents.iter().position(|agent| agent.id == agent_id) {
+                    s.agents[index].status = AgentStatus::Completed;
+                    Some((s.clone(), s.agents[index].clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        self.update_session_storage(session_id);
+        if let Some((session, agent)) = completed_agent {
+            self.emit_agent_completed(&session, &agent);
+        }
+
+        let already_judging = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .map(|s| {
+                    matches!(
+                        s.state,
+                        SessionState::SpawningJudge
+                            | SessionState::Judging
+                            | SessionState::AwaitingVerdictSelection
+                            | SessionState::Completed
+                    )
+                })
+                .unwrap_or(false)
+        };
+        if already_judging {
+            return Ok(());
+        }
+
+        let all_round_tasks_complete = metadata.debaters.iter().all(|d| {
+            let path =
+                Self::debate_round_task_file_path(Path::new(&d.worktree_path), d.index, round)
+                    .to_string_lossy()
+                    .to_string();
+            Self::is_task_completed(&path)
+        });
+
+        if all_round_tasks_complete {
+            if round < metadata.rounds {
+                let next_round = round + 1;
+                let next_round_started = {
+                    let sessions = self.sessions.read();
+                    sessions
+                        .get(session_id)
+                        .map(|s| {
+                            metadata.debaters.iter().any(|d| {
+                                let id =
+                                    Self::debate_round_agent_id(session_id, d.index, next_round);
+                                s.agents.iter().any(|agent| agent.id == id)
+                            })
+                        })
+                        .unwrap_or(false)
+                };
+                if !next_round_started {
+                    self.spawn_debate_round(session_id, next_round)
+                        .map_err(SessionError::SpawnError)?;
+                }
+            } else {
+                self.spawn_debate_judge(session_id)
+                    .map_err(SessionError::SpawnError)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn spawn_debate_judge(&self, session_id: &str) -> Result<(), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Debate { .. }) {
+            return Err(format!("Session {} is not a Debate session", session_id));
+        }
+
+        let metadata = Self::read_debate_metadata(&session.project_path, session_id)?;
+        let judge_id = format!("{}-judge", session_id);
+
+        let judge_exists = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .map(|s| s.agents.iter().any(|a| a.id == judge_id))
+                .unwrap_or(false)
+        };
+        if judge_exists {
+            return Ok(());
+        }
+
+        let spawning_changes = {
+            let mut sessions = self.sessions.write();
+            sessions
+                .get_mut(session_id)
+                .map(|s| self.set_session_state_with_events(s, SessionState::SpawningJudge))
+        };
+        if let Some(changes) = spawning_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
+        self.emit_session_update(session_id);
+
+        let global_wiki_path = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.load_config().ok())
+            .and_then(|cfg| cfg.global_wiki_path)
+            .unwrap_or_default();
+        let global_wiki_path = expand_tilde(&global_wiki_path);
+        let judge_prompt =
+            Self::build_debate_judge_prompt(session_id, &metadata, &global_wiki_path);
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            "debate-judge-prompt.md",
+            &judge_prompt,
+        )?;
+        let prompt_path = prompt_file.to_string_lossy().to_string();
+
+        let mut judge_config = metadata.judge_config.clone();
+        if judge_config.cli.trim().is_empty() {
+            judge_config.cli = session.default_cli.clone();
+        }
+        if judge_config.model.is_none() {
+            judge_config.model = session.default_model.clone();
+        }
+
+        let (cmd, mut args) = Self::build_command(&judge_config);
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+        let cwd = session.project_path.to_string_lossy().to_string();
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    judge_id.clone(),
+                    AgentRole::Judge {
+                        session_id: session_id.to_string(),
+                    },
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(&cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn debate judge: {}", e))?;
+        }
+
+        let judging_changes = {
+            let mut sessions = self.sessions.write();
+            if let Some(s) = sessions.get_mut(session_id) {
+                let agent = AgentInfo {
+                    id: judge_id,
+                    role: AgentRole::Judge {
+                        session_id: session_id.to_string(),
+                    },
+                    status: AgentStatus::Running,
+                    config: judge_config,
+                    parent_id: None,
+                    commit_sha: None,
+                    base_commit_sha: None,
+                };
+                s.agents.push(agent.clone());
+                self.emit_agent_launched(s, &agent);
+                Some(self.set_session_state_with_events(s, SessionState::Judging))
+            } else {
+                None
+            }
+        };
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+        if let Some(changes) = judging_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_debate_debater_statuses(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<DebateDebaterStatus>, String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Debate { .. }) {
+            return Err(format!("Session {} is not a Debate session", session_id));
+        }
+
+        let metadata = Self::read_debate_metadata(&session.project_path, session_id)?;
+        Ok(metadata
+            .debaters
+            .iter()
+            .map(|d| {
+                let latest_task = (1..=metadata.rounds)
+                    .rev()
+                    .map(|round| {
+                        Self::debate_round_task_file_path(
+                            Path::new(&d.worktree_path),
+                            d.index,
+                            round,
+                        )
+                    })
+                    .find(|path| path.exists())
+                    .unwrap_or_else(|| {
+                        Self::debate_round_task_file_path(Path::new(&d.worktree_path), d.index, 1)
+                    });
+                DebateDebaterStatus {
+                    index: d.index,
+                    name: d.name.clone(),
+                    stance: d.stance.clone(),
+                    branch: d.branch.clone(),
+                    worktree_path: d.worktree_path.clone(),
+                    status: Self::read_task_status(&latest_task.to_string_lossy()),
+                }
+            })
+            .collect())
+    }
+
+    pub fn get_debate_evaluation(
+        &self,
+        session_id: &str,
+    ) -> Result<(String, Option<String>), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        if !matches!(session.session_type, SessionType::Debate { .. }) {
+            return Err(format!("Session {} is not a Debate session", session_id));
+        }
+
+        let metadata = Self::read_debate_metadata(&session.project_path, session_id)?;
+        let report = match std::fs::read_to_string(&metadata.verdict_file) {
+            Ok(content) => Some(content),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(format!("Failed to read debate verdict: {}", err)),
+        };
+
+        if report.is_some() {
+            let awaiting_changes = {
+                let mut sessions = self.sessions.write();
+                if let Some(s) = sessions.get_mut(session_id) {
+                    if s.state == SessionState::Judging {
+                        Some(self.set_session_state_with_events(
+                            s,
+                            SessionState::AwaitingVerdictSelection,
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(changes) = awaiting_changes {
+                self.emit_session_update(session_id);
+                self.update_session_storage(session_id);
+                self.emit_cell_status_changes(session_id, changes);
+            }
+        }
+
+        Ok((metadata.verdict_file, report))
+    }
+
     pub fn select_fusion_winner(&self, session_id: &str, variant_name: &str) -> Result<(), String> {
         let session = self
             .get_session(session_id)
@@ -8541,7 +10592,12 @@ phases and do EXACTLY this, then stop:
             .variants
             .iter()
             .find(|v| v.name == requested || v.slug == requested_slug)
-            .ok_or_else(|| format!("Variant '{}' not found for session {}", requested, session_id))?;
+            .ok_or_else(|| {
+                format!(
+                    "Variant '{}' not found for session {}",
+                    requested, session_id
+                )
+            })?;
 
         let merging_changes = {
             let mut sessions = self.sessions.write();
@@ -8557,12 +10613,19 @@ phases and do EXACTLY this, then stop:
             self.emit_cell_status_changes(session_id, changes);
         }
 
-        Self::run_git_in_dir(&session.project_path, &["merge", "--squash", &winner.branch])?;
+        Self::run_git_in_dir(
+            &session.project_path,
+            &["merge", "--squash", &winner.branch],
+        )?;
 
         // Commit the squash merge (--squash only stages changes, doesn't commit)
         Self::run_git_in_dir(
             &session.project_path,
-            &["commit", "-m", &format!("Merge fusion winner: {}", winner.name)],
+            &[
+                "commit",
+                "-m",
+                &format!("Merge fusion winner: {}", winner.name),
+            ],
         )?;
 
         for variant in &metadata.variants {
@@ -8627,8 +10690,9 @@ phases and do EXACTLY this, then stop:
         let pty_manager = self.pty_manager.read();
 
         // Kill the PTY
-        pty_manager.kill(&worker_agent_id)
-            .map_err(|e| SessionError::TerminationError(format!("Failed to kill worker {}: {}", worker_id, e)))?;
+        pty_manager.kill(&worker_agent_id).map_err(|e| {
+            SessionError::TerminationError(format!("Failed to kill worker {}: {}", worker_id, e))
+        })?;
 
         // Update agent status
         let completed_agent = {
@@ -8662,11 +10726,15 @@ phases and do EXACTLY this, then stop:
         let session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
-        }.ok_or_else(|| format!("Session not found: {}", session_id))?;
+        }
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
         // Verify session is in Planning or PlanReady state
         if session.state != SessionState::Planning && session.state != SessionState::PlanReady {
-            return Err(format!("Session is not in planning phase: {:?}", session.state));
+            return Err(format!(
+                "Session is not in planning phase: {:?}",
+                session.state
+            ));
         }
 
         // Dispatch based on session type
@@ -8677,6 +10745,9 @@ phases and do EXACTLY this, then stop:
             SessionType::Fusion { .. } => {
                 return self.continue_fusion_after_planning(session_id, &session);
             }
+            SessionType::Debate { .. } => {
+                return self.continue_debate_after_planning(session_id, &session);
+            }
             SessionType::Solo { .. } => {
                 return Err("Solo sessions do not support planning continuation".to_string());
             }
@@ -8686,7 +10757,11 @@ phases and do EXACTLY this, then stop:
         let cwd = session.project_path.to_str().unwrap_or(".");
 
         // Load the pending config
-        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-config.json");
+        let pending_config_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("pending-config.json");
         let config_json = std::fs::read_to_string(&pending_config_path)
             .map_err(|e| format!("Failed to read pending config: {}", e))?;
         let config: HiveLaunchConfig = serde_json::from_str(&config_json)
@@ -8697,7 +10772,10 @@ phases and do EXACTLY this, then stop:
         if let Err(e) = self.stop_agent(session_id, &planner_id) {
             tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
         } else {
-            tracing::info!("Stopped Master Planner {} before spawning Queen", planner_id);
+            tracing::info!(
+                "Stopped Master Planner {} before spawning Queen",
+                planner_id
+            );
             // Remove Master Planner from agents list to prevent resource leaks
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
@@ -8715,7 +10793,12 @@ phases and do EXACTLY this, then stop:
             let (cmd, mut args) = Self::build_command(&config.queen_config);
 
             // Plan should exist now
-            let has_plan = session.project_path.join(".hive-manager").join(session_id).join("plan.md").exists();
+            let has_plan = session
+                .project_path
+                .join(".hive-manager")
+                .join(session_id)
+                .join("plan.md")
+                .exists();
 
             // Write Queen prompt with plan reference
             let master_prompt = Self::build_queen_master_prompt(
@@ -8728,14 +10811,24 @@ phases and do EXACTLY this, then stop:
                 has_plan,
                 config.with_evaluator,
             );
-            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
+            let prompt_file = Self::write_prompt_file(
+                &session.project_path,
+                session_id,
+                "queen-prompt.md",
+                &master_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write tool documentation files
             Self::write_tool_files(&session.project_path, session_id, &config.queen_config.cli)?;
 
-            tracing::info!("Launching Queen agent (after planning): {} {:?} in {:?}", cmd, args, cwd);
+            tracing::info!(
+                "Launching Queen agent (after planning): {} {:?} in {:?}",
+                cmd,
+                args,
+                cwd
+            );
 
             pty_manager
                 .create_session(
@@ -8778,9 +10871,12 @@ phases and do EXACTLY this, then stop:
         };
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: updated_session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: updated_session.clone(),
+                },
+            );
         }
 
         // Update storage
@@ -8810,14 +10906,20 @@ phases and do EXACTLY this, then stop:
                 let changes = self.set_session_state_with_events(session, SessionState::PlanReady);
 
                 if let Some(ref app_handle) = self.app_handle {
-                    let _ = app_handle.emit("session-update", SessionUpdate {
-                        session: session.clone(),
-                    });
+                    let _ = app_handle.emit(
+                        "session-update",
+                        SessionUpdate {
+                            session: session.clone(),
+                        },
+                    );
                 }
                 self.emit_cell_status_changes(session_id, changes);
                 Ok(())
             } else {
-                Err(format!("Session is not in planning state: {:?}", session.state))
+                Err(format!(
+                    "Session is not in planning state: {:?}",
+                    session.state
+                ))
             }
         } else {
             Err(format!("Session not found: {}", session_id))
@@ -8847,7 +10949,8 @@ phases and do EXACTLY this, then stop:
             .storage
             .clone()
             .ok_or_else(|| "Session storage is not initialized".to_string())?;
-        let persisted = storage.load_session(session_id)
+        let persisted = storage
+            .load_session(session_id)
             .map_err(|e| format!("Failed to load session from storage: {}", e))?;
         storage
             .mark_session_synced(session_id, &persisted)
@@ -8874,9 +10977,12 @@ phases and do EXACTLY this, then stop:
 
         // Emit session-update event to frontend
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         Ok(session)
@@ -8911,19 +11017,15 @@ phases and do EXACTLY this, then stop:
                 .ok()
                 .flatten();
             let has_unconfirmed = ledger.as_ref().map(|l| !l.confirmed).unwrap_or(false);
-            let classified =
-                crate::storage::run_journal::classify_step(&entry, has_unconfirmed);
+            let classified = crate::storage::run_journal::classify_step(&entry, has_unconfirmed);
 
             match classified {
                 StepStatus::Completed => {
                     // Completed write-steps are skipped on resume so destructive ops
                     // (git commit/branch, worker/evaluator spawn) are never re-run.
                     if entry.kind.is_write_step() {
-                        let _ = store.record_step_finished(
-                            run_id,
-                            &entry.step_id,
-                            StepStatus::Skipped,
-                        );
+                        let _ =
+                            store.record_step_finished(run_id, &entry.step_id, StepStatus::Skipped);
                         let mut skipped = entry.clone();
                         skipped.status = StepStatus::Skipped;
                         report.skipped.push(skipped);
@@ -8938,12 +11040,7 @@ phases and do EXACTLY this, then stop:
                             entry.kind,
                             led.effect_ref.as_deref(),
                         );
-                        let _ = store.confirm_ledger(
-                            run_id,
-                            &entry.step_id,
-                            None,
-                            confidence,
-                        );
+                        let _ = store.confirm_ledger(run_id, &entry.step_id, None, confidence);
                         if confidence == Confidence::High {
                             let _ = store.record_step_finished(
                                 run_id,
@@ -8988,11 +11085,9 @@ phases and do EXACTLY this, then stop:
             StepKind::GitCommit => {
                 Self::run_git_in_dir(&project_path, &["cat-file", "-e", reference]).is_ok()
             }
-            StepKind::GitBranch | StepKind::WorkerSpawn => Self::run_git_in_dir(
-                &project_path,
-                &["rev-parse", "--verify", reference],
-            )
-            .is_ok(),
+            StepKind::GitBranch | StepKind::WorkerSpawn => {
+                Self::run_git_in_dir(&project_path, &["rev-parse", "--verify", reference]).is_ok()
+            }
             _ => false,
         };
         if found {
@@ -9014,6 +11109,9 @@ phases and do EXACTLY this, then stop:
                 planner_count: *planner_count,
             },
             crate::storage::SessionTypeInfo::Fusion { variants } => SessionType::Fusion {
+                variants: variants.clone(),
+            },
+            crate::storage::SessionTypeInfo::Debate { variants } => SessionType::Debate {
                 variants: variants.clone(),
             },
             crate::storage::SessionTypeInfo::Solo { cli, model } => SessionType::Solo {
@@ -9070,9 +11168,7 @@ phases and do EXACTLY this, then stop:
             project_path: PathBuf::from(&persisted.project_path),
             state,
             created_at: persisted.created_at,
-            last_activity_at: persisted
-                .last_activity_at
-                .unwrap_or(persisted.created_at),
+            last_activity_at: persisted.last_activity_at.unwrap_or(persisted.created_at),
             agents,
             default_cli: persisted.default_cli.clone(),
             default_model: persisted.default_model.clone(),
@@ -9088,11 +11184,19 @@ phases and do EXACTLY this, then stop:
     }
 
     /// Continue a Swarm session after planning phase
-    fn continue_swarm_after_planning(&self, session_id: &str, session: &Session) -> Result<Session, String> {
+    fn continue_swarm_after_planning(
+        &self,
+        session_id: &str,
+        session: &Session,
+    ) -> Result<Session, String> {
         let cwd = session.project_path.to_str().unwrap_or(".");
 
         // Load the pending Swarm config
-        let pending_config_path = session.project_path.join(".hive-manager").join(session_id).join("pending-swarm-config.json");
+        let pending_config_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("pending-swarm-config.json");
         let config_json = std::fs::read_to_string(&pending_config_path)
             .map_err(|e| format!("Failed to read pending swarm config: {}", e))?;
         let config: SwarmLaunchConfig = serde_json::from_str(&config_json)
@@ -9116,7 +11220,10 @@ phases and do EXACTLY this, then stop:
         if let Err(e) = self.stop_agent(session_id, &planner_id) {
             tracing::warn!("Failed to stop Master Planner {}: {}", planner_id, e);
         } else {
-            tracing::info!("Stopped Master Planner {} before spawning Queen", planner_id);
+            tracing::info!(
+                "Stopped Master Planner {} before spawning Queen",
+                planner_id
+            );
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
                 s.agents.retain(|a| a.id != planner_id);
@@ -9141,12 +11248,22 @@ phases and do EXACTLY this, then stop:
                 config.prompt.as_deref(),
                 config.with_evaluator,
             );
-            let prompt_file = Self::write_prompt_file(&session.project_path, session_id, "queen-prompt.md", &master_prompt)?;
+            let prompt_file = Self::write_prompt_file(
+                &session.project_path,
+                session_id,
+                "queen-prompt.md",
+                &master_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write Swarm tool documentation files (includes spawn-planner.md)
-            Self::write_swarm_tool_files(&session.project_path, session_id, planners.len() as u8, &config.queen_config.cli)?;
+            Self::write_swarm_tool_files(
+                &session.project_path,
+                session_id,
+                planners.len() as u8,
+                &config.queen_config.cli,
+            )?;
 
             tracing::info!("Launching Queen agent (swarm - sequential planner spawning, after planning): {} {:?} in {:?}", cmd, args, cwd);
 
@@ -9177,7 +11294,11 @@ phases and do EXACTLY this, then stop:
         }
 
         // Store planner config for Queen to reference when spawning via HTTP API
-        let swarm_config_path = session.project_path.join(".hive-manager").join(session_id).join("swarm-planners.json");
+        let swarm_config_path = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("swarm-planners.json");
         let planners_json = serde_json::to_string_pretty(&planners)
             .map_err(|e| format!("Failed to serialize planner config: {}", e))?;
         std::fs::write(&swarm_config_path, planners_json)
@@ -9190,16 +11311,19 @@ phases and do EXACTLY this, then stop:
                 session.agents.extend(new_agents.clone());
                 self.emit_agent_batch_launched(session, &new_agents);
                 let changes = self.set_session_state_with_events(session, SessionState::Running);
-                (session.clone(), changes)  // Queen will spawn planners sequentially
+                (session.clone(), changes) // Queen will spawn planners sequentially
             } else {
                 return Err("Session disappeared".to_string());
             }
         };
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: updated_session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: updated_session.clone(),
+                },
+            );
         }
 
         // Update storage
@@ -9261,14 +11385,29 @@ phases and do EXACTLY this, then stop:
                 config.prompt.as_deref(),
                 config.with_evaluator,
             );
-            let prompt_file = Self::write_prompt_file(&project_path, &session_id, "queen-prompt.md", &master_prompt)?;
+            let prompt_file = Self::write_prompt_file(
+                &project_path,
+                &session_id,
+                "queen-prompt.md",
+                &master_prompt,
+            )?;
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write Swarm tool documentation files (includes spawn-planner.md)
-            Self::write_swarm_tool_files(&project_path, &session_id, planners.len() as u8, &config.queen_config.cli)?;
+            Self::write_swarm_tool_files(
+                &project_path,
+                &session_id,
+                planners.len() as u8,
+                &config.queen_config.cli,
+            )?;
 
-            tracing::info!("Launching Queen agent (swarm - sequential planner spawning): {} {:?} in {:?}", cmd, args, cwd);
+            tracing::info!(
+                "Launching Queen agent (swarm - sequential planner spawning): {} {:?} in {:?}",
+                cmd,
+                args,
+                cwd
+            );
 
             pty_manager
                 .create_session(
@@ -9297,7 +11436,10 @@ phases and do EXACTLY this, then stop:
         }
 
         // Store planner config for Queen to reference when spawning
-        let swarm_config_path = project_path.join(".hive-manager").join(&session_id).join("swarm-planners.json");
+        let swarm_config_path = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("swarm-planners.json");
         std::fs::create_dir_all(swarm_config_path.parent().unwrap())
             .map_err(|e| format!("Failed to create session directory: {}", e))?;
         let planners_json = serde_json::to_string_pretty(&planners)
@@ -9310,9 +11452,11 @@ phases and do EXACTLY this, then stop:
             id: session_id.clone(),
             name: config.name.clone(),
             color: config.color.clone(),
-            session_type: SessionType::Swarm { planner_count: planners.len() as u8 },
+            session_type: SessionType::Swarm {
+                planner_count: planners.len() as u8,
+            },
             project_path,
-            state: SessionState::Running,  // Queen will spawn planners sequentially
+            state: SessionState::Running, // Queen will spawn planners sequentially
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents,
@@ -9334,9 +11478,12 @@ phases and do EXACTLY this, then stop:
         }
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("session-update", SessionUpdate {
-                session: session.clone(),
-            });
+            let _ = app_handle.emit(
+                "session-update",
+                SessionUpdate {
+                    session: session.clone(),
+                },
+            );
         }
 
         // Initialize session storage if available
@@ -9402,7 +11549,8 @@ phases and do EXACTLY this, then stop:
         let session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
-        }.ok_or_else(|| format!("Session not found: {}", session_id))?;
+        }
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
         let can_add_worker = matches!(
             session.state,
@@ -9416,11 +11564,16 @@ phases and do EXACTLY this, then stop:
                 | SessionState::QaMaxRetriesExceeded
         );
         if !can_add_worker {
-            return Err(format!("Cannot add worker to session in state {:?}", session.state));
+            return Err(format!(
+                "Cannot add worker to session in state {:?}",
+                session.state
+            ));
         }
 
         // Determine worker index
-        let existing_workers = session.agents.iter()
+        let existing_workers = session
+            .agents
+            .iter()
             .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
             .count();
         let worker_index = (existing_workers + 1) as u8;
@@ -9460,7 +11613,8 @@ phases and do EXACTLY this, then stop:
         );
 
         let worker_cell_name = format!("worker-{worker_index}");
-        let task_file_path = Self::task_file_path_for_worker(Path::new(&worker_cwd), worker_index as usize);
+        let task_file_path =
+            Self::task_file_path_for_worker(Path::new(&worker_cwd), worker_index as usize);
 
         // Write task file for this worker (STANDBY or with initial task)
         let _task_file = match Self::write_task_file(
@@ -9487,7 +11641,12 @@ phases and do EXACTLY this, then stop:
         };
 
         // Write worker prompt to file and add to args
-        let worker_prompt = Self::build_worker_prompt(worker_index, &config_with_role, &actual_parent_id, session_id);
+        let worker_prompt = Self::build_worker_prompt(
+            worker_index,
+            &config_with_role,
+            &actual_parent_id,
+            session_id,
+        );
         let filename = format!("worker-{}-prompt.md", worker_index);
         let prompt_file = match Self::write_worker_prompt_file(
             Path::new(&worker_cwd),
@@ -9519,7 +11678,10 @@ phases and do EXACTLY this, then stop:
             args
         );
 
-        let worker_role = AgentRole::Worker { index: worker_index, parent: Some(actual_parent_id.clone()) };
+        let worker_role = AgentRole::Worker {
+            index: worker_index,
+            parent: Some(actual_parent_id.clone()),
+        };
 
         // Spawn PTY
         {
@@ -9578,7 +11740,12 @@ phases and do EXACTLY this, then stop:
     }
 
     #[allow(dead_code)]
-    pub fn launch_evaluator(&self, session_id: &str, mut config: AgentConfig, smoke_test: bool) -> Result<AgentInfo, String> {
+    pub fn launch_evaluator(
+        &self,
+        session_id: &str,
+        mut config: AgentConfig,
+        smoke_test: bool,
+    ) -> Result<AgentInfo, String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
@@ -9618,10 +11785,7 @@ phases and do EXACTLY this, then stop:
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.retain(|agent| agent.id != evaluator_id);
-                Some(self.set_session_state_with_events(
-                    current,
-                    SessionState::SpawningEvaluator,
-                ))
+                Some(self.set_session_state_with_events(current, SessionState::SpawningEvaluator))
             } else {
                 None
             }
@@ -9857,7 +12021,8 @@ phases and do EXACTLY this, then stop:
         let session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
-        }.ok_or_else(|| format!("Session not found: {}", session_id))?;
+        }
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
         // Allow adding planners when Running or WaitingForPlanner
         let can_add_planner = matches!(
@@ -9865,11 +12030,16 @@ phases and do EXACTLY this, then stop:
             SessionState::Running | SessionState::WaitingForPlanner(_)
         );
         if !can_add_planner {
-            return Err(format!("Cannot add planner to session in state {:?}", session.state));
+            return Err(format!(
+                "Cannot add planner to session in state {:?}",
+                session.state
+            ));
         }
 
         // Determine planner index
-        let existing_planners = session.agents.iter()
+        let existing_planners = session
+            .agents
+            .iter()
             .filter(|a| matches!(a.role, AgentRole::Planner { .. }))
             .count();
         let planner_index = (existing_planners + 1) as u8;
@@ -9905,7 +12075,12 @@ phases and do EXACTLY this, then stop:
             session_id,
         );
         let filename = format!("planner-{}-prompt.md", planner_index);
-        let prompt_file = Self::write_prompt_file(&session.project_path, session_id, &filename, &planner_prompt)?;
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            &filename,
+            &planner_prompt,
+        )?;
         let prompt_path = prompt_file.to_string_lossy().to_string();
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -9927,7 +12102,9 @@ phases and do EXACTLY this, then stop:
             pty_manager
                 .create_session(
                     planner_id.clone(),
-                    AgentRole::Planner { index: planner_index },
+                    AgentRole::Planner {
+                        index: planner_index,
+                    },
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     Some(cwd),
@@ -9943,7 +12120,9 @@ phases and do EXACTLY this, then stop:
 
         let agent_info = AgentInfo {
             id: planner_id.clone(),
-            role: AgentRole::Planner { index: planner_index },
+            role: AgentRole::Planner {
+                index: planner_index,
+            },
             status: AgentStatus::Running,
             config: agent_config,
             parent_id: Some(queen_id),
@@ -9970,9 +12149,12 @@ phases and do EXACTLY this, then stop:
         if let Some(ref app_handle) = self.app_handle {
             let sessions = self.sessions.read();
             if let Some(session) = sessions.get(session_id) {
-                let _ = app_handle.emit("session-update", SessionUpdate {
-                    session: session.clone(),
-                });
+                let _ = app_handle.emit(
+                    "session-update",
+                    SessionUpdate {
+                        session: session.clone(),
+                    },
+                );
             }
         }
 
@@ -9984,7 +12166,8 @@ phases and do EXACTLY this, then stop:
         self.ensure_task_watcher(session_id, &session.project_path);
 
         // Store planner's worker config for sequential spawning
-        let planner_workers_path = session.project_path
+        let planner_workers_path = session
+            .project_path
             .join(".hive-manager")
             .join(session_id)
             .join(format!("planner-{}-workers.json", planner_index));
@@ -10005,39 +12188,54 @@ phases and do EXACTLY this, then stop:
     }
 
     fn session_to_persisted_snapshot(session: &Session) -> crate::storage::PersistedSession {
-        use crate::storage::{PersistedSession, SessionTypeInfo, PersistedAgentInfo, PersistedAgentConfig};
+        use crate::storage::{
+            PersistedAgentConfig, PersistedAgentInfo, PersistedSession, SessionTypeInfo,
+        };
 
         let session_type = match &session.session_type {
-            SessionType::Hive { worker_count } => SessionTypeInfo::Hive { worker_count: *worker_count },
-            SessionType::Swarm { planner_count } => SessionTypeInfo::Swarm { planner_count: *planner_count },
-            SessionType::Fusion { variants } => SessionTypeInfo::Fusion { variants: variants.clone() },
+            SessionType::Hive { worker_count } => SessionTypeInfo::Hive {
+                worker_count: *worker_count,
+            },
+            SessionType::Swarm { planner_count } => SessionTypeInfo::Swarm {
+                planner_count: *planner_count,
+            },
+            SessionType::Fusion { variants } => SessionTypeInfo::Fusion {
+                variants: variants.clone(),
+            },
+            SessionType::Debate { variants } => SessionTypeInfo::Debate {
+                variants: variants.clone(),
+            },
             SessionType::Solo { cli, model } => SessionTypeInfo::Solo {
                 cli: cli.clone(),
                 model: model.clone(),
             },
         };
 
-        let agents: Vec<PersistedAgentInfo> = session.agents.iter().map(|a| {
-            let role_str = serialize_persisted_agent_role(&a.role);
+        let agents: Vec<PersistedAgentInfo> = session
+            .agents
+            .iter()
+            .map(|a| {
+                let role_str = serialize_persisted_agent_role(&a.role);
 
-            PersistedAgentInfo {
-                id: a.id.clone(),
-                role: role_str,
-                config: PersistedAgentConfig {
-                    cli: a.config.cli.clone(),
-                    model: a.config.model.clone(),
-                    flags: a.config.flags.clone(),
-                    label: a.config.label.clone(),
-                    name: a.config.name.clone(),
-                    description: a.config.description.clone(),
-                    role_type: a.config.role.as_ref().map(|r| r.role_type.clone()),
-                    initial_prompt: a.config.initial_prompt.clone(),
-                },
-                parent_id: a.parent_id.clone(),
-                commit_sha: a.commit_sha.clone(),
-                base_commit_sha: a.base_commit_sha.clone(),
-            }
-        }).collect();
+                PersistedAgentInfo {
+                    id: a.id.clone(),
+                    role: role_str,
+                    config: PersistedAgentConfig {
+                        cli: a.config.cli.clone(),
+                        model: a.config.model.clone(),
+                        flags: a.config.flags.clone(),
+                        label: a.config.label.clone(),
+                        name: a.config.name.clone(),
+                        description: a.config.description.clone(),
+                        role_type: a.config.role.as_ref().map(|r| r.role_type.clone()),
+                        initial_prompt: a.config.initial_prompt.clone(),
+                    },
+                    parent_id: a.parent_id.clone(),
+                    commit_sha: a.commit_sha.clone(),
+                    base_commit_sha: a.base_commit_sha.clone(),
+                }
+            })
+            .collect();
 
         let state_str = serialize_session_state(&session.state);
         let auth_strategy = if is_terminal_session_state(&session.state) {
@@ -10083,24 +12281,32 @@ phases and do EXACTLY this, then stop:
             }
 
             // Build hierarchy nodes
-            let hierarchy: Vec<HierarchyNode> = session.agents.iter().map(|agent| {
-                let role_str = format_agent_display(&agent.role);
+            let hierarchy: Vec<HierarchyNode> = session
+                .agents
+                .iter()
+                .map(|agent| {
+                    let role_str = format_agent_display(&agent.role);
 
-                let children: Vec<String> = session.agents.iter()
-                    .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
-                    .map(|a| a.id.clone())
-                    .collect();
+                    let children: Vec<String> = session
+                        .agents
+                        .iter()
+                        .filter(|a| a.parent_id.as_ref() == Some(&agent.id))
+                        .map(|a| a.id.clone())
+                        .collect();
 
-                HierarchyNode {
-                    id: agent.id.clone(),
-                    role: role_str,
-                    parent_id: agent.parent_id.clone(),
-                    children,
-                }
-            }).collect();
+                    HierarchyNode {
+                        id: agent.id.clone(),
+                        role: role_str,
+                        parent_id: agent.parent_id.clone(),
+                        children,
+                    }
+                })
+                .collect();
 
             // Build worker state info
-            let workers: Vec<WorkerStateInfo> = session.agents.iter()
+            let workers: Vec<WorkerStateInfo> = session
+                .agents
+                .iter()
                 .filter(|a| include_in_worker_roster(&a.role))
                 .map(|a| WorkerStateInfo {
                     id: a.id.clone(),
@@ -10141,11 +12347,13 @@ phases and do EXACTLY this, then stop:
             .join("worktrees")
             .join(session_id);
         let fusion_worktrees_path = project_path.join(".hive-fusion").join(session_id);
+        let debate_worktrees_path = project_path.join(".hive-debate").join(session_id);
 
         match TaskFileWatcher::new(
             &session_path,
             &worktrees_path,
             &fusion_worktrees_path,
+            &debate_worktrees_path,
             session_id,
             app_handle,
         ) {
@@ -10265,9 +12473,11 @@ fn parse_agent_role(role: &str) -> Option<AgentRole> {
             .ok()?;
         Some(AgentRole::Planner { index })
     } else if role.starts_with("Worker(") {
-        parse_indexed_role(role, "Worker(").map(|(index, parent)| AgentRole::Worker { index, parent })
+        parse_indexed_role(role, "Worker(")
+            .map(|(index, parent)| AgentRole::Worker { index, parent })
     } else if role.starts_with("QaWorker(") {
-        parse_indexed_role(role, "QaWorker(").map(|(index, parent)| AgentRole::QaWorker { index, parent })
+        parse_indexed_role(role, "QaWorker(")
+            .map(|(index, parent)| AgentRole::QaWorker { index, parent })
     } else if role.starts_with("Fusion(") {
         let variant = role
             .trim_start_matches("Fusion(")
@@ -10306,7 +12516,10 @@ fn parse_indexed_role(role: &str, prefix: &str) -> Option<(u8, Option<String>)> 
 fn parse_persisted_session_state(state: &str) -> SessionState {
     if let Some(iteration) = state.strip_prefix("QaInProgress:") {
         return SessionState::QaInProgress {
-            iteration: iteration.parse::<u8>().ok().filter(|iteration| *iteration > 0),
+            iteration: iteration
+                .parse::<u8>()
+                .ok()
+                .filter(|iteration| *iteration > 0),
         };
     }
     if let Some(iteration) = state.strip_prefix("QaFailed:") {
@@ -10328,6 +12541,8 @@ fn parse_persisted_session_state(state: &str) -> SessionState {
         "WaitingForPlanner" => SessionState::WaitingForPlanner(0),
         "SpawningFusionVariant" => SessionState::SpawningFusionVariant(0),
         "WaitingForFusionVariants" => SessionState::WaitingForFusionVariants,
+        "SpawningDebateRound" => SessionState::SpawningDebateRound(0),
+        "WaitingForDebateRound" => SessionState::WaitingForDebateRound(0),
         "SpawningJudge" => SessionState::SpawningJudge,
         "Judging" => SessionState::Judging,
         "AwaitingVerdictSelection" => SessionState::AwaitingVerdictSelection,
@@ -10357,6 +12572,8 @@ fn serialize_session_state(state: &SessionState) -> String {
         SessionState::WaitingForPlanner(_) => "WaitingForPlanner".to_string(),
         SessionState::SpawningFusionVariant(_) => "SpawningFusionVariant".to_string(),
         SessionState::WaitingForFusionVariants => "WaitingForFusionVariants".to_string(),
+        SessionState::SpawningDebateRound(_) => "SpawningDebateRound".to_string(),
+        SessionState::WaitingForDebateRound(_) => "WaitingForDebateRound".to_string(),
         SessionState::SpawningJudge => "SpawningJudge".to_string(),
         SessionState::Judging => "Judging".to_string(),
         SessionState::AwaitingVerdictSelection => "AwaitingVerdictSelection".to_string(),
@@ -10390,7 +12607,11 @@ fn serialize_persisted_agent_role(role: &AgentRole) -> String {
         AgentRole::Judge { session_id } => format!("Judge({})", session_id),
         AgentRole::Evaluator => "Evaluator".to_string(),
         AgentRole::QaWorker { index, parent } => {
-            format!("QaWorker({},{})", index, parent.as_deref().unwrap_or("None"))
+            format!(
+                "QaWorker({},{})",
+                index,
+                parent.as_deref().unwrap_or("None")
+            )
         }
     }
 }
@@ -10422,16 +12643,18 @@ fn format_agent_display(role: &AgentRole) -> String {
 }
 
 fn include_in_worker_roster(role: &AgentRole) -> bool {
-    !matches!(serialize_agent_role(role), "queen" | "evaluator" | "qa-worker")
+    !matches!(
+        serialize_agent_role(role),
+        "queen" | "evaluator" | "qa-worker"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_model_arg,
-        parse_persisted_session_state, serialize_session_state, AgentConfig, AgentInfo,
-        AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController, SessionError,
-        SessionState, SessionType,
+        extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
+        AgentInfo, AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController,
+        SessionError, SessionState, SessionType,
     };
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::workspace::git::current_head;
@@ -10446,8 +12669,7 @@ mod tests {
     #[test]
     fn extract_model_arg_reads_short_long_and_equals_forms() {
         assert_eq!(
-            extract_model_arg(&["--dangerously-skip-permissions", "-m", "gpt-5.5"])
-                .as_deref(),
+            extract_model_arg(&["--dangerously-skip-permissions", "-m", "gpt-5.5"]).as_deref(),
             Some("gpt-5.5")
         );
         assert_eq!(
@@ -10525,7 +12747,11 @@ mod tests {
 
         // Building the resume report marks it Skipped and surfaces it.
         let report = controller.build_resume_report(run_id, Path::new("."));
-        assert_eq!(report.skipped.len(), 1, "completed write-step is reported skipped");
+        assert_eq!(
+            report.skipped.len(),
+            1,
+            "completed write-step is reported skipped"
+        );
         assert_eq!(report.skipped[0].step_id, step_id);
         assert_eq!(report.skipped[0].status, StepStatus::Skipped);
 
@@ -10564,7 +12790,8 @@ mod tests {
         let repo = TempDir::new().unwrap();
         let repo_path = repo.path().to_path_buf();
         SessionController::run_git_in_dir(&repo_path, &["init", "-q"]).unwrap();
-        SessionController::run_git_in_dir(&repo_path, &["config", "user.email", "t@t.dev"]).unwrap();
+        SessionController::run_git_in_dir(&repo_path, &["config", "user.email", "t@t.dev"])
+            .unwrap();
         SessionController::run_git_in_dir(&repo_path, &["config", "user.name", "tester"]).unwrap();
         std::fs::write(repo_path.join("a.txt"), "hi").unwrap();
         SessionController::run_git_in_dir(&repo_path, &["add", "."]).unwrap();
@@ -10577,13 +12804,25 @@ mod tests {
             .record_step_started(run_id, StepKind::GitCommit, 1, None)
             .unwrap();
         store
-            .record_ledger(run_id, &step_id, "git_commit", Some(&sha), Confidence::Uncertain)
+            .record_ledger(
+                run_id,
+                &step_id,
+                "git_commit",
+                Some(&sha),
+                Confidence::Uncertain,
+            )
             .unwrap();
 
         // Resume verifies the SHA exists -> ledger confirmed with High confidence.
         let report = controller.build_resume_report(run_id, &repo_path);
-        assert!(report.uncertain.is_empty(), "verified commit is not uncertain");
-        let ledger = store.read_ledger_for_step(run_id, &step_id).unwrap().unwrap();
+        assert!(
+            report.uncertain.is_empty(),
+            "verified commit is not uncertain"
+        );
+        let ledger = store
+            .read_ledger_for_step(run_id, &step_id)
+            .unwrap()
+            .unwrap();
         assert!(ledger.confirmed);
         assert_eq!(ledger.confidence, Confidence::High);
     }
@@ -10697,8 +12936,7 @@ mod tests {
 
     #[test]
     fn add_prompt_to_args_preserves_worktree_scoped_absolute_prompt_path() {
-        let prompt_path =
-            r"D:\repo\.hive-manager\worktrees\session-123\worker-2\.hive-manager\prompts\worker-2-prompt.md";
+        let prompt_path = r"D:\repo\.hive-manager\worktrees\session-123\worker-2\.hive-manager\prompts\worker-2-prompt.md";
         let expected_prompt = format!("Read {} and execute.", prompt_path);
         let expected_cursor_prompt =
             "Read /mnt/d/repo/.hive-manager/worktrees/session-123/worker-2/.hive-manager/prompts/worker-2-prompt.md and execute."
@@ -10814,17 +13052,21 @@ mod tests {
             extract_markdown_section(&prompt, "## Required Protocol"),
             SessionController::evaluator_required_protocol("session-123"),
         );
-        assert!(prompt.contains("configured QA workers below (1 total) before you grade any criterion"));
-        assert!(prompt.contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
-        assert!(prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:"));
+        assert!(
+            prompt.contains("configured QA workers below (1 total) before you grade any criterion")
+        );
+        assert!(prompt
+            .contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
+        assert!(
+            prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:")
+        );
         assert!(!prompt.contains(r#""specialization": "api", "cli": "claude""#));
     }
 
     #[test]
     fn research_worker_surfaces_are_read_only() {
         let session_id = "session-research-readonly";
-        let worktree_path =
-            PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
+        let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
         let _ = std::fs::create_dir_all(&worktree_path);
 
         let cfg = AgentConfig {
@@ -10896,8 +13138,14 @@ mod tests {
         let task_file = std::fs::read_to_string(&task_file_path).expect("read task file");
 
         let expected = SessionController::scope_block(".");
-        assert_eq!(extract_markdown_section(&worker_prompt, "## Scope"), expected);
-        assert_eq!(extract_markdown_section(&fusion_prompt, "## Scope"), expected);
+        assert_eq!(
+            extract_markdown_section(&worker_prompt, "## Scope"),
+            expected
+        );
+        assert_eq!(
+            extract_markdown_section(&fusion_prompt, "## Scope"),
+            expected
+        );
         assert_eq!(extract_markdown_section(&task_file, "## Scope"), expected);
 
         std::fs::remove_dir_all(session_worktree_root).expect("remove test worktree");
@@ -11240,7 +13488,8 @@ mod tests {
     fn worker_completion_commit_sha_returns_worker_head_after_commit() {
         let session_id = "worker-commit-head";
         let (temp_dir, worktree_path) = init_repo_with_worker_worktree(session_id, 1);
-        std::fs::write(worktree_path.join("worker.txt"), "worker change\n").expect("write worker change");
+        std::fs::write(worktree_path.join("worker.txt"), "worker change\n")
+            .expect("write worker change");
         run_git(&worktree_path, &["add", "worker.txt"]);
         run_git(&worktree_path, &["commit", "-m", "worker change"]);
 
@@ -11284,7 +13533,8 @@ mod tests {
     async fn on_worker_completed_records_commit_sha_before_progression() {
         let session_id = "worker-gate-record";
         let (temp_dir, worktree_path) = init_repo_with_worker_worktree(session_id, 1);
-        std::fs::write(worktree_path.join("worker.txt"), "worker change\n").expect("write worker change");
+        std::fs::write(worktree_path.join("worker.txt"), "worker change\n")
+            .expect("write worker change");
         run_git(&worktree_path, &["add", "worker.txt"]);
         run_git(&worktree_path, &["commit", "-m", "worker change"]);
         let expected_head = current_head(&worktree_path).expect("worker HEAD");
@@ -11299,7 +13549,10 @@ mod tests {
 
         let refreshed = controller.get_session(session_id).unwrap();
         assert_eq!(refreshed.state, SessionState::WaitingForWorker(1));
-        assert_eq!(refreshed.agents[0].commit_sha.as_deref(), Some(expected_head.as_str()));
+        assert_eq!(
+            refreshed.agents[0].commit_sha.as_deref(),
+            Some(expected_head.as_str())
+        );
     }
 
     /// Verifies that planning/swarm sessions (which never populate session.worktree_path)
@@ -11327,7 +13580,10 @@ mod tests {
         }
 
         std::fs::write(repo_path.join("README.md"), "base commit\n").expect("write file");
-        for args in [["add", "README.md"].as_slice(), ["commit", "-m", "initial commit"].as_slice()] {
+        for args in [
+            ["add", "README.md"].as_slice(),
+            ["commit", "-m", "initial commit"].as_slice(),
+        ] {
             let status = std::process::Command::new("git")
                 .args(args)
                 .current_dir(repo_path)
@@ -11361,14 +13617,8 @@ mod tests {
         };
 
         assert!(session.worktree_path.is_none());
-        let base_ref = SessionController::resolve_worker_base_ref(
-            &session,
-            "spawn_next_worker",
-            2,
-        );
+        let base_ref = SessionController::resolve_worker_base_ref(&session, "spawn_next_worker", 2);
 
         assert_eq!(base_ref, expected_head);
     }
 }
-
-

@@ -1,14 +1,17 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use parking_lot::RwLock;
 use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::State;
 
 use crate::actions::{ActionContext, ActionRegistry, Caller};
 use crate::http::handlers::{validate_cli, validate_project_path};
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
-use crate::session::{Session, SessionController, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig};
+use crate::session::{
+    DebateLaunchConfig, FusionLaunchConfig, HiveLaunchConfig, ResearchLaunchConfig, Session,
+    SessionController, SwarmLaunchConfig,
+};
 
 pub struct SessionControllerState(pub Arc<RwLock<SessionController>>);
 
@@ -29,14 +32,7 @@ async fn dispatch_frontend(
 }
 
 const SESSION_COLOR_ALLOWLIST: &[&str] = &[
-    "#7aa2f7",
-    "#bb9af7",
-    "#9ece6a",
-    "#e0af68",
-    "#7dcfff",
-    "#f7768e",
-    "#ff9e64",
-    "#f7b1d1",
+    "#7aa2f7", "#bb9af7", "#9ece6a", "#e0af68", "#7dcfff", "#f7768e", "#ff9e64", "#f7b1d1",
 ];
 
 // SessionControllerState is Send + Sync because Arc<RwLock<T>> is Send + Sync when T is Send
@@ -130,7 +126,7 @@ fn validate_swarm_launch_config(config: &SwarmLaunchConfig) -> Result<(), String
         if evaluator_config.cli.trim().is_empty() {
             // Empty nested CLI means "inherit session default"; only validate explicit overrides.
         } else {
-        validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
+            validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
         }
     }
 
@@ -196,13 +192,7 @@ pub async fn list_sessions(
     registry: State<'_, Arc<ActionRegistry>>,
     app_state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    dispatch_frontend(
-        &registry,
-        Arc::clone(&app_state),
-        "session.list",
-        json!({}),
-    )
-    .await
+    dispatch_frontend(&registry, Arc::clone(&app_state), "session.list", json!({})).await
 }
 
 #[tauri::command]
@@ -351,6 +341,15 @@ pub async fn launch_fusion(
 ) -> Result<Session, String> {
     let controller = state.0.read();
     controller.launch_fusion(config)
+}
+
+#[tauri::command]
+pub async fn launch_debate(
+    state: State<'_, SessionControllerState>,
+    config: DebateLaunchConfig,
+) -> Result<Session, String> {
+    let controller = state.0.read();
+    controller.launch_debate(config)
 }
 
 #[tauri::command]

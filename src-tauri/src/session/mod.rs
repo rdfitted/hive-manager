@@ -4,8 +4,8 @@ mod polling_intervals;
 
 #[allow(unused_imports)]
 pub use controller::{
-    Session, SessionController, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig,
-    FusionVariantConfig, FusionVariantStatus, SessionType, AgentInfo, SessionState, AuthStrategy,
-    QaWorkerConfig, CompletionBlockedError, CompletionError,
-    DEFAULT_MAX_QA_ITERATIONS,
+    AgentInfo, AuthStrategy, CompletionBlockedError, CompletionError, DebateDebaterConfig,
+    DebateDebaterStatus, DebateLaunchConfig, FusionLaunchConfig, FusionVariantConfig,
+    FusionVariantStatus, HiveLaunchConfig, QaWorkerConfig, ResearchLaunchConfig, Session,
+    SessionController, SessionState, SessionType, SwarmLaunchConfig, DEFAULT_MAX_QA_ITERATIONS,
 };

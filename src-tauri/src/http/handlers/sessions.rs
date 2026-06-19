@@ -1,9 +1,9 @@
+use crate::cli::CliRegistry;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use crate::cli::CliRegistry;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -12,20 +12,14 @@ use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
 use crate::session::{
-    CompletionBlockedError, CompletionError, FusionLaunchConfig, FusionVariantConfig,
-    FusionVariantStatus, HiveLaunchConfig, QaWorkerConfig,
+    CompletionBlockedError, CompletionError, DebateDebaterConfig, DebateDebaterStatus,
+    DebateLaunchConfig, FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus,
+    HiveLaunchConfig, QaWorkerConfig,
 };
 use crate::storage::SessionTypeInfo;
 
 const SESSION_COLOR_ALLOWLIST: &[&str] = &[
-    "#7aa2f7",
-    "#bb9af7",
-    "#9ece6a",
-    "#e0af68",
-    "#7dcfff",
-    "#f7768e",
-    "#ff9e64",
-    "#f7b1d1",
+    "#7aa2f7", "#bb9af7", "#9ece6a", "#e0af68", "#7dcfff", "#f7768e", "#ff9e64", "#f7b1d1",
 ];
 
 fn validate_session_name(name: Option<&str>) -> Result<(), ApiError> {
@@ -122,8 +116,14 @@ fn evaluator_config_from_request(
 
 fn completion_blocked_to_api_error(error: CompletionBlockedError) -> ApiError {
     let mut details = std::collections::HashMap::new();
-    details.insert("current_state".to_string(), serde_json::json!(error.current_state));
-    details.insert("unblock_paths".to_string(), serde_json::json!(error.unblock_paths));
+    details.insert(
+        "current_state".to_string(),
+        serde_json::json!(error.current_state),
+    );
+    details.insert(
+        "unblock_paths".to_string(),
+        serde_json::json!(error.unblock_paths),
+    );
     details.insert(
         "remaining_quiescence_seconds".to_string(),
         serde_json::json!(error.remaining_quiescence_seconds),
@@ -213,6 +213,30 @@ pub struct LaunchFusionRequest {
 }
 
 #[derive(Deserialize)]
+pub struct LaunchDebateDebaterRequest {
+    pub name: String,
+    pub stance: Option<String>,
+    pub cli: Option<String>,
+    pub model: Option<String>,
+    pub flags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub struct LaunchDebateRequest {
+    pub project_path: String,
+    pub topic: String,
+    pub rounds: Option<u8>,
+    pub debaters: Vec<LaunchDebateDebaterRequest>,
+    pub judge_cli: Option<String>,
+    pub judge_model: Option<String>,
+    pub with_planning: Option<bool>,
+    pub default_cli: Option<String>,
+    pub default_model: Option<String>,
+    pub name: Option<String>,
+    pub color: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct LaunchSoloRequest {
     pub project_path: String,
     pub task_description: Option<String>,
@@ -236,6 +260,8 @@ pub struct CreateSessionRequest {
     pub worker_count: Option<u8>,
     pub workers: Option<Vec<AgentConfig>>,
     pub variants: Option<Vec<LaunchFusionVariantRequest>>,
+    pub debaters: Option<Vec<LaunchDebateDebaterRequest>>,
+    pub rounds: Option<u8>,
     pub judge_cli: Option<String>,
     pub judge_model: Option<String>,
     pub with_planning: Option<bool>,
@@ -283,6 +309,21 @@ pub struct FusionStatusResponse {
 
 #[derive(Serialize)]
 pub struct FusionEvaluationResponse {
+    pub session_id: String,
+    pub state: String,
+    pub report_path: String,
+    pub report: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DebateStatusResponse {
+    pub session_id: String,
+    pub state: String,
+    pub debaters: Vec<DebateDebaterStatus>,
+}
+
+#[derive(Serialize)]
+pub struct DebateEvaluationResponse {
     pub session_id: String,
     pub state: String,
     pub report_path: String,
@@ -347,7 +388,9 @@ pub async fn create_session(
                 req.evaluator_config,
                 req.evaluator_cli,
                 req.evaluator_model,
-                req.with_evaluator.unwrap_or(false).then_some(default_cli.as_str()),
+                req.with_evaluator
+                    .unwrap_or(false)
+                    .then_some(default_cli.as_str()),
             )?;
             let with_evaluator = req.with_evaluator.unwrap_or(false) || evaluator_config.is_some();
 
@@ -382,7 +425,9 @@ pub async fn create_session(
             let variants = req
                 .variants
                 .filter(|variants| !variants.is_empty())
-                .ok_or_else(|| ApiError::bad_request("Fusion sessions require at least one variant"))?
+                .ok_or_else(|| {
+                    ApiError::bad_request("Fusion sessions require at least one variant")
+                })?
                 .into_iter()
                 .map(|variant| {
                     let cli = variant.cli.unwrap_or_else(|| default_cli.clone());
@@ -399,7 +444,9 @@ pub async fn create_session(
             let task_description = req
                 .objective
                 .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| ApiError::bad_request("Fusion sessions require a non-empty objective"))?;
+                .ok_or_else(|| {
+                    ApiError::bad_request("Fusion sessions require a non-empty objective")
+                })?;
 
             let judge_cli = req.judge_cli.unwrap_or_else(|| default_cli.clone());
             validate_cli(&judge_cli)?;
@@ -439,8 +486,82 @@ pub async fn create_session(
                 }),
             ))
         }
+        "debate" => {
+            let debaters = req
+                .debaters
+                .filter(|debaters| !debaters.is_empty())
+                .ok_or_else(|| {
+                    ApiError::bad_request("Debate sessions require at least one debater")
+                })?
+                .into_iter()
+                .map(|debater| {
+                    let cli = debater.cli.unwrap_or_else(|| default_cli.clone());
+                    validate_cli(&cli)?;
+                    Ok(DebateDebaterConfig {
+                        name: debater.name,
+                        stance: debater.stance,
+                        cli,
+                        model: debater.model,
+                        flags: debater.flags.unwrap_or_default(),
+                    })
+                })
+                .collect::<Result<Vec<_>, ApiError>>()?;
+
+            let topic = req
+                .objective
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::bad_request("Debate sessions require a non-empty objective")
+                })?;
+
+            let rounds = req.rounds.unwrap_or(3);
+            if rounds == 0 {
+                return Err(ApiError::bad_request(
+                    "Debate sessions require at least one round",
+                ));
+            }
+
+            let judge_cli = req.judge_cli.unwrap_or_else(|| default_cli.clone());
+            validate_cli(&judge_cli)?;
+
+            let config = DebateLaunchConfig {
+                project_path: req.project_path,
+                name: req.name,
+                color: req.color,
+                debaters,
+                topic,
+                rounds,
+                judge_config: AgentConfig {
+                    cli: judge_cli,
+                    model: req.judge_model.or(req.default_model.clone()),
+                    flags: vec![],
+                    label: Some("Debate Judge".to_string()),
+                    name: None,
+                    description: None,
+                    role: None,
+                    initial_prompt: None,
+                },
+                queen_config: None,
+                with_planning: req.with_planning.unwrap_or(false),
+                default_cli,
+                default_model: req.default_model,
+            };
+
+            let controller = state.session_controller.write();
+            let session = controller
+                .launch_debate(config)
+                .map_err(ApiError::internal)?;
+
+            Ok((
+                StatusCode::CREATED,
+                Json(LaunchResponse {
+                    session_id: session.id,
+                    message: "Session created".to_string(),
+                }),
+            ))
+        }
         _ => Err(ApiError::bad_request(
-            "Unsupported mode. Valid options: hive, fusion",
+            "Unsupported mode. Valid options: hive, fusion, debate",
         )),
     }
 }
@@ -461,7 +582,9 @@ pub async fn launch_session(
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SessionListResponse>, ApiError> {
-    let persisted = state.storage.list_sessions()
+    let persisted = state
+        .storage
+        .list_sessions()
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let active_sessions = state.session_controller.read().list_sessions();
@@ -501,6 +624,9 @@ pub async fn list_sessions(
                     crate::session::SessionType::Fusion { variants } => {
                         format!("Fusion ({})", variants.len())
                     }
+                    crate::session::SessionType::Debate { variants } => {
+                        format!("Debate ({})", variants.len())
+                    }
                     crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
                 },
                 status: format!("{:?}", session.state),
@@ -531,9 +657,18 @@ pub async fn get_session(
             name: session.name.clone(),
             color: session.color.clone(),
             session_type: match &session.session_type {
-                crate::session::SessionType::Hive { worker_count } => format!("Hive ({})", worker_count),
-                crate::session::SessionType::Swarm { planner_count } => format!("Swarm ({})", planner_count),
-                crate::session::SessionType::Fusion { variants } => format!("Fusion ({})", variants.len()),
+                crate::session::SessionType::Hive { worker_count } => {
+                    format!("Hive ({})", worker_count)
+                }
+                crate::session::SessionType::Swarm { planner_count } => {
+                    format!("Swarm ({})", planner_count)
+                }
+                crate::session::SessionType::Fusion { variants } => {
+                    format!("Fusion ({})", variants.len())
+                }
+                crate::session::SessionType::Debate { variants } => {
+                    format!("Debate ({})", variants.len())
+                }
                 crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
             },
             status: format!("{:?}", session.state),
@@ -544,7 +679,9 @@ pub async fn get_session(
     }
 
     // Try loading from storage if not active
-    let persisted = state.storage.load_session(&id)
+    let persisted = state
+        .storage
+        .load_session(&id)
         .map_err(|_| ApiError::not_found(format!("Session {} not found", id)))?;
 
     Ok(Json(SessionInfo {
@@ -555,6 +692,7 @@ pub async fn get_session(
             SessionTypeInfo::Hive { worker_count } => format!("Hive ({})", worker_count),
             SessionTypeInfo::Swarm { planner_count } => format!("Swarm ({})", planner_count),
             SessionTypeInfo::Fusion { variants } => format!("Fusion ({})", variants.len()),
+            SessionTypeInfo::Debate { variants } => format!("Debate ({})", variants.len()),
             SessionTypeInfo::Solo { cli, .. } => format!("Solo ({})", cli),
         },
         status: persisted.state,
@@ -581,14 +719,16 @@ pub async fn launch_hive(
     let command = req.command.unwrap_or_else(|| "claude".to_string());
     validate_cli(&command)?;
 
-    let session = controller.launch_hive(
-        project_path,
-        req.worker_count.unwrap_or(3),
-        &command,
-        req.task_description,
-        req.name,
-        req.color,
-    ).map_err(ApiError::internal)?;
+    let session = controller
+        .launch_hive(
+            project_path,
+            req.worker_count.unwrap_or(3),
+            &command,
+            req.task_description,
+            req.name,
+            req.color,
+        )
+        .map_err(ApiError::internal)?;
 
     Ok((
         StatusCode::CREATED,
@@ -664,7 +804,8 @@ pub async fn launch_swarm(
         planners: vec![],
     };
 
-    let session = controller.launch_swarm(config)
+    let session = controller
+        .launch_swarm(config)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok((
@@ -739,7 +880,9 @@ pub async fn launch_fusion(
     Json(req): Json<LaunchFusionRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
     if req.variants.is_empty() {
-        return Err(ApiError::bad_request("Fusion launch requires at least one variant"));
+        return Err(ApiError::bad_request(
+            "Fusion launch requires at least one variant",
+        ));
     }
     if req.task_description.trim().is_empty() {
         return Err(ApiError::bad_request("task_description cannot be empty"));
@@ -809,6 +952,92 @@ pub async fn launch_fusion(
     ))
 }
 
+/// POST /api/sessions/debate - Launch a new Debate session
+pub async fn launch_debate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LaunchDebateRequest>,
+) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
+    if req.debaters.is_empty() {
+        return Err(ApiError::bad_request(
+            "Debate launch requires at least one debater",
+        ));
+    }
+    if req.topic.trim().is_empty() {
+        return Err(ApiError::bad_request("topic cannot be empty"));
+    }
+
+    validate_project_path(&req.project_path)?;
+    validate_session_name(req.name.as_deref())?;
+    validate_session_color(req.color.as_deref())?;
+
+    let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
+    validate_cli(&default_cli)?;
+
+    let judge_cli = req.judge_cli.unwrap_or_else(|| default_cli.clone());
+    validate_cli(&judge_cli)?;
+
+    let rounds = req.rounds.unwrap_or(3);
+    if rounds == 0 {
+        return Err(ApiError::bad_request(
+            "Debate launch requires at least one round",
+        ));
+    }
+
+    let debaters = req
+        .debaters
+        .into_iter()
+        .map(|d| {
+            let cli = d.cli.unwrap_or_else(|| default_cli.clone());
+            validate_cli(&cli)?;
+            Ok(DebateDebaterConfig {
+                name: d.name,
+                stance: d.stance,
+                cli,
+                model: d.model,
+                flags: d.flags.unwrap_or_default(),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    let judge_config = AgentConfig {
+        cli: judge_cli,
+        model: req.judge_model.or(req.default_model.clone()),
+        flags: vec![],
+        label: Some("Debate Judge".to_string()),
+        name: None,
+        description: None,
+        role: None,
+        initial_prompt: None,
+    };
+
+    let config = DebateLaunchConfig {
+        project_path: req.project_path,
+        name: req.name,
+        color: req.color,
+        debaters,
+        topic: req.topic,
+        rounds,
+        judge_config,
+        queen_config: None,
+        with_planning: req.with_planning.unwrap_or(false),
+        default_cli,
+        default_model: req.default_model,
+    };
+
+    let controller = state.session_controller.write();
+    let session = controller
+        .launch_debate(config)
+        .map_err(ApiError::internal)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(LaunchResponse {
+            session_id: session.id,
+            message: "Debate session launched".to_string(),
+        }),
+    ))
+}
+
 /// PATCH /api/sessions/{id} - Update session metadata
 pub async fn update_session(
     State(state): State<Arc<AppState>>,
@@ -835,9 +1064,18 @@ pub async fn update_session(
         name: session.name,
         color: session.color,
         session_type: match &session.session_type {
-            crate::session::SessionType::Hive { worker_count } => format!("Hive ({})", worker_count),
-            crate::session::SessionType::Swarm { planner_count } => format!("Swarm ({})", planner_count),
-            crate::session::SessionType::Fusion { variants } => format!("Fusion ({})", variants.len()),
+            crate::session::SessionType::Hive { worker_count } => {
+                format!("Hive ({})", worker_count)
+            }
+            crate::session::SessionType::Swarm { planner_count } => {
+                format!("Swarm ({})", planner_count)
+            }
+            crate::session::SessionType::Fusion { variants } => {
+                format!("Fusion ({})", variants.len())
+            }
+            crate::session::SessionType::Debate { variants } => {
+                format!("Debate ({})", variants.len())
+            }
             crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
         },
         status: format!("{:?}", session.state),
@@ -924,6 +1162,61 @@ pub async fn get_fusion_evaluation(
     }))
 }
 
+/// GET /api/sessions/{id}/debate/status - Get debate debater statuses
+pub async fn get_debate_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<DebateStatusResponse>, ApiError> {
+    validate_session_id(&id)?;
+
+    let controller = state.session_controller.read();
+    if controller.get_session(&id).is_none() {
+        return Err(ApiError::not_found(format!("Session {} not found", id)));
+    }
+
+    let debaters = controller
+        .get_debate_debater_statuses(&id)
+        .map_err(ApiError::internal)?;
+    let state_str = controller
+        .get_session(&id)
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    Ok(Json(DebateStatusResponse {
+        session_id: id,
+        state: state_str,
+        debaters,
+    }))
+}
+
+/// GET /api/sessions/{id}/debate/evaluation - Get debate judge verdict
+pub async fn get_debate_evaluation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<DebateEvaluationResponse>, ApiError> {
+    validate_session_id(&id)?;
+
+    let controller = state.session_controller.read();
+    if controller.get_session(&id).is_none() {
+        return Err(ApiError::not_found(format!("Session {} not found", id)));
+    }
+
+    let (report_path, report) = controller
+        .get_debate_evaluation(&id)
+        .map_err(ApiError::internal)?;
+    let state_str = controller
+        .get_session(&id)
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    Ok(Json(DebateEvaluationResponse {
+        session_id: id,
+        state: state_str,
+        report_path,
+        report,
+    }))
+}
+
 /// POST /api/sessions/{id}/stop - Stop a session
 pub async fn stop_session(
     State(state): State<Arc<AppState>>,
@@ -932,7 +1225,8 @@ pub async fn stop_session(
     validate_session_id(&id)?;
 
     let controller = state.session_controller.write();
-    controller.stop_session(&id)
+    controller
+        .stop_session(&id)
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({
@@ -948,14 +1242,13 @@ pub async fn close_session(
     validate_session_id(&id)?;
 
     let controller = state.session_controller.write();
-    controller.close_session(&id)
-        .map_err(|e| {
-            if e.starts_with("Session not found") {
-                ApiError::not_found(e)
-            } else {
-                ApiError::internal(e)
-            }
-        })?;
+    controller.close_session(&id).map_err(|e| {
+        if e.starts_with("Session not found") {
+            ApiError::not_found(e)
+        } else {
+            ApiError::internal(e)
+        }
+    })?;
 
     Ok(Json(serde_json::json!({
         "message": format!("Session {} closed", id)
@@ -998,15 +1291,17 @@ pub async fn get_run_journal(
     validate_session_id(&id)?;
 
     let store = crate::storage::RunJournalStore::new(Arc::clone(&state.app_state_db));
-    let response = tokio::task::spawn_blocking(move || -> Result<RunJournalResponse, crate::storage::StorageError> {
-        // Defensive: ensure the journal/ledger tables exist (idempotent CREATE TABLE IF NOT
-        // EXISTS). Production creates them at startup, but a fresh/in-memory DB (e.g. tests)
-        // may not have run that path, in which case read_journal would hit "no such table".
-        store.ensure_schema()?;
-        let journal = store.read_journal(&id)?;
-        let ledger = store.read_ledger(&id)?;
-        Ok(RunJournalResponse { journal, ledger })
-    })
+    let response = tokio::task::spawn_blocking(
+        move || -> Result<RunJournalResponse, crate::storage::StorageError> {
+            // Defensive: ensure the journal/ledger tables exist (idempotent CREATE TABLE IF NOT
+            // EXISTS). Production creates them at startup, but a fresh/in-memory DB (e.g. tests)
+            // may not have run that path, in which case read_journal would hit "no such table".
+            store.ensure_schema()?;
+            let journal = store.read_journal(&id)?;
+            let ledger = store.read_ledger(&id)?;
+            Ok(RunJournalResponse { journal, ledger })
+        },
+    )
     .await
     .map_err(|e| ApiError::internal(format!("Task join error: {e}")))?
     .map_err(|e| ApiError::internal(format!("Failed to read run journal: {e}")))?;

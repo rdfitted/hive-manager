@@ -87,8 +87,12 @@ impl LaunchSpec {
     }
 
     /// Add multiple environment variables.
-    pub fn envs(mut self, envs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
-        self.env.extend(envs.into_iter().map(|(k, v)| (k.into(), v.into())));
+    pub fn envs(
+        mut self,
+        envs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.env
+            .extend(envs.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 
@@ -183,7 +187,10 @@ impl RuntimeError {
 
     /// Create a not found error.
     pub fn not_found(process_id: impl Into<String>) -> Self {
-        Self::new(RuntimeErrorKind::NotFound, format!("Process not found: {}", process_id.into()))
+        Self::new(
+            RuntimeErrorKind::NotFound,
+            format!("Process not found: {}", process_id.into()),
+        )
     }
 }
 
@@ -263,7 +270,10 @@ mod tests {
             .wsl_binary_path("/custom/agent");
 
         assert_eq!(spec.command, "claude");
-        assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "--model", "opus"]);
+        assert_eq!(
+            spec.args,
+            vec!["--dangerously-skip-permissions", "--model", "opus"]
+        );
         assert_eq!(spec.cwd, Some(PathBuf::from("/project")));
         assert_eq!(spec.env.get("KEY"), Some(&"value".to_string()));
         assert_eq!(spec.cols, 120);

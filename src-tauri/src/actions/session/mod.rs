@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::http::handlers::{validate_cli, validate_project_path};
-use crate::session::HiveLaunchConfig;
+use crate::session::{DebateLaunchConfig, HiveLaunchConfig};
 
 use super::error::ActionError;
 use super::registry::{Action, ActionRegistry};
@@ -96,6 +96,36 @@ fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(), ActionEr
         }
     }
 
+    Ok(())
+}
+
+fn validate_debate_launch_config(config: &DebateLaunchConfig) -> Result<(), ActionError> {
+    validate_project_path(&config.project_path)?;
+    validate_session_name(config.name.as_deref())?;
+    validate_session_color(config.color.as_deref())?;
+    if config.topic.trim().is_empty() {
+        return Err(ActionError::bad_request(
+            "Debate launch requires a non-empty topic",
+        ));
+    }
+    if config.debaters.is_empty() {
+        return Err(ActionError::bad_request(
+            "Debate launch requires at least one debater",
+        ));
+    }
+    if config.rounds == 0 {
+        return Err(ActionError::bad_request(
+            "Debate launch requires at least one round",
+        ));
+    }
+    validate_cli(&config.judge_config.cli)?;
+    validate_cli(&config.default_cli)?;
+    if let Some(queen_config) = &config.queen_config {
+        validate_cli(&queen_config.cli)?;
+    }
+    for debater in &config.debaters {
+        validate_cli(&debater.cli)?;
+    }
     Ok(())
 }
 
@@ -218,7 +248,9 @@ impl Action for StopSession {
         let parsed: SessionIdInput = deserialize_input(input)?;
         {
             let controller = ctx.state.session_controller.read();
-            controller.stop_session(&parsed.id).map_err(ActionError::from)?;
+            controller
+                .stop_session(&parsed.id)
+                .map_err(ActionError::from)?;
         }
         Ok(json!({ "message": format!("Session {} stopped", parsed.id) }))
     }
@@ -286,7 +318,9 @@ impl Action for LaunchHiveV2 {
         let config: HiveLaunchConfig = deserialize_input(input)?;
         let session = {
             let controller = ctx.state.session_controller.read();
-            controller.launch_hive_v2(config).map_err(ActionError::from)?
+            controller
+                .launch_hive_v2(config)
+                .map_err(ActionError::from)?
         };
         serde_json::to_value(session)
             .map_err(|e| ActionError::internal(format!("Failed to serialize session: {}", e)))
@@ -296,6 +330,40 @@ impl Action for LaunchHiveV2 {
 // ---------------------------------------------------------------------------
 // session.update_metadata
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// session.launch_debate
+// ---------------------------------------------------------------------------
+
+struct LaunchDebate;
+
+#[async_trait]
+impl Action for LaunchDebate {
+    fn name(&self) -> &'static str {
+        "session.launch_debate"
+    }
+
+    fn input_schema(&self) -> RootSchema {
+        schemars::schema_for!(DebateLaunchConfig)
+    }
+
+    fn validate_input(&self, input: &Value) -> Result<(), ActionError> {
+        let config: DebateLaunchConfig = deserialize_input(input.clone())?;
+        validate_debate_launch_config(&config)
+    }
+
+    async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
+        let config: DebateLaunchConfig = deserialize_input(input)?;
+        let session = {
+            let controller = ctx.state.session_controller.read();
+            controller
+                .launch_debate(config)
+                .map_err(ActionError::from)?
+        };
+        serde_json::to_value(session)
+            .map_err(|e| ActionError::internal(format!("Failed to serialize session: {}", e)))
+    }
+}
 
 struct UpdateSessionMetadata;
 
@@ -343,5 +411,6 @@ pub fn register(registry: &mut ActionRegistry) {
     registry.register(Box::new(StopSession));
     registry.register(Box::new(CloseSession));
     registry.register(Box::new(LaunchHiveV2));
+    registry.register(Box::new(LaunchDebate));
     registry.register(Box::new(UpdateSessionMetadata));
 }

@@ -17,13 +17,19 @@ pub(crate) fn variant_to_cell_id(variant: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect::<String>();
     let trimmed = normalized.trim_matches('-');
-    let slug = if trimmed.is_empty() { PRIMARY_CELL_ID } else { trimmed };
+    let slug = if trimmed.is_empty() {
+        PRIMARY_CELL_ID
+    } else {
+        trimmed
+    };
     format!("{VARIANT_CELL_PREFIX}{slug}")
 }
 
 pub(crate) fn session_cell_ids(session: &Session) -> Vec<String> {
     match &session.session_type {
-        SessionType::Fusion { variants } if !variants.is_empty() => {
+        SessionType::Fusion { variants } | SessionType::Debate { variants }
+            if !variants.is_empty() =>
+        {
             let mut seen = HashSet::new();
             let mut cell_ids = variants
                 .iter()
@@ -48,11 +54,13 @@ pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
         | SessionState::SpawningWorker(_)
         | SessionState::SpawningPlanner(_)
         | SessionState::SpawningFusionVariant(_)
+        | SessionState::SpawningDebateRound(_)
         | SessionState::SpawningJudge
         | SessionState::SpawningEvaluator => CellStatus::Launching,
         SessionState::WaitingForWorker(_)
         | SessionState::WaitingForPlanner(_)
         | SessionState::WaitingForFusionVariants
+        | SessionState::WaitingForDebateRound(_)
         | SessionState::Judging
         | SessionState::MergingWinner
         | SessionState::QaInProgress { .. }
@@ -61,9 +69,9 @@ pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
             CellStatus::WaitingInput
         }
         SessionState::Completed | SessionState::Closed => CellStatus::Completed,
-        SessionState::QaFailed { .. } | SessionState::QaMaxRetriesExceeded | SessionState::Failed(_) => {
-            CellStatus::Failed
-        }
+        SessionState::QaFailed { .. }
+        | SessionState::QaMaxRetriesExceeded
+        | SessionState::Failed(_) => CellStatus::Failed,
         SessionState::Closing => CellStatus::Summarizing,
     }
 }
@@ -91,8 +99,11 @@ pub(crate) fn derive_cell_status_name_for_state(
     .to_string()
 }
 
-fn is_fusion_scoped_cell(session: &Session, cell_id: &str) -> bool {
-    matches!(session.session_type, SessionType::Fusion { .. }) && cell_id != PRIMARY_CELL_ID
+fn is_variant_scoped_cell(session: &Session, cell_id: &str) -> bool {
+    matches!(
+        session.session_type,
+        SessionType::Fusion { .. } | SessionType::Debate { .. }
+    ) && cell_id != PRIMARY_CELL_ID
 }
 
 pub(crate) fn aggregate_cell_status(session: &Session, cell_id: &str) -> CellStatus {
@@ -122,22 +133,33 @@ pub(crate) fn aggregate_cell_status_for_state(
         .map(|agent| agent_status_to_cell_status(&agent.status))
         .collect::<Vec<_>>();
 
-    if agent_statuses.iter().any(|status| *status == CellStatus::Failed) {
+    if agent_statuses
+        .iter()
+        .any(|status| *status == CellStatus::Failed)
+    {
         CellStatus::Failed
     } else if agent_statuses
         .iter()
         .any(|status| *status == CellStatus::WaitingInput)
     {
         CellStatus::WaitingInput
-    } else if agent_statuses.iter().any(|status| *status == CellStatus::Launching) {
+    } else if agent_statuses
+        .iter()
+        .any(|status| *status == CellStatus::Launching)
+    {
         CellStatus::Launching
-    } else if agent_statuses.iter().any(|status| *status == CellStatus::Running) {
+    } else if agent_statuses
+        .iter()
+        .any(|status| *status == CellStatus::Running)
+    {
         CellStatus::Running
     } else if !agent_statuses.is_empty()
-        && agent_statuses.iter().all(|status| *status == CellStatus::Completed)
+        && agent_statuses
+            .iter()
+            .all(|status| *status == CellStatus::Completed)
     {
         CellStatus::Completed
-    } else if agent_statuses.is_empty() && is_fusion_scoped_cell(session, cell_id) {
+    } else if agent_statuses.is_empty() && is_variant_scoped_cell(session, cell_id) {
         CellStatus::Queued
     } else {
         session_state_to_cell_status(state)
@@ -151,19 +173,21 @@ fn agent_in_cell_with_variant_cache(
     variant_cell_cache: Option<&mut HashMap<String, String>>,
 ) -> bool {
     match &session.session_type {
-        SessionType::Fusion { .. } if cell_id == RESOLVER_CELL_ID => {
-            // Resolver cell contains all NON-Fusion agents (judge, planner, evaluator, QA)
+        SessionType::Fusion { .. } | SessionType::Debate { .. } if cell_id == RESOLVER_CELL_ID => {
+            // Resolver cell contains all NON-variant agents (judge, planner, evaluator, QA)
             !matches!(&agent.role, AgentRole::Fusion { .. })
         }
-        SessionType::Fusion { .. } if cell_id != PRIMARY_CELL_ID => {
-            // Variant cells contain only Fusion agents matching that variant
+        SessionType::Fusion { .. } | SessionType::Debate { .. } if cell_id != PRIMARY_CELL_ID => {
+            // Variant cells contain only variant agents matching that variant/debater
             fusion_agent_matches_cell(cell_id, agent, variant_cell_cache)
         }
-        SessionType::Fusion { variants } if variants.is_empty() => {
+        SessionType::Fusion { variants } | SessionType::Debate { variants }
+            if variants.is_empty() =>
+        {
             cell_id == PRIMARY_CELL_ID
         }
-        SessionType::Fusion { .. } => {
-            // PRIMARY_CELL_ID is not used in Fusion sessions
+        SessionType::Fusion { .. } | SessionType::Debate { .. } => {
+            // PRIMARY_CELL_ID is not used in Fusion/Debate sessions
             false
         }
         _ => {
@@ -226,8 +250,8 @@ mod tests {
     use crate::pty::{AgentConfig, AgentRole};
     use crate::session::AuthStrategy;
 
-    use super::*;
     use super::super::controller::DEFAULT_MAX_QA_ITERATIONS;
+    use super::*;
 
     fn test_session(state: SessionState, agent_statuses: Vec<AgentStatus>) -> Session {
         let now = Utc::now();
@@ -295,7 +319,10 @@ mod tests {
     fn terminal_session_state_overrides_running_agent_status() {
         let session = test_session(SessionState::Completed, vec![AgentStatus::Running]);
 
-        assert_eq!(aggregate_cell_status(&session, "variant:alpha"), CellStatus::Completed);
+        assert_eq!(
+            aggregate_cell_status(&session, "variant:alpha"),
+            CellStatus::Completed
+        );
     }
 
     #[test]
@@ -321,7 +348,10 @@ mod tests {
             vec![AgentStatus::Starting, AgentStatus::Running],
         );
 
-        assert_eq!(aggregate_cell_status(&session, "variant:alpha"), CellStatus::Launching);
+        assert_eq!(
+            aggregate_cell_status(&session, "variant:alpha"),
+            CellStatus::Launching
+        );
     }
 
     #[test]
@@ -338,7 +368,10 @@ mod tests {
     fn empty_fusion_resolver_cell_stays_queued_while_session_runs() {
         let session = test_session(SessionState::Running, vec![]);
 
-        assert_eq!(aggregate_cell_status(&session, RESOLVER_CELL_ID), CellStatus::Queued);
+        assert_eq!(
+            aggregate_cell_status(&session, RESOLVER_CELL_ID),
+            CellStatus::Queued
+        );
     }
 
     #[test]
@@ -357,7 +390,11 @@ mod tests {
         // Fusion sessions do NOT use primary cell
         let session = test_session(SessionState::Running, vec![AgentStatus::Running]);
 
-        assert!(!agent_in_cell(&session, PRIMARY_CELL_ID, &session.agents[0]));
+        assert!(!agent_in_cell(
+            &session,
+            PRIMARY_CELL_ID,
+            &session.agents[0]
+        ));
     }
 
     #[test]
@@ -372,7 +409,10 @@ mod tests {
             vec![PRIMARY_CELL_ID.to_string()]
         );
         assert!(agent_in_cell(&session, PRIMARY_CELL_ID, &session.agents[0]));
-        assert_eq!(aggregate_cell_status(&session, PRIMARY_CELL_ID), CellStatus::Running);
+        assert_eq!(
+            aggregate_cell_status(&session, PRIMARY_CELL_ID),
+            CellStatus::Running
+        );
     }
 
     #[test]

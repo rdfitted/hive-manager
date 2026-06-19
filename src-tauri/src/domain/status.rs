@@ -28,6 +28,7 @@ mod tests {
     fn session_mode_round_trip() {
         assert_enum_round_trip(SessionMode::Hive, "\"hive\"");
         assert_enum_round_trip(SessionMode::Fusion, "\"fusion\"");
+        assert_enum_round_trip(SessionMode::Debate, "\"debate\"");
     }
 
     #[test]
@@ -91,7 +92,10 @@ mod tests {
     #[test]
     fn event_type_round_trip() {
         assert_enum_round_trip(EventType::SessionCreated, "\"session_created\"");
-        assert_enum_round_trip(EventType::SessionStatusChanged, "\"session_status_changed\"");
+        assert_enum_round_trip(
+            EventType::SessionStatusChanged,
+            "\"session_status_changed\"",
+        );
         assert_enum_round_trip(EventType::CellCreated, "\"cell_created\"");
         assert_enum_round_trip(EventType::CellStatusChanged, "\"cell_status_changed\"");
         assert_enum_round_trip(EventType::ConversationMessage, "\"conversation_message\"");

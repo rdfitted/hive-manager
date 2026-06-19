@@ -31,7 +31,16 @@ pub use qwen::QwenAdapter;
 /// `gemini` and `antigravity` are both first-class CLIs. `antigravity` (`agy`)
 /// is the default for the frontend role; the legacy Gemini CLI is retained as
 /// a selectable peer until Google deprecates it on 2026-06-18.
-pub const VALID_CLIS: &[&str] = &["claude", "gemini", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
+pub const VALID_CLIS: &[&str] = &[
+    "claude",
+    "gemini",
+    "antigravity",
+    "codex",
+    "opencode",
+    "cursor",
+    "droid",
+    "qwen",
+];
 
 /// Validate a CLI name against the allowlist.
 pub fn is_valid_cli(cli: &str) -> bool {
@@ -106,8 +115,12 @@ impl LaunchCommand {
     }
 
     /// Add multiple environment variables.
-    pub fn envs(mut self, envs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
-        self.env.extend(envs.into_iter().map(|(k, v)| (k.into(), v.into())));
+    pub fn envs(
+        mut self,
+        envs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.env
+            .extend(envs.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 }
@@ -227,7 +240,10 @@ mod tests {
             .env("KEY", "value");
 
         assert_eq!(cmd.binary, "claude");
-        assert_eq!(cmd.args, vec!["--dangerously-skip-permissions", "--model", "opus"]);
+        assert_eq!(
+            cmd.args,
+            vec!["--dangerously-skip-permissions", "--model", "opus"]
+        );
         assert_eq!(cmd.env.get("KEY"), Some(&"value".to_string()));
     }
 
