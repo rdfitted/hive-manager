@@ -33,6 +33,7 @@ async fn setup_test_app() -> axum::Router {
         SessionStorage::new().unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -40,6 +41,7 @@ async fn setup_test_app() -> axum::Router {
         injection_manager,
         storage,
         event_bus,
+        app_state_db,
         None,
     ));
 
@@ -64,6 +66,9 @@ async fn setup_test_app_with_controller_at(
         SessionStorage::new_with_base(base_dir).unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db = Arc::new(
+        crate::storage::ApplicationStateDb::open(storage.base_dir()).unwrap(),
+    );
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -71,6 +76,7 @@ async fn setup_test_app_with_controller_at(
         injection_manager,
         storage.clone(),
         event_bus,
+        app_state_db,
         None,
     ));
 
@@ -89,6 +95,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         SessionStorage::new().unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -96,6 +103,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         injection_manager,
         storage,
         event_bus,
+        app_state_db,
         None,
     ));
 
@@ -5226,6 +5234,173 @@ async fn test_resolver_launch_rejects_unknown_candidate_ids() {
                 .uri(format!("/api/sessions/{}/resolver/launch", session_id))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Application-state (SQLite) HTTP endpoint tests (issue #124)
+// ---------------------------------------------------------------------------
+
+async fn read_json_body(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn test_post_application_state_returns_row() {
+    let (app, _controller) = setup_test_app_with_controller().await;
+
+    let body = serde_json::json!({
+        "key": "route",
+        "value": { "route": "dashboard" }
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/app-state-post/application-state")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = read_json_body(response).await;
+    assert_eq!(json["session_id"], "app-state-post");
+    assert_eq!(json["key"], "route");
+    assert_eq!(json["value"], serde_json::json!({ "route": "dashboard" }));
+    // Server stamps a positive millisecond timestamp.
+    assert!(json["updated_at"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_get_snapshot_returns_all() {
+    let (app, _controller) = setup_test_app_with_controller().await;
+    let session_id = "app-state-snapshot";
+
+    for (key, value) in [("a", serde_json::json!(1)), ("b", serde_json::json!("two"))] {
+        let body = serde_json::json!({ "key": key, "value": value });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/application-state"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/application-state"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = read_json_body(response).await;
+    let rows = json.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    // Ordered by key: a, then b. Values are parsed JSON, not strings.
+    assert_eq!(rows[0]["key"], "a");
+    assert_eq!(rows[0]["value"], serde_json::json!(1));
+    assert_eq!(rows[1]["key"], "b");
+    assert_eq!(rows[1]["value"], serde_json::json!("two"));
+}
+
+#[tokio::test]
+async fn test_get_poll_returns_changed_only() {
+    let (app, _controller) = setup_test_app_with_controller().await;
+    let session_id = "app-state-poll";
+
+    // Write two keys; capture the highest updated_at as the watermark.
+    let mut watermark = 0i64;
+    for key in ["a", "b"] {
+        let body = serde_json::json!({ "key": key, "value": key });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/application-state"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let row = read_json_body(resp).await;
+        watermark = watermark.max(row["updated_at"].as_i64().unwrap());
+    }
+
+    // Ensure the next write has a strictly greater millisecond timestamp.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    // Write a third key AFTER the watermark.
+    let body = serde_json::json!({ "key": "c", "value": "c" });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/application-state"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Poll with the watermark: only the third key should return.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{session_id}/application-state/poll?since={watermark}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = read_json_body(response).await;
+    let rows = json.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "watermark poll returns only newer rows");
+    assert_eq!(rows[0]["key"], "c");
+}
+
+#[tokio::test]
+async fn test_application_state_invalid_session_id_rejected() {
+    let (app, _controller) = setup_test_app_with_controller().await;
+
+    // Path-traversal-style session id must be rejected with 400 by validate_session_id.
+    // Use a backslash (encoded) which the handler checks for after axum decodes the path.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/bad..id/application-state")
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
