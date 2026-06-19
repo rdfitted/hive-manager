@@ -72,16 +72,26 @@
   }
 
   async function fetchDebateData() {
-    if (!$activeSession) return;
+    const sessionId = $activeSession?.id;
+    if (!sessionId) return;
+
+    const isCurrentSession = () => $activeSession?.id === sessionId;
+
     try {
-      const statusRes = await fetch(apiUrl(`/api/sessions/${$activeSession.id}/debate/status`));
+      const statusRes = await fetch(apiUrl(`/api/sessions/${sessionId}/debate/status`));
       if (statusRes.ok) {
-        debateStatus = await statusRes.json();
+        const status = await statusRes.json();
+        if (!isCurrentSession()) return;
+        debateStatus = status;
       }
+
+      if (!isCurrentSession()) return;
       
-      const evalRes = await fetch(apiUrl(`/api/sessions/${$activeSession.id}/debate/evaluation`));
+      const evalRes = await fetch(apiUrl(`/api/sessions/${sessionId}/debate/evaluation`));
       if (evalRes.ok) {
-        debateEvaluation = await evalRes.json();
+        const evaluation = await evalRes.json();
+        if (!isCurrentSession()) return;
+        debateEvaluation = evaluation;
         
         // Auto-switch to verdict tab when it becomes ready
         if (debateEvaluation?.report && viewMode === 'terminals') {

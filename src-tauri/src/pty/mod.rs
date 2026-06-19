@@ -1,7 +1,7 @@
 mod manager;
-#[cfg(not(test))]
+#[cfg(not(all(test, windows)))]
 mod session;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "session_stub.rs"]
 mod session;
 

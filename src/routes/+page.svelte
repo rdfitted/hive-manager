@@ -10,7 +10,7 @@
   import DebatePanel from '$lib/components/DebatePanel.svelte';
   import SessionOverview from '$lib/components/session/SessionOverview.svelte';
   import { readTerminalSelection } from '$lib/components/Terminal.svelte';
-  import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
   import { layout } from '$lib/stores/layout';
@@ -21,6 +21,7 @@
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
+  let activeSessionState = $derived(serdeEnumVariantName($activeSession?.state));
 
   onMount(() => {
     sessions.loadSessions();
@@ -35,7 +36,7 @@
   $effect(() => {
     const session = $activeSession;
     const sessionId = session?.id ?? null;
-    const sessionState = session ? (typeof session.state === 'string' ? session.state : Object.keys(session.state)[0]) : null;
+    const sessionState = session ? serdeEnumVariantName(session.state) ?? null : null;
 
     if (sessionId && sessionId !== prevSessionId) {
       prevSessionId = sessionId;
@@ -48,7 +49,7 @@
         if (!isTransitioning) {
           isTransitioning = true;
           tick().then(() => {
-            const queen = $activeAgents.find(a => a.role === 'Queen' || a.id.endsWith('-queen'));
+            const queen = $activeAgents.find(a => serdeEnumVariantName(a.role) === 'Queen' || a.id.endsWith('-queen'));
             if (queen) {
               ui.setFocusedAgent(queen.id);
               ui.setSelectedAgent(queen.id);
@@ -267,9 +268,9 @@
           <div class="no-agents">
             <p>No agents in this session</p>
           </div>
-        {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && $activeSession.state !== 'Planning' && $activeSession.state !== 'PlanReady'}
+        {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && activeSessionState !== 'Planning' && activeSessionState !== 'PlanReady'}
           <FusionPanel />
-        {:else if $activeSession?.session_type && 'Debate' in $activeSession.session_type && $activeSession.state !== 'Planning' && $activeSession.state !== 'PlanReady'}
+        {:else if $activeSession?.session_type && 'Debate' in $activeSession.session_type && activeSessionState !== 'Planning' && activeSessionState !== 'PlanReady'}
           <DebatePanel />
         {:else}
           <SessionOverview />

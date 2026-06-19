@@ -9,9 +9,9 @@
 //! - `LocalProcessRuntime`: Headless process execution (via `std::process::Command`)
 
 mod local_process;
-#[cfg(not(test))]
+#[cfg(not(all(test, windows)))]
 mod local_pty;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "local_pty_stub.rs"]
 mod local_pty;
 mod worktree;

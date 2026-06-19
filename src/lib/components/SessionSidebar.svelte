@@ -81,6 +81,7 @@
   let resumeLoading = $state(false);
   let resuming = $state(false);
   let resumeError = $state<string | null>(null);
+  let resumeReportRequestId = 0;
 
   let collapsed = $derived($layout.leftCollapsed);
   let sidebarWidth = $derived(collapsed ? RAIL_WIDTH : $layout.leftWidth);
@@ -160,6 +161,7 @@
 
   async function handleResumeSession(session: SessionSummary) {
     const targetSessionId = session.id;
+    const requestId = ++resumeReportRequestId;
     resumeTargetSessionId = targetSessionId;
     resumeTargetName = sessionDisplayName(session);
     resumeReport = null;
@@ -168,16 +170,24 @@
     resumeLoading = true;
 
     try {
-      resumeReport = await sessions.getResumeReport(targetSessionId);
+      const report = await sessions.getResumeReport(targetSessionId);
+      if (resumeReportRequestId === requestId && resumeTargetSessionId === targetSessionId) {
+        resumeReport = report;
+      }
     } catch (err) {
-      resumeError = String(err);
-      console.error('Failed to prepare resume:', err);
+      if (resumeReportRequestId === requestId && resumeTargetSessionId === targetSessionId) {
+        resumeError = String(err);
+        console.error('Failed to prepare resume:', err);
+      }
     } finally {
-      resumeLoading = false;
+      if (resumeReportRequestId === requestId && resumeTargetSessionId === targetSessionId) {
+        resumeLoading = false;
+      }
     }
   }
 
   function resetResumeModal() {
+    resumeReportRequestId += 1;
     resumeModalOpen = false;
     resumeTargetSessionId = null;
     resumeTargetName = null;

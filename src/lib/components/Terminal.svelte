@@ -78,6 +78,15 @@
   let isWaiting = $derived(agent?.status && typeof agent.status === 'object' && 'WaitingForInput' in agent.status);
 
   $effect(() => {
+    const currentAgentId = agentId;
+    terminalSelectionReaders.set(currentAgentId, () => term?.getSelection() || null);
+
+    return () => {
+      terminalSelectionReaders.delete(currentAgentId);
+    };
+  });
+
+  $effect(() => {
     if (isFocused && term) {
       term.focus();
       // Re-fit terminal after becoming visible to restore correct dimensions.
@@ -662,7 +671,6 @@
       handleResize();
     });
 
-    terminalSelectionReaders.set(agentId, () => term?.getSelection() || null);
   });
 
   onDestroy(() => {
