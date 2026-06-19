@@ -9,7 +9,7 @@ use crate::session::{
     AgentInfo, AuthStrategy, Session, SessionController, SessionState, SessionType,
     DEFAULT_MAX_QA_ITERATIONS,
 };
-use crate::storage::{PersistedSession, SessionStorage, SessionTypeInfo};
+use crate::storage::{ConversationMessage, PersistedSession, SessionStorage, SessionTypeInfo};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -57,6 +57,39 @@ async fn setup_test_app() -> axum::Router {
     state.set_registry(Arc::new(crate::actions::build_registry()));
 
     create_router(state)
+}
+
+async fn setup_test_state() -> Arc<AppState> {
+    let storage = Arc::new(SessionStorage::new().unwrap());
+    let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new().unwrap(),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        session_controller,
+        injection_manager,
+        storage,
+        event_bus,
+        app_state_db,
+        queue_manager,
+        None,
+    ));
+    state.set_registry(Arc::new(crate::actions::build_registry()));
+    state
 }
 
 /// Setup test app with a specific storage base dir (hermetic). Returns router, controller, and the storage.
@@ -5913,7 +5946,11 @@ async fn test_http_dispatch_session_list_via_registry() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    let sessions = json.as_array().expect("session.list returns an array");
+    assert_eq!(json.get("renderer").and_then(|v| v.as_str()), Some("table"));
+    let sessions = json
+        .get("data")
+        .and_then(|v| v.as_array())
+        .expect("session.list data returns an array");
     assert!(sessions
         .iter()
         .any(|s| s.get("id").and_then(|v| v.as_str()) == Some("session-actionlist")));
@@ -6032,6 +6069,41 @@ async fn test_http_action_unknown_returns_404() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_conversation_emit_includes_render_envelope() {
+    let state = setup_test_state().await;
+    let mut events = state.event_bus.subscribe_session("session-render".to_string());
+
+    let table_message = ConversationMessage {
+        timestamp: chrono::Utc::now(),
+        from: "worker-3".to_string(),
+        content: "| file | status |\n| --- | --- |\n| src/lib.rs | changed |".to_string(),
+    };
+    state
+        .emit_conversation_message("session-render", "worker-3", &table_message)
+        .await
+        .unwrap();
+
+    let table_event = events.recv().await.unwrap();
+    assert_eq!(table_event.payload["renderer"], "table");
+    assert_eq!(table_event.payload["data"]["content"], table_message.content);
+    assert_eq!(table_event.payload["data"]["agent_id"], "worker-3");
+
+    let diff_message = ConversationMessage {
+        timestamp: chrono::Utc::now(),
+        from: "worker-3".to_string(),
+        content: "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".to_string(),
+    };
+    state
+        .emit_conversation_message("session-render", "worker-3", &diff_message)
+        .await
+        .unwrap();
+
+    let diff_event = events.recv().await.unwrap();
+    assert_eq!(diff_event.payload["renderer"], "diff");
+    assert_eq!(diff_event.payload["data"]["content"], diff_message.content);
 }
 
 // ---- #125 run-journal endpoint ----

@@ -343,7 +343,7 @@ pub struct HiveLaunchConfig {
 ///
 /// Mirrors the shape of [`HiveLaunchConfig`] so the frontend can build it the
 /// same way it builds a Hive launch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ResearchLaunchConfig {
     pub project_path: String,
     #[serde(default)]
@@ -392,7 +392,7 @@ fn expand_tilde(path: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SwarmLaunchConfig {
     pub project_path: String,
     #[serde(default)]
@@ -432,14 +432,14 @@ pub struct QaWorkerConfig {
     pub flags: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlannerConfig {
     pub config: AgentConfig,
     pub domain: String,
     pub workers: Vec<AgentConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FusionLaunchConfig {
     pub project_path: String,
     #[serde(default)]
@@ -466,7 +466,7 @@ fn default_debate_rounds() -> u8 {
     3
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FusionVariantConfig {
     pub name: String,
     pub cli: String,

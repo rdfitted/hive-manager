@@ -101,9 +101,10 @@ impl ActionRegistry {
         ctx: &ActionContext,
         input: Value,
     ) -> Result<Value, ActionError> {
-        let action = self.actions.get(name).ok_or_else(|| {
-            ActionError::not_found(format!("Unknown action '{}'", name))
-        })?;
+        let action = self
+            .actions
+            .get(name)
+            .ok_or_else(|| ActionError::not_found(format!("Unknown action '{}'", name)))?;
 
         action.validate_input(&input)?;
         action.run(ctx, input).await
@@ -117,5 +118,7 @@ pub fn build_registry() -> ActionRegistry {
     let mut registry = ActionRegistry::new();
     super::session::register(&mut registry);
     super::git::register(&mut registry);
+    super::pty::register(&mut registry);
+    super::coordination::register(&mut registry);
     registry
 }

@@ -1,13 +1,15 @@
+use crate::actions::{ActionContext, Caller};
 use crate::cli::CliRegistry;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 
-use super::{validate_cli, validate_project_path, validate_session_id};
+use super::{validate_cli, validate_session_id};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
@@ -16,57 +18,42 @@ use crate::session::{
     DebateLaunchConfig, FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus,
     HiveLaunchConfig, QaWorkerConfig,
 };
-use crate::storage::SessionTypeInfo;
 
-const SESSION_COLOR_ALLOWLIST: &[&str] = &[
-    "#7aa2f7", "#bb9af7", "#9ece6a", "#e0af68", "#7dcfff", "#f7768e", "#ff9e64", "#f7b1d1",
-];
-
-fn validate_session_name(name: Option<&str>) -> Result<(), ApiError> {
-    let Some(name) = name else {
-        return Ok(());
-    };
-
-    if name.trim().is_empty() {
-        return Err(ApiError::bad_request(
-            "Invalid session name: must not be empty or whitespace",
-        ));
-    }
-
-    if name.chars().count() > 64 {
-        return Err(ApiError::bad_request(
-            "Invalid session name: must be 64 characters or fewer",
-        ));
-    }
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
-        return Err(ApiError::bad_request(
-            "Invalid session name: must not contain '..', '/', or '\\'",
-        ));
-    }
-
-    Ok(())
+async fn dispatch_session_action(
+    state: &Arc<AppState>,
+    action: &str,
+    input: Value,
+) -> Result<Value, ApiError> {
+    let ctx = ActionContext::new(Caller::Http, Arc::clone(state));
+    state
+        .registry()
+        .dispatch(action, &ctx, input)
+        .await
+        .map_err(ApiError::from)
 }
 
-fn validate_session_color(color: Option<&str>) -> Result<(), ApiError> {
-    let Some(color) = color else {
-        return Ok(());
-    };
-
-    if !SESSION_COLOR_ALLOWLIST.contains(&color) && !is_valid_hex_session_color(color) {
-        return Err(ApiError::bad_request(format!(
-            "Invalid session color '{}'. Valid options: {} or any #RRGGBB hex color",
-            color,
-            SESSION_COLOR_ALLOWLIST.join(", ")
-        )));
-    }
-
-    Ok(())
+fn decode_action_output<T: DeserializeOwned>(action: &str, value: Value) -> Result<T, ApiError> {
+    serde_json::from_value(value).map_err(|e| {
+        ApiError::internal(format!(
+            "Action {} returned an unexpected payload: {}",
+            action, e
+        ))
+    })
 }
 
-fn is_valid_hex_session_color(color: &str) -> bool {
-    color.len() == 7
-        && color.starts_with('#')
-        && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
+fn launch_response_from_action_output(
+    value: &Value,
+    message: &str,
+) -> Result<LaunchResponse, ApiError> {
+    let session_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("Launch action returned a session without an id"))?
+        .to_string();
+    Ok(LaunchResponse {
+        session_id,
+        message: message.to_string(),
+    })
 }
 
 fn evaluator_config_from_request(
@@ -139,7 +126,7 @@ fn map_completion_error(error: CompletionError) -> ApiError {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: String,
     pub name: Option<String>,
@@ -338,10 +325,6 @@ pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
-    validate_project_path(&req.project_path)?;
-    validate_session_name(req.name.as_deref())?;
-    validate_session_color(req.color.as_deref())?;
-
     let mode = req.mode.trim().to_ascii_lowercase();
     let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;
@@ -408,17 +391,21 @@ pub async fn create_session(
                 smoke_test: req.smoke_test.unwrap_or(false),
             };
 
-            let controller = state.session_controller.write();
-            let session = controller
-                .launch_hive_v2(config)
-                .map_err(ApiError::internal)?;
+            let output = dispatch_session_action(
+                &state,
+                "session.launch_hive_v2",
+                serde_json::to_value(config).map_err(|e| {
+                    ApiError::internal(format!("Failed to serialize launch config: {}", e))
+                })?,
+            )
+            .await?;
 
             Ok((
                 StatusCode::CREATED,
-                Json(LaunchResponse {
-                    session_id: session.id,
-                    message: "Session created".to_string(),
-                }),
+                Json(launch_response_from_action_output(
+                    &output,
+                    "Session created",
+                )?),
             ))
         }
         "fusion" => {
@@ -473,17 +460,21 @@ pub async fn create_session(
                 default_model: req.default_model,
             };
 
-            let controller = state.session_controller.write();
-            let session = controller
-                .launch_fusion(config)
-                .map_err(ApiError::internal)?;
+            let output = dispatch_session_action(
+                &state,
+                "session.launch_fusion",
+                serde_json::to_value(config).map_err(|e| {
+                    ApiError::internal(format!("Failed to serialize launch config: {}", e))
+                })?,
+            )
+            .await?;
 
             Ok((
                 StatusCode::CREATED,
-                Json(LaunchResponse {
-                    session_id: session.id,
-                    message: "Session created".to_string(),
-                }),
+                Json(launch_response_from_action_output(
+                    &output,
+                    "Session created",
+                )?),
             ))
         }
         "debate" => {
@@ -547,17 +538,21 @@ pub async fn create_session(
                 default_model: req.default_model,
             };
 
-            let controller = state.session_controller.write();
-            let session = controller
-                .launch_debate(config)
-                .map_err(ApiError::internal)?;
+            let output = dispatch_session_action(
+                &state,
+                "session.launch_debate",
+                serde_json::to_value(config).map_err(|e| {
+                    ApiError::internal(format!("Failed to serialize launch config: {}", e))
+                })?,
+            )
+            .await?;
 
             Ok((
                 StatusCode::CREATED,
-                Json(LaunchResponse {
-                    session_id: session.id,
-                    message: "Session created".to_string(),
-                }),
+                Json(launch_response_from_action_output(
+                    &output,
+                    "Session created",
+                )?),
             ))
         }
         _ => Err(ApiError::bad_request(
@@ -648,61 +643,10 @@ pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionInfo>, ApiError> {
-    validate_session_id(&id)?;
-
-    let controller = state.session_controller.read();
-    if let Some(session) = controller.get_session(&id) {
-        return Ok(Json(SessionInfo {
-            id: session.id.clone(),
-            name: session.name.clone(),
-            color: session.color.clone(),
-            session_type: match &session.session_type {
-                crate::session::SessionType::Hive { worker_count } => {
-                    format!("Hive ({})", worker_count)
-                }
-                crate::session::SessionType::Swarm { planner_count } => {
-                    format!("Swarm ({})", planner_count)
-                }
-                crate::session::SessionType::Fusion { variants } => {
-                    format!("Fusion ({})", variants.len())
-                }
-                crate::session::SessionType::Debate { variants } => {
-                    format!("Debate ({})", variants.len())
-                }
-                crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
-            },
-            status: format!("{:?}", session.state),
-            project_path: session.project_path.to_string_lossy().to_string(),
-            created_at: session.created_at.to_rfc3339(),
-            last_activity_at: session.last_activity_at.to_rfc3339(),
-        }));
-    }
-
-    // Try loading from storage if not active
-    let persisted = state
-        .storage
-        .load_session(&id)
-        .map_err(|_| ApiError::not_found(format!("Session {} not found", id)))?;
-
-    Ok(Json(SessionInfo {
-        id: persisted.id,
-        name: persisted.name,
-        color: persisted.color,
-        session_type: match &persisted.session_type {
-            SessionTypeInfo::Hive { worker_count } => format!("Hive ({})", worker_count),
-            SessionTypeInfo::Swarm { planner_count } => format!("Swarm ({})", planner_count),
-            SessionTypeInfo::Fusion { variants } => format!("Fusion ({})", variants.len()),
-            SessionTypeInfo::Debate { variants } => format!("Debate ({})", variants.len()),
-            SessionTypeInfo::Solo { cli, .. } => format!("Solo ({})", cli),
-        },
-        status: persisted.state,
-        project_path: persisted.project_path,
-        created_at: persisted.created_at.to_rfc3339(),
-        last_activity_at: persisted
-            .last_activity_at
-            .unwrap_or(persisted.created_at)
-            .to_rfc3339(),
-    }))
+    let output =
+        dispatch_session_action(&state, "session.get_info", serde_json::json!({ "id": id }))
+            .await?;
+    Ok(Json(decode_action_output("session.get_info", output)?))
 }
 
 /// POST /api/sessions/hive - Launch a new Hive session
@@ -710,32 +654,26 @@ pub async fn launch_hive(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchHiveRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
-    validate_session_name(req.name.as_deref())?;
-    validate_session_color(req.color.as_deref())?;
-
-    let controller = state.session_controller.write();
-    let project_path = std::path::PathBuf::from(req.project_path);
-
-    let command = req.command.unwrap_or_else(|| "claude".to_string());
-    validate_cli(&command)?;
-
-    let session = controller
-        .launch_hive(
-            project_path,
-            req.worker_count.unwrap_or(3),
-            &command,
-            req.task_description,
-            req.name,
-            req.color,
-        )
-        .map_err(ApiError::internal)?;
+    let output = dispatch_session_action(
+        &state,
+        "session.launch_hive",
+        serde_json::json!({
+            "project_path": req.project_path,
+            "task_description": req.task_description,
+            "worker_count": req.worker_count,
+            "command": req.command,
+            "name": req.name,
+            "color": req.color,
+        }),
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
-        Json(LaunchResponse {
-            session_id: session.id,
-            message: "Hive session launched".to_string(),
-        }),
+        Json(launch_response_from_action_output(
+            &output,
+            "Hive session launched",
+        )?),
     ))
 }
 
@@ -744,11 +682,6 @@ pub async fn launch_swarm(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchSwarmRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
-    validate_session_name(req.name.as_deref())?;
-    validate_session_color(req.color.as_deref())?;
-
-    let controller = state.session_controller.write();
-
     let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;
     let default_model = req
@@ -804,16 +737,20 @@ pub async fn launch_swarm(
         planners: vec![],
     };
 
-    let session = controller
-        .launch_swarm(config)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let output = dispatch_session_action(
+        &state,
+        "session.launch_swarm",
+        serde_json::to_value(config)
+            .map_err(|e| ApiError::internal(format!("Failed to serialize launch config: {}", e)))?,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
-        Json(LaunchResponse {
-            session_id: session.id,
-            message: "Swarm session launched".to_string(),
-        }),
+        Json(launch_response_from_action_output(
+            &output,
+            "Swarm session launched",
+        )?),
     ))
 }
 
@@ -822,11 +759,6 @@ pub async fn launch_solo(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchSoloRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
-    validate_project_path(&req.project_path)?;
-    validate_cli(&req.cli)?;
-    validate_session_name(req.name.as_deref())?;
-    validate_session_color(req.color.as_deref())?;
-
     let agent_config = AgentConfig {
         cli: req.cli.clone(),
         model: req.model,
@@ -860,17 +792,20 @@ pub async fn launch_solo(
         smoke_test: false,
     };
 
-    let controller = state.session_controller.write();
-    let session = controller
-        .launch_solo(config)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let output = dispatch_session_action(
+        &state,
+        "session.launch_solo",
+        serde_json::to_value(config)
+            .map_err(|e| ApiError::internal(format!("Failed to serialize launch config: {}", e)))?,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
-        Json(LaunchResponse {
-            session_id: session.id,
-            message: "Solo session launched".to_string(),
-        }),
+        Json(launch_response_from_action_output(
+            &output,
+            "Solo session launched",
+        )?),
     ))
 }
 
@@ -879,20 +814,6 @@ pub async fn launch_fusion(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchFusionRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
-    if req.variants.is_empty() {
-        return Err(ApiError::bad_request(
-            "Fusion launch requires at least one variant",
-        ));
-    }
-    if req.task_description.trim().is_empty() {
-        return Err(ApiError::bad_request("task_description cannot be empty"));
-    }
-
-    // Validate project path for security (prevent path traversal)
-    validate_project_path(&req.project_path)?;
-    validate_session_name(req.name.as_deref())?;
-    validate_session_color(req.color.as_deref())?;
-
     let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;
 
@@ -938,17 +859,20 @@ pub async fn launch_fusion(
         default_model: req.default_model,
     };
 
-    let controller = state.session_controller.write();
-    let session = controller
-        .launch_fusion(config)
-        .map_err(ApiError::internal)?;
+    let output = dispatch_session_action(
+        &state,
+        "session.launch_fusion",
+        serde_json::to_value(config)
+            .map_err(|e| ApiError::internal(format!("Failed to serialize launch config: {}", e)))?,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
-        Json(LaunchResponse {
-            session_id: session.id,
-            message: "Fusion session launched".to_string(),
-        }),
+        Json(launch_response_from_action_output(
+            &output,
+            "Fusion session launched",
+        )?),
     ))
 }
 
@@ -957,19 +881,6 @@ pub async fn launch_debate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LaunchDebateRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
-    if req.debaters.is_empty() {
-        return Err(ApiError::bad_request(
-            "Debate launch requires at least one debater",
-        ));
-    }
-    if req.topic.trim().is_empty() {
-        return Err(ApiError::bad_request("topic cannot be empty"));
-    }
-
-    validate_project_path(&req.project_path)?;
-    validate_session_name(req.name.as_deref())?;
-    validate_session_color(req.color.as_deref())?;
-
     let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;
 
@@ -977,11 +888,6 @@ pub async fn launch_debate(
     validate_cli(&judge_cli)?;
 
     let rounds = req.rounds.unwrap_or(3);
-    if rounds == 0 {
-        return Err(ApiError::bad_request(
-            "Debate launch requires at least one round",
-        ));
-    }
 
     let debaters = req
         .debaters
@@ -1024,17 +930,20 @@ pub async fn launch_debate(
         default_model: req.default_model,
     };
 
-    let controller = state.session_controller.write();
-    let session = controller
-        .launch_debate(config)
-        .map_err(ApiError::internal)?;
+    let output = dispatch_session_action(
+        &state,
+        "session.launch_debate",
+        serde_json::to_value(config)
+            .map_err(|e| ApiError::internal(format!("Failed to serialize launch config: {}", e)))?,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
-        Json(LaunchResponse {
-            session_id: session.id,
-            message: "Debate session launched".to_string(),
-        }),
+        Json(launch_response_from_action_output(
+            &output,
+            "Debate session launched",
+        )?),
     ))
 }
 
@@ -1044,45 +953,16 @@ pub async fn update_session(
     Path(id): Path<String>,
     Json(req): Json<UpdateSessionRequest>,
 ) -> Result<Json<SessionInfo>, ApiError> {
-    validate_session_id(&id)?;
-    validate_session_name(req.name.as_ref().and_then(|name| name.as_deref()))?;
-    validate_session_color(req.color.as_ref().and_then(|color| color.as_deref()))?;
-
-    let controller = state.session_controller.write();
-    let session = controller
-        .update_session_metadata(&id, req.name, req.color)
-        .map_err(|e| {
-            if e.starts_with("Session not found") {
-                ApiError::not_found(e)
-            } else {
-                ApiError::internal(e)
-            }
-        })?;
-
-    Ok(Json(SessionInfo {
-        id: session.id,
-        name: session.name,
-        color: session.color,
-        session_type: match &session.session_type {
-            crate::session::SessionType::Hive { worker_count } => {
-                format!("Hive ({})", worker_count)
-            }
-            crate::session::SessionType::Swarm { planner_count } => {
-                format!("Swarm ({})", planner_count)
-            }
-            crate::session::SessionType::Fusion { variants } => {
-                format!("Fusion ({})", variants.len())
-            }
-            crate::session::SessionType::Debate { variants } => {
-                format!("Debate ({})", variants.len())
-            }
-            crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
-        },
-        status: format!("{:?}", session.state),
-        project_path: session.project_path.to_string_lossy().to_string(),
-        created_at: session.created_at.to_rfc3339(),
-        last_activity_at: session.last_activity_at.to_rfc3339(),
-    }))
+    let output = dispatch_session_action(
+        &state,
+        "session.update_metadata_info",
+        serde_json::json!({ "id": id, "name": req.name, "color": req.color }),
+    )
+    .await?;
+    Ok(Json(decode_action_output(
+        "session.update_metadata_info",
+        output,
+    )?))
 }
 
 /// POST /api/sessions/{id}/fusion/select-winner - Select and squash-merge winner
@@ -1222,16 +1102,9 @@ pub async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_session_id(&id)?;
-
-    let controller = state.session_controller.write();
-    controller
-        .stop_session(&id)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "message": format!("Session {} stopped", id)
-    })))
+    let output =
+        dispatch_session_action(&state, "session.stop", serde_json::json!({ "id": id })).await?;
+    Ok(Json(output))
 }
 
 /// POST /api/sessions/{id}/close - Close a session
@@ -1239,20 +1112,9 @@ pub async fn close_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_session_id(&id)?;
-
-    let controller = state.session_controller.write();
-    controller.close_session(&id).map_err(|e| {
-        if e.starts_with("Session not found") {
-            ApiError::not_found(e)
-        } else {
-            ApiError::internal(e)
-        }
-    })?;
-
-    Ok(Json(serde_json::json!({
-        "message": format!("Session {} closed", id)
-    })))
+    let output =
+        dispatch_session_action(&state, "session.close", serde_json::json!({ "id": id })).await?;
+    Ok(Json(output))
 }
 
 /// POST /api/sessions/{id}/complete - Mark a session as completed

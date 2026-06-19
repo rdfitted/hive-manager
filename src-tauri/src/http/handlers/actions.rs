@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 
+use crate::actions::render::envelope_for_action_result;
 use crate::actions::{ActionContext, Caller};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
@@ -50,7 +51,7 @@ pub async fn list_actions(
 
 /// POST /api/actions/{name} — dispatch a registered action with caller = Http.
 /// The request body is the action's input JSON; the response is the action's
-/// raw output value (an envelope can wrap this later per #127).
+/// raw output value wrapped in the `{ renderer?, data }` envelope.
 pub async fn dispatch_action(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -59,5 +60,5 @@ pub async fn dispatch_action(
     let input = body.map(|Json(value)| value).unwrap_or(Value::Null);
     let ctx = ActionContext::new(Caller::Http, Arc::clone(&state));
     let output = state.registry().dispatch(&name, &ctx, input).await?;
-    Ok(Json(output))
+    Ok(Json(envelope_for_action_result(&name, output)))
 }
