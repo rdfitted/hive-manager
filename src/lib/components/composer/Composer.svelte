@@ -217,7 +217,9 @@
   }
 
   async function submit() {
-    if (disabled) return;
+    // No submit handler (dialog usage with bind:value): never submit, clear, or consume
+    // the one-shot context — that would wipe the field and silently eat pending context.
+    if (disabled || !onsubmit) return;
     let text = currentText().trim();
     // Prepend one-shot operator context exactly once.
     if (sessionId) {
@@ -271,8 +273,10 @@
       }
     }
 
-    // Enter submits; Shift+Enter inserts a newline (matches the project convention).
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Enter submits ONLY when this composer has a submit handler (e.g. the chat input).
+    // In dialog usage (bind:value, no onsubmit) Enter inserts a newline like a textarea
+    // instead of clearing the field. Shift+Enter always inserts a newline.
+    if (e.key === 'Enter' && !e.shiftKey && onsubmit) {
       e.preventDefault();
       submit();
     }
