@@ -7,8 +7,9 @@
   import ShortcutsOverlay from '$lib/components/ShortcutsOverlay.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
   import FusionPanel from '$lib/components/FusionPanel.svelte';
+  import DebatePanel from '$lib/components/DebatePanel.svelte';
   import SessionOverview from '$lib/components/session/SessionOverview.svelte';
-  import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
   import { layout } from '$lib/stores/layout';
@@ -104,6 +105,10 @@
 
   async function handleLaunchFusion(config: FusionLaunchConfig): Promise<void> {
     await sessions.launchFusion(config);
+  }
+
+  async function handleLaunchDebate(config: DebateLaunchConfig): Promise<void> {
+    await sessions.launchDebate(config);
   }
 
   function openAddWorkerDialog() {
@@ -219,6 +224,7 @@
     onLaunchHiveV2={handleLaunchHiveV2}
     onLaunchSwarm={handleLaunchSwarm}
     onLaunchFusion={handleLaunchFusion}
+    onLaunchDebate={handleLaunchDebate}
     onOpenAddWorker={openAddWorkerDialog}
   />
 
@@ -266,6 +272,8 @@
           </div>
         {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && $activeSession.state !== 'Planning' && $activeSession.state !== 'PlanReady'}
           <FusionPanel />
+        {:else if $activeSession?.session_type && 'Debate' in $activeSession.session_type && $activeSession.state !== 'Planning' && $activeSession.state !== 'PlanReady'}
+          <DebatePanel />
         {:else}
           <SessionOverview />
         {/if}

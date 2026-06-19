@@ -5,7 +5,7 @@
   import TemplatePicker from './templates/TemplatePicker.svelte';
   import Composer from './composer/Composer.svelte';
   import { Crown, CaretDown, CaretRight } from 'phosphor-svelte';
-  import type { AgentConfig, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
+  import type { AgentConfig, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig, DebateLaunchConfig, DebateDebaterConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
   import { templates, selectedTemplate } from '$lib/stores/templates';
   import { cliOptions, defaultRoles } from '$lib/config/clis';
@@ -19,9 +19,10 @@
     launchSwarm: SwarmLaunchConfig;
     launchFusion: FusionLaunchConfig;
     launchSolo: SoloLaunchConfig;
+    launchDebate: DebateLaunchConfig;
   }>();
 
-  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'swarm' | 'research';
+  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'swarm' | 'research' | 'debate';
   type LaunchWorkerConfig = AgentConfig & { selectedRole: string; promptTemplateOverride?: string | null };
 
   // ... (predefinedRoles same)
@@ -216,6 +217,22 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }));
   let judgeAgentConfig: AgentConfig = { cli: judgeConfig.cli, model: judgeConfig.model, flags: [], label: 'Fusion Judge' };
 
+  // Debate config
+  let debaterCount = 2;
+  let debateRounds = 3;
+  let debateTopic = '';
+  let debateDebaters: DebateDebaterConfig[] = [
+    { name: 'Debater A', stance: 'Proponent', cli: 'claude', flags: [] },
+    { name: 'Debater B', stance: 'Opponent', cli: 'claude', flags: [] },
+    { name: 'Debater C', stance: 'Alternative A', cli: 'claude', flags: [] },
+    { name: 'Debater D', stance: 'Alternative B', cli: 'claude', flags: [] },
+  ];
+  let debateJudgeAgentConfig: AgentConfig = { cli: 'claude', flags: [], label: 'Debate Judge' };
+
+  let debaterAgentConfigs: AgentConfig[] = debateDebaters.map(d => ({
+    cli: d.cli, model: d.model, flags: [], label: d.name,
+  }));
+
   function applyTemplate(template: SessionTemplate | null) {
     if (!template) return;
     
@@ -240,10 +257,19 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
       variantAgentConfigs = fusionVariants.map(v => ({
         cli: v.cli, model: v.model, flags: [], label: v.name,
       }));
+    } else if (template.mode === 'debate') {
+      debaterCount = template.cells.length;
+      debateDebaters = template.cells.map((c, i: number) => ({
+        name: `Debater ${String.fromCharCode(65 + i)}`,
+        stance: `Stance ${String.fromCharCode(65 + i)}`,
+        cli: c.cli,
+        model: c.model,
+        flags: [],
+      }));
+      debaterAgentConfigs = debateDebaters.map(d => ({
+        cli: d.cli, model: d.model, flags: [], label: d.name,
+      }));
     }
-    
-    // Switch to the actual mode after applying
-    // mode = template.mode as SessionMode; // already set above
   }
 
   $: if ($selectedTemplate) {
@@ -266,8 +292,23 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     judgeConfig = { cli: detail.cli, model: detail.model || undefined, flags: detail.flags, label: detail.label };
   }
 
+  function handleDebaterConfigChange(index: number, detail: AgentConfig) {
+    debaterAgentConfigs[index] = detail;
+    debateDebaters[index] = {
+      ...debateDebaters[index],
+      cli: detail.cli,
+      model: detail.model || undefined,
+      flags: detail.flags,
+    };
+  }
+
+  function handleDebateJudgeConfigChange(detail: AgentConfig) {
+    debateJudgeAgentConfig = detail;
+  }
+
 
   $: activeFusionVariants = fusionVariants.slice(0, variantCount);
+  $: activeDebaters = debateDebaters.slice(0, debaterCount);
 
   function updateWorkerCli(workerIndex: number) {
     const worker = hiveWorkers[workerIndex];
@@ -477,6 +518,21 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           qa_workers: withEvaluator ? qaWorkers : undefined,
         };
         dispatch('launchSolo', config);
+      } else if (mode === 'debate') {
+        const config: DebateLaunchConfig = {
+          name: sessionName.trim() || undefined,
+          color: sessionColor || undefined,
+          project_path: projectPath,
+          debaters: activeDebaters,
+          topic: prompt,
+          rounds: debateRounds,
+          judge_config: debateJudgeAgentConfig,
+          queen_config: queenConfig,
+          with_planning: withPlanning,
+          default_cli: 'claude',
+          default_model: undefined,
+        };
+        dispatch('launchDebate', config);
       } else {
         const config: FusionLaunchConfig = {
           name: sessionName.trim() || undefined,
@@ -556,6 +612,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           type="button"
         >
           Fusion
+        </button>
+        <button
+          class="mode-tab"
+          class:active={mode === 'debate'}
+          on:click={() => (mode = 'debate')}
+          type="button"
+        >
+          Debate
         </button>
         <button
           class="mode-tab"
@@ -898,6 +962,76 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
           </div>
+        {:else if mode === 'debate'}
+          <div class="form-section">
+            <h3>Debate Configuration</h3>
+            <p class="section-description">Run multiple debaters in parallel to argue different perspectives across multiple rounds. A judge evaluates and renders the verdict.</p>
+
+            <div class="form-row">
+              <div class="field">
+                <label for="debater-count">Number of Debaters</label>
+                <select id="debater-count" bind:value={debaterCount} class="role-select">
+                  <option value={2}>2 Debaters</option>
+                  <option value={3}>3 Debaters</option>
+                  <option value={4}>4 Debaters</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label for="debate-rounds">Number of Rounds</label>
+                <select id="debate-rounds" bind:value={debateRounds} class="role-select">
+                  <option value={1}>1 Round</option>
+                  <option value={2}>2 Rounds</option>
+                  <option value={3}>3 Rounds</option>
+                  <option value={4}>4 Rounds</option>
+                  <option value={5}>5 Rounds</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="subsection">
+              <h4>Debater Configurations</h4>
+              <div class="workers-list">
+                {#each activeDebaters as debater, i (i)}
+                  <div class="worker-card">
+                    <div class="card-header" style="display: flex; gap: 8px; flex-direction: column; align-items: stretch; border: none; padding: 0; margin-bottom: 8px;">
+                      <input
+                        type="text"
+                        class="card-title-input"
+                        bind:value={debateDebaters[i].name}
+                        placeholder="Debater {String.fromCharCode(65 + i)}"
+                        style="width: 100%;"
+                      />
+                      <input
+                        type="text"
+                        class="card-title-input"
+                        style="font-size: 12px; opacity: 0.8; font-weight: normal; width: 100%; border-bottom: 1px dashed color-mix(in srgb, var(--text-primary) 10%, transparent);"
+                        bind:value={debateDebaters[i].stance}
+                        placeholder="Stance (optional, e.g. Pro / Con)"
+                      />
+                    </div>
+                    <AgentConfigEditor
+                      config={debaterAgentConfigs[i]}
+                      showLabel={false}
+                      on:change={(e) => handleDebaterConfigChange(i, e.detail)}
+                    />
+                  </div>
+                {/each}
+              </div>
+            </div>
+
+            <div class="subsection">
+              <h4>Judge Configuration</h4>
+              <p class="section-description">Evaluates the debate and renders the verdict.</p>
+              <div class="worker-card">
+                <AgentConfigEditor
+                  config={debateJudgeAgentConfig}
+                  showLabel={false}
+                  on:change={(e) => handleDebateJudgeConfigChange(e.detail)}
+                />
+              </div>
+            </div>
+          </div>
         {:else if mode === 'solo'}
           <div class="form-section">
             <h3>Solo Configuration</h3>
@@ -970,6 +1104,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                       <div class="node fusion">
                         <span class="node-label">{variant.name}</span>
                         <span class="node-cli">{variant.cli}</span>
+                      </div>
+                    {/each}
+                  {:else if mode === 'debate'}
+                    {#each activeDebaters as debater}
+                      <div class="node debate">
+                        <span class="node-label">{debater.name}</span>
+                        <span class="node-cli">{debater.cli}</span>
                       </div>
                     {/each}
                   {:else if mode === 'solo'}
@@ -1591,5 +1732,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
   .node.fusion { border-color: var(--status-success); }
+  .node.debate { border-color: var(--accent-purple, #bb9af7); }
   .node.solo { border-color: var(--status-warning); }
 </style>

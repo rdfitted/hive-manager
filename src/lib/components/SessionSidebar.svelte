@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
-  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { invoke } from '@tauri-apps/api/core';
@@ -52,6 +52,7 @@
     onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
     onLaunchFusion?: (config: FusionLaunchConfig) => Promise<void>;
     onLaunchSolo?: (config: SoloLaunchConfig) => Promise<void>;
+    onLaunchDebate?: (config: DebateLaunchConfig) => Promise<void>;
     onOpenAddWorker?: () => void;
   }
 
@@ -65,7 +66,7 @@
     state: string;
   }
 
-  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onOpenAddWorker }: Props = $props();
+  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onLaunchDebate, onOpenAddWorker }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
@@ -232,6 +233,22 @@
         await onLaunchSolo(e.detail);
       } else {
         await sessions.launchSolo(e.detail);
+      }
+      showLaunchDialog = false;
+    } catch (err) {
+      console.error('Launch failed:', err);
+    } finally {
+      launching = false;
+    }
+  }
+
+  async function handleLaunchDebate(e: CustomEvent<DebateLaunchConfig>) {
+    launching = true;
+    try {
+      if (onLaunchDebate) {
+        await onLaunchDebate(e.detail);
+      } else {
+        await sessions.launchDebate(e.detail);
       }
       showLaunchDialog = false;
     } catch (err) {
@@ -545,6 +562,7 @@
   on:launchSwarm={handleLaunchSwarm}
   on:launchFusion={handleLaunchFusion}
   on:launchSolo={handleLaunchSolo}
+  on:launchDebate={handleLaunchDebate}
 />
 
 <!-- Close confirmation dialog -->

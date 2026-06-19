@@ -2,7 +2,7 @@
     import { onMount } from 'svelte';
     import { templates, selectedTemplate } from '../../stores/templates';
     import type { SessionTemplate } from '../../types/domain';
-    import { MagnifyingGlass, Hexagon, TestTube } from 'phosphor-svelte';
+    import { MagnifyingGlass, Hexagon, TestTube, Scales } from 'phosphor-svelte';
 
     let searchQuery = '';
 
@@ -50,6 +50,8 @@
                     <div class="card-icon" class:builtin={template.is_builtin}>
                         {#if template.mode === 'hive'}
                             <Hexagon size={24} weight="light" />
+                        {:else if template.mode === 'debate'}
+                            <Scales size={24} weight="light" />
                         {:else}
                             <TestTube size={24} weight="light" />
                         {/if}

@@ -89,6 +89,7 @@
                     <option value="hive">Hive</option>
                     <option value="fusion">Fusion</option>
                     <option value="research">Research</option>
+                    <option value="debate">Debate</option>
                 </select>
             </div>
             <div class="form-group">

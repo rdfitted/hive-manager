@@ -102,6 +102,28 @@ export interface FusionLaunchConfig {
   with_planning: boolean;
 }
 
+export interface DebateDebaterConfig {
+  name: string;
+  stance?: string;
+  cli: string;
+  model?: string;
+  flags: string[];
+}
+
+export interface DebateLaunchConfig {
+  project_path: string;
+  name?: string;
+  color?: string;
+  debaters: DebateDebaterConfig[];
+  topic: string;
+  rounds: number;
+  judge_config: AgentConfig;
+  queen_config?: AgentConfig;
+  with_planning: boolean;
+  default_cli: string;
+  default_model?: string;
+}
+
 export interface PlannerConfig {
   config: AgentConfig;
   domain: string;
@@ -209,6 +231,7 @@ export interface Session {
     | { Hive: { worker_count: number } } 
     | { Swarm: { planner_count: number } } 
     | { Fusion: { variants: string[] } }
+    | { Debate: { variants: string[] } }
     | { Solo: { cli: string } };
   project_path: string;
   state: SessionState;
@@ -487,6 +510,26 @@ function createSessionsStore() {
       update((state) => ({ ...state, loading: true, error: null }));
       try {
         const session = await invoke<Session>('launch_fusion', { config });
+        update((state) => {
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
+    async launchDebate(config: DebateLaunchConfig) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('launch_debate', { config });
         update((state) => {
           const exists = state.sessions.some((s) => s.id === session.id);
           return {
