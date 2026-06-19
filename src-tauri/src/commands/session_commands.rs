@@ -1,5 +1,8 @@
 use parking_lot::RwLock;
 use serde_json::json;
+use std::collections::{HashSet, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::State;
 
@@ -32,6 +35,111 @@ async fn dispatch_frontend(
 // SessionControllerState is Send + Sync because Arc<RwLock<T>> is Send + Sync when T is Send
 unsafe impl Send for SessionControllerState {}
 unsafe impl Sync for SessionControllerState {}
+
+const SESSION_FILE_RESULT_CAP: usize = 100;
+const SESSION_FILE_VISIT_CAP: usize = 5_000;
+
+fn validate_session_id_for_command(session_id: &str) -> Result<(), String> {
+    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
+        return Err("Invalid session ID format".to_string());
+    }
+    Ok(())
+}
+
+fn is_ignored_file_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        ".git" | ".hive-manager" | ".svelte-kit" | "node_modules" | "target" | "dist" | "build"
+    )
+}
+
+fn path_within_any_root(path: &Path, canonical_roots: &[PathBuf]) -> bool {
+    canonical_roots.iter().any(|root| path.starts_with(root))
+}
+
+fn dedupe_canonical_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut canonical_roots = Vec::new();
+
+    for root in roots {
+        let Ok(canonical) = fs::canonicalize(root) else {
+            continue;
+        };
+        let key = canonical.to_string_lossy().to_lowercase();
+        if seen.insert(key) {
+            canonical_roots.push(canonical);
+        }
+    }
+
+    canonical_roots
+}
+
+fn file_matches_query(path: &Path, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+
+    let path_text = path.to_string_lossy().to_lowercase();
+    let name_text = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    path_text.contains(query) || name_text.contains(query)
+}
+
+fn list_files_under_roots(roots: Vec<PathBuf>, query: String) -> Result<Vec<String>, String> {
+    let canonical_roots = dedupe_canonical_roots(roots);
+    let query = query.trim().to_lowercase();
+    let mut pending: VecDeque<PathBuf> = canonical_roots.iter().cloned().collect();
+    let mut results = Vec::new();
+    let mut visited = 0usize;
+
+    while let Some(dir) = pending.pop_front() {
+        if visited >= SESSION_FILE_VISIT_CAP || results.len() >= SESSION_FILE_RESULT_CAP {
+            break;
+        }
+        visited += 1;
+
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            if results.len() >= SESSION_FILE_RESULT_CAP || visited >= SESSION_FILE_VISIT_CAP {
+                break;
+            }
+
+            let path = entry.path();
+            let Ok(canonical_path) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !path_within_any_root(&canonical_path, &canonical_roots) {
+                continue;
+            }
+
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+
+            if file_type.is_dir() {
+                if !is_ignored_file_dir(&path) {
+                    pending.push_back(path);
+                }
+                continue;
+            }
+
+            if file_type.is_file() && file_matches_query(&path, &query) {
+                results.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    Ok(results)
+}
 
 #[tauri::command]
 pub async fn launch_hive(
@@ -321,9 +429,7 @@ pub async fn get_run_journal(
     app_state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<serde_json::Value, String> {
-    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
-        return Err("Invalid session ID format".to_string());
-    }
+    validate_session_id_for_command(&session_id)?;
     let store = crate::storage::RunJournalStore::new(Arc::clone(&app_state.app_state_db));
     let journal = store
         .read_journal(&session_id)
@@ -332,6 +438,32 @@ pub async fn get_run_journal(
         .read_ledger(&session_id)
         .map_err(|e| format!("Failed to read run ledger: {e}"))?;
     Ok(json!({ "journal": journal, "ledger": ledger }))
+}
+
+#[tauri::command]
+pub async fn list_session_files(
+    state: State<'_, SessionControllerState>,
+    session_id: String,
+    query: String,
+) -> Result<Vec<String>, String> {
+    validate_session_id_for_command(&session_id)?;
+
+    let roots = {
+        let controller = state.0.read();
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        let mut roots = vec![session.project_path];
+        if let Some(worktree_path) = session.worktree_path {
+            roots.push(PathBuf::from(worktree_path));
+        }
+        roots
+    };
+
+    tauri::async_runtime::spawn_blocking(move || list_files_under_roots(roots, query))
+        .await
+        .map_err(|e| format!("Failed to list session files: {e}"))?
 }
 
 #[tauri::command]
@@ -349,4 +481,22 @@ pub async fn update_session_metadata(
         json!({ "id": id, "name": name, "color": color }),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_within_any_root;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_scope_rejects_sibling_paths() {
+        let root = std::env::temp_dir().join("hm-session-root");
+        let inside = root.join("src").join("main.rs");
+        let outside = std::env::temp_dir()
+            .join("hm-session-root-sibling")
+            .join("main.rs");
+
+        assert!(path_within_any_root(&inside, &[PathBuf::from(&root)]));
+        assert!(!path_within_any_root(&outside, &[root]));
+    }
 }

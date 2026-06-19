@@ -6,12 +6,16 @@
   export let open = false;
   /** The session being resumed (for the title). */
   export let sessionName: string | null = null;
-  /** The resume classification produced by the backend on resume. */
+  /** The resume classification produced by the backend or preview store. */
   export let report: ResumeReport | null = null;
+  export let loading = false;
+  export let confirming = false;
+  export let error: string | null = null;
 
   // Default-checked: skip already-completed write-steps so destructive git ops
   // (commits, branch/worktree creation, worker/evaluator spawns) are not re-run.
   let skipCompletedWriteSteps = true;
+  let wasOpen = false;
 
   const dispatch = createEventDispatcher<{
     confirm: { skipCompletedWriteSteps: boolean };
@@ -22,6 +26,10 @@
   $: interrupted = report?.interrupted ?? [];
   $: uncertain = report?.uncertain ?? [];
   $: hasWarnings = interrupted.length > 0 || uncertain.length > 0;
+  $: if (open && !wasOpen) {
+    skipCompletedWriteSteps = true;
+  }
+  $: wasOpen = open;
 
   function kindLabel(entry: RunJournalEntry): string {
     return entry.kind.replace(/_/g, ' ');
@@ -62,8 +70,12 @@
       </header>
 
       <div class="modal-body">
-        {#if !report}
-          <p class="muted">No prior run journal — resuming a clean session.</p>
+        {#if loading}
+          <p class="muted">Reading run journal...</p>
+        {:else if error}
+          <p class="error-text">{error}</p>
+        {:else if !report}
+          <p class="muted">No prior run journal - resuming a clean session.</p>
         {:else}
           {#if skipped.length > 0}
             <section>
@@ -95,7 +107,7 @@
             <section>
               <h3>Unconfirmed side-effects ({uncertain.length})</h3>
               <p class="muted">
-                These effects could not be verified — review before continuing.
+                These effects could not be verified - review before continuing.
               </p>
               <ul>
                 {#each uncertain as effect (effect.step_id)}
@@ -108,7 +120,7 @@
           {/if}
 
           {#if skipped.length === 0 && !hasWarnings}
-            <p class="muted">Nothing needs attention — safe to resume.</p>
+            <p class="muted">Nothing needs attention - safe to resume.</p>
           {/if}
         {/if}
 
@@ -119,8 +131,12 @@
       </div>
 
       <footer class="modal-footer">
-        <button type="button" class="secondary" on:click={cancel}>Cancel</button>
-        <button type="button" class="primary" on:click={confirm}>Resume</button>
+        <button type="button" class="secondary" on:click={cancel} disabled={confirming}>
+          Cancel
+        </button>
+        <button type="button" class="primary" on:click={confirm} disabled={loading || confirming}>
+          {confirming ? 'Resuming...' : 'Resume'}
+        </button>
       </footer>
     </div>
   </div>
@@ -136,6 +152,7 @@
     justify-content: center;
     z-index: 1000;
   }
+
   .modal {
     background: var(--bg-elevated, #1a1b26);
     color: var(--text-primary, #c0caf5);
@@ -147,37 +164,46 @@
     flex-direction: column;
     overflow: hidden;
   }
+
   .modal-header {
     padding: 1rem 1.25rem;
     border-bottom: 1px solid var(--border, #2a2e42);
   }
+
   .modal-header h2 {
     margin: 0;
     font-size: 1.05rem;
   }
+
   .modal-body {
     padding: 1rem 1.25rem;
     overflow-y: auto;
   }
+
   section {
     margin-bottom: 1rem;
   }
+
   section h3 {
     margin: 0 0 0.25rem;
     font-size: 0.9rem;
   }
+
   ul {
     list-style: none;
     padding: 0;
     margin: 0.25rem 0 0;
   }
+
   li {
     padding: 0.25rem 0;
     font-size: 0.85rem;
   }
+
   .warn-row {
     color: var(--text-warning, #e0af68);
   }
+
   .badge {
     display: inline-block;
     font-size: 0.7rem;
@@ -186,19 +212,29 @@
     margin-right: 0.4rem;
     text-transform: uppercase;
   }
+
   .badge.done {
     background: rgba(158, 206, 106, 0.18);
     color: var(--text-success, #9ece6a);
   }
+
   .badge.warn {
     background: rgba(224, 175, 104, 0.18);
     color: var(--text-warning, #e0af68);
   }
+
   .muted {
     color: var(--text-secondary, #787c99);
     font-size: 0.8rem;
     margin: 0.25rem 0;
   }
+
+  .error-text {
+    color: var(--status-error, #f7768e);
+    font-size: 0.82rem;
+    margin: 0.25rem 0;
+  }
+
   .skip-toggle {
     display: flex;
     align-items: center;
@@ -206,6 +242,7 @@
     margin-top: 0.75rem;
     font-size: 0.85rem;
   }
+
   .modal-footer {
     padding: 0.85rem 1.25rem;
     border-top: 1px solid var(--border, #2a2e42);
@@ -213,6 +250,7 @@
     justify-content: flex-end;
     gap: 0.5rem;
   }
+
   button {
     padding: 0.4rem 0.9rem;
     border-radius: 6px;
@@ -220,11 +258,18 @@
     cursor: pointer;
     font-size: 0.85rem;
   }
+
+  button:disabled {
+    cursor: default;
+    opacity: 0.55;
+  }
+
   button.primary {
     background: var(--accent, #7aa2f7);
     color: #0b0c14;
     border-color: var(--accent, #7aa2f7);
   }
+
   button.secondary {
     background: transparent;
     color: var(--text-primary, #c0caf5);

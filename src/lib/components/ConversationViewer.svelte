@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import { conversationStore, type ConversationMessage } from '$lib/stores/conversations';
   import { activeSession } from '$lib/stores/sessions';
   import AgentStatusBar from './AgentStatusBar.svelte';
@@ -12,6 +13,7 @@
   let messageInput = '';
   let lastMessageCount = 0;
   let pollInterval: ReturnType<typeof setInterval>;
+  let approvalError = '';
 
   $: sessionId = $activeSession?.id ?? null;
   $: agents = $activeSession?.agents ?? [];
@@ -96,14 +98,47 @@
     await conversationStore.sendMessage(sessionId, selectedAgent, 'operator', text.trim());
   }
 
-  // Approval widget signals. Wiring approve/reject to the queen/worker is #123's
-  // Action contract; for #127 we console-log so the widget is demonstrable.
+  function queenAgentId(): string | null {
+    const queen = agents.find((agent) => agent.role === 'Queen' || agent.id.endsWith('-queen'));
+    return queen?.id ?? null;
+  }
+
+  async function injectApprovalDecision(decision: 'approved' | 'rejected', detail: { actionId?: string }) {
+    if (!sessionId) return;
+    const targetAgentId = queenAgentId() ?? (selectedAgent !== 'shared' ? selectedAgent : null);
+    if (!targetAgentId) {
+      approvalError = 'No agent is available for approval injection.';
+      return;
+    }
+
+    const actionId = detail?.actionId ?? 'unknown';
+    const message = [
+      `Operator ${decision} approval request.`,
+      `action_id: ${actionId}`,
+      `decision: ${decision}`,
+    ].join('\n');
+
+    try {
+      approvalError = '';
+      await invoke('operator_inject', {
+        request: {
+          session_id: sessionId,
+          target_agent_id: targetAgentId,
+          message,
+        },
+      });
+    } catch (err) {
+      approvalError = String(err);
+      console.error('[tool-render] approval injection failed', err);
+    }
+  }
+
   function handleApprove(detail: { actionId?: string }) {
-    console.log('[tool-render] approve', detail?.actionId ?? null);
+    void injectApprovalDecision('approved', detail);
   }
 
   function handleReject(detail: { actionId?: string }) {
-    console.log('[tool-render] reject', detail?.actionId ?? null);
+    void injectApprovalDecision('rejected', detail);
   }
 
   function getSenderColor(from: string): string {
@@ -215,6 +250,13 @@
     <div class="error">
       {$conversationStore.error}
       <button class="dismiss-btn" onclick={() => conversationStore.clearError()}>&#10005;</button>
+    </div>
+  {/if}
+
+  {#if approvalError}
+    <div class="error">
+      {approvalError}
+      <button class="dismiss-btn" onclick={() => approvalError = ''}>&#10005;</button>
     </div>
   {/if}
 </div>

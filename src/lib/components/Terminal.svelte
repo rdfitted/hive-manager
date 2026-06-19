@@ -1,3 +1,22 @@
+<script lang="ts" module>
+  type TerminalSelectionReader = () => string | null;
+
+  const terminalSelectionReaders = new Map<string, TerminalSelectionReader>();
+
+  export function readTerminalSelection(agentId?: string | null): string | null {
+    if (agentId) {
+      return terminalSelectionReaders.get(agentId)?.() || null;
+    }
+
+    for (const read of terminalSelectionReaders.values()) {
+      const selection = read();
+      if (selection) return selection;
+    }
+
+    return null;
+  }
+</script>
+
 <script lang="ts">
   import { ArrowDown, Broom, CaretDown, CaretUp, CheckSquare, ClipboardText, FileText, MagnifyingGlass, X } from 'phosphor-svelte';
   import { onMount, onDestroy, tick } from 'svelte';
@@ -642,9 +661,12 @@
     requestAnimationFrame(() => {
       handleResize();
     });
+
+    terminalSelectionReaders.set(agentId, () => term?.getSelection() || null);
   });
 
   onDestroy(() => {
+    terminalSelectionReaders.delete(agentId);
     if (resizeTimeout) clearTimeout(resizeTimeout);
     if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
     document.removeEventListener('click', handleGlobalClick);

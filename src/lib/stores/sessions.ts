@@ -306,9 +306,61 @@ export interface RunJournalResponse {
   ledger: LedgerEntry[];
 }
 
+export interface ResumeOptions {
+  skipCompletedWriteSteps: boolean;
+}
+
 /** Fetch the run journal + ledger for a session (#125). */
 export async function getRunJournal(sessionId: string): Promise<RunJournalResponse> {
   return invoke<RunJournalResponse>('get_run_journal', { sessionId });
+}
+
+const WRITE_STEP_KINDS = new Set<StepKind>([
+  'worker_spawn',
+  'evaluator_spawn',
+  'git_commit',
+  'git_branch',
+  'file_write',
+]);
+
+export function isResumeReportEmpty(report: ResumeReport): boolean {
+  return (
+    report.skipped.length === 0 &&
+    report.interrupted.length === 0 &&
+    report.uncertain.length === 0
+  );
+}
+
+/**
+ * Frontend preview of the backend resume classifier. The backend still performs
+ * authoritative verification during `resume_session`; this read-only pass gives
+ * the confirmation modal enough per-step context before the operator resumes.
+ */
+export function buildResumeReportFromJournal(response: RunJournalResponse): ResumeReport {
+  const ledgerByStep = new Map(response.ledger.map((entry) => [entry.step_id, entry]));
+  const report: ResumeReport = { skipped: [], interrupted: [], uncertain: [] };
+
+  for (const entry of response.journal) {
+    const ledger = ledgerByStep.get(entry.step_id);
+    const hasUnconfirmedLedger = !!ledger && !ledger.confirmed;
+
+    if (entry.status === 'completed' && WRITE_STEP_KINDS.has(entry.kind)) {
+      report.skipped.push({ ...entry, status: 'skipped' });
+      continue;
+    }
+
+    if (entry.status === 'started' || entry.status === 'unknown' || entry.status === 'interrupted') {
+      report.interrupted.push({
+        ...entry,
+        status: hasUnconfirmedLedger ? 'unknown' : 'interrupted',
+      });
+      if (hasUnconfirmedLedger && ledger) {
+        report.uncertain.push(ledger);
+      }
+    }
+  }
+
+  return report;
 }
 
 interface SessionsState {
@@ -338,6 +390,17 @@ function createSessionsStore() {
       return { ...state };
     });
   });
+
+  function getState(): SessionsState {
+    let current: SessionsState = {
+      sessions: [],
+      activeSessionId: null,
+      loading: false,
+      error: null,
+    };
+    subscribe((state) => (current = state))();
+    return current;
+  }
 
   return {
     subscribe,
@@ -600,7 +663,18 @@ function createSessionsStore() {
       }
     },
 
-    async resumeSession(sessionId: string) {
+    async getResumeReport(sessionId: string): Promise<ResumeReport | null> {
+      const loadedSession = getState().sessions.find((session) => session.id === sessionId);
+      if (loadedSession?.resume_report) {
+        return loadedSession.resume_report;
+      }
+
+      const response = await getRunJournal(sessionId);
+      const report = buildResumeReportFromJournal(response);
+      return isResumeReportEmpty(report) ? null : report;
+    },
+
+    async resumeSession(sessionId: string, _options?: ResumeOptions) {
       update((state) => ({ ...state, loading: true, error: null }));
       try {
         const session = await invoke<Session>('resume_session', { sessionId });

@@ -47,10 +47,11 @@ use commands::{
     get_workers_state, git_fetch, git_pull, git_push, git_worktree_add, git_worktree_list,
     git_worktree_prune, git_worktree_remove, inject_to_pty, kill_pty, launch_debate, launch_fusion,
     launch_hive, launch_hive_v2, launch_research, launch_solo, launch_swarm, list_branches,
-    list_ptys, list_sessions, list_stored_sessions, log_coordination_message, mark_plan_ready,
-    operator_inject, paste_to_pty, queen_inject, queen_switch_branch, resize_pty, resume_session,
-    stop_agent, stop_session, switch_branch, update_app_config, update_session_metadata,
-    write_to_pty, CoordinationState, PtyManagerState, SessionControllerState, StorageState,
+    list_ptys, list_session_files, list_sessions, list_stored_sessions, log_coordination_message,
+    mark_plan_ready, operator_inject, paste_to_pty, queen_inject, queen_switch_branch, resize_pty,
+    resume_session, stop_agent, stop_session, switch_branch, update_app_config,
+    update_session_metadata, write_to_pty, CoordinationState, PtyManagerState,
+    SessionControllerState, StorageState,
 };
 #[cfg(not(test))]
 use pty::PtyManager;
@@ -590,6 +591,7 @@ pub fn run() {
             mark_plan_ready,
             resume_session,
             get_run_journal,
+            list_session_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
