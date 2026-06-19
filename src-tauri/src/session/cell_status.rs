@@ -266,6 +266,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         }
     }
 

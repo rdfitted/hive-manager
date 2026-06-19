@@ -523,6 +523,10 @@ pub struct Session {
     /// non-repo folders and honors the research "no git" contract.
     #[serde(default)]
     pub no_git: bool,
+    /// Populated by `resume_session` (#125): per-step classification of a resumed run so
+    /// the frontend can show a confirmation modal. `None` for freshly launched sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_report: Option<crate::domain::run_journal::ResumeReport>,
 }
 
 #[derive(Clone, Serialize)]
@@ -550,6 +554,9 @@ pub struct SessionController {
     /// QA timeout cancel handles: session_id -> abort handle
     qa_timeout_handles: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     evaluator_respawns_inflight: Mutex<HashSet<String>>,
+    /// Durable run journal + side-effect ledger (#125). Optional so tests/legacy
+    /// construction paths can run without a SQLite DB; write-step seams no-op when unset.
+    run_journal: Option<crate::storage::RunJournalStore>,
 }
 
 // Explicitly implement Send + Sync
@@ -704,6 +711,72 @@ impl SessionController {
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
             qa_timeout_handles: Mutex::new(HashMap::new()),
             evaluator_respawns_inflight: Mutex::new(HashSet::new()),
+            run_journal: None,
+        }
+    }
+
+    /// Attach the run journal store (#125). Schema must already be ensured by the caller.
+    pub fn set_run_journal(&mut self, store: crate::storage::RunJournalStore) {
+        self.run_journal = Some(store);
+    }
+
+    /// Record a write-step as `Started`, returning its deterministic id. No-op (returns
+    /// `None`) when no journal store is attached. Errors are logged, not propagated, so
+    /// journaling never blocks the orchestration path.
+    fn journal_step_started(
+        &self,
+        run_id: &str,
+        kind: crate::domain::run_journal::StepKind,
+        ordinal: u64,
+        detail: Option<&str>,
+    ) -> Option<String> {
+        let store = self.run_journal.as_ref()?;
+        match store.record_step_started(run_id, kind, ordinal, detail) {
+            Ok(step_id) => Some(step_id),
+            Err(e) => {
+                tracing::warn!(run_id, ?kind, ordinal, "Failed to journal step start: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Mark a previously-started write-step finished. No-op when journaling is unset.
+    fn journal_step_finished(
+        &self,
+        run_id: &str,
+        step_id: &str,
+        status: crate::domain::run_journal::StepStatus,
+    ) {
+        if let Some(store) = self.run_journal.as_ref() {
+            if let Err(e) = store.record_step_finished(run_id, step_id, status) {
+                tracing::warn!(run_id, step_id, "Failed to journal step finish: {}", e);
+            }
+        }
+    }
+
+    /// Check the journal for a Completed write-step of the given kind/ordinal. Used by the
+    /// resume guard so already-completed destructive ops are not re-executed.
+    fn is_write_step_completed(
+        &self,
+        run_id: &str,
+        kind: crate::domain::run_journal::StepKind,
+        ordinal: u64,
+    ) -> bool {
+        let Some(store) = self.run_journal.as_ref() else {
+            return false;
+        };
+        let step_id =
+            crate::domain::run_journal::RunJournalEntry::deterministic_step_id(run_id, kind, ordinal);
+        match store.read_journal(run_id) {
+            Ok(entries) => entries.iter().any(|e| {
+                e.step_id == step_id
+                    && matches!(
+                        e.status,
+                        crate::domain::run_journal::StepStatus::Completed
+                            | crate::domain::run_journal::StepStatus::Skipped
+                    )
+            }),
+            Err(_) => false,
         }
     }
 
@@ -862,6 +935,7 @@ impl SessionController {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         };
 
         {
@@ -6099,6 +6173,7 @@ Last updated: {timestamp}
             worktree_path: Some(solo_cwd.clone()),
             worktree_branch: Some(solo_branch.clone()),
             no_git: false,
+            resume_report: None,
         };
 
         {
@@ -6460,6 +6535,7 @@ Last updated: {timestamp}
                 None
             },
             no_git: !use_worktrees,
+            resume_report: None,
         };
 
         {
@@ -6684,6 +6760,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: variants.first().map(|v| v.worktree_path.clone()),
             worktree_branch: variants.first().map(|v| v.branch.clone()),
             no_git: false,
+            resume_report: None,
         };
 
         {
@@ -6954,6 +7031,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         };
 
         {
@@ -7053,6 +7131,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         };
 
         {
@@ -7437,6 +7516,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         };
 
         {
@@ -7479,6 +7559,26 @@ phases and do EXACTLY this, then stop:
         let worker_config = &config.workers[worker_index];
         let index = (worker_index + 1) as u8;
         let worker_branch = format!("hive/{}/worker-{}", session_id, index);
+
+        // #125 resume guard: if this worker-spawn write-step is already journaled
+        // Completed, a prior run already created its worktree/branch — do NOT re-run the
+        // destructive spawn. Advance to the next worker instead.
+        if self.is_write_step_completed(session_id, crate::domain::run_journal::StepKind::WorkerSpawn, index as u64) {
+            tracing::info!(
+                session_id,
+                worker_index = index,
+                "Skipping worker spawn — already journaled Completed (resume)"
+            );
+            return Ok(());
+        }
+        // #125: record the write-step as Started BEFORE any destructive worktree op.
+        let journal_step_id = self.journal_step_started(
+            session_id,
+            crate::domain::run_journal::StepKind::WorkerSpawn,
+            index as u64,
+            Some(&worker_branch),
+        );
+
         let previous_state = self
             .sessions
             .read()
@@ -7637,6 +7737,15 @@ phases and do EXACTLY this, then stop:
         if let Some(changes) = waiting_changes {
             self.persist_then_emit_session_update(session_id, changes)
                 .map_err(SessionError::ConfigError)?;
+        }
+
+        // #125: the worker-spawn write-step landed — mark it Completed so a resume skips it.
+        if let Some(step_id) = journal_step_id.as_deref() {
+            self.journal_step_finished(
+                session_id,
+                step_id,
+                crate::domain::run_journal::StepStatus::Completed,
+            );
         }
 
         Ok(())
@@ -7903,6 +8012,33 @@ phases and do EXACTLY this, then stop:
             ))
         })?;
         self.sync_agent_commit_sha(session_id, &worker_agent_id, worker_commit_sha.clone());
+
+        // #125: journal the worker's git commit as a confirmable side-effect. The commit
+        // SHA is captured here, so the destructive op already landed: record Started +
+        // ledger (effect_ref=SHA) then immediately Completed + confirm. On resume an
+        // interrupted commit (Started, unconfirmed) is verified via `git cat-file -e`.
+        if let Some(ref sha) = worker_commit_sha {
+            use crate::domain::run_journal::{Confidence, StepKind, StepStatus};
+            if let Some(step_id) = self.journal_step_started(
+                session_id,
+                StepKind::GitCommit,
+                worker_id as u64,
+                Some(&worker_agent_id),
+            ) {
+                if let Some(store) = self.run_journal.as_ref() {
+                    let _ = store.record_ledger(
+                        session_id,
+                        &step_id,
+                        "git_commit",
+                        Some(sha),
+                        Confidence::Uncertain,
+                    );
+                    let _ = store.confirm_ledger(session_id, &step_id, Some(sha), Confidence::High);
+                }
+                self.journal_step_finished(session_id, &step_id, StepStatus::Completed);
+            }
+        }
+
         if Self::require_commit_sha_gate_enabled() && worker_commit_sha.is_none() {
             tracing::warn!(
                 session_id = %session_id,
@@ -8718,7 +8854,15 @@ phases and do EXACTLY this, then stop:
             .map_err(|e| format!("Failed to track session storage state: {}", e))?;
 
         // Convert persisted session to active session
-        let session = self.session_from_persisted(&persisted)?;
+        let mut session = self.session_from_persisted(&persisted)?;
+
+        // #125: classify the run journal for this resumed session — mark completed
+        // write-steps Skipped (the spawn/commit guards keep them from re-running) and
+        // verify unconfirmed ledger effects. Attach the report for the frontend modal.
+        let report = self.build_resume_report(session_id, &session.project_path);
+        if !report.is_empty() {
+            session.resume_report = Some(report);
+        }
 
         // Add to in-memory sessions
         {
@@ -8736,6 +8880,126 @@ phases and do EXACTLY this, then stop:
         }
 
         Ok(session)
+    }
+
+    /// #125: read the run journal, classify each step, mark completed write-steps as
+    /// Skipped, and verify unconfirmed ledger effects against the repo. Returns a
+    /// [`ResumeReport`](crate::domain::run_journal::ResumeReport). Empty (and cheap) when
+    /// no journal store is attached or the run has no journaled steps.
+    fn build_resume_report(
+        &self,
+        run_id: &str,
+        project_path: &Path,
+    ) -> crate::domain::run_journal::ResumeReport {
+        use crate::domain::run_journal::{Confidence, ResumeReport, StepStatus};
+
+        let mut report = ResumeReport::default();
+        let Some(store) = self.run_journal.as_ref() else {
+            return report;
+        };
+        let entries = match store.read_journal(run_id) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(run_id, "Failed to read run journal on resume: {}", e);
+                return report;
+            }
+        };
+
+        for entry in entries {
+            let ledger = store
+                .read_ledger_for_step(run_id, &entry.step_id)
+                .ok()
+                .flatten();
+            let has_unconfirmed = ledger.as_ref().map(|l| !l.confirmed).unwrap_or(false);
+            let classified =
+                crate::storage::run_journal::classify_step(&entry, has_unconfirmed);
+
+            match classified {
+                StepStatus::Completed => {
+                    // Completed write-steps are skipped on resume so destructive ops
+                    // (git commit/branch, worker/evaluator spawn) are never re-run.
+                    if entry.kind.is_write_step() {
+                        let _ = store.record_step_finished(
+                            run_id,
+                            &entry.step_id,
+                            StepStatus::Skipped,
+                        );
+                        let mut skipped = entry.clone();
+                        skipped.status = StepStatus::Skipped;
+                        report.skipped.push(skipped);
+                    }
+                }
+                StepStatus::Unknown => {
+                    // An interrupted write-step with an unconfirmed ledger effect:
+                    // verify the side-effect actually landed and set Confidence.
+                    if let Some(led) = ledger {
+                        let confidence = self.verify_ledger_effect(
+                            project_path,
+                            entry.kind,
+                            led.effect_ref.as_deref(),
+                        );
+                        let _ = store.confirm_ledger(
+                            run_id,
+                            &entry.step_id,
+                            None,
+                            confidence,
+                        );
+                        if confidence == Confidence::High {
+                            let _ = store.record_step_finished(
+                                run_id,
+                                &entry.step_id,
+                                StepStatus::Completed,
+                            );
+                        } else {
+                            let mut recovered = led;
+                            recovered.confidence = confidence;
+                            report.uncertain.push(recovered);
+                            report.interrupted.push(entry);
+                        }
+                    } else {
+                        report.interrupted.push(entry);
+                    }
+                }
+                StepStatus::Interrupted => {
+                    report.interrupted.push(entry);
+                }
+                _ => {}
+            }
+        }
+
+        report
+    }
+
+    /// Verify a journaled side-effect still exists in the repo. Commit SHAs are checked
+    /// with `git cat-file -e`; branch names with `git rev-parse --verify`. Returns
+    /// [`Confidence::High`] when found, [`Confidence::Uncertain`] otherwise.
+    fn verify_ledger_effect(
+        &self,
+        project_path: &Path,
+        kind: crate::domain::run_journal::StepKind,
+        effect_ref: Option<&str>,
+    ) -> crate::domain::run_journal::Confidence {
+        use crate::domain::run_journal::{Confidence, StepKind};
+        let Some(reference) = effect_ref else {
+            return Confidence::Uncertain;
+        };
+        let project_path = project_path.to_path_buf();
+        let found = match kind {
+            StepKind::GitCommit => {
+                Self::run_git_in_dir(&project_path, &["cat-file", "-e", reference]).is_ok()
+            }
+            StepKind::GitBranch | StepKind::WorkerSpawn => Self::run_git_in_dir(
+                &project_path,
+                &["rev-parse", "--verify", reference],
+            )
+            .is_ok(),
+            _ => false,
+        };
+        if found {
+            Confidence::High
+        } else {
+            Confidence::Uncertain
+        }
     }
 
     fn session_from_persisted(
@@ -8819,6 +9083,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: persisted.worktree_path.clone(),
             worktree_branch: persisted.worktree_branch.clone(),
             no_git: persisted.no_git,
+            resume_report: None,
         })
     }
 
@@ -9060,6 +9325,7 @@ phases and do EXACTLY this, then stop:
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         };
 
         {
@@ -9380,6 +9646,14 @@ phases and do EXACTLY this, then stop:
         let (cmd, mut args) = Self::build_command(&config);
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_file.to_string_lossy());
 
+        // #125: record the evaluator-spawn write-step as Started before the PTY spawn.
+        let evaluator_journal_step = self.journal_step_started(
+            session_id,
+            crate::domain::run_journal::StepKind::EvaluatorSpawn,
+            0,
+            Some("evaluator"),
+        );
+
         let cwd = session.project_path.to_str().unwrap_or(".");
         {
             let pty_manager = self.pty_manager.read();
@@ -9393,7 +9667,16 @@ phases and do EXACTLY this, then stop:
                     120,
                     30,
                 )
-                .map_err(|e| format!("Failed to spawn Evaluator: {}", e))?;
+                .map_err(|e| {
+                    if let Some(step_id) = evaluator_journal_step.as_deref() {
+                        self.journal_step_finished(
+                            session_id,
+                            step_id,
+                            crate::domain::run_journal::StepStatus::Failed,
+                        );
+                    }
+                    format!("Failed to spawn Evaluator: {}", e)
+                })?;
         }
 
         let agent_info = AgentInfo {
@@ -9423,6 +9706,15 @@ phases and do EXACTLY this, then stop:
         self.emit_cell_status_changes(session_id, qa_changes);
         self.ensure_task_watcher(session_id, &session.project_path);
         self.start_qa_timeout(session_id, timeout_secs);
+
+        // #125: evaluator spawned successfully — mark the write-step Completed.
+        if let Some(step_id) = evaluator_journal_step.as_deref() {
+            self.journal_step_finished(
+                session_id,
+                step_id,
+                crate::domain::run_journal::StepStatus::Completed,
+            );
+        }
 
         Ok(agent_info)
     }
@@ -10202,6 +10494,109 @@ mod tests {
         assert!(json.contains("SpawningWorker"));
     }
 
+    // ---- #125 run journal: resume skip + ledger recovery ----
+
+    fn controller_with_journal() -> (SessionController, crate::storage::RunJournalStore) {
+        let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+        let mut controller = SessionController::new(pty_manager);
+        let db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+        let store = crate::storage::RunJournalStore::new(db);
+        store.ensure_schema().unwrap();
+        controller.set_run_journal(store.clone());
+        (controller, store)
+    }
+
+    #[test]
+    fn test_resume_skips_completed_write_step() {
+        use crate::domain::run_journal::{StepKind, StepStatus};
+        let (controller, store) = controller_with_journal();
+        let run_id = "resume-skip";
+
+        // A worker-spawn write-step that completed in a prior run.
+        let step_id = store
+            .record_step_started(run_id, StepKind::WorkerSpawn, 1, None)
+            .unwrap();
+        store
+            .record_step_finished(run_id, &step_id, StepStatus::Completed)
+            .unwrap();
+
+        // The resume guard sees it as completed (so the destructive spawn is NOT re-run).
+        assert!(controller.is_write_step_completed(run_id, StepKind::WorkerSpawn, 1));
+
+        // Building the resume report marks it Skipped and surfaces it.
+        let report = controller.build_resume_report(run_id, Path::new("."));
+        assert_eq!(report.skipped.len(), 1, "completed write-step is reported skipped");
+        assert_eq!(report.skipped[0].step_id, step_id);
+        assert_eq!(report.skipped[0].status, StepStatus::Skipped);
+
+        // The journal row is now persisted as Skipped.
+        let journal = store.read_journal(run_id).unwrap();
+        assert_eq!(journal[0].status, StepStatus::Skipped);
+    }
+
+    #[test]
+    fn test_resume_classifies_interrupted_step() {
+        use crate::domain::run_journal::{StepKind, StepStatus};
+        let (controller, store) = controller_with_journal();
+        let run_id = "resume-interrupted";
+
+        // A worker spawn that started but never finished (no ledger): Interrupted.
+        store
+            .record_step_started(run_id, StepKind::WorkerSpawn, 1, None)
+            .unwrap();
+
+        let report = controller.build_resume_report(run_id, Path::new("."));
+        assert_eq!(report.interrupted.len(), 1);
+        assert_eq!(report.interrupted[0].kind, StepKind::WorkerSpawn);
+        assert!(report.skipped.is_empty());
+        // Not completed, so the guard would allow a re-spawn.
+        assert!(!controller.is_write_step_completed(run_id, StepKind::WorkerSpawn, 1));
+        let _ = StepStatus::Interrupted;
+    }
+
+    #[test]
+    fn test_resume_recovers_unconfirmed_commit_in_temp_repo() {
+        use crate::domain::run_journal::{Confidence, StepKind};
+        let (controller, store) = controller_with_journal();
+        let run_id = "resume-recover";
+
+        // Build a real temp git repo with one commit so the SHA verification succeeds.
+        let repo = TempDir::new().unwrap();
+        let repo_path = repo.path().to_path_buf();
+        SessionController::run_git_in_dir(&repo_path, &["init", "-q"]).unwrap();
+        SessionController::run_git_in_dir(&repo_path, &["config", "user.email", "t@t.dev"]).unwrap();
+        SessionController::run_git_in_dir(&repo_path, &["config", "user.name", "tester"]).unwrap();
+        std::fs::write(repo_path.join("a.txt"), "hi").unwrap();
+        SessionController::run_git_in_dir(&repo_path, &["add", "."]).unwrap();
+        SessionController::run_git_in_dir(&repo_path, &["commit", "-q", "-m", "init"]).unwrap();
+        let sha = current_head(&repo_path).unwrap();
+
+        // Simulate a crash between commit and confirmation: Started step + unconfirmed
+        // ledger row carrying the real SHA.
+        let step_id = store
+            .record_step_started(run_id, StepKind::GitCommit, 1, None)
+            .unwrap();
+        store
+            .record_ledger(run_id, &step_id, "git_commit", Some(&sha), Confidence::Uncertain)
+            .unwrap();
+
+        // Resume verifies the SHA exists -> ledger confirmed with High confidence.
+        let report = controller.build_resume_report(run_id, &repo_path);
+        assert!(report.uncertain.is_empty(), "verified commit is not uncertain");
+        let ledger = store.read_ledger_for_step(run_id, &step_id).unwrap().unwrap();
+        assert!(ledger.confirmed);
+        assert_eq!(ledger.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn test_resume_report_no_journal_store_is_empty() {
+        // Controller without a journal store: build_resume_report is a cheap empty no-op.
+        let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+        let controller = SessionController::new(pty_manager);
+        let report = controller.build_resume_report("x", Path::new("."));
+        assert!(report.is_empty());
+    }
+
     #[test]
     fn persisted_qa_state_round_trip_uses_safe_fallbacks() {
         assert_eq!(
@@ -10676,6 +11071,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         }
     }
 
@@ -10723,6 +11119,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         }
     }
 
@@ -10960,6 +11357,7 @@ mod tests {
             worktree_path: None, // Key: no session worktree for planning/swarm
             worktree_branch: None,
             no_git: false,
+            resume_report: None,
         };
 
         assert!(session.worktree_path.is_none());

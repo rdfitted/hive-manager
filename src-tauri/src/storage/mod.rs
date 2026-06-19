@@ -21,6 +21,9 @@ use crate::templates::SessionTemplate;
 pub mod application_state;
 pub use application_state::{ApplicationStateDb, ApplicationStateRow};
 
+pub mod run_journal;
+pub use run_journal::RunJournalStore;
+
 /// Generate a deterministic ID for legacy learnings that lack one.
 /// Uses UUID v5 (SHA-1 namespace hash) from concatenated fields so the same
 /// entry always produces the same ID across reads.

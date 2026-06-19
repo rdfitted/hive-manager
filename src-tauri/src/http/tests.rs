@@ -134,6 +134,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        resume_report: None,
     }
 }
 
@@ -174,6 +175,7 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        resume_report: None,
     }
 }
 
@@ -320,6 +322,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        resume_report: None,
     });
 
     let body = serde_json::json!({
@@ -373,6 +376,7 @@ async fn test_patch_session_null_clears_field() {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        resume_report: None,
     });
 
     let body = serde_json::json!({
@@ -5056,6 +5060,7 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         worktree_path: None,
         worktree_branch: None,
         no_git: false,
+        resume_report: None,
     }
 }
 
@@ -5618,4 +5623,94 @@ async fn test_http_action_unknown_returns_404() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---- #125 run-journal endpoint ----
+
+#[tokio::test]
+async fn test_get_run_journal_empty_returns_ok() {
+    // A session with no journaled steps returns 200 with empty arrays (routing +
+    // serialization smoke).
+    let (app, _controller) = setup_test_app_with_controller().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/run-journal-empty/run-journal")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = read_json_body(response).await;
+    assert_eq!(json["journal"].as_array().unwrap().len(), 0);
+    assert_eq!(json["ledger"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_get_run_journal_returns_seeded_entries() {
+    use crate::domain::run_journal::{Confidence, StepKind, StepStatus};
+
+    // Use an on-disk DB so the seeding store and the HTTP app share the same file.
+    let temp = TempDir::new().unwrap();
+    let (app, _controller, storage) =
+        setup_test_app_with_controller_at(temp.path().to_path_buf()).await;
+
+    let db = Arc::new(crate::storage::ApplicationStateDb::open(storage.base_dir()).unwrap());
+    let store = crate::storage::RunJournalStore::new(db);
+    store.ensure_schema().unwrap();
+
+    let run_id = "run-journal-seeded";
+    let step_id = store
+        .record_step_started(run_id, StepKind::GitCommit, 1, Some("worker-1"))
+        .unwrap();
+    store
+        .record_ledger(run_id, &step_id, "git_commit", Some("abc123"), Confidence::High)
+        .unwrap();
+    store.confirm_ledger(run_id, &step_id, None, Confidence::High).unwrap();
+    store
+        .record_step_finished(run_id, &step_id, StepStatus::Completed)
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{run_id}/run-journal"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = read_json_body(response).await;
+    let journal = json["journal"].as_array().unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0]["kind"], "git_commit");
+    assert_eq!(journal[0]["status"], "completed");
+    let ledger = json["ledger"].as_array().unwrap();
+    assert_eq!(ledger.len(), 1);
+    assert_eq!(ledger[0]["effect_ref"], "abc123");
+    assert_eq!(ledger[0]["confirmed"], true);
+    assert_eq!(ledger[0]["confidence"], "high");
+}
+
+#[tokio::test]
+async fn test_get_run_journal_rejects_bad_session_id() {
+    let (app, _controller) = setup_test_app_with_controller().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/..%2Fevil/run-journal")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Axum decodes %2F; the traversal token is rejected by validate_session_id.
+    assert_ne!(response.status(), StatusCode::OK);
 }
