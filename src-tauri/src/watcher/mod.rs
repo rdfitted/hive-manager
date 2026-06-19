@@ -144,7 +144,12 @@ impl TaskFileWatcher {
             let suffix = filename.strip_prefix("debate-debater-")?;
             let (debater_index, round_part) = suffix.split_once("-round-")?;
             let round = round_part.strip_suffix("-task.md")?;
-            return Some((debater_index.parse().ok()?, round.parse().ok()?));
+            let debater_index = debater_index.parse().ok()?;
+            let round = round.parse().ok()?;
+            if debater_index == 0 || round == 0 {
+                return None;
+            }
+            return Some((debater_index, round));
         }
         None
     }
@@ -372,6 +377,18 @@ mod tests {
         );
         assert_eq!(
             TaskFileWatcher::extract_debate_round(&PathBuf::from("debate-debater-1-task.md")),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from(
+                "debate-debater-0-round-1-task.md"
+            )),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from(
+                "debate-debater-1-round-0-task.md"
+            )),
             None
         );
     }

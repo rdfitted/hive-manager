@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -270,10 +270,19 @@ pub struct LaunchSessionRequest {
 
 #[derive(Deserialize)]
 pub struct UpdateSessionRequest {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_update_field")]
     pub name: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_update_field")]
     pub color: Option<Option<String>>,
+}
+
+fn deserialize_nullable_update_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -724,6 +733,8 @@ pub async fn launch_swarm(
         project_path: req.project_path,
         name: req.name,
         color: req.color,
+        default_cli,
+        default_model,
         queen_config,
         planner_count: req.planner_count.unwrap_or(2),
         planner_config,
@@ -888,6 +899,9 @@ pub async fn launch_debate(
     validate_cli(&judge_cli)?;
 
     let rounds = req.rounds.unwrap_or(3);
+    if rounds == 0 {
+        return Err(ApiError::bad_request("rounds must be greater than zero"));
+    }
 
     let debaters = req
         .debaters
@@ -953,10 +967,29 @@ pub async fn update_session(
     Path(id): Path<String>,
     Json(req): Json<UpdateSessionRequest>,
 ) -> Result<Json<SessionInfo>, ApiError> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("id".to_string(), Value::String(id));
+    if let Some(name) = req.name {
+        payload.insert(
+            "name".to_string(),
+            serde_json::to_value(name).map_err(|e| {
+                ApiError::internal(format!("Failed to serialize name update: {}", e))
+            })?,
+        );
+    }
+    if let Some(color) = req.color {
+        payload.insert(
+            "color".to_string(),
+            serde_json::to_value(color).map_err(|e| {
+                ApiError::internal(format!("Failed to serialize color update: {}", e))
+            })?,
+        );
+    }
+
     let output = dispatch_session_action(
         &state,
         "session.update_metadata_info",
-        serde_json::json!({ "id": id, "name": req.name, "color": req.color }),
+        Value::Object(payload),
     )
     .await?;
     Ok(Json(decode_action_output(

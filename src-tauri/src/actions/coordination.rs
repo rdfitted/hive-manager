@@ -6,8 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::coordination::{StateManager, WorkerStateInfo};
+use crate::coordination::{CoordinationMessage, MessageType, StateManager, WorkerStateInfo};
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
+use crate::tauri_shim::Emitter;
 
 use super::error::ActionError;
 use super::registry::{Action, ActionRegistry};
@@ -346,7 +347,9 @@ impl Action for AddWorker {
                 })
                 .collect();
 
-            let _ = state_manager.update_workers_file(&workers);
+            state_manager
+                .update_workers_file(&workers)
+                .map_err(|e| ActionError::internal(e.to_string()))?;
         }
 
         serialize_output(agent_info, "agent info")
@@ -391,11 +394,21 @@ impl Action for LogCoordinationMessage {
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
         require_frontend(ctx)?;
         let parsed: LogCoordinationMessageInput = deserialize_input(input)?;
-        let manager = ctx.state.injection_manager.read();
-        manager
-            .log_system_message(&parsed.session_id, &parsed.to, &parsed.content)
+        let coord_message = CoordinationMessage::new(
+            &parsed.from,
+            &parsed.to,
+            &parsed.content,
+            MessageType::System,
+        );
+        ctx.state
+            .storage
+            .append_coordination_log(&parsed.session_id, &coord_message)
             .map_err(|e| ActionError::internal(e.to_string()))?;
-        let _ = parsed.from;
+        if let Some(app_handle) = ctx.state.app_handle.as_ref() {
+            app_handle
+                .emit("coordination-message", &coord_message)
+                .map_err(|e| ActionError::internal(e.to_string()))?;
+        }
         Ok(Value::Null)
     }
 }
@@ -764,8 +777,15 @@ fn extract_priority(text: &str) -> (String, Option<String>) {
     ];
 
     for (marker, priority) in priorities {
-        if text.to_uppercase().contains(marker) {
-            let cleaned = text.replace(marker, "").replace(&marker.to_lowercase(), "");
+        if text
+            .split_whitespace()
+            .any(|token| token.eq_ignore_ascii_case(marker))
+        {
+            let cleaned = text
+                .split_whitespace()
+                .filter(|token| !token.eq_ignore_ascii_case(marker))
+                .collect::<Vec<_>>()
+                .join(" ");
             return (cleaned, Some(priority.to_string()));
         }
     }
@@ -774,12 +794,38 @@ fn extract_priority(text: &str) -> (String, Option<String>) {
 }
 
 fn extract_assignee(text: &str) -> (String, Option<String>) {
-    if let Some(pos) = text.find("->") {
-        let (title, assignee) = text.split_at(pos);
-        return (title.to_string(), Some(assignee[2..].trim().to_string()));
+    for separator in ["->", "\u{2192}"] {
+        if let Some((title, assignee)) = text.split_once(separator) {
+            return (title.to_string(), Some(assignee.trim().to_string()));
+        }
     }
 
     (text.to_string(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_assignee, extract_priority};
+
+    #[test]
+    fn extract_priority_strips_detected_token_case_insensitively() {
+        let (title, priority) = extract_priority("[High] Fix launch regression");
+
+        assert_eq!(title, "Fix launch regression");
+        assert_eq!(priority.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn extract_assignee_supports_ascii_and_unicode_arrows() {
+        assert_eq!(
+            extract_assignee("Fix launch -> worker-8"),
+            ("Fix launch ".to_string(), Some("worker-8".to_string()))
+        );
+        assert_eq!(
+            extract_assignee("Fix launch \u{2192} worker-9"),
+            ("Fix launch ".to_string(), Some("worker-9".to_string()))
+        );
+    }
 }
 
 pub fn register(registry: &mut ActionRegistry) {

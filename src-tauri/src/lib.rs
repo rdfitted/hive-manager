@@ -461,10 +461,12 @@ pub fn run() {
                         .unwrap_or("");
                     let debater_index = json.get("debater_index")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u8;
+                        .and_then(|value| u8::try_from(value).ok())
+                        .unwrap_or(0);
                     let round = json.get("round")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u8;
+                        .and_then(|value| u8::try_from(value).ok())
+                        .unwrap_or(0);
 
                     if session_id.is_empty() || debater_index == 0 || round == 0 {
                         tracing::warn!("Invalid debate-round-completed payload: {}", payload);

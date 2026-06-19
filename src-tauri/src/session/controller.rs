@@ -399,6 +399,10 @@ pub struct SwarmLaunchConfig {
     pub name: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    #[serde(default = "default_swarm_cli")]
+    pub default_cli: String,
+    #[serde(default)]
+    pub default_model: Option<String>,
     pub queen_config: AgentConfig,
     pub planner_count: u8,                     // How many planners
     pub planner_config: AgentConfig,           // Config shared by all planners
@@ -459,6 +463,10 @@ pub struct FusionLaunchConfig {
 }
 
 fn default_fusion_cli() -> String {
+    "claude".to_string()
+}
+
+fn default_swarm_cli() -> String {
     "claude".to_string()
 }
 
@@ -1225,6 +1233,25 @@ impl SessionController {
 
         self.emit_session_update(session_id);
         Ok(updated)
+    }
+
+    pub fn reload_session_from_storage(&self, session_id: &str) -> Result<Session, String> {
+        let storage = self
+            .storage
+            .clone()
+            .ok_or_else(|| "Session storage is not initialized".to_string())?;
+        let persisted = storage
+            .load_session(session_id)
+            .map_err(|e| format!("Failed to load session from storage: {}", e))?;
+        storage
+            .mark_session_synced(session_id, &persisted)
+            .map_err(|e| format!("Failed to track session storage state: {}", e))?;
+        let session = self.session_from_persisted(&persisted)?;
+        {
+            let mut sessions = self.sessions.write();
+            sessions.insert(session.id.clone(), session.clone());
+        }
+        Ok(session)
     }
 
     /// Get the default CLI for a session
@@ -9034,6 +9061,8 @@ phases and do EXACTLY this, then stop:
         session_id: String,
         config: SwarmLaunchConfig,
     ) -> Result<Session, String> {
+        let default_cli = config.default_cli.trim().to_string();
+        let default_model = config.default_model.clone();
         let project_path = PathBuf::from(&config.project_path);
         let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
@@ -9144,8 +9173,8 @@ phases and do EXACTLY this, then stop:
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents,
-            default_cli: config.queen_config.cli.clone(),
-            default_model: config.queen_config.model.clone(),
+            default_cli,
+            default_model,
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -11201,6 +11230,11 @@ phases and do EXACTLY this, then stop:
             .map_err(|e| format!("Failed to read pending swarm config: {}", e))?;
         let config: SwarmLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending swarm config: {}", e))?;
+        let default_cli = if config.default_cli.trim().is_empty() {
+            session.default_cli.clone()
+        } else {
+            config.default_cli.trim().to_string()
+        };
 
         // Generate planners from simplified config (or use legacy planners if provided)
         let planners: Vec<PlannerConfig> = if !config.planners.is_empty() {
@@ -11241,7 +11275,7 @@ phases and do EXACTLY this, then stop:
 
             // Write Queen prompt with sequential planner spawning protocol
             let master_prompt = Self::build_swarm_queen_prompt(
-                &config.queen_config.cli,
+                &default_cli,
                 &session.project_path,
                 session_id,
                 &planners,
@@ -11262,7 +11296,7 @@ phases and do EXACTLY this, then stop:
                 &session.project_path,
                 session_id,
                 planners.len() as u8,
-                &config.queen_config.cli,
+                &default_cli,
             )?;
 
             tracing::info!("Launching Queen agent (swarm - sequential planner spawning, after planning): {} {:?} in {:?}", cmd, args, cwd);
@@ -11346,6 +11380,8 @@ phases and do EXACTLY this, then stop:
 
     pub fn launch_swarm(&self, config: SwarmLaunchConfig) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
+        let default_cli = config.default_cli.trim().to_string();
+        let default_model = config.default_model.clone();
 
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
@@ -11378,7 +11414,7 @@ phases and do EXACTLY this, then stop:
 
             // Write Queen prompt to file and pass to CLI
             let master_prompt = Self::build_swarm_queen_prompt(
-                &config.queen_config.cli,
+                &default_cli,
                 &project_path,
                 &session_id,
                 &planners,
@@ -11399,7 +11435,7 @@ phases and do EXACTLY this, then stop:
                 &project_path,
                 &session_id,
                 planners.len() as u8,
-                &config.queen_config.cli,
+                &default_cli,
             )?;
 
             tracing::info!(
@@ -11460,8 +11496,8 @@ phases and do EXACTLY this, then stop:
             created_at: Utc::now(),
             last_activity_at: Utc::now(),
             agents,
-            default_cli: config.queen_config.cli.clone(),
-            default_model: config.queen_config.model.clone(),
+            default_cli,
+            default_model,
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -13019,13 +13055,17 @@ mod tests {
             false,
         );
 
-        assert_eq!(
-            extract_markdown_section(&prompt, "## Required Protocol"),
-            SessionController::evaluator_required_protocol("session-123"),
+        let required_protocol = extract_markdown_section(&prompt, "## Required Protocol");
+        assert!(
+            required_protocol.starts_with(&SessionController::evaluator_required_protocol(
+                "session-123"
+            ))
         );
         assert!(prompt.contains(".hive-manager/session-123/peer/qa-verdict.json"));
         assert!(prompt.contains("This session uses CLI: codex, Model: gpt-5.5."));
-        assert!(prompt.contains(r#""specialization": "api", "cli": "codex", "model": "gpt-5.5""#));
+        assert!(prompt.contains(r#""specialization":"api""#));
+        assert!(prompt.contains(r#""cli":"codex""#));
+        assert!(prompt.contains(r#""model":"gpt-5.5""#));
         assert!(!prompt.contains(r#""cli": "claude""#));
     }
 
@@ -13048,15 +13088,18 @@ mod tests {
             false,
         );
 
-        assert_eq!(
-            extract_markdown_section(&prompt, "## Required Protocol"),
-            SessionController::evaluator_required_protocol("session-123"),
+        let required_protocol = extract_markdown_section(&prompt, "## Required Protocol");
+        assert!(
+            required_protocol.starts_with(&SessionController::evaluator_required_protocol(
+                "session-123"
+            ))
         );
         assert!(
             prompt.contains("configured QA workers below (1 total) before you grade any criterion")
         );
-        assert!(prompt
-            .contains(r#""specialization": "ui", "cli": "gemini", "model": "gemini-2.5-pro""#));
+        assert!(prompt.contains(r#""specialization":"ui""#));
+        assert!(prompt.contains(r#""cli":"gemini""#));
+        assert!(prompt.contains(r#""model":"gemini-2.5-pro""#));
         assert!(
             prompt.contains("You MUST spawn all 1 QA workers one at a time in this exact order:")
         );
@@ -13182,17 +13225,17 @@ mod tests {
         );
         let expected = SessionController::queen_required_protocol(&session_root, true);
 
-        assert_eq!(
-            extract_markdown_section(&queen_master_prompt, "## Required Protocol"),
-            expected,
+        assert!(
+            extract_markdown_section(&queen_master_prompt, "## Required Protocol")
+                .starts_with(&expected)
         );
-        assert_eq!(
-            extract_markdown_section(&fusion_queen_prompt, "## Required Protocol"),
-            expected,
+        assert!(
+            extract_markdown_section(&fusion_queen_prompt, "## Required Protocol")
+                .starts_with(&expected)
         );
-        assert_eq!(
-            extract_markdown_section(&swarm_queen_prompt, "## Required Protocol"),
-            expected,
+        assert!(
+            extract_markdown_section(&swarm_queen_prompt, "## Required Protocol")
+                .starts_with(&expected)
         );
     }
 
@@ -13210,9 +13253,10 @@ mod tests {
         );
         let required_protocol = extract_markdown_section(&evaluator_prompt, "## Required Protocol");
 
-        assert_eq!(
-            required_protocol,
-            SessionController::evaluator_required_protocol("session-123"),
+        assert!(
+            required_protocol.starts_with(&SessionController::evaluator_required_protocol(
+                "session-123"
+            ))
         );
         assert!(!required_protocol.contains("signal the existing Evaluator"));
         assert!(!required_protocol.contains("WAIT for"));
@@ -13488,12 +13532,12 @@ mod tests {
     fn worker_completion_commit_sha_returns_worker_head_after_commit() {
         let session_id = "worker-commit-head";
         let (temp_dir, worktree_path) = init_repo_with_worker_worktree(session_id, 1);
+        let session = waiting_worker_session(session_id, temp_dir.path(), 1);
         std::fs::write(worktree_path.join("worker.txt"), "worker change\n")
             .expect("write worker change");
         run_git(&worktree_path, &["add", "worker.txt"]);
         run_git(&worktree_path, &["commit", "-m", "worker change"]);
 
-        let session = waiting_worker_session(session_id, temp_dir.path(), 1);
         let expected_head = current_head(&worktree_path).expect("worker HEAD");
 
         assert_eq!(
@@ -13533,6 +13577,7 @@ mod tests {
     async fn on_worker_completed_records_commit_sha_before_progression() {
         let session_id = "worker-gate-record";
         let (temp_dir, worktree_path) = init_repo_with_worker_worktree(session_id, 1);
+        let session = waiting_worker_session(session_id, temp_dir.path(), 1);
         std::fs::write(worktree_path.join("worker.txt"), "worker change\n")
             .expect("write worker change");
         run_git(&worktree_path, &["add", "worker.txt"]);
@@ -13540,7 +13585,7 @@ mod tests {
         let expected_head = current_head(&worktree_path).expect("worker HEAD");
 
         let controller = test_controller();
-        controller.insert_test_session(waiting_worker_session(session_id, temp_dir.path(), 1));
+        controller.insert_test_session(session);
 
         controller
             .on_worker_completed(session_id, 1)

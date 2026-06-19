@@ -9,10 +9,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use super::validate_session_id;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
-use crate::storage::Learning;
-use super::validate_session_id;
+use crate::storage::{Learning, StorageError};
 
 /// Request to submit a learning
 #[derive(Debug, Deserialize)]
@@ -38,7 +38,9 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
     let sessions = controller.list_sessions();
 
     if sessions.is_empty() {
-        return Err(ApiError::bad_request("No active session to determine project path"));
+        return Err(ApiError::bad_request(
+            "No active session to determine project path",
+        ));
     }
 
     let first_path = sessions[0].project_path.clone();
@@ -47,7 +49,7 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
             "Multiple active sessions with different project paths. \
              Use session-scoped endpoints instead: \
              GET/POST /api/sessions/{session_id}/learnings, \
-             GET /api/sessions/{session_id}/project-dna"
+             GET /api/sessions/{session_id}/project-dna",
         ));
     }
 
@@ -148,6 +150,24 @@ fn filter_learnings(learnings: Vec<Learning>, params: &LearningsFilter) -> Vec<V
         .collect()
 }
 
+fn ensure_session_exists(state: &AppState, session_id: &str) -> Result<(), ApiError> {
+    if {
+        let controller = state.session_controller.read();
+        controller.get_session(session_id).is_some()
+    } {
+        return Ok(());
+    }
+
+    match state.storage.load_session(session_id) {
+        Ok(_) => Ok(()),
+        Err(StorageError::SessionNotFound(_)) => Err(ApiError::not_found(format!(
+            "Session {} not found",
+            session_id
+        ))),
+        Err(err) => Err(ApiError::internal(err.to_string())),
+    }
+}
+
 /// POST /api/learnings - Submit a learning (project-scoped, legacy)
 /// DEPRECATED: Use POST /api/sessions/{session_id}/learnings for new code
 pub async fn submit_learning(
@@ -195,9 +215,7 @@ pub async fn list_learnings(
 
 /// GET /api/project-dna - Get curated project DNA content (project-scoped, legacy)
 /// DEPRECATED: Use GET /api/sessions/{session_id}/project-dna for new code
-pub async fn get_project_dna(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, ApiError> {
+pub async fn get_project_dna(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let project_path = resolve_project_path(&state)?;
 
     let content = state
@@ -241,6 +259,7 @@ pub async fn list_learnings_for_session(
     Query(params): Query<LearningsFilter>,
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
+    ensure_session_exists(&state, &session_id)?;
 
     // Use session-scoped storage
     let learnings = state
@@ -284,6 +303,7 @@ pub async fn get_project_dna_for_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
+    ensure_session_exists(&state, &session_id)?;
 
     // Use session-scoped storage
     let content = state

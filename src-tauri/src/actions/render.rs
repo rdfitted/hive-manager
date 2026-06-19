@@ -20,12 +20,12 @@ pub fn envelope_for_content(data: Value, content: &str) -> Value {
 }
 
 fn renderer_for_action_result(action_name: &str, data: &Value) -> Option<&'static str> {
-    if action_name.starts_with("git.") || action_name.contains("worktree") {
-        return Some("diff");
-    }
-
     if is_structured_table(data) {
         return Some("table");
+    }
+
+    if action_name.starts_with("git.") || action_name.contains("worktree") {
+        return Some("diff");
     }
 
     None
@@ -38,6 +38,25 @@ fn is_structured_table(value: &Value) -> bool {
             .all(|row| matches!(row, Value::Object(_) | Value::Array(_))),
         Value::Object(object) => object.values().any(is_structured_table),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::renderer_for_action_result;
+    use serde_json::json;
+
+    #[test]
+    fn structured_git_action_data_renders_as_table_before_diff_heuristic() {
+        let data = json!([
+            {"file": "src/main.rs", "status": "modified"},
+            {"file": "src/lib.rs", "status": "added"}
+        ]);
+
+        assert_eq!(
+            renderer_for_action_result("git.status", &data),
+            Some("table")
+        );
     }
 }
 

@@ -97,6 +97,22 @@ fn session_state_from_persisted(state: &str) -> SessionState {
                 .unwrap_or(1);
             SessionState::SpawningFusionVariant(index)
         }
+        value if value.starts_with("SpawningDebateRound(") => {
+            let round = value
+                .trim_start_matches("SpawningDebateRound(")
+                .trim_end_matches(')')
+                .parse()
+                .unwrap_or(1);
+            SessionState::SpawningDebateRound(round)
+        }
+        value if value.starts_with("WaitingForDebateRound(") => {
+            let round = value
+                .trim_start_matches("WaitingForDebateRound(")
+                .trim_end_matches(')')
+                .parse()
+                .unwrap_or(1);
+            SessionState::WaitingForDebateRound(round)
+        }
         value if value.starts_with("QaInProgress") => {
             SessionState::QaInProgress { iteration: None }
         }
@@ -108,6 +124,24 @@ fn session_state_from_persisted(state: &str) -> SessionState {
                 .to_string(),
         ),
         _ => SessionState::Completed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_state_from_persisted;
+    use crate::session::SessionState;
+
+    #[test]
+    fn persisted_indexed_debate_states_keep_round_index() {
+        assert_eq!(
+            session_state_from_persisted("SpawningDebateRound(2)"),
+            SessionState::SpawningDebateRound(2)
+        );
+        assert_eq!(
+            session_state_from_persisted("WaitingForDebateRound(3)"),
+            SessionState::WaitingForDebateRound(3)
+        );
     }
 }
 

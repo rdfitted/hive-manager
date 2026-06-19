@@ -6,14 +6,14 @@
 use async_trait::async_trait;
 use schemars::schema::RootSchema;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
 use crate::http::handlers::{validate_cli, validate_project_path};
 use crate::session::{
     DebateLaunchConfig, FusionLaunchConfig, HiveLaunchConfig, ResearchLaunchConfig, Session,
-    SessionType, SwarmLaunchConfig,
+    SessionState, SessionType, SwarmLaunchConfig,
 };
 use crate::storage::{PersistedSession, SessionTypeInfo};
 
@@ -158,6 +158,7 @@ fn validate_swarm_launch_config(config: &SwarmLaunchConfig) -> Result<(), Action
     validate_project_path(&config.project_path)?;
     validate_session_name(config.name.as_deref())?;
     validate_session_color(config.color.as_deref())?;
+    validate_cli(&config.default_cli)?;
     validate_cli(&config.queen_config.cli)?;
     validate_cli(&config.planner_config.cli)?;
 
@@ -261,9 +262,9 @@ struct EmptyInput {}
 struct UpdateMetadataInput {
     id: String,
     /// Outer `Some` means "set this field"; inner `None` clears it.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_metadata_field")]
     name: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_metadata_field")]
     color: Option<Option<String>>,
 }
 
@@ -282,6 +283,15 @@ struct SessionInfoOutput {
 fn deserialize_input<T: for<'de> Deserialize<'de>>(input: Value) -> Result<T, ActionError> {
     serde_json::from_value(input)
         .map_err(|e| ActionError::bad_request(format!("Invalid input: {}", e)))
+}
+
+fn deserialize_nullable_metadata_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 fn session_info_from_session(session: Session) -> SessionInfoOutput {
@@ -323,6 +333,17 @@ fn session_info_from_persisted(persisted: PersistedSession) -> SessionInfoOutput
             .unwrap_or(persisted.created_at)
             .to_rfc3339(),
     }
+}
+
+fn should_reload_session_info_from_storage(session: &Session) -> bool {
+    matches!(
+        session.state,
+        SessionState::QaPassed
+            | SessionState::QaMaxRetriesExceeded
+            | SessionState::Completed
+            | SessionState::Closed
+            | SessionState::Failed(_)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +432,22 @@ impl Action for GetSessionInfo {
             let controller = ctx.state.session_controller.read();
             controller.get_session(&parsed.id)
         } {
+            if should_reload_session_info_from_storage(&session) {
+                let reloaded = {
+                    let controller = ctx.state.session_controller.read();
+                    controller.reload_session_from_storage(&parsed.id).ok()
+                };
+                if let Some(reloaded) = reloaded {
+                    return serde_json::to_value(session_info_from_session(reloaded)).map_err(
+                        |e| {
+                            ActionError::internal(format!(
+                                "Failed to serialize session info: {}",
+                                e
+                            ))
+                        },
+                    );
+                }
+            }
             return serde_json::to_value(session_info_from_session(session)).map_err(|e| {
                 ActionError::internal(format!("Failed to serialize session info: {}", e))
             });

@@ -15,7 +15,8 @@ use axum::{
     http::{Request, StatusCode},
 };
 use parking_lot::RwLock;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -134,6 +135,18 @@ async fn setup_test_app_with_controller_at(
     (create_router(state), session_controller, storage)
 }
 
+async fn setup_isolated_test_app_with_controller() -> (
+    TempDir,
+    axum::Router,
+    Arc<RwLock<SessionController>>,
+    Arc<SessionStorage>,
+) {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    (storage_dir, app, controller, storage)
+}
+
 /// Setup test app and return both the router and session controller for inserting test sessions
 async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionController>>) {
     let storage = Arc::new(SessionStorage::new().unwrap());
@@ -167,6 +180,24 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
     state.set_registry(Arc::new(crate::actions::build_registry()));
 
     (create_router(state), session_controller)
+}
+
+fn run_git_for_test(repo_path: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .status()
+        .expect("run git command");
+    assert!(status.success(), "git {:?} should succeed", args);
+}
+
+fn init_git_repo_for_launch_fixture(repo_path: &Path) {
+    run_git_for_test(repo_path, &["init", "-q"]);
+    run_git_for_test(repo_path, &["config", "user.email", "hive@example.com"]);
+    run_git_for_test(repo_path, &["config", "user.name", "Hive Test"]);
+    std::fs::write(repo_path.join("README.md"), "launch fixture\n").expect("write fixture file");
+    run_git_for_test(repo_path, &["add", "README.md"]);
+    run_git_for_test(repo_path, &["commit", "-q", "-m", "initial commit"]);
 }
 
 fn make_test_session(id: &str, project_path: &str) -> Session {
@@ -488,7 +519,7 @@ async fn test_patch_session_rejects_invalid_color() {
 
     let body = serde_json::json!({
         "name": "Alpha Session",
-        "color": "#ffffff"
+        "color": "not-a-color"
     });
 
     let response = app
@@ -1267,7 +1298,7 @@ async fn test_session_scoped_submit_learning_returns_learning_id() {
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_with_filtering_by_category() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-filter-category");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -1360,7 +1391,7 @@ async fn test_session_scoped_list_learnings_with_filtering_by_category() {
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_with_filtering_by_keywords() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-filter-keywords");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -1479,7 +1510,7 @@ async fn test_session_scoped_list_learnings_with_filtering_by_keywords() {
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_with_combined_filters() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-combined-filters");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -1555,7 +1586,7 @@ async fn test_session_scoped_list_learnings_with_combined_filters() {
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_returns_correct_structure() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-structure");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -1776,7 +1807,7 @@ async fn test_session_scoped_delete_learning_returns_404_for_nonexistent_session
 
 #[tokio::test]
 async fn test_session_scoped_delete_learning_preserves_other_learnings() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-delete-preserve");
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -2024,7 +2055,7 @@ async fn test_legacy_list_learnings_with_filtering() {
 
 #[tokio::test]
 async fn test_e2e_session_isolation() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir_a = std::env::temp_dir().join("hive-test-isolation-a");
     let temp_dir_b = std::env::temp_dir().join("hive-test-isolation-b");
@@ -2189,7 +2220,7 @@ async fn test_e2e_session_isolation() {
 
 #[tokio::test]
 async fn test_e2e_delete_does_not_affect_other_sessions() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir_a = std::env::temp_dir().join("hive-test-delete-iso-a");
     let temp_dir_b = std::env::temp_dir().join("hive-test-delete-iso-b");
@@ -3241,20 +3272,35 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
             .expect("swarm session should include queen");
         assert_eq!(queen.config.cli, "qwen");
         assert_eq!(queen.config.model.as_deref(), Some("qwen3-coder"));
-        let planner = session
-            .agents
-            .iter()
-            .find(|agent| matches!(agent.role, AgentRole::Planner { .. }))
-            .expect("swarm session should include planner");
-        assert_eq!(planner.config.cli, "droid");
-        assert_eq!(planner.config.model.as_deref(), Some("glm-5.1"));
-        let worker = session
-            .agents
-            .iter()
-            .find(|agent| matches!(agent.role, AgentRole::Worker { .. }))
-            .expect("swarm session should include worker");
-        assert_eq!(worker.config.cli, "codex");
-        assert_eq!(worker.config.model.as_deref(), Some("gpt-5.5"));
+        let planners_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join(session_id)
+            .join("swarm-planners.json");
+        let planners_json = std::fs::read_to_string(planners_path).unwrap();
+        let planners: Vec<serde_json::Value> = serde_json::from_str(&planners_json).unwrap();
+        let planner_config = planners[0].get("config").unwrap();
+        assert_eq!(
+            planner_config.get("cli").and_then(|value| value.as_str()),
+            Some("droid")
+        );
+        assert_eq!(
+            planner_config.get("model").and_then(|value| value.as_str()),
+            Some("glm-5.1")
+        );
+        let worker_config = planners[0]
+            .get("workers")
+            .and_then(|workers| workers.as_array())
+            .and_then(|workers| workers.first())
+            .unwrap();
+        assert_eq!(
+            worker_config.get("cli").and_then(|value| value.as_str()),
+            Some("codex")
+        );
+        assert_eq!(
+            worker_config.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.5")
+        );
     }
 }
 
@@ -3444,6 +3490,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
 async fn test_launch_solo_with_same_cli_evaluator_preserves_custom_session_model() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
 
     let body = serde_json::json!({
         "project_path": temp_dir.path().to_string_lossy(),
@@ -3807,6 +3854,7 @@ async fn test_read_conversation_since_filter() {
 
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let marker = chrono::Utc::now().to_rfc3339();
+    let encoded_marker = marker.replace('+', "%2B").replace(':', "%3A");
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let body_2 = serde_json::json!({
@@ -3834,7 +3882,7 @@ async fn test_read_conversation_since_filter() {
             Request::builder()
                 .uri(format!(
                     "/api/sessions/{}/conversations/shared?since={}",
-                    session_id, marker
+                    session_id, encoded_marker
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -3889,7 +3937,7 @@ async fn test_conversation_rejects_path_traversal_and_invalid_agent_id() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/sessions/session-safe/conversations/worker 1/append")
+                .uri("/api/sessions/session-safe/conversations/worker%201/append")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -4355,7 +4403,8 @@ async fn test_get_cell_rejects_invalid_cell_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4449,7 +4498,8 @@ async fn test_list_agents_in_cell_rejects_invalid_cell_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4573,7 +4623,8 @@ async fn test_list_artifacts_rejects_invalid_cell_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4908,7 +4959,8 @@ async fn test_send_agent_input_rejects_invalid_agent_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -5417,7 +5469,8 @@ async fn test_get_events_rejects_path_traversal_session_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -5463,7 +5516,8 @@ async fn test_stream_events_rejects_path_traversal_session_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // ── Resolver launch endpoint tests ──────────────────────────────────────
@@ -5540,6 +5594,8 @@ async fn test_resolver_launch_success_with_artifacts() {
 
     // Register Fusion session in controller
     let session = make_fusion_session(&session_id, &std::env::temp_dir().to_string_lossy());
+    let mut session = session;
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::minutes(11);
     controller.write().insert_test_session(session);
 
     let body = serde_json::json!({
@@ -6074,7 +6130,9 @@ async fn test_http_action_unknown_returns_404() {
 #[tokio::test]
 async fn test_conversation_emit_includes_render_envelope() {
     let state = setup_test_state().await;
-    let mut events = state.event_bus.subscribe_session("session-render".to_string());
+    let mut events = state
+        .event_bus
+        .subscribe_session("session-render".to_string());
 
     let table_message = ConversationMessage {
         timestamp: chrono::Utc::now(),
@@ -6088,7 +6146,10 @@ async fn test_conversation_emit_includes_render_envelope() {
 
     let table_event = events.recv().await.unwrap();
     assert_eq!(table_event.payload["renderer"], "table");
-    assert_eq!(table_event.payload["data"]["content"], table_message.content);
+    assert_eq!(
+        table_event.payload["data"]["content"],
+        table_message.content
+    );
     assert_eq!(table_event.payload["data"]["agent_id"], "worker-3");
 
     let diff_message = ConversationMessage {
