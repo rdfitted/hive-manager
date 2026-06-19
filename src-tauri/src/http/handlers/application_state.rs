@@ -32,6 +32,12 @@ pub struct WriteBody {
     pub value: serde_json::Value,
 }
 
+/// Request body for an atomic take (read-and-delete).
+#[derive(Debug, Deserialize)]
+pub struct TakeBody {
+    pub key: String,
+}
+
 /// GET /api/sessions/{id}/application-state
 /// Full snapshot of all rows for a session (used for hydrate-on-load / session-switch).
 pub async fn get_application_state(
@@ -101,4 +107,34 @@ pub async fn write_application_state(
         value: body.value,
         updated_at: updated_at_ms,
     }))
+}
+
+/// POST /api/sessions/{id}/application-state/take
+/// Atomically read-and-delete a single key in one transaction, returning the taken row
+/// or `null`. Used by #128 for one-shot context (`pending_selection_context`) with
+/// exactly-one-turn semantics: a lagging/double submit cannot re-consume a key that was
+/// already taken, because the read+delete is a single `BEGIN IMMEDIATE` transaction.
+pub async fn take_application_state(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<TakeBody>,
+) -> Result<Json<Option<ApplicationStateRow>>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    if body.key.is_empty() || body.key.len() > 256 {
+        return Err(ApiError::bad_request(
+            "Invalid key: must be 1-256 characters",
+        ));
+    }
+
+    let db = Arc::clone(&state.app_state_db);
+    let key = body.key.clone();
+    let session = session_id.clone();
+
+    let row = tokio::task::spawn_blocking(move || db.take_key(&session, &key))
+        .await
+        .map_err(|e| ApiError::internal(format!("Task join error: {e}")))?
+        .map_err(|e| ApiError::internal(format!("Failed to take application state: {e}")))?;
+
+    Ok(Json(row))
 }

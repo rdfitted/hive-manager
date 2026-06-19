@@ -189,7 +189,6 @@ impl ApplicationStateDb {
     /// Returns the row if it existed (and deletes it), or `None`. Used by #128 for
     /// one-shot context keys (e.g. `pending_selection_context`) with exactly-one-turn
     /// semantics — no TTL needed.
-    #[allow(dead_code)]
     pub fn take_key(
         &self,
         session_id: &str,

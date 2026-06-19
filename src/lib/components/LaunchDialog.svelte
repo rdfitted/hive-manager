@@ -3,6 +3,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import AgentConfigEditor from './AgentConfigEditor.svelte';
   import TemplatePicker from './templates/TemplatePicker.svelte';
+  import Composer from './composer/Composer.svelte';
   import { Crown, CaretDown, CaretRight } from 'phosphor-svelte';
   import type { AgentConfig, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig, FusionVariantConfig, SoloLaunchConfig, PlannerConfig, WorkerRole, QaWorkerConfig } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
@@ -918,13 +919,15 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
         {#if mode !== 'solo'}
           <div class="form-group">
-            <label for="prompt">Initial Prompt (optional)</label>
-            <textarea
-              id="prompt"
-              bind:value={prompt}
-              placeholder="Enter a task for the session..."
-              rows="3"
-            ></textarea>
+            <span class="composer-label" id="prompt-label">Initial Prompt (optional)</span>
+            <div class="composer-host" aria-labelledby="prompt-label">
+              <Composer
+                sessionId={null}
+                placeholder="Enter a task for the session… (@ to mention, / for commands)"
+                persistDraft={false}
+                bind:value={prompt}
+              />
+            </div>
           </div>
         {/if}
 
@@ -1079,12 +1082,17 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .form-group label,
-  .form-group .group-label {
+  .form-group .group-label,
+  .composer-label {
     display: block;
     margin-bottom: 6px;
     font-size: 13px;
     font-weight: 500;
     color: var(--text-primary);
+  }
+
+  .composer-host {
+    display: flex;
   }
 
   .form-row {

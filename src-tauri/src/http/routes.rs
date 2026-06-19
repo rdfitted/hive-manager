@@ -109,6 +109,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{id}/application-state/poll",
             get(application_state::poll_application_state),
         )
+        // One-shot atomic read-and-delete (#128 Ctrl+I pending_selection_context).
+        .route(
+            "/api/sessions/{id}/application-state/take",
+            post(application_state::take_application_state),
+        )
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
         .route("/api/sessions/{id}/inject/queen", post(inject::queen_inject))
