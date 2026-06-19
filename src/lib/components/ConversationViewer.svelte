@@ -3,6 +3,7 @@
   import { conversationStore, type ConversationMessage } from '$lib/stores/conversations';
   import { activeSession } from '$lib/stores/sessions';
   import AgentStatusBar from './AgentStatusBar.svelte';
+  import ToolRenderHost from './renderers/ToolRenderHost.svelte';
 
   let messageContainer: HTMLDivElement;
   let autoScroll = true;
@@ -100,6 +101,16 @@
     }
   }
 
+  // Approval widget signals. Wiring approve/reject to the queen/worker is #123's
+  // Action contract; for #127 we console-log so the widget is demonstrable.
+  function handleApprove(detail: { actionId?: string }) {
+    console.log('[tool-render] approve', detail?.actionId ?? null);
+  }
+
+  function handleReject(detail: { actionId?: string }) {
+    console.log('[tool-render] reject', detail?.actionId ?? null);
+  }
+
   function getSenderColor(from: string): string {
     if (from === 'queen') return 'var(--accent-cyan)';
     if (from === 'system' || from === 'SYSTEM') return 'var(--accent-chrome)';
@@ -176,7 +187,17 @@
         <div class="message">
           <span class="msg-time">{formatTimestamp(msg.timestamp)}</span>
           <span class="msg-sender" style="color: {getSenderColor(msg.from)}">{msg.from}</span>
-          <span class="msg-content">{msg.content}</span>
+          {#if msg.renderer || msg.data}
+            <div class="msg-content msg-widget">
+              <ToolRenderHost
+                message={msg}
+                onapprove={handleApprove}
+                onreject={handleReject}
+              />
+            </div>
+          {:else}
+            <span class="msg-content">{msg.content}</span>
+          {/if}
         </div>
       {/each}
     {/if}
@@ -319,6 +340,11 @@
   .msg-content {
     color: var(--text-primary);
     word-break: break-word;
+  }
+
+  .msg-widget {
+    flex: 1;
+    min-width: 0;
   }
 
   .input-bar {

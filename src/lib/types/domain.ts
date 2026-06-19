@@ -178,6 +178,20 @@ export interface RolePack {
 }
 
 /**
+ * Result envelope for the native tool-render registry (issue #127).
+ *
+ * `renderer` is a PLAIN string hint (e.g. "diff", "table", "approval"), NOT a
+ * serde-tagged enum — the backend (eventually #123's Action contract) emits it
+ * as a literal string merged onto the conversation-message payload, so no
+ * serdeEnumVariantName normalization is needed here. Both fields are optional
+ * and backward-compatible: a message with neither renders as plain text.
+ */
+export interface ToolResultEnvelope {
+    renderer?: string;
+    data?: unknown;
+}
+
+/**
  * Helper to extract the variant name from a Serde-serialized enum with data.
  * If input is a string, returns the string.
  * If input is an object { variant: data }, returns the key.

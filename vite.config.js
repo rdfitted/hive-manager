@@ -29,4 +29,8 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+
+  // Vitest test config lives in the dedicated vitest.config.ts (which Vitest
+  // prefers over this file). That config uses the plain `svelte()` plugin
+  // instead of `sveltekit()` to avoid a CSS-preprocess proxy error under jsdom.
 }));
