@@ -42,6 +42,7 @@ async fn setup_test_app() -> axum::Router {
         event_bus,
         None,
     ));
+    state.set_registry(Arc::new(crate::actions::build_registry()));
 
     create_router(state)
 }
@@ -73,6 +74,7 @@ async fn setup_test_app_with_controller_at(
         event_bus,
         None,
     ));
+    state.set_registry(Arc::new(crate::actions::build_registry()));
 
     (create_router(state), session_controller, storage)
 }
@@ -98,6 +100,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         event_bus,
         None,
     ));
+    state.set_registry(Arc::new(crate::actions::build_registry()));
 
     (create_router(state), session_controller)
 }
@@ -5259,4 +5262,183 @@ async fn test_resolver_launch_non_fusion_session_returns_400() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// #123 — unified Action contract: HTTP surface over the registry
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_action_endpoint_lists_schemas() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/actions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let actions = json.get("actions").unwrap().as_array().unwrap();
+
+    let names: Vec<&str> = actions
+        .iter()
+        .map(|a| a.get("name").unwrap().as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"session.launch_hive_v2"));
+    assert!(names.contains(&"session.list"));
+    assert!(names.contains(&"git.pull"));
+
+    // Every descriptor carries a non-empty input_schema object.
+    for a in actions {
+        assert!(
+            a.get("input_schema").unwrap().is_object(),
+            "input_schema should be an object for {}",
+            a.get("name").unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_http_dispatch_session_list_via_registry() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join("hive-test-action-session-list");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-actionlist", temp_dir.to_str().unwrap()));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/actions/session.list")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    let sessions = json.as_array().expect("session.list returns an array");
+    assert!(sessions
+        .iter()
+        .any(|s| s.get("id").and_then(|v| v.as_str()) == Some("session-actionlist")));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_same_handler_both_callers() {
+    use crate::actions::{build_registry, ActionContext, Caller};
+    use crate::coordination::InjectionManager;
+    use crate::events::EventBus;
+    use crate::pty::PtyManager;
+
+    // Build a hermetic state + controller and insert one session.
+    let storage = Arc::new(SessionStorage::new().unwrap());
+    let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new().unwrap(),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        session_controller.clone(),
+        injection_manager,
+        storage,
+        event_bus,
+        None,
+    ));
+    state.set_registry(Arc::new(build_registry()));
+
+    let temp_dir = std::env::temp_dir().join("hive-test-action-both-callers");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    session_controller
+        .read()
+        .insert_test_session(make_test_session("session-both", temp_dir.to_str().unwrap()));
+
+    let registry = state.registry().clone();
+
+    // Dispatch the SAME action with two different callers.
+    let frontend_ctx = ActionContext::new(Caller::Frontend, state.clone());
+    let http_ctx = ActionContext::new(Caller::Http, state.clone());
+
+    let frontend_out = registry
+        .dispatch("session.list", &frontend_ctx, serde_json::json!({}))
+        .await
+        .unwrap();
+    let http_out = registry
+        .dispatch("session.list", &http_ctx, serde_json::json!({}))
+        .await
+        .unwrap();
+
+    // Same handler, same payload regardless of caller (AC2).
+    assert_eq!(frontend_out, http_out);
+    assert!(frontend_out
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s.get("id").and_then(|v| v.as_str()) == Some("session-both")));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_http_action_validation_rejects_bad_color() {
+    let app = setup_test_app().await;
+
+    // Invalid color must be rejected with 400 before the controller runs (AC3).
+    let body = serde_json::json!({ "id": "sess-x", "color": "purple" });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/actions/session.update_metadata")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_http_action_unknown_returns_404() {
+    let app = setup_test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/actions/does.not.exist")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

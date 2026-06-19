@@ -1,13 +1,32 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::RwLock;
+use serde_json::json;
 use tauri::State;
 
+use crate::actions::{ActionContext, ActionRegistry, Caller};
 use crate::http::handlers::{validate_cli, validate_project_path};
+use crate::http::state::AppState;
 use crate::pty::AgentConfig;
 use crate::session::{Session, SessionController, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig};
 
 pub struct SessionControllerState(pub Arc<RwLock<SessionController>>);
+
+/// Dispatch an action through the shared registry with `caller = Frontend`,
+/// returning the raw JSON value or the action's message string (the exact text
+/// the frontend `invoke()` already expects on error).
+async fn dispatch_frontend(
+    registry: &ActionRegistry,
+    state: Arc<AppState>,
+    name: &str,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let ctx = ActionContext::new(Caller::Frontend, state);
+    registry
+        .dispatch(name, &ctx, input)
+        .await
+        .map_err(|e| e.to_message())
+}
 
 const SESSION_COLOR_ALLOWLIST: &[&str] = &[
     "#7aa2f7",
@@ -64,42 +83,6 @@ fn is_valid_hex_session_color(color: &str) -> bool {
     color.len() == 7
         && color.starts_with('#')
         && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
-}
-
-fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(), String> {
-    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
-    validate_session_name(config.name.as_deref())?;
-    validate_session_color(config.color.as_deref())?;
-    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
-
-    for worker in &config.workers {
-        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
-    }
-
-    if let Some(evaluator_config) = &config.evaluator_config {
-        if evaluator_config.cli.trim().is_empty() {
-            // Empty nested CLI means "inherit session default"; only validate explicit overrides.
-        } else {
-        validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
-        }
-    }
-
-    if let Some(qa_workers) = &config.qa_workers {
-        for qa_worker in qa_workers {
-            validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
-            match qa_worker.specialization.as_str() {
-                "ui" | "api" | "a11y" => {}
-                other => {
-                    return Err(format!(
-                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
-                        other
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn validate_research_launch_config(config: &ResearchLaunchConfig) -> Result<(), String> {
@@ -188,39 +171,70 @@ pub async fn launch_hive(
     )
 }
 
+// NOTE on return types: the migrated session commands return `serde_json::Value`
+// rather than the typed `Session` (which is `Serialize`-only, not `Deserialize`).
+// The action layer already serialized the typed result; Tauri serializes this
+// `Value` to byte-identical JSON, so the frontend `invoke()` wire contract is
+// unchanged — only the Rust-side return type differs.
 #[tauri::command]
 pub async fn get_session(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     id: String,
-) -> Result<Option<Session>, String> {
-    let controller = state.0.read();
-    Ok(controller.get_session(&id))
+) -> Result<serde_json::Value, String> {
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.get",
+        json!({ "id": id }),
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn list_sessions(
-    state: State<'_, SessionControllerState>,
-) -> Result<Vec<Session>, String> {
-    let controller = state.0.read();
-    Ok(controller.list_sessions())
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.list",
+        json!({}),
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn stop_session(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<(), String> {
-    let controller = state.0.read();
-    controller.stop_session(&id)
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.stop",
+        json!({ "id": id }),
+    )
+    .await?;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn close_session(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<(), String> {
-    let controller = state.0.read();
-    controller.close_session(&id)
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.close",
+        json!({ "id": id }),
+    )
+    .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -235,12 +249,18 @@ pub async fn stop_agent(
 
 #[tauri::command]
 pub async fn launch_hive_v2(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     config: HiveLaunchConfig,
-) -> Result<Session, String> {
-    validate_hive_launch_config(&config)?;
-    let controller = state.0.read();
-    controller.launch_hive_v2(config)
+) -> Result<serde_json::Value, String> {
+    let input = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.launch_hive_v2",
+        input,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -362,14 +382,17 @@ pub async fn resume_session(
 
 #[tauri::command]
 pub async fn update_session_metadata(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     id: String,
     name: Option<Option<String>>,
     color: Option<Option<String>>,
-) -> Result<Session, String> {
-    validate_session_name(name.as_ref().and_then(|value| value.as_deref()))?;
-    validate_session_color(color.as_ref().and_then(|value| value.as_deref()))?;
-
-    let controller = state.0.read();
-    controller.update_session_metadata(&id, name, color)
+) -> Result<serde_json::Value, String> {
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.update_metadata",
+        json!({ "id": id, "name": name, "color": color }),
+    )
+    .await
 }
