@@ -7,7 +7,7 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
 use crate::http::handlers::{
     actions, agents, application_state, artifacts, cells, conversations, evaluator, events, health,
-    heartbeats, inject, learnings, planners, resolver, sessions, templates, workers,
+    heartbeats, inject, learnings, planners, queue, resolver, sessions, templates, workers,
 };
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -48,6 +48,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))
         .route("/api/sessions/{id}/workers", post(workers::add_worker))
+        // Durable run-queue snapshot (#126)
+        .route("/api/sessions/{id}/queue", get(queue::get_queue))
         // Evaluator routes
         .route("/api/sessions/{id}/evaluators", get(evaluator::list_evaluators))
         .route("/api/sessions/{id}/evaluators", post(evaluator::add_evaluator))

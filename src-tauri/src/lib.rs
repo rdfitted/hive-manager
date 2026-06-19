@@ -83,6 +83,19 @@ pub fn run() {
         .ensure_schema()
         .expect("Failed to initialize run_journal schema");
 
+    // #126: build the durable sub-agent run queue on the same shared SQLite DB and ensure
+    // its `agent_run_queue` table exists (idempotent CREATE TABLE IF NOT EXISTS, run once at
+    // startup). The QueueManager wraps the repo + EventBus and is the source of truth for
+    // queued/running/finalized workers; Session.agents stays a UI cache.
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(Arc::clone(&app_state_db)));
+    queue_repo
+        .ensure_schema()
+        .expect("Failed to initialize agent_run_queue schema");
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        Arc::clone(&queue_repo),
+        Arc::clone(&event_bus),
+    ));
+
     // Set storage on session controller
     {
         let mut controller = session_controller.write();
@@ -130,6 +143,7 @@ pub fn run() {
                 Arc::clone(&storage),
                 Arc::clone(&event_bus),
                 Arc::clone(&app_state_db),
+                Arc::clone(&queue_manager),
                 Some(app.handle().clone()),
             ));
             // Attach the shared registry so HTTP handlers can dispatch actions.
@@ -182,6 +196,26 @@ pub fn run() {
                         }
                     }
                     known_stalled = currently_stalled;
+                }
+            });
+
+            // #126: durable run-queue maintenance — every 30s, reclaim stuck running rows
+            // (heartbeat older than STUCK_CUTOFF flips back to 'queued', emits
+            // WorkerReclaimed) and finalize no-progress / continuation-exceeded runs (emits
+            // WorkerFinalized). Reclaim never kills a live PTY; it only marks a row claimable.
+            let maintenance_queue_manager = Arc::clone(&queue_manager);
+            let maintenance_app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    match maintenance_queue_manager.run_maintenance().await {
+                        Ok(()) => {
+                            // Nudge the frontend store to refetch /queue after a maintenance pass.
+                            let _ = maintenance_app_handle.emit("queue-updated", serde_json::json!({}));
+                        }
+                        Err(e) => tracing::warn!("Queue maintenance pass failed: {e}"),
+                    }
                 }
             });
 

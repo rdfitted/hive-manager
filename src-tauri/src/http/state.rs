@@ -9,7 +9,7 @@ use crate::storage::{AppConfig, ApplicationStateDb, SessionStorage};
 use crate::storage::ConversationMessage;
 use crate::pty::PtyManager;
 use crate::session::SessionController;
-use crate::coordination::InjectionManager;
+use crate::coordination::{InjectionManager, QueueManager};
 use crate::events::EventBus;
 
 #[allow(dead_code)]
@@ -21,6 +21,9 @@ pub struct AppState {
     pub storage: Arc<SessionStorage>,
     pub event_bus: Arc<EventBus>,
     pub app_state_db: Arc<ApplicationStateDb>,
+    /// Durable sub-agent run queue (#126). The `agent_run_queue` table is the source of
+    /// truth for queued/running/finalized workers; `Session.agents` is a UI cache.
+    pub queue_manager: Arc<QueueManager>,
     pub app_handle: Option<AppHandle>,
     /// Unified action registry, dispatched by both the Tauri and HTTP surfaces.
     /// Wrapped in `OnceLock` so `AppState` can be constructed before the registry
@@ -38,6 +41,7 @@ impl AppState {
         storage: Arc<SessionStorage>,
         event_bus: Arc<EventBus>,
         app_state_db: Arc<ApplicationStateDb>,
+        queue_manager: Arc<QueueManager>,
         app_handle: Option<AppHandle>,
     ) -> Self {
         Self {
@@ -48,6 +52,7 @@ impl AppState {
             storage,
             event_bus,
             app_state_db,
+            queue_manager,
             app_handle,
             registry: std::sync::OnceLock::new(),
         }
