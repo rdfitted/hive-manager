@@ -32,6 +32,12 @@ fn test_state() -> Arc<AppState> {
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
     // Keep the TempDir alive for the lifetime of the process under test by leaking it;
     // tests are short-lived and this avoids a premature directory cleanup race.
     std::mem::forget(dir);
@@ -43,6 +49,7 @@ fn test_state() -> Arc<AppState> {
         storage,
         event_bus,
         app_state_db,
+        queue_manager,
         None,
     ))
 }

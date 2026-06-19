@@ -34,6 +34,12 @@ async fn setup_test_app() -> axum::Router {
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -42,6 +48,7 @@ async fn setup_test_app() -> axum::Router {
         storage,
         event_bus,
         app_state_db,
+        queue_manager,
         None,
     ));
     state.set_registry(Arc::new(crate::actions::build_registry()));
@@ -70,6 +77,12 @@ async fn setup_test_app_with_controller_at(
     let app_state_db = Arc::new(
         crate::storage::ApplicationStateDb::open(storage.base_dir()).unwrap(),
     );
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -78,6 +91,7 @@ async fn setup_test_app_with_controller_at(
         storage.clone(),
         event_bus,
         app_state_db,
+        queue_manager,
         None,
     ));
     state.set_registry(Arc::new(crate::actions::build_registry()));
@@ -98,6 +112,12 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -106,6 +126,7 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
         storage,
         event_bus,
         app_state_db,
+        queue_manager,
         None,
     ));
     state.set_registry(Arc::new(crate::actions::build_registry()));
@@ -5541,6 +5562,12 @@ async fn test_same_handler_both_callers() {
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
     let state = Arc::new(AppState::new(
         config,
         pty_manager,
@@ -5549,6 +5576,7 @@ async fn test_same_handler_both_callers() {
         storage,
         event_bus,
         app_state_db,
+        queue_manager,
         None,
     ));
     state.set_registry(Arc::new(build_registry()));
@@ -5712,5 +5740,184 @@ async fn test_get_run_journal_rejects_bad_session_id() {
         .unwrap();
 
     // Axum decodes %2F; the traversal token is rejected by validate_session_id.
+    assert_ne!(response.status(), StatusCode::OK);
+}
+
+// ----------------------------------------------------------------------------
+// #126 — durable sub-agent run queue HTTP integration tests
+// ----------------------------------------------------------------------------
+
+/// Helper: GET /queue and parse the JSON snapshot.
+async fn fetch_queue_snapshot(app: &axum::Router, session_id: &str) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/queue"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn test_queue_endpoint_empty_snapshot() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-empty");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-queue-empty", temp_dir.to_str().unwrap()));
+
+    let snap = fetch_queue_snapshot(&app, "session-queue-empty").await;
+    assert_eq!(snap["queued"], 0);
+    assert_eq!(snap["running"], 0);
+    assert_eq!(snap["rows"].as_array().unwrap().len(), 0);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_add_worker_enqueues_and_claims() {
+    // First POST /workers enqueues a queue row and atomically claims it (-> running). The
+    // downstream PTY/worktree spawn fails in the hermetic test env (temp dir is not a git
+    // repo), so no agent is added — but the queue row is the source of truth and is now
+    // `running`. A duplicate POST for the same worker re-enqueues (no-op), loses the claim
+    // on the already-running fresh row, and is turned away with 409.
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-claim");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-queue-claim", temp_dir.to_str().unwrap()));
+
+    let body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
+
+    // First POST: enqueue + claim succeed; spawn may fail downstream (500), never 409.
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-queue-claim/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        first.status(),
+        StatusCode::CONFLICT,
+        "first claim must not be a 409"
+    );
+
+    // The queue row exists and is running, even though the spawn failed.
+    let snap = fetch_queue_snapshot(&app, "session-queue-claim").await;
+    assert_eq!(snap["running"], 1, "first POST claims the row to running");
+    assert_eq!(snap["rows"][0]["worker_id"], "session-queue-claim-worker-1");
+
+    // Second POST for the same worker loses the claim → 409.
+    let second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-queue-claim/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::CONFLICT,
+        "duplicate worker POST must return 409 (lost claim)"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_heartbeat_advances_queue_counters() {
+    // After a worker is claimed (running), heartbeats advance the queue continuation /
+    // no-progress counters via record_heartbeat.
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-heartbeat");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller.read().insert_test_session(make_test_session_with_agents(
+        "session-queue-hb",
+        temp_dir.to_str().unwrap(),
+        &["session-queue-hb-worker-1"],
+    ));
+
+    // Claim the worker row directly via the queue path used by add_worker (enqueue+claim).
+    let worker_body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-queue-hb/workers")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&worker_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Two identical-status heartbeats: the first is a continuation, the second no-progress.
+    for _ in 0..2 {
+        let hb = serde_json::json!({
+            "agent_id": "session-queue-hb-worker-2",
+            "status": "working"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-queue-hb/heartbeat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&hb).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let snap = fetch_queue_snapshot(&app, "session-queue-hb").await;
+    // The enqueued worker is worker index 2 (one agent already present), so its row's
+    // heartbeat_at is set after the heartbeats.
+    let row = snap["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["worker_id"] == "session-queue-hb-worker-2")
+        .expect("queue row for worker-2");
+    assert!(row["heartbeat_at"].as_i64().is_some(), "heartbeat recorded onto the queue row");
+    assert_eq!(row["no_progress_count"], 1, "second identical heartbeat is no-progress");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_queue_endpoint_rejects_bad_session_id() {
+    let (app, _controller) = setup_test_app_with_controller().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/..%2Fevil/queue")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_ne!(response.status(), StatusCode::OK);
 }

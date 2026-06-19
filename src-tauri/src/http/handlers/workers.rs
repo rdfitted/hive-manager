@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::coordination::{StateManager, WorkerStateInfo};
@@ -108,6 +109,63 @@ pub async fn add_worker(
         role: Some(role.clone()),
         initial_prompt: req.initial_task.clone(),
     };
+
+    // #126: enqueue + atomically claim the worker BEFORE spawning. The queue table is the
+    // source of truth, so we compute the deterministic worker_id the same way the controller
+    // does (`{session}-worker-{index}`, index = existing worker count + 1), enqueue a
+    // `queued` row, then try to claim it. A duplicate POST for the same worker hits an
+    // already-`running` row, loses the claim, and is turned away with 409 — no double spawn.
+    let predicted_index = {
+        let controller = state.session_controller.read();
+        let existing = controller
+            .get_session(&session_id)
+            .map(|s| {
+                s.agents
+                    .iter()
+                    .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
+                    .count()
+            })
+            .unwrap_or(0);
+        (existing + 1) as u8
+    };
+    let predicted_worker_id = format!("{}-worker-{}", session_id, predicted_index);
+    let queue_id = predicted_worker_id.clone();
+    let payload = json!({
+        "role_type": req.role_type,
+        "cli": cli,
+        "model": config.model,
+        "parent_id": req.parent_id,
+        "initial_task": req.initial_task,
+    });
+
+    state
+        .queue_manager
+        .enqueue_worker(
+            &queue_id,
+            &session_id,
+            &predicted_worker_id,
+            &req.role_type,
+            &cli,
+            payload,
+            None,
+        )
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let claimed = state
+        .queue_manager
+        .claim_and_spawn(&queue_id, &session_id, &predicted_worker_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !claimed {
+        let mut details: HashMap<String, Value> = HashMap::new();
+        details.insert("worker_id".to_string(), json!(predicted_worker_id));
+        details.insert("session_id".to_string(), json!(session_id));
+        return Err(ApiError::conflict_with_details(
+            format!("Worker {} is already claimed and running", predicted_worker_id),
+            details,
+        ));
+    }
 
     // Add worker through session controller
     let (worker_id, worker_index) = {

@@ -28,6 +28,12 @@ pub enum EventType {
     AgentFailed,
     ArtifactUpdated,
     ResolverSelectedCandidate,
+    // Durable run-queue lifecycle (#126).
+    WorkerQueued,
+    WorkerClaimed,
+    WorkerClaimFailed,
+    WorkerReclaimed,
+    WorkerFinalized,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

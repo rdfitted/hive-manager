@@ -9,6 +9,7 @@ pub mod planners;
 pub mod learnings;
 pub mod conversations;
 pub mod heartbeats;
+pub mod queue;
 pub mod cells;
 pub mod agents;
 pub mod artifacts;

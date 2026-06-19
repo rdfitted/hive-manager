@@ -105,6 +105,12 @@ mod tests {
             EventType::ResolverSelectedCandidate,
             "\"resolver_selected_candidate\"",
         );
+        // #126 durable run-queue lifecycle variants.
+        assert_enum_round_trip(EventType::WorkerQueued, "\"worker_queued\"");
+        assert_enum_round_trip(EventType::WorkerClaimed, "\"worker_claimed\"");
+        assert_enum_round_trip(EventType::WorkerClaimFailed, "\"worker_claim_failed\"");
+        assert_enum_round_trip(EventType::WorkerReclaimed, "\"worker_reclaimed\"");
+        assert_enum_round_trip(EventType::WorkerFinalized, "\"worker_finalized\"");
     }
 
     #[test]

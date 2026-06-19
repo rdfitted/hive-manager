@@ -64,14 +64,26 @@ pub async fn post_heartbeat(
         ));
     }
 
-    let controller = state.session_controller.read();
-    if controller.get_session(&session_id).is_none() {
-        return Err(ApiError::not_found(format!("Session {} not found", session_id)));
+    // Scope the (non-Send) parking_lot guard so it is dropped before the await below.
+    {
+        let controller = state.session_controller.read();
+        if controller.get_session(&session_id).is_none() {
+            return Err(ApiError::not_found(format!("Session {} not found", session_id)));
+        }
+
+        controller
+            .update_heartbeat(&session_id, &req.agent_id, &req.status, req.summary.as_deref())
+            .map_err(|e| ApiError::internal(e))?;
     }
 
-    controller
-        .update_heartbeat(&session_id, &req.agent_id, &req.status, req.summary.as_deref())
-        .map_err(|e| ApiError::internal(e))?;
+    // #126: record the heartbeat into the durable queue row, advancing the
+    // continuation / no-progress counters. A worker with no matching queue row (e.g. the
+    // Queen) is simply a no-op here.
+    state
+        .queue_manager
+        .record_heartbeat(&session_id, &req.agent_id, &req.status)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok((
         StatusCode::OK,

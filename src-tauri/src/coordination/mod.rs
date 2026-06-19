@@ -1,10 +1,12 @@
 mod contracts;
 mod state;
 mod injection;
+pub mod queue_manager;
 
 pub use contracts::*;
 pub use state::*;
 pub use injection::*;
+pub use queue_manager::QueueManager;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
