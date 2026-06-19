@@ -28,7 +28,7 @@ pub enum AgentStatus {
 }
 
 /// Worker role configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerRole {
     pub role_type: String,          // "backend", "frontend", "coherence", "simplify", or custom
     pub label: String,              // Display name
@@ -53,7 +53,7 @@ impl Default for WorkerRole {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentConfig {
     #[serde(default = "default_cli")]
     pub cli: String,              // "claude", "gemini", "antigravity", "opencode", "codex"

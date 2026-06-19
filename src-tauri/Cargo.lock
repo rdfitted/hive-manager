@@ -1685,6 +1685,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 name = "hive-manager"
 version = "0.32.0"
 dependencies = [
+ "async-trait",
  "axum",
  "chrono",
  "fs2",
@@ -1694,6 +1695,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "rusqlite",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tauri",
@@ -3714,6 +3716,7 @@ version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "indexmap 1.9.3",
  "schemars_derive",

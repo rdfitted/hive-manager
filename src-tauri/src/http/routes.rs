@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
 use crate::http::handlers::{
-    agents, application_state, artifacts, cells, conversations, evaluator, events, health,
+    actions, agents, application_state, artifacts, cells, conversations, evaluator, events, health,
     heartbeats, inject, learnings, planners, resolver, sessions, templates, workers,
 };
 
@@ -18,6 +18,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(health::health_check))
+        // Unified action registry surface (the future agent/MCP entrypoint).
+        // GET lists every action + schema; POST dispatches any action (caller=Http).
+        .route("/api/actions", get(actions::list_actions))
+        .route("/api/actions/{name}", post(actions::dispatch_action))
         .route("/api/sessions", get(sessions::list_sessions).post(sessions::create_session))
         // Heartbeat routes (active must be before {id} to match)
         .route("/api/sessions/active", get(heartbeats::get_active_sessions))

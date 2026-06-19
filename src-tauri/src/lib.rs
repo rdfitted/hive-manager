@@ -1,4 +1,5 @@
 mod commands;
+pub mod actions;
 pub mod artifacts;
 pub mod domain;
 pub mod adapters;
@@ -20,10 +21,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use parking_lot::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use crate::actions::ActionRegistry;
 use crate::domain::event::EventType;
 use crate::http::handlers::cells::build_cells;
 use crate::http::state::AppState;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, paste_to_pty, resize_pty, write_to_pty, inject_to_pty,
@@ -79,6 +81,10 @@ pub fn run() {
         controller.set_event_bus(Arc::clone(&event_bus));
     }
 
+    // Unified action registry — the single registration point shared by the
+    // Tauri #[command] wrappers (caller=Frontend) and the HTTP layer (caller=Http).
+    let action_registry: Arc<ActionRegistry> = Arc::new(crate::actions::build_registry());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -90,6 +96,7 @@ pub fn run() {
         .manage(SessionControllerState(Arc::clone(&session_controller)))
         .manage(CoordinationState(Arc::clone(&injection_manager)))
         .manage(StorageState(Arc::clone(&storage)))
+        .manage(Arc::clone(&action_registry))
         .setup(move |app| {
             // Set app handle for event emission
             {
@@ -100,6 +107,24 @@ pub fn run() {
                 let mut injection = injection_manager.write();
                 injection.set_app_handle(app.handle().clone());
             }
+
+            // Build the SINGLE shared AppState now that the app handle exists, and
+            // hand the SAME Arc to both the Tauri-managed state (used by migrated
+            // #[command]s via the action registry) and the HTTP server below.
+            // This unifies the two former state holders onto one Arc<AppState>.
+            let app_state = Arc::new(AppState::new(
+                shared_config.clone(),
+                Arc::clone(&pty_manager),
+                Arc::clone(&session_controller),
+                Arc::clone(&injection_manager),
+                Arc::clone(&storage),
+                Arc::clone(&event_bus),
+                Arc::clone(&app_state_db),
+                Some(app.handle().clone()),
+            ));
+            // Attach the shared registry so HTTP handlers can dispatch actions.
+            app_state.set_registry(Arc::clone(&action_registry));
+            app.manage(Arc::clone(&app_state));
 
             // Stall detection background task - runs every 60s, emits agent-stalled/agent-recovered
             let stall_controller = session_controller.clone();
@@ -257,31 +282,20 @@ pub fn run() {
                 }
             });
 
-            // Start HTTP server if enabled
-            let http_config = shared_config.clone();
-            let http_session_controller = session_controller.clone();
-            let http_event_bus = event_bus.clone();
-            let http_app_state_db = app_state_db.clone();
-            let http_app_handle = app.handle().clone();
+            // Start HTTP server if enabled, sharing the SAME Arc<AppState> the
+            // Tauri command surface uses so both surfaces see identical state.
+            // (The app_state_db from #124 is already folded into this unified
+            // Arc<AppState>, so the HTTP server sees the same SQLite layer.)
+            let http_state = Arc::clone(&app_state);
             tauri::async_runtime::spawn(async move {
                 let (enabled, port) = {
-                    let cfg = http_config.read().await;
+                    let cfg = http_state.config.read().await;
                     (cfg.api.enabled, cfg.api.port)
                 };
 
                 if enabled {
                     tracing::info!("Starting HTTP API on port {}", port);
-                    let state = Arc::new(AppState::new(
-                        http_config,
-                        pty_manager.clone(),
-                        http_session_controller.clone(),
-                        injection_manager.clone(),
-                        storage.clone(),
-                        http_event_bus,
-                        http_app_state_db,
-                        Some(http_app_handle),
-                    ));
-                    if let Err(e) = http::serve(state, port).await {
+                    if let Err(e) = http::serve(http_state, port).await {
                         tracing::error!("HTTP server error: {}", e);
                     }
                 }

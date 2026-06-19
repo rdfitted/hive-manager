@@ -303,7 +303,7 @@ pub struct AgentInfo {
     pub base_commit_sha: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HiveLaunchConfig {
     pub project_path: String,
     #[serde(default)]
@@ -412,7 +412,7 @@ pub struct SwarmLaunchConfig {
     pub planners: Vec<PlannerConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, schemars::JsonSchema)]
 pub struct QaWorkerConfig {
     pub specialization: String,
     pub cli: String,

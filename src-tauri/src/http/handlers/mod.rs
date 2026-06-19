@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod health;
 pub mod application_state;
 pub mod sessions;

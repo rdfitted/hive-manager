@@ -3,6 +3,7 @@ use tokio::sync::RwLock;
 use parking_lot::RwLock as PLRwLock;
 use tauri::{AppHandle, Emitter};
 
+use crate::actions::ActionRegistry;
 use crate::domain::event::{Event, EventType, Severity};
 use crate::storage::{AppConfig, ApplicationStateDb, SessionStorage};
 use crate::storage::ConversationMessage;
@@ -21,6 +22,11 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     pub app_state_db: Arc<ApplicationStateDb>,
     pub app_handle: Option<AppHandle>,
+    /// Unified action registry, dispatched by both the Tauri and HTTP surfaces.
+    /// Wrapped in `OnceLock` so `AppState` can be constructed before the registry
+    /// exists and then have it attached once (avoids a construction-order cycle:
+    /// the registry's actions reach back into `AppState` via `ActionContext`).
+    pub registry: std::sync::OnceLock<Arc<ActionRegistry>>,
 }
 
 impl AppState {
@@ -43,7 +49,21 @@ impl AppState {
             event_bus,
             app_state_db,
             app_handle,
+            registry: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attach the action registry. Idempotent — the first set wins.
+    pub fn set_registry(&self, registry: Arc<ActionRegistry>) {
+        let _ = self.registry.set(registry);
+    }
+
+    /// The attached registry. Panics if dispatched-through before
+    /// [`AppState::set_registry`] ran (a startup-wiring bug, not a runtime path).
+    pub fn registry(&self) -> &Arc<ActionRegistry> {
+        self.registry
+            .get()
+            .expect("ActionRegistry not attached to AppState")
     }
 
     pub async fn emit_conversation_message(
