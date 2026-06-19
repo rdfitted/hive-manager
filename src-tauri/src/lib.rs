@@ -30,7 +30,7 @@ use tauri::{Emitter, Manager};
 use commands::{
     create_pty, get_pty_status, kill_pty, list_ptys, paste_to_pty, resize_pty, write_to_pty, inject_to_pty,
     launch_hive, launch_hive_v2, launch_research, launch_swarm, launch_solo, launch_fusion, get_session, list_sessions, stop_session, close_session, stop_agent, update_session_metadata,
-    continue_after_planning, mark_plan_ready, resume_session,
+    continue_after_planning, mark_plan_ready, resume_session, get_run_journal,
     queen_inject, queen_switch_branch, operator_inject, add_worker_to_session, get_coordination_log, log_coordination_message,
     get_workers_state, assign_task, get_session_storage_path, list_stored_sessions, get_current_directory,
     get_app_config, update_app_config, get_session_plan,
@@ -74,11 +74,21 @@ pub fn run() {
         SessionStorage::new().expect("Failed to initialize injection manager storage"),
     )));
 
+    // #125: build the run journal + ledger store on the shared SQLite DB and ensure its
+    // tables exist (idempotent CREATE TABLE IF NOT EXISTS, run once at startup — NOT a
+    // register_migration hook). Threaded into the controller by construction so the
+    // write-step seams can record/resume.
+    let run_journal_store = crate::storage::RunJournalStore::new(Arc::clone(&app_state_db));
+    run_journal_store
+        .ensure_schema()
+        .expect("Failed to initialize run_journal schema");
+
     // Set storage on session controller
     {
         let mut controller = session_controller.write();
         controller.set_storage(Arc::clone(&storage));
         controller.set_event_bus(Arc::clone(&event_bus));
+        controller.set_run_journal(run_journal_store.clone());
     }
 
     // Unified action registry — the single registration point shared by the
@@ -476,6 +486,7 @@ pub fn run() {
             continue_after_planning,
             mark_plan_ready,
             resume_session,
+            get_run_journal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

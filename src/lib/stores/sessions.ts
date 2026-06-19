@@ -219,6 +219,73 @@ export interface Session {
   /** Git worktree path for the session primary workspace (Tauri Session), when set. */
   worktree_path?: string | null;
   worktree_branch?: string | null;
+  /** Present on a resumed session (#125): per-step classification for the resume modal. */
+  resume_report?: ResumeReport | null;
+}
+
+// ---- #125 run journal + side-effect ledger ----
+
+/** The kind of orchestrator step journaled (mirrors Rust `StepKind`, snake_case). */
+export type StepKind =
+  | 'worker_spawn'
+  | 'evaluator_spawn'
+  | 'git_commit'
+  | 'git_branch'
+  | 'file_write'
+  | 'task_injection'
+  | 'other';
+
+/** Lifecycle status of a journaled step (mirrors Rust `StepStatus`, snake_case). */
+export type StepStatus =
+  | 'started'
+  | 'completed'
+  | 'failed'
+  | 'interrupted'
+  | 'unknown'
+  | 'skipped';
+
+/** Confidence that a recovered side-effect actually landed. */
+export type Confidence = 'high' | 'likely' | 'uncertain';
+
+export interface RunJournalEntry {
+  run_id: string;
+  step_id: string;
+  kind: StepKind;
+  status: StepStatus;
+  /** RFC3339 timestamp. */
+  started_at: string;
+  finished_at?: string | null;
+  detail?: string | null;
+}
+
+export interface LedgerEntry {
+  run_id: string;
+  step_id: string;
+  effect_kind: string;
+  /** e.g. a commit SHA or branch name. */
+  effect_ref?: string | null;
+  confirmed: boolean;
+  confidence: Confidence;
+  recorded_at: string;
+}
+
+export interface ResumeReport {
+  /** Completed write-steps that will be skipped (not re-run) on resume. */
+  skipped: RunJournalEntry[];
+  /** Steps started but never finished (app killed mid-step). */
+  interrupted: RunJournalEntry[];
+  /** Ledger effects that could not be confirmed and need human attention. */
+  uncertain: LedgerEntry[];
+}
+
+export interface RunJournalResponse {
+  journal: RunJournalEntry[];
+  ledger: LedgerEntry[];
+}
+
+/** Fetch the run journal + ledger for a session (#125). */
+export async function getRunJournal(sessionId: string): Promise<RunJournalResponse> {
+  return invoke<RunJournalResponse>('get_run_journal', { sessionId });
 }
 
 interface SessionsState {

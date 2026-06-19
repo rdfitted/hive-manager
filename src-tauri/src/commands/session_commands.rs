@@ -380,6 +380,25 @@ pub async fn resume_session(
     controller.resume_session(&session_id)
 }
 
+/// #125: read the run journal + side-effect ledger for a session, for the resume modal.
+#[tauri::command]
+pub async fn get_run_journal(
+    app_state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
+        return Err("Invalid session ID format".to_string());
+    }
+    let store = crate::storage::RunJournalStore::new(Arc::clone(&app_state.app_state_db));
+    let journal = store
+        .read_journal(&session_id)
+        .map_err(|e| format!("Failed to read run journal: {e}"))?;
+    let ledger = store
+        .read_ledger(&session_id)
+        .map_err(|e| format!("Failed to read run ledger: {e}"))?;
+    Ok(json!({ "journal": journal, "ledger": ledger }))
+}
+
 #[tauri::command]
 pub async fn update_session_metadata(
     registry: State<'_, Arc<ActionRegistry>>,

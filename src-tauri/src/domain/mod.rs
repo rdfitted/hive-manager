@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod cell;
 pub mod event;
 pub mod resolver;
+pub mod run_journal;
 pub mod session;
 pub mod status;
 pub mod workspace;

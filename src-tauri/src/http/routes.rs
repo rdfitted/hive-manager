@@ -95,6 +95,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Event routes
         .route("/api/sessions/{id}/events", get(events::get_events))
         .route("/api/sessions/{id}/stream", get(events::stream_events))
+        // Run journal + ledger (#125): per-step status for a resumable run
+        .route("/api/sessions/{id}/run-journal", get(sessions::get_run_journal))
         // Application-state routes (SQLite-backed nav/UI state + watermark polling)
         .route(
             "/api/sessions/{id}/application-state",
