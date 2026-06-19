@@ -4,7 +4,7 @@ use parking_lot::RwLock as PLRwLock;
 use tauri::{AppHandle, Emitter};
 
 use crate::domain::event::{Event, EventType, Severity};
-use crate::storage::{AppConfig, SessionStorage};
+use crate::storage::{AppConfig, ApplicationStateDb, SessionStorage};
 use crate::storage::ConversationMessage;
 use crate::pty::PtyManager;
 use crate::session::SessionController;
@@ -19,6 +19,7 @@ pub struct AppState {
     pub injection_manager: Arc<PLRwLock<InjectionManager>>,
     pub storage: Arc<SessionStorage>,
     pub event_bus: Arc<EventBus>,
+    pub app_state_db: Arc<ApplicationStateDb>,
     pub app_handle: Option<AppHandle>,
 }
 
@@ -30,6 +31,7 @@ impl AppState {
         injection_manager: Arc<PLRwLock<InjectionManager>>,
         storage: Arc<SessionStorage>,
         event_bus: Arc<EventBus>,
+        app_state_db: Arc<ApplicationStateDb>,
         app_handle: Option<AppHandle>,
     ) -> Self {
         Self {
@@ -39,6 +41,7 @@ impl AppState {
             injection_manager,
             storage,
             event_bus,
+            app_state_db,
             app_handle,
         }
     }

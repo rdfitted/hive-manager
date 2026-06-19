@@ -18,6 +18,9 @@ use crate::session::cell_status::PRIMARY_CELL_ID;
 use crate::session::DEFAULT_MAX_QA_ITERATIONS;
 use crate::templates::SessionTemplate;
 
+pub mod application_state;
+pub use application_state::{ApplicationStateDb, ApplicationStateRow};
+
 /// Generate a deterministic ID for legacy learnings that lack one.
 /// Uses UUID v5 (SHA-1 namespace hash) from concatenated fields so the same
 /// entry always produces the same ID across reads.
@@ -92,6 +95,8 @@ pub enum StorageError {
     SessionNotFound(String),
     #[error("Invalid path: {0}")]
     InvalidPath(String),
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
 }
 
 /// Summary of a session for listing

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::http::state::AppState;
 use crate::http::handlers::{
-    agents, artifacts, cells, conversations, evaluator, events, health, heartbeats, inject,
-    learnings, planners, resolver, sessions, templates, workers,
+    agents, application_state, artifacts, cells, conversations, evaluator, events, health,
+    heartbeats, inject, learnings, planners, resolver, sessions, templates, workers,
 };
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -91,6 +91,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Event routes
         .route("/api/sessions/{id}/events", get(events::get_events))
         .route("/api/sessions/{id}/stream", get(events::stream_events))
+        // Application-state routes (SQLite-backed nav/UI state + watermark polling)
+        .route(
+            "/api/sessions/{id}/application-state",
+            get(application_state::get_application_state)
+                .post(application_state::write_application_state),
+        )
+        .route(
+            "/api/sessions/{id}/application-state/poll",
+            get(application_state::poll_application_state),
+        )
         // Injection routes
         .route("/api/sessions/{id}/inject", post(inject::operator_inject))
         .route("/api/sessions/{id}/inject/queen", post(inject::queen_inject))

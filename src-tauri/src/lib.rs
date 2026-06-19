@@ -38,7 +38,7 @@ use commands::{
 };
 use pty::PtyManager;
 use session::SessionController;
-use storage::SessionStorage;
+use storage::{ApplicationStateDb, SessionStorage};
 use coordination::InjectionManager;
 use events::EventBus;
 
@@ -52,6 +52,14 @@ pub fn run() {
 
     // Initialize session storage
     let storage = Arc::new(SessionStorage::new().expect("Failed to initialize session storage"));
+
+    // Initialize the SQLite application_state DB alongside file storage (runs migrations
+    // idempotently). Shared via Arc onto AppState for HTTP + downstream subsystems.
+    let app_state_db = Arc::new(
+        ApplicationStateDb::open(storage.base_dir())
+            .expect("Failed to initialize application_state db"),
+    );
+
     let config = storage.load_config().expect("Failed to load config");
     let shared_config = Arc::new(tokio::sync::RwLock::new(config));
     let event_bus = EventBus::new(storage.base_dir().clone());
@@ -253,6 +261,7 @@ pub fn run() {
             let http_config = shared_config.clone();
             let http_session_controller = session_controller.clone();
             let http_event_bus = event_bus.clone();
+            let http_app_state_db = app_state_db.clone();
             let http_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let (enabled, port) = {
@@ -269,6 +278,7 @@ pub fn run() {
                         injection_manager.clone(),
                         storage.clone(),
                         http_event_bus,
+                        http_app_state_db,
                         Some(http_app_handle),
                     ));
                     if let Err(e) = http::serve(state, port).await {
