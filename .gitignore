@@ -30,12 +30,8 @@ logs/
 .hive/
 .swarm/
 .hive-manager/
+.ai-docs/
 nul
-
-# Compound-engineering knowledge: track the CURATED docs, keep the raw firehose local
-.ai-docs/learnings.jsonl
-.ai-docs/archive/
-.ai-docs/.init
 
 # Local planning docs (not shipped)
 PLANNING DOCS/
