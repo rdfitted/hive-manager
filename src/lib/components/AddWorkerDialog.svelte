@@ -3,6 +3,7 @@
   import { coordination, type WorkerRole, type AddWorkerRequest } from '$lib/stores/coordination';
   import { activeSession, activeAgents, serdeEnumVariantName } from '$lib/stores/sessions';
   import { cliOptions, defaultRoles } from '$lib/config/clis';
+  import Composer from './composer/Composer.svelte';
 
   export let open = false;
 
@@ -233,14 +234,15 @@
         </div>
 
         <div class="form-section">
-          <label class="section-label" for="task-input">Initial Task (optional)</label>
-          <textarea
-            id="task-input"
-            placeholder="Describe the initial task for this worker..."
-            bind:value={initialTask}
-            rows={3}
-            class="textarea-input"
-          ></textarea>
+          <span class="section-label" id="task-label">Initial Task (optional)</span>
+          <div class="composer-host" aria-labelledby="task-label">
+            <Composer
+              sessionId={$activeSession?.id ?? null}
+              placeholder="Describe the initial task for this worker… (@ to mention, / for commands)"
+              persistDraft={false}
+              bind:value={initialTask}
+            />
+          </div>
         </div>
 
         {#if error}
@@ -388,8 +390,7 @@
   }
 
   .custom-role-input,
-  .select-input,
-  .textarea-input {
+  .select-input {
     width: 100%;
     padding: 10px 12px;
     background: var(--bg-surface);
@@ -400,8 +401,7 @@
   }
 
   .custom-role-input:focus,
-  .select-input:focus,
-  .textarea-input:focus {
+  .select-input:focus {
     outline: none;
     border-color: var(--accent-cyan);
   }
@@ -410,10 +410,8 @@
     margin-top: 12px;
   }
 
-  .textarea-input {
-    resize: vertical;
-    min-height: 60px;
-    font-family: inherit;
+  .composer-host {
+    display: flex;
   }
 
   .cli-description {

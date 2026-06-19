@@ -12,6 +12,7 @@
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
   import { layout } from '$lib/stores/layout';
+  import { pendingContext } from '$lib/stores/pendingContext';
 
   let showAddWorkerDialog = $state(false);
   let showShortcuts = $state(false);
@@ -113,6 +114,46 @@
     showAddWorkerDialog = false;
   }
 
+  // Read an xterm terminal selection if the focused/under-cursor element is inside one.
+  function readXtermSelection(): string | null {
+    const term = document.querySelector('.xterm-helper-textarea, .xterm') as HTMLElement | null;
+    // xterm exposes selection via the DOM Selection API over the .xterm-rows; the
+    // window selection below covers it, so this is a placeholder for buffer-level reads.
+    if (!term) return null;
+    return null;
+  }
+
+  // Capture the operator's current selection (terminal or page) or selected cell as a
+  // one-shot context for the next composer submit. CRLF is normalized and the text trimmed.
+  function captureSelectionContext(sessionId: string) {
+    const xtermText = readXtermSelection();
+    const winText = window.getSelection()?.toString() ?? '';
+    const raw = (xtermText ?? winText).replace(/\r\n/g, '\n').trim();
+
+    if (raw) {
+      pendingContext.capture({
+        sessionId,
+        agentId: $ui.focusedAgentId,
+        kind: 'selection',
+        text: raw,
+        capturedAt: Date.now(),
+      });
+      return;
+    }
+
+    // No text selection — fall back to the selected session cell, if any.
+    const cellId = $ui.selectedCellId;
+    if (cellId) {
+      pendingContext.capture({
+        sessionId,
+        agentId: $ui.focusedAgentId,
+        kind: 'cell',
+        cellId,
+        capturedAt: Date.now(),
+      });
+    }
+  }
+
   // Keyboard shortcuts (Ctrl on Windows/Linux, Cmd on macOS)
   function handleKeydown(event: KeyboardEvent) {
     const mod = event.ctrlKey || event.metaKey;
@@ -133,6 +174,18 @@
     }
     if (event.key === 'Escape' && showShortcuts) {
       showShortcuts = false;
+    }
+    // Ctrl+I: capture the active selection / cell as one-shot operator context for the
+    // next composer submit. Skip when focus is inside the composer (don't hijack its own
+    // selection). Reads xterm selection first, then the window selection, else the
+    // selected session cell.
+    if (mod && (event.key === 'i' || event.key === 'I')) {
+      const ctxTarget = event.target as HTMLElement | null;
+      if (ctxTarget?.closest('[data-composer]')) return; // composer owns its selection
+      const sid = $activeSession?.id ?? null;
+      if (!sid) return;
+      event.preventDefault();
+      captureSelectionContext(sid);
     }
     // Navigate agents with arrow keys — skip when user is typing in inputs, textareas,
     // contenteditable regions, or terminal panes so we don't hijack their keystrokes.

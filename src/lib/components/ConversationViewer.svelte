@@ -4,6 +4,7 @@
   import { activeSession } from '$lib/stores/sessions';
   import AgentStatusBar from './AgentStatusBar.svelte';
   import ToolRenderHost from './renderers/ToolRenderHost.svelte';
+  import Composer from './composer/Composer.svelte';
 
   let messageContainer: HTMLDivElement;
   let autoScroll = true;
@@ -88,17 +89,11 @@
     }
   }
 
-  async function sendMessage() {
-    if (!sessionId || !selectedAgent || !messageInput.trim()) return;
-    await conversationStore.sendMessage(sessionId, selectedAgent, 'operator', messageInput.trim());
-    messageInput = '';
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
+  // The Composer flattens its contenteditable model (mentions/commands) to a plain string
+  // and prepends any one-shot operator context before handing the final prompt here.
+  async function sendComposerMessage(text: string) {
+    if (!sessionId || !selectedAgent || !text.trim()) return;
+    await conversationStore.sendMessage(sessionId, selectedAgent, 'operator', text.trim());
   }
 
   // Approval widget signals. Wiring approve/reject to the queen/worker is #123's
@@ -206,16 +201,13 @@
   <!-- Input -->
   {#if selectedAgent && selectedAgent !== 'shared'}
     <div class="input-bar">
-      <input
-        type="text"
-        placeholder="Send message as operator..."
+      <Composer
+        sessionId={sessionId}
+        agentId={selectedAgent}
+        placeholder="Send message as operator… (@ to mention, / for commands)"
         bind:value={messageInput}
-        onkeydown={handleKeydown}
-        class="message-input"
+        onsubmit={sendComposerMessage}
       />
-      <button class="send-btn" onclick={sendMessage} disabled={!messageInput.trim()}>
-        Send
-      </button>
     </div>
   {/if}
 
@@ -353,41 +345,6 @@
     padding: 8px 12px;
     border-top: 1px solid var(--border-structural);
     background: var(--bg-surface);
-  }
-
-  .message-input {
-    flex: 1;
-    padding: 6px 10px;
-    font-size: 12px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-  }
-
-  .message-input:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
-  }
-
-  .send-btn {
-    padding: 6px 14px;
-    font-size: 12px;
-    font-weight: 600;
-    background: var(--accent-cyan);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: white;
-    cursor: pointer;
-  }
-
-  .send-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .send-btn:hover:not(:disabled) {
-    opacity: 0.9;
   }
 
   .error {

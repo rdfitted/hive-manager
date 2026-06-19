@@ -30,6 +30,12 @@
       ],
     },
     {
+      title: 'Context',
+      shortcuts: [
+        { keys: ['Ctrl', 'I'], action: 'Capture selection / cell context for next turn' },
+      ],
+    },
+    {
       title: 'Help',
       shortcuts: [
         { keys: ['Ctrl', '/'], action: 'Show this overlay' },
