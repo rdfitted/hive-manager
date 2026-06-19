@@ -2,6 +2,8 @@ import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { CellStatus } from '$lib/types/domain';
+import { applicationState } from './applicationState';
+import { ui } from './ui';
 
 export type AgentRole =
   | 'MasterPlanner'
@@ -436,6 +438,14 @@ function createSessionsStore() {
 
     setActiveSession(sessionId: string | null) {
       update((state) => ({ ...state, activeSessionId: sessionId }));
+      // Route navigation-state persistence at this session and (re)start the
+      // snapshot-hydrate + watermark poll loop. On switch the store resets to 0.
+      ui.setPersistSession(sessionId);
+      if (sessionId) {
+        applicationState.start(sessionId);
+      } else {
+        applicationState.stop();
+      }
     },
 
     removeSession(sessionId: string) {

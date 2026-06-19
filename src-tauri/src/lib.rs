@@ -40,7 +40,7 @@ use commands::{
 };
 use pty::PtyManager;
 use session::SessionController;
-use storage::SessionStorage;
+use storage::{ApplicationStateDb, SessionStorage};
 use coordination::InjectionManager;
 use events::EventBus;
 
@@ -54,6 +54,14 @@ pub fn run() {
 
     // Initialize session storage
     let storage = Arc::new(SessionStorage::new().expect("Failed to initialize session storage"));
+
+    // Initialize the SQLite application_state DB alongside file storage (runs migrations
+    // idempotently). Shared via Arc onto AppState for HTTP + downstream subsystems.
+    let app_state_db = Arc::new(
+        ApplicationStateDb::open(storage.base_dir())
+            .expect("Failed to initialize application_state db"),
+    );
+
     let config = storage.load_config().expect("Failed to load config");
     let shared_config = Arc::new(tokio::sync::RwLock::new(config));
     let event_bus = EventBus::new(storage.base_dir().clone());
@@ -111,6 +119,7 @@ pub fn run() {
                 Arc::clone(&injection_manager),
                 Arc::clone(&storage),
                 Arc::clone(&event_bus),
+                Arc::clone(&app_state_db),
                 Some(app.handle().clone()),
             ));
             // Attach the shared registry so HTTP handlers can dispatch actions.
@@ -275,6 +284,8 @@ pub fn run() {
 
             // Start HTTP server if enabled, sharing the SAME Arc<AppState> the
             // Tauri command surface uses so both surfaces see identical state.
+            // (The app_state_db from #124 is already folded into this unified
+            // Arc<AppState>, so the HTTP server sees the same SQLite layer.)
             let http_state = Arc::clone(&app_state);
             tauri::async_runtime::spawn(async move {
                 let (enabled, port) = {

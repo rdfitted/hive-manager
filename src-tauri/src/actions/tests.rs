@@ -31,6 +31,7 @@ fn test_state() -> Arc<AppState> {
         SessionStorage::new_with_base(dir.path().to_path_buf()).unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
     // Keep the TempDir alive for the lifetime of the process under test by leaking it;
     // tests are short-lived and this avoids a premature directory cleanup race.
     std::mem::forget(dir);
@@ -41,6 +42,7 @@ fn test_state() -> Arc<AppState> {
         injection_manager,
         storage,
         event_bus,
+        app_state_db,
         None,
     ))
 }
