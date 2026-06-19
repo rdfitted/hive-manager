@@ -9,6 +9,15 @@ export interface ConversationMessage {
   content: string;
   agent_id?: string;
   session_id?: string;
+  /**
+   * Native tool-render envelope (issue #127). Optional + backward-compatible:
+   * old messages and the Tauri 'conversation-message' payload deserialize
+   * unchanged, and conversationMessageSignature/dedupe IGNORE these fields, so
+   * the signature hash is stable whether or not a renderer is attached.
+   * `renderer` is a plain string hint; `data` is the structured payload.
+   */
+  renderer?: string;
+  data?: unknown;
 }
 
 export interface HeartbeatInfo {
