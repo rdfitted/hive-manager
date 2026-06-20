@@ -1,14 +1,18 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use parking_lot::RwLock;
 use serde_json::json;
+use std::collections::{HashSet, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::State;
 
 use crate::actions::{ActionContext, ActionRegistry, Caller};
-use crate::http::handlers::{validate_cli, validate_project_path};
 use crate::http::state::AppState;
 use crate::pty::AgentConfig;
-use crate::session::{Session, SessionController, HiveLaunchConfig, ResearchLaunchConfig, SwarmLaunchConfig, FusionLaunchConfig};
+use crate::session::{
+    DebateLaunchConfig, FusionLaunchConfig, HiveLaunchConfig, ResearchLaunchConfig, Session,
+    SessionController, SwarmLaunchConfig,
+};
 
 pub struct SessionControllerState(pub Arc<RwLock<SessionController>>);
 
@@ -28,147 +32,136 @@ async fn dispatch_frontend(
         .map_err(|e| e.to_message())
 }
 
-const SESSION_COLOR_ALLOWLIST: &[&str] = &[
-    "#7aa2f7",
-    "#bb9af7",
-    "#9ece6a",
-    "#e0af68",
-    "#7dcfff",
-    "#f7768e",
-    "#ff9e64",
-    "#f7b1d1",
-];
-
 // SessionControllerState is Send + Sync because Arc<RwLock<T>> is Send + Sync when T is Send
 unsafe impl Send for SessionControllerState {}
 unsafe impl Sync for SessionControllerState {}
 
-fn validate_session_name(name: Option<&str>) -> Result<(), String> {
-    let Some(name) = name else {
-        return Ok(());
+const SESSION_FILE_RESULT_CAP: usize = 100;
+const SESSION_FILE_VISIT_CAP: usize = 5_000;
+
+fn validate_session_id_for_command(session_id: &str) -> Result<(), String> {
+    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
+        return Err("Invalid session ID format".to_string());
+    }
+    Ok(())
+}
+
+fn is_ignored_file_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
     };
-
-    if name.trim().is_empty() {
-        return Err("Invalid session name: must not be empty or whitespace".to_string());
-    }
-
-    if name.chars().count() > 64 {
-        return Err("Invalid session name: must be 64 characters or fewer".to_string());
-    }
-
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
-        return Err("Invalid session name: must not contain '..', '/', or '\\'".to_string());
-    }
-
-    Ok(())
+    matches!(
+        name,
+        ".git" | ".hive-manager" | ".svelte-kit" | "node_modules" | "target" | "dist" | "build"
+    )
 }
 
-fn validate_session_color(color: Option<&str>) -> Result<(), String> {
-    let Some(color) = color else {
-        return Ok(());
-    };
-
-    if !SESSION_COLOR_ALLOWLIST.contains(&color) && !is_valid_hex_session_color(color) {
-        return Err(format!(
-            "Invalid session color '{}'. Valid options: {} or any #RRGGBB hex color",
-            color,
-            SESSION_COLOR_ALLOWLIST.join(", ")
-        ));
-    }
-
-    Ok(())
+fn path_within_any_root(path: &Path, canonical_roots: &[PathBuf]) -> bool {
+    canonical_roots.iter().any(|root| path.starts_with(root))
 }
 
-fn is_valid_hex_session_color(color: &str) -> bool {
-    color.len() == 7
-        && color.starts_with('#')
-        && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
-}
+fn dedupe_canonical_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut canonical_roots = Vec::new();
 
-fn validate_research_launch_config(config: &ResearchLaunchConfig) -> Result<(), String> {
-    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
-    validate_session_name(config.name.as_deref())?;
-    validate_session_color(config.color.as_deref())?;
-    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
-
-    // Research requires a roster of 1..=6 researchers. These are NOT pre-spawned:
-    // the Queen spawns them on demand, so the roster must list at least one entry for
-    // the Queen to draw from (and is capped like the launch dialog does at 6).
-    if !(1..=6).contains(&config.workers.len()) {
-        return Err(format!(
-            "Research sessions require 1 to 6 researchers (got {}).",
-            config.workers.len()
-        ));
-    }
-
-    for worker in &config.workers {
-        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
-    }
-
-    Ok(())
-}
-
-fn validate_swarm_launch_config(config: &SwarmLaunchConfig) -> Result<(), String> {
-    validate_project_path(&config.project_path).map_err(|e| e.message.clone())?;
-    validate_session_name(config.name.as_deref())?;
-    validate_session_color(config.color.as_deref())?;
-    validate_cli(&config.queen_config.cli).map_err(|e| e.message.clone())?;
-    validate_cli(&config.planner_config.cli).map_err(|e| e.message.clone())?;
-
-    for worker in &config.workers_per_planner {
-        validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
-    }
-
-    for planner in &config.planners {
-        validate_cli(&planner.config.cli).map_err(|e| e.message.clone())?;
-        for worker in &planner.workers {
-            validate_cli(&worker.cli).map_err(|e| e.message.clone())?;
+    for root in roots {
+        let Ok(canonical) = fs::canonicalize(root) else {
+            continue;
+        };
+        let key = canonical.to_string_lossy().to_lowercase();
+        if seen.insert(key) {
+            canonical_roots.push(canonical);
         }
     }
 
-    if let Some(evaluator_config) = &config.evaluator_config {
-        if evaluator_config.cli.trim().is_empty() {
-            // Empty nested CLI means "inherit session default"; only validate explicit overrides.
-        } else {
-        validate_cli(&evaluator_config.cli).map_err(|e| e.message.clone())?;
-        }
+    canonical_roots
+}
+
+fn file_matches_query(path: &Path, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
     }
 
-    if let Some(qa_workers) = &config.qa_workers {
-        for qa_worker in qa_workers {
-            validate_cli(&qa_worker.cli).map_err(|e| e.message.clone())?;
-            match qa_worker.specialization.as_str() {
-                "ui" | "api" | "a11y" => {}
-                other => {
-                    return Err(format!(
-                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
-                        other
-                    ));
+    let path_text = path.to_string_lossy().to_lowercase();
+    let name_text = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    path_text.contains(query) || name_text.contains(query)
+}
+
+fn list_files_under_roots(roots: Vec<PathBuf>, query: String) -> Result<Vec<String>, String> {
+    let canonical_roots = dedupe_canonical_roots(roots);
+    let query = query.trim().to_lowercase();
+    let mut pending: VecDeque<PathBuf> = canonical_roots.iter().cloned().collect();
+    let mut results = Vec::new();
+    let mut visited = 0usize;
+
+    while let Some(dir) = pending.pop_front() {
+        if visited >= SESSION_FILE_VISIT_CAP || results.len() >= SESSION_FILE_RESULT_CAP {
+            break;
+        }
+        visited += 1;
+
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            if results.len() >= SESSION_FILE_RESULT_CAP || visited >= SESSION_FILE_VISIT_CAP {
+                break;
+            }
+
+            let path = entry.path();
+            let Ok(canonical_path) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !path_within_any_root(&canonical_path, &canonical_roots) {
+                continue;
+            }
+
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+
+            if file_type.is_dir() {
+                if !is_ignored_file_dir(&path) {
+                    pending.push_back(path);
                 }
+                continue;
+            }
+
+            if file_type.is_file() && file_matches_query(&path, &query) {
+                results.push(path.to_string_lossy().to_string());
             }
         }
     }
 
-    Ok(())
+    Ok(results)
 }
 
 #[tauri::command]
 pub async fn launch_hive(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     project_path: String,
     worker_count: u8,
     command: String,
     prompt: Option<String>,
-) -> Result<Session, String> {
-    let controller = state.0.read();
-    controller.launch_hive(
-        PathBuf::from(project_path),
-        worker_count,
-        &command,
-        prompt,
-        None,
-        None,
+) -> Result<serde_json::Value, String> {
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.launch_hive",
+        json!({
+            "project_path": project_path,
+            "worker_count": worker_count,
+            "command": command,
+            "task_description": prompt,
+        }),
     )
+    .await
 }
 
 // NOTE on return types: the migrated session commands return `serde_json::Value`
@@ -196,13 +189,7 @@ pub async fn list_sessions(
     registry: State<'_, Arc<ActionRegistry>>,
     app_state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    dispatch_frontend(
-        &registry,
-        Arc::clone(&app_state),
-        "session.list",
-        json!({}),
-    )
-    .await
+    dispatch_frontend(&registry, Arc::clone(&app_state), "session.list", json!({})).await
 }
 
 #[tauri::command]
@@ -265,27 +252,40 @@ pub async fn launch_hive_v2(
 
 #[tauri::command]
 pub async fn launch_research(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     config: ResearchLaunchConfig,
-) -> Result<Session, String> {
-    validate_research_launch_config(&config)?;
-    let controller = state.0.read();
-    controller.launch_research(config)
+) -> Result<serde_json::Value, String> {
+    let input = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.launch_research",
+        input,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn launch_swarm(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     config: SwarmLaunchConfig,
-) -> Result<Session, String> {
-    validate_swarm_launch_config(&config)?;
-    let controller = state.0.read();
-    controller.launch_swarm(config)
+) -> Result<serde_json::Value, String> {
+    let input = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.launch_swarm",
+        input,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn launch_solo(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     project_path: String,
     task_description: Option<String>,
     cli: String,
@@ -293,10 +293,7 @@ pub async fn launch_solo(
     flags: Option<Vec<String>>,
     evaluator_cli: Option<String>,
     evaluator_model: Option<String>,
-) -> Result<Session, String> {
-    validate_project_path(&project_path).map_err(|e| e.message.clone())?;
-    validate_cli(&cli).map_err(|e| e.message.clone())?;
-
+) -> Result<serde_json::Value, String> {
     let agent_config = AgentConfig {
         cli: cli.clone(),
         model,
@@ -310,7 +307,6 @@ pub async fn launch_solo(
 
     // Build evaluator_config: validate if provided, else fall back to cli silently
     let evaluator_config = if let Some(ref eval_cli) = evaluator_cli {
-        validate_cli(eval_cli).map_err(|e| e.message.clone())?;
         Some(AgentConfig {
             cli: eval_cli.clone(),
             model: evaluator_model,
@@ -340,17 +336,46 @@ pub async fn launch_solo(
         smoke_test: false,
     };
 
-    let controller = state.0.read();
-    controller.launch_solo(config)
+    let input = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.launch_solo",
+        input,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn launch_fusion(
-    state: State<'_, SessionControllerState>,
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
     config: FusionLaunchConfig,
-) -> Result<Session, String> {
-    let controller = state.0.read();
-    controller.launch_fusion(config)
+) -> Result<serde_json::Value, String> {
+    let input = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.launch_fusion",
+        input,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn launch_debate(
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
+    config: DebateLaunchConfig,
+) -> Result<serde_json::Value, String> {
+    let input = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    dispatch_frontend(
+        &registry,
+        Arc::clone(&app_state),
+        "session.launch_debate",
+        input,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -404,9 +429,7 @@ pub async fn get_run_journal(
     app_state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<serde_json::Value, String> {
-    if session_id.contains("..") || session_id.contains('/') || session_id.contains('\\') {
-        return Err("Invalid session ID format".to_string());
-    }
+    validate_session_id_for_command(&session_id)?;
     let store = crate::storage::RunJournalStore::new(Arc::clone(&app_state.app_state_db));
     let journal = store
         .read_journal(&session_id)
@@ -415,6 +438,32 @@ pub async fn get_run_journal(
         .read_ledger(&session_id)
         .map_err(|e| format!("Failed to read run ledger: {e}"))?;
     Ok(json!({ "journal": journal, "ledger": ledger }))
+}
+
+#[tauri::command]
+pub async fn list_session_files(
+    state: State<'_, SessionControllerState>,
+    session_id: String,
+    query: String,
+) -> Result<Vec<String>, String> {
+    validate_session_id_for_command(&session_id)?;
+
+    let roots = {
+        let controller = state.0.read();
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        let mut roots = vec![session.project_path];
+        if let Some(worktree_path) = session.worktree_path {
+            roots.push(PathBuf::from(worktree_path));
+        }
+        roots
+    };
+
+    tauri::async_runtime::spawn_blocking(move || list_files_under_roots(roots, query))
+        .await
+        .map_err(|e| format!("Failed to list session files: {e}"))?
 }
 
 #[tauri::command]
@@ -432,4 +481,22 @@ pub async fn update_session_metadata(
         json!({ "id": id, "name": name, "color": color }),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_within_any_root;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_scope_rejects_sibling_paths() {
+        let root = std::env::temp_dir().join("hm-session-root");
+        let inside = root.join("src").join("main.rs");
+        let outside = std::env::temp_dir()
+            .join("hm-session-root-sibling")
+            .join("main.rs");
+
+        assert!(path_within_any_root(&inside, &[PathBuf::from(&root)]));
+        assert!(!path_within_any_root(&outside, &[root]));
+    }
 }

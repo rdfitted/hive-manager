@@ -70,7 +70,7 @@ export function fileMentions(paths: string[]): MentionItem[] {
 
 /**
  * Debounced file source: lists files under a session's project/worktree path via a Tauri
- * command. Returns absolute paths exactly as Rust provides them (no client-side joining).
+ * command keyed by session id. Returns absolute paths exactly as Rust provides them.
  * Results are capped and the call is debounced so large worktrees don't thrash.
  */
 let fileDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -78,7 +78,7 @@ const FILE_DEBOUNCE_MS = 200;
 const FILE_RESULT_CAP = 50;
 
 export function listSessionFiles(
-  rootPath: string,
+  sessionId: string,
   query: string
 ): Promise<string[]> {
   return new Promise((resolve) => {
@@ -87,7 +87,7 @@ export function listSessionFiles(
       fileDebounce = null;
       try {
         const files = await invoke<string[]>('list_session_files', {
-          rootPath,
+          sessionId,
           query,
         });
         resolve(files.slice(0, FILE_RESULT_CAP));

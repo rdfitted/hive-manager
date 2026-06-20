@@ -23,6 +23,7 @@ describe('slash commands', () => {
     expect(findCommand('hive')?.expand()).toBe('/hive ');
     expect(findCommand('fusion')?.expand()).toBe('/fusion ');
     expect(findCommand('research')?.expand()).toBe('/research ');
+    expect(findCommand('debate')?.expand()).toBe('/debate ');
   });
 
   it('quick actions are tagged with control actions, not insert', () => {

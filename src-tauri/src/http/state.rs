@@ -1,16 +1,17 @@
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use parking_lot::RwLock as PLRwLock;
-use tauri::{AppHandle, Emitter};
+use std::sync::Arc;
+use crate::tauri_shim::{AppHandle, Emitter};
+use tokio::sync::RwLock;
 
+use crate::actions::render::envelope_for_content;
 use crate::actions::ActionRegistry;
+use crate::coordination::{InjectionManager, QueueManager};
 use crate::domain::event::{Event, EventType, Severity};
-use crate::storage::{AppConfig, ApplicationStateDb, SessionStorage};
-use crate::storage::ConversationMessage;
+use crate::events::EventBus;
 use crate::pty::PtyManager;
 use crate::session::SessionController;
-use crate::coordination::{InjectionManager, QueueManager};
-use crate::events::EventBus;
+use crate::storage::ConversationMessage;
+use crate::storage::{AppConfig, ApplicationStateDb, SessionStorage};
 
 #[allow(dead_code)]
 pub struct AppState {
@@ -77,15 +78,24 @@ impl AppState {
         agent_id: &str,
         message: &ConversationMessage,
     ) -> Result<(), String> {
+        let data = serde_json::json!({
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "timestamp": message.timestamp,
+            "from": message.from,
+            "content": message.content,
+        });
+        let envelope = envelope_for_content(data.clone(), &message.content);
+        let mut payload = data;
+        if let (Some(payload), Some(envelope)) = (payload.as_object_mut(), envelope.as_object()) {
+            for (key, value) in envelope {
+                payload.insert(key.clone(), value.clone());
+            }
+        }
+
         if let Some(app_handle) = self.app_handle.as_ref() {
             app_handle
-                .emit("conversation-message", serde_json::json!({
-                    "session_id": session_id,
-                    "agent_id": agent_id,
-                    "timestamp": message.timestamp,
-                    "from": message.from,
-                    "content": message.content,
-                }))
+                .emit("conversation-message", payload.clone())
                 .map_err(|error| format!("Failed to emit Tauri conversation message: {error}"))?;
         }
 
@@ -97,11 +107,7 @@ impl AppState {
                 agent_id: Some(agent_id.to_string()),
                 event_type: EventType::ConversationMessage,
                 timestamp: message.timestamp,
-                payload: serde_json::json!({
-                    "timestamp": message.timestamp,
-                    "from": message.from,
-                    "content": message.content,
-                }),
+                payload,
                 severity: Severity::Info,
             })
             .await

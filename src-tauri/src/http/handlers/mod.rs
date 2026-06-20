@@ -1,21 +1,21 @@
 pub mod actions;
-pub mod health;
-pub mod application_state;
-pub mod sessions;
-pub mod inject;
-pub mod workers;
-pub mod evaluator;
-pub mod planners;
-pub mod learnings;
-pub mod conversations;
-pub mod heartbeats;
-pub mod queue;
-pub mod cells;
 pub mod agents;
+pub mod application_state;
 pub mod artifacts;
+pub mod cells;
+pub mod conversations;
+pub mod evaluator;
 pub mod events;
+pub mod health;
+pub mod heartbeats;
+pub mod inject;
+pub mod learnings;
+pub mod planners;
+pub mod queue;
 pub mod resolver;
+pub mod sessions;
 pub mod templates;
+pub mod workers;
 
 use crate::http::error::ApiError;
 use std::collections::HashSet;
@@ -23,7 +23,16 @@ use std::collections::HashSet;
 // gemini and antigravity are peers (see adapters/mod.rs::VALID_CLIS).
 // antigravity is the worker default; gemini is retained as a selectable peer
 // until Google deprecates it on 2026-06-18.
-const VALID_CLIS: &[&str] = &["claude", "gemini", "antigravity", "codex", "opencode", "cursor", "droid", "qwen"];
+const VALID_CLIS: &[&str] = &[
+    "claude",
+    "gemini",
+    "antigravity",
+    "codex",
+    "opencode",
+    "cursor",
+    "droid",
+    "qwen",
+];
 
 /// Validate session_id for path traversal attacks
 pub fn validate_session_id(session_id: &str) -> Result<(), ApiError> {
@@ -70,7 +79,10 @@ pub fn validate_agent_id(agent_id: &str) -> Result<(), ApiError> {
             "Invalid agent ID: must not contain '..', '/', or '\\'",
         ));
     }
-    if !agent_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !agent_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err(ApiError::bad_request(
             "Invalid agent ID: only alphanumeric characters and hyphens are allowed",
         ));
@@ -140,14 +152,14 @@ pub fn validate_cli(cli: &str) -> Result<(), ApiError> {
 /// Validate project path for path traversal and existence
 pub fn validate_project_path(path: &str) -> Result<(), ApiError> {
     use std::path::Path;
-    
+
     // Check for path traversal sequences
     if path.contains("..") {
         return Err(ApiError::bad_request(
             "Invalid project path: must not contain '..' (path traversal)",
         ));
     }
-    
+
     // Verify the path exists and is a directory
     let project_path = Path::new(path);
     if !project_path.exists() {
@@ -162,6 +174,6 @@ pub fn validate_project_path(path: &str) -> Result<(), ApiError> {
             path
         )));
     }
-    
+
     Ok(())
 }

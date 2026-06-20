@@ -142,7 +142,8 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
         SessionTemplate {
             id: "bug-fix-hive".to_string(),
             name: "Bug-fix Hive".to_string(),
-            description: "Queen-led bug fix session with backend and frontend implementers.".to_string(),
+            description: "Queen-led bug fix session with backend and frontend implementers."
+                .to_string(),
             mode: SessionMode::Hive,
             cells: vec![
                 CellTemplate {
@@ -178,7 +179,9 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
         SessionTemplate {
             id: "feature-build-hive".to_string(),
             name: "Feature-build Hive".to_string(),
-            description: "Queen plus backend, frontend, and coherence workers for feature delivery.".to_string(),
+            description:
+                "Queen plus backend, frontend, and coherence workers for feature delivery."
+                    .to_string(),
             mode: SessionMode::Hive,
             cells: vec![
                 CellTemplate {
@@ -213,7 +216,8 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
         SessionTemplate {
             id: "fusion-compare".to_string(),
             name: "Fusion Compare".to_string(),
-            description: "Two candidate implementation cells plus a resolver recommendation pass.".to_string(),
+            description: "Two candidate implementation cells plus a resolver recommendation pass."
+                .to_string(),
             mode: SessionMode::Fusion,
             cells: vec![
                 CellTemplate {
@@ -306,7 +310,9 @@ impl TemplateEngine {
     /// Load built-in templates
     fn load_builtin_templates(&mut self) {
         // Backend worker role template
-        self.builtin_templates.insert("roles/backend".to_string(), r#"# Backend Worker Role
+        self.builtin_templates.insert(
+            "roles/backend".to_string(),
+            r#"# Backend Worker Role
 
 You are a Backend Worker in a multi-agent coding session.
 
@@ -330,7 +336,9 @@ You are a Backend Worker in a multi-agent coding session.
 
 ## Current Assignment
 {{task}}
-"#.to_string());
+"#
+            .to_string(),
+        );
 
         // NOTE: No `roles/researcher` builtin template. Research workers are launched
         // via launch_research, which (like all v2 Hive launches) builds worker prompts
@@ -340,7 +348,9 @@ You are a Backend Worker in a multi-agent coding session.
         // here would be dead code and was removed in PR #121 review.
 
         // Frontend worker role template
-        self.builtin_templates.insert("roles/frontend".to_string(), r#"# Frontend Worker Role
+        self.builtin_templates.insert(
+            "roles/frontend".to_string(),
+            r#"# Frontend Worker Role
 
 You are a Frontend Worker in a multi-agent coding session.
 
@@ -364,10 +374,14 @@ You are a Frontend Worker in a multi-agent coding session.
 
 ## Current Assignment
 {{task}}
-"#.to_string());
+"#
+            .to_string(),
+        );
 
         // Coherence worker role template
-        self.builtin_templates.insert("roles/coherence".to_string(), r#"# Coherence Worker Role
+        self.builtin_templates.insert(
+            "roles/coherence".to_string(),
+            r#"# Coherence Worker Role
 
 You are a Coherence Worker in a multi-agent coding session.
 
@@ -392,10 +406,14 @@ You are a Coherence Worker in a multi-agent coding session.
 
 ## Current Assignment
 {{task}}
-"#.to_string());
+"#
+            .to_string(),
+        );
 
         // Simplify worker role template
-        self.builtin_templates.insert("roles/simplify".to_string(), r#"# Simplify Worker Role
+        self.builtin_templates.insert(
+            "roles/simplify".to_string(),
+            r#"# Simplify Worker Role
 
 You are a Simplify Worker in a multi-agent coding session.
 
@@ -420,10 +438,14 @@ You are a Simplify Worker in a multi-agent coding session.
 
 ## Current Assignment
 {{task}}
-"#.to_string());
+"#
+            .to_string(),
+        );
 
         // Custom worker role template
-        self.builtin_templates.insert("roles/custom".to_string(), r#"# Custom Worker Role
+        self.builtin_templates.insert(
+            "roles/custom".to_string(),
+            r#"# Custom Worker Role
 
 You are a Worker in a multi-agent coding session.
 
@@ -445,7 +467,9 @@ You are a Worker in a multi-agent coding session.
 
 ## Current Assignment
 {{task}}
-"#.to_string());
+"#
+            .to_string(),
+        );
 
         self.builtin_templates.insert("roles/evaluator".to_string(), r#"# Evaluator - QA Authority
 
@@ -812,7 +836,9 @@ Always reference criteria by number. Fail when accessibility evidence is partial
 "#.to_string());
 
         // Fusion worker prompt template
-        self.builtin_templates.insert("fusion-worker".to_string(), r#"You are a Fusion worker implementing variant "{{variant_name}}".
+        self.builtin_templates.insert(
+            "fusion-worker".to_string(),
+            r#"You are a Fusion worker implementing variant "{{variant_name}}".
 Working directory: {{worktree_path}}
 Branch: {{branch}}
 
@@ -824,10 +850,14 @@ Branch: {{branch}}
 - Commit all changes to your branch
 - Do NOT interact with other variants
 - When complete, update your task file status to COMPLETED
-"#.to_string());
+"#
+            .to_string(),
+        );
 
         // Fusion judge prompt template
-        self.builtin_templates.insert("fusion-judge".to_string(), r#"You are the Judge evaluating {{variant_count}} competing implementations.
+        self.builtin_templates.insert(
+            "fusion-judge".to_string(),
+            r#"You are the Judge evaluating {{variant_count}} competing implementations.
 
 ## Variants
 {{variant_list}}
@@ -844,9 +874,111 @@ Branch: {{branch}}
 ## Recommendation
 Winner: [variant name]
 Rationale: [explanation]
+"#
+            .to_string(),
+        );
+
+        self.builtin_templates.insert(
+            "debater".to_string(),
+            r#"You are a Debate debater arguing as "{{debater_name}}".
+Working directory: {{worktree_path}}
+Branch: {{branch}}
+
+## Debate Topic
+{{task}}
+
+## Your Stance
+{{stance}}
+
+## Round
+Round {{round}} of {{total_rounds}}
+
+## Opponent Prior-Round Arguments
+Previous round directory: {{previous_round_dir}}
+
+{{opponent_files}}
+
+## Deliverable
+Write this round's argument to:
+{{argument_file}}
+
+Then update your task file:
+{{task_file}}
+
+## Rules
+- Argue only your assigned stance.
+- Read opponent prior-round arguments before writing rebuttals in rounds after round 1.
+- Do not edit production source code.
+- Do not commit or push.
+- When complete, update your task file status to COMPLETED.
+
+## Heartbeat
+{{generic_heartbeat_snippet}}
+"#
+            .to_string(),
+        );
+
+        self.builtin_templates.insert("debate-judge".to_string(), r#"You are the Judge evaluating a multi-round Debate session.
+
+## Debate Topic
+{{topic}}
+
+## Debaters
+{{debater_list}}
+
+## Rounds
+{{rounds}}
+
+## Argument Files
+{{round_files}}
+
+## Evaluation Process
+1. Read every argument file listed above.
+2. Evaluate argument quality, rebuttal strength, evidence, consistency, and handling of opponent claims.
+3. Write the verdict to: {{verdict_file}}
+
+## Verdict Format
+# Debate Verdict
+## Summary
+## Round-by-Round Assessment
+## Winner
+Winner: [debater name]
+Rationale: [concise explanation]
+## Notable Insights
+
+## Wiki Capture
+The global wiki path is: `{{global_wiki_path}}`
+
+If `{{global_wiki_path}}` is non-empty and the debate produced durable knowledge, capture the verdict to the global wiki with this Draft -> PR flow:
+
+```bash
+cd "{{global_wiki_path}}"
+git checkout main && git pull --ff-only
+git checkout -b debate/{{topic_slug}}
+```
+
+Read `~/.ai-docs/schema.md`, write a schema-compliant markdown entry summarizing the debate and sources, then:
+
+```bash
+git add -A
+git commit -m "debate: {{topic_slug}} verdict"
+git push -u origin debate/{{topic_slug}}
+gh pr create --base main --title "debate: {{topic_slug}} verdict" --body "Captures debate verdict for {{topic}}"
+```
+
+If `{{global_wiki_path}}` is empty, skip wiki capture gracefully.
+
+## Constraints
+- You are read-only for project code.
+- Only produce the verdict and optional wiki Draft -> PR.
+
+## Heartbeat
+{{generic_heartbeat_snippet}}
 "#.to_string());
 
-        self.builtin_templates.insert("resolver".to_string(), r#"# Resolver Recommendation Pass
+        self.builtin_templates.insert(
+            "resolver".to_string(),
+            r#"# Resolver Recommendation Pass
 
 You are evaluating candidate implementation artifacts for session `{{session_id}}`.
 
@@ -864,7 +996,9 @@ Recommend the strongest candidate or describe a safe hybrid plan.
 - Provide concise rationale grounded in artifact evidence
 - List explicit tradeoffs
 - Include a hybrid integration plan only if combining candidates is materially better
-"#.to_string());
+"#
+            .to_string(),
+        );
 
         // Queen prompt for Hive sessions
         self.builtin_templates.insert("queen-hive".to_string(), r#"# Queen - Hive Session Orchestrator
@@ -1306,7 +1440,9 @@ The planners will break down tasks and assign to their workers.
 "#.to_string());
 
         // Planner prompt template
-        self.builtin_templates.insert("planner".to_string(), r#"# Planner - {{domain}} Domain
+        self.builtin_templates.insert(
+            "planner".to_string(),
+            r#"# Planner - {{domain}} Domain
 
 You are a Planner agent managing the {{domain}} domain in a Swarm session.
 
@@ -1329,7 +1465,9 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
 ## Current Domain Task
 
 {{task}}
-"#.to_string());
+"#
+            .to_string(),
+        );
     }
 
     /// Render a worker prompt from a role
@@ -1362,6 +1500,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
             SessionType::Hive { .. } => "queen-hive",
             SessionType::Swarm { .. } => "queen-swarm",
             SessionType::Fusion { .. } => "queen-fusion",
+            SessionType::Debate { .. } => "queen-fusion",
             SessionType::Solo { .. } => "queen-hive", // Solo has no queen, keep fallback template for compatibility
         };
 
@@ -1407,15 +1546,27 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
 
         rendered = rendered.replace(
             "{{variant_name}}",
-            context.variables.get("variant_name").map(String::as_str).unwrap_or("variant"),
+            context
+                .variables
+                .get("variant_name")
+                .map(String::as_str)
+                .unwrap_or("variant"),
         );
         rendered = rendered.replace(
             "{{worktree_path}}",
-            context.variables.get("worktree_path").map(String::as_str).unwrap_or("."),
+            context
+                .variables
+                .get("worktree_path")
+                .map(String::as_str)
+                .unwrap_or("."),
         );
         rendered = rendered.replace(
             "{{branch}}",
-            context.variables.get("branch").map(String::as_str).unwrap_or(""),
+            context
+                .variables
+                .get("branch")
+                .map(String::as_str)
+                .unwrap_or(""),
         );
 
         if let Some(ref task) = context.task {
@@ -1437,24 +1588,44 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         rendered = rendered.replace("{{session_id}}", &context.session_id);
         rendered = rendered.replace(
             "{{variant_count}}",
-            context.variables.get("variant_count").map(String::as_str).unwrap_or("0"),
+            context
+                .variables
+                .get("variant_count")
+                .map(String::as_str)
+                .unwrap_or("0"),
         );
         rendered = rendered.replace(
             "{{variant_list}}",
-            context.variables.get("variant_list").map(String::as_str).unwrap_or(""),
+            context
+                .variables
+                .get("variant_list")
+                .map(String::as_str)
+                .unwrap_or(""),
         );
         rendered = rendered.replace(
             "{{decision_file}}",
-            context.variables.get("decision_file").map(String::as_str).unwrap_or(""),
+            context
+                .variables
+                .get("decision_file")
+                .map(String::as_str)
+                .unwrap_or(""),
         );
 
         Ok(rendered)
     }
 
-    pub fn render_resolver_prompt(
+    pub fn render_debater_prompt(&self, context: &PromptContext) -> Result<String, TemplateError> {
+        self.render_template("debater", context)
+    }
+
+    pub fn render_debate_judge_prompt(
         &self,
         context: &PromptContext,
     ) -> Result<String, TemplateError> {
+        self.render_template("debate-judge", context)
+    }
+
+    pub fn render_resolver_prompt(&self, context: &PromptContext) -> Result<String, TemplateError> {
         self.render_template("resolver", context)
     }
 
@@ -1605,7 +1776,8 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         }
 
         // Fall back to built-in template
-        self.builtin_templates.get(name)
+        self.builtin_templates
+            .get(name)
             .cloned()
             .ok_or_else(|| TemplateError::NotFound(name.to_string()))
     }
@@ -1744,7 +1916,10 @@ mod tests {
         let mut variables = HashMap::new();
         variables.insert("agent_id".to_string(), "session-123-worker-1".to_string());
         variables.insert("heartbeat_status".to_string(), "working".to_string());
-        variables.insert("heartbeat_summary".to_string(), "Implementing backend task".to_string());
+        variables.insert(
+            "heartbeat_summary".to_string(),
+            "Implementing backend task".to_string(),
+        );
 
         let prompt = TemplateEngine::default()
             .render_worker_prompt(
@@ -1825,7 +2000,10 @@ mod tests {
         enabled.insert("qa_worker_index".to_string(), "1".to_string());
         enabled.insert("custom_instructions".to_string(), "Test".to_string());
         enabled.insert("supports_chrome".to_string(), "true".to_string());
-        enabled.insert("auth_bypass_url".to_string(), "http://localhost".to_string());
+        enabled.insert(
+            "auth_bypass_url".to_string(),
+            "http://localhost".to_string(),
+        );
         enabled.insert("auth_bypass_token".to_string(), "token".to_string());
 
         let enabled_prompt = TemplateEngine::default()
@@ -1847,7 +2025,10 @@ mod tests {
         disabled.insert("qa_worker_index".to_string(), "1".to_string());
         disabled.insert("custom_instructions".to_string(), "Test".to_string());
         disabled.insert("supports_chrome".to_string(), "false".to_string());
-        disabled.insert("auth_bypass_url".to_string(), "http://localhost".to_string());
+        disabled.insert(
+            "auth_bypass_url".to_string(),
+            "http://localhost".to_string(),
+        );
         disabled.insert("auth_bypass_token".to_string(), "token".to_string());
 
         let disabled_prompt = TemplateEngine::default()

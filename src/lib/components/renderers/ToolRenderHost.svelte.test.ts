@@ -57,6 +57,19 @@ describe('ToolRenderHost', () => {
     expect(container.querySelector('.diff-line')).toBeNull();
   });
 
+  it('mounts the Chart widget for renderer:"chart" with inline SVG bars', () => {
+    const msg = message({
+      renderer: 'chart',
+      data: { title: 'Builds', labels: ['pass', 'fail'], values: [12, 3] },
+    });
+    const { container, getByText } = render(ToolRenderHost, { props: { message: msg } });
+
+    expect(getByText('Builds')).toBeTruthy();
+    expect(container.querySelector('svg')).not.toBeNull();
+    expect(container.querySelectorAll('.chart-bar')).toHaveLength(2);
+    expect(container.querySelector('pre.tool-render-fallback')).toBeNull();
+  });
+
   it('invokes onapprove with the actionId when the Approval card button is clicked', async () => {
     const msg = message({
       renderer: 'approval',

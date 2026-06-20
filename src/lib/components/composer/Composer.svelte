@@ -6,6 +6,8 @@
   import {
     agentMentions,
     sessionMentions,
+    fileMentions,
+    listSessionFiles,
     filterMentions,
     flattenMention,
     type MentionItem,
@@ -47,6 +49,7 @@
   /** Start offset of the active @/ trigger within the current text node. */
   let triggerStart = -1;
   let triggerNode: Node | null = null;
+  let mentionRequest = 0;
 
   let mentionItems: MentionItem[] = $state([]);
   let commandItems: SlashCommand[] = $state([]);
@@ -75,8 +78,18 @@
     if (editor && value) editor.textContent = value;
   });
 
+  function flattenNode(node: Node): string {
+    if (node instanceof HTMLElement && node.dataset.tokenValue) {
+      return node.dataset.tokenValue;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent ?? '';
+    }
+    return Array.from(node.childNodes).map(flattenNode).join('');
+  }
+
   function currentText(): string {
-    return editor?.textContent ?? '';
+    return editor ? Array.from(editor.childNodes).map(flattenNode).join('') : '';
   }
 
   function syncValue() {
@@ -131,7 +144,7 @@
           triggerStart = i;
           triggerNode = node;
           menuQuery = query;
-          if (ch === '@') openMentionMenu(query);
+          if (ch === '@') void openMentionMenu(query);
           else openSlashMenu(query);
           return;
         }
@@ -144,10 +157,17 @@
     closeMenu();
   }
 
-  function openMentionMenu(query: string) {
+  async function openMentionMenu(query: string) {
+    const request = ++mentionRequest;
     const agents = get(activeAgents);
-    const sess = get(sessionsStore).sessions;
-    const all = [...agentMentions(agents), ...sessionMentions(sess)];
+    const storeState = get(sessionsStore);
+    const sess = storeState.sessions;
+    let all = [...agentMentions(agents), ...sessionMentions(sess)];
+    if (sessionId) {
+      const files = await listSessionFiles(sessionId, query);
+      if (request !== mentionRequest || triggerNode == null) return;
+      all = [...all, ...fileMentions(files)];
+    }
     mentionItems = filterMentions(all, query);
     if (mentionItems.length === 0) {
       closeMenu();
@@ -174,26 +194,46 @@
   }
 
   function closeMenu() {
+    mentionRequest += 1;
     menuMode = 'none';
     triggerStart = -1;
     triggerNode = null;
   }
 
-  /** Replace the trigger token (`@que` / `/res`) with the given plain text and place caret after. */
-  function replaceTrigger(replacement: string) {
+  function tokenDisplayForMention(item: MentionItem): string {
+    if (item.kind === 'agent') return `@${item.label}`;
+    if (item.kind === 'session') return `#${item.label}`;
+    return `file:${item.label}`;
+  }
+
+  function replaceTriggerWithToken(display: string, value: string, kind: 'mention' | 'command') {
     if (triggerNode == null || triggerStart < 0) return;
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
     const offset = sel.getRangeAt(0).startOffset;
     const text = triggerNode.textContent ?? '';
-    const before = text.slice(0, triggerStart);
-    const after = text.slice(offset);
-    const next = before + replacement + after;
-    triggerNode.textContent = next;
-    // Restore caret right after the inserted replacement.
-    const caretPos = before.length + replacement.length;
+    const beforeText = text.slice(0, triggerStart);
+    const afterText = text.slice(offset);
+    const parent = triggerNode.parentNode;
+    if (!parent) return;
+
+    const before = document.createTextNode(beforeText);
+    const token = document.createElement('span');
+    token.className = `composer-token ${kind}`;
+    token.dataset.tokenValue = value;
+    token.contentEditable = 'false';
+    token.textContent = display;
+    const spacer = document.createTextNode(' ');
+    const after = document.createTextNode(afterText);
+
+    parent.insertBefore(before, triggerNode);
+    parent.insertBefore(token, triggerNode);
+    parent.insertBefore(spacer, triggerNode);
+    parent.insertBefore(after, triggerNode);
+    parent.removeChild(triggerNode);
+
     const range = document.createRange();
-    range.setStart(triggerNode, Math.min(caretPos, (triggerNode.textContent ?? '').length));
+    range.setStartAfter(spacer);
     range.collapse(true);
     sel.removeAllRanges();
     sel.addRange(range);
@@ -202,7 +242,7 @@
   }
 
   function selectMention(item: MentionItem) {
-    replaceTrigger(flattenMention(item) + ' ');
+    replaceTriggerWithToken(tokenDisplayForMention(item), flattenMention(item), 'mention');
   }
 
   function selectCommand(cmd: SlashCommand) {
@@ -212,8 +252,8 @@
       syncValue();
       return;
     }
-    // 'insert' and 'attach' both insert the expansion (attach is a no-op placeholder).
-    replaceTrigger(cmd.expand());
+    const expanded = cmd.expand().trimEnd();
+    replaceTriggerWithToken(cmd.label, expanded || cmd.label, 'command');
   }
 
   async function submit() {
@@ -359,6 +399,29 @@
 
   .composer:focus {
     border-color: var(--accent-cyan);
+  }
+
+  .composer :global(.composer-token) {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    margin: 0 2px;
+    padding: 1px 6px;
+    border: 1px solid color-mix(in srgb, var(--accent-cyan) 45%, var(--border-structural));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
+    color: var(--accent-cyan);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.35;
+    vertical-align: baseline;
+    white-space: nowrap;
+  }
+
+  .composer :global(.composer-token.command) {
+    border-color: color-mix(in srgb, var(--accent-amber) 45%, var(--border-structural));
+    background: color-mix(in srgb, var(--accent-amber) 12%, transparent);
+    color: var(--accent-amber);
   }
 
   .composer:empty::before {

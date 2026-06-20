@@ -102,6 +102,28 @@ export interface FusionLaunchConfig {
   with_planning: boolean;
 }
 
+export interface DebateDebaterConfig {
+  name: string;
+  stance?: string;
+  cli: string;
+  model?: string;
+  flags: string[];
+}
+
+export interface DebateLaunchConfig {
+  project_path: string;
+  name?: string;
+  color?: string;
+  debaters: DebateDebaterConfig[];
+  topic: string;
+  rounds: number;
+  judge_config: AgentConfig;
+  queen_config?: AgentConfig;
+  with_planning: boolean;
+  default_cli: string;
+  default_model?: string;
+}
+
 export interface PlannerConfig {
   config: AgentConfig;
   domain: string;
@@ -209,6 +231,7 @@ export interface Session {
     | { Hive: { worker_count: number } } 
     | { Swarm: { planner_count: number } } 
     | { Fusion: { variants: string[] } }
+    | { Debate: { variants: string[] } }
     | { Solo: { cli: string } };
   project_path: string;
   state: SessionState;
@@ -283,9 +306,61 @@ export interface RunJournalResponse {
   ledger: LedgerEntry[];
 }
 
+export interface ResumeOptions {
+  skipCompletedWriteSteps: boolean;
+}
+
 /** Fetch the run journal + ledger for a session (#125). */
 export async function getRunJournal(sessionId: string): Promise<RunJournalResponse> {
   return invoke<RunJournalResponse>('get_run_journal', { sessionId });
+}
+
+const WRITE_STEP_KINDS = new Set<StepKind>([
+  'worker_spawn',
+  'evaluator_spawn',
+  'git_commit',
+  'git_branch',
+  'file_write',
+]);
+
+export function isResumeReportEmpty(report: ResumeReport): boolean {
+  return (
+    report.skipped.length === 0 &&
+    report.interrupted.length === 0 &&
+    report.uncertain.length === 0
+  );
+}
+
+/**
+ * Frontend preview of the backend resume classifier. The backend still performs
+ * authoritative verification during `resume_session`; this read-only pass gives
+ * the confirmation modal enough per-step context before the operator resumes.
+ */
+export function buildResumeReportFromJournal(response: RunJournalResponse): ResumeReport {
+  const ledgerByStep = new Map(response.ledger.map((entry) => [entry.step_id, entry]));
+  const report: ResumeReport = { skipped: [], interrupted: [], uncertain: [] };
+
+  for (const entry of response.journal) {
+    const ledger = ledgerByStep.get(entry.step_id);
+    const hasUnconfirmedLedger = !!ledger && !ledger.confirmed;
+
+    if (entry.status === 'completed' && WRITE_STEP_KINDS.has(entry.kind)) {
+      report.skipped.push({ ...entry, status: 'skipped' });
+      continue;
+    }
+
+    if (entry.status === 'started' || entry.status === 'unknown' || entry.status === 'interrupted') {
+      report.interrupted.push({
+        ...entry,
+        status: hasUnconfirmedLedger ? 'unknown' : 'interrupted',
+      });
+      if (hasUnconfirmedLedger && ledger) {
+        report.uncertain.push(ledger);
+      }
+    }
+  }
+
+  return report;
 }
 
 interface SessionsState {
@@ -315,6 +390,17 @@ function createSessionsStore() {
       return { ...state };
     });
   });
+
+  function getState(): SessionsState {
+    let current: SessionsState = {
+      sessions: [],
+      activeSessionId: null,
+      loading: false,
+      error: null,
+    };
+    subscribe((state) => (current = state))();
+    return current;
+  }
 
   return {
     subscribe,
@@ -503,6 +589,26 @@ function createSessionsStore() {
       }
     },
 
+    async launchDebate(config: DebateLaunchConfig) {
+      update((state) => ({ ...state, loading: true, error: null }));
+      try {
+        const session = await invoke<Session>('launch_debate', { config });
+        update((state) => {
+          const exists = state.sessions.some((s) => s.id === session.id);
+          return {
+            ...state,
+            sessions: exists ? state.sessions : [...state.sessions, session],
+            activeSessionId: session.id,
+            loading: false,
+          };
+        });
+        return session;
+      } catch (err) {
+        update((state) => ({ ...state, loading: false, error: String(err) }));
+        throw err;
+      }
+    },
+
     setActiveSession(sessionId: string | null) {
       update((state) => ({ ...state, activeSessionId: sessionId }));
       // Route navigation-state persistence at this session and (re)start the
@@ -557,7 +663,18 @@ function createSessionsStore() {
       }
     },
 
-    async resumeSession(sessionId: string) {
+    async getResumeReport(sessionId: string): Promise<ResumeReport | null> {
+      const loadedSession = getState().sessions.find((session) => session.id === sessionId);
+      if (loadedSession?.resume_report) {
+        return loadedSession.resume_report;
+      }
+
+      const response = await getRunJournal(sessionId);
+      const report = buildResumeReportFromJournal(response);
+      return isResumeReportEmpty(report) ? null : report;
+    },
+
+    async resumeSession(sessionId: string, _options?: ResumeOptions) {
       update((state) => ({ ...state, loading: true, error: null }));
       try {
         const session = await invoke<Session>('resume_session', { sessionId });

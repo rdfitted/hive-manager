@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::Path;
 use std::sync::{mpsc::channel, Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use crate::tauri_shim::{AppHandle, Emitter};
 
 #[derive(Clone, Serialize)]
 struct WorkerCompletedPayload {
@@ -16,6 +16,14 @@ struct WorkerCompletedPayload {
 struct FusionVariantCompletedPayload {
     session_id: String,
     variant_index: u8,
+    task_file: String,
+}
+
+#[derive(Clone, Serialize)]
+struct DebateRoundCompletedPayload {
+    session_id: String,
+    debater_index: u8,
+    round: u8,
     task_file: String,
 }
 
@@ -45,6 +53,7 @@ impl TaskFileWatcher {
         session_path: &Path,
         worktrees_path: &Path,
         fusion_worktrees_path: &Path,
+        debate_worktrees_path: &Path,
         session_id: &str,
         app_handle: AppHandle,
     ) -> Result<Self, notify::Error> {
@@ -66,6 +75,8 @@ impl TaskFileWatcher {
         watcher.watch(worktrees_path, RecursiveMode::Recursive)?;
         std::fs::create_dir_all(fusion_worktrees_path).ok();
         watcher.watch(fusion_worktrees_path, RecursiveMode::Recursive)?;
+        std::fs::create_dir_all(debate_worktrees_path).ok();
+        watcher.watch(debate_worktrees_path, RecursiveMode::Recursive)?;
         let peer_path = session_path.join("peer");
         std::fs::create_dir_all(&peer_path).ok();
         watcher.watch(&peer_path, RecursiveMode::NonRecursive)?;
@@ -79,7 +90,13 @@ impl TaskFileWatcher {
 
         std::thread::spawn(move || {
             while let Ok(event) = rx.recv() {
-                Self::handle_event(&event, &session_id_owned, &app_handle_clone, &last_emit_clone, debounce);
+                Self::handle_event(
+                    &event,
+                    &session_id_owned,
+                    &app_handle_clone,
+                    &last_emit_clone,
+                    debounce,
+                );
             }
         });
 
@@ -117,6 +134,22 @@ impl TaskFileWatcher {
             let suffix = filename.strip_prefix("fusion-variant-")?;
             let num_end = suffix.strip_suffix("-task.md")?;
             return num_end.parse::<u8>().ok();
+        }
+        None
+    }
+
+    fn extract_debate_round(path: &Path) -> Option<(u8, u8)> {
+        let filename = path.file_name()?.to_str()?;
+        if filename.starts_with("debate-debater-") && filename.ends_with("-task.md") {
+            let suffix = filename.strip_prefix("debate-debater-")?;
+            let (debater_index, round_part) = suffix.split_once("-round-")?;
+            let round = round_part.strip_suffix("-task.md")?;
+            let debater_index = debater_index.parse().ok()?;
+            let round = round.parse().ok()?;
+            if debater_index == 0 || round == 0 {
+                return None;
+            }
+            return Some((debater_index, round));
         }
         None
     }
@@ -191,13 +224,20 @@ impl TaskFileWatcher {
 
             let worker_id = Self::extract_worker_id(path);
             let fusion_variant_index = Self::extract_fusion_variant(path);
+            let debate_round = Self::extract_debate_round(path);
             let evaluator_agent_id = Self::extract_evaluator_id(path);
-            if worker_id.is_none() && fusion_variant_index.is_none() && evaluator_agent_id.is_none() {
+            if worker_id.is_none()
+                && fusion_variant_index.is_none()
+                && debate_round.is_none()
+                && evaluator_agent_id.is_none()
+            {
                 continue;
             }
 
             if let Ok(content) = std::fs::read_to_string(path) {
-                if content.contains("Status: COMPLETED") || content.contains("**Status**: COMPLETED") {
+                if content.contains("Status: COMPLETED")
+                    || content.contains("**Status**: COMPLETED")
+                {
                     let task_file = path.to_string_lossy().to_string();
 
                     if let Some(worker_id) = worker_id {
@@ -216,6 +256,16 @@ impl TaskFileWatcher {
                             task_file: task_file.clone(),
                         };
                         let _ = app_handle.emit("fusion-variant-completed", payload);
+                    }
+
+                    if let Some((debater_index, round)) = debate_round {
+                        let payload = DebateRoundCompletedPayload {
+                            session_id: session_id.to_string(),
+                            debater_index,
+                            round,
+                            task_file: task_file.clone(),
+                        };
+                        let _ = app_handle.emit("debate-round-completed", payload);
                     }
 
                     if let Some(agent_id) = evaluator_agent_id {
@@ -245,25 +295,102 @@ mod tests {
 
     #[test]
     fn test_extract_worker_id() {
-        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-1-task.md")), Some(1));
-        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-5-task.md")), Some(5));
-        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-12-task.md")), Some(12));
+        assert_eq!(
+            TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-1-task.md")),
+            Some(1)
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-5-task.md")),
+            Some(5)
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-12-task.md")),
+            Some(12)
+        );
 
-        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-task.md")), None);
-        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("planner-1-task.md")), None);
-        assert_eq!(TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-1.md")), None);
+        assert_eq!(
+            TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-task.md")),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_worker_id(&PathBuf::from("planner-1-task.md")),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_worker_id(&PathBuf::from("worker-1.md")),
+            None
+        );
     }
 
     #[test]
     fn test_extract_fusion_variant() {
-        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-1-task.md")), Some(1));
-        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-5-task.md")), Some(5));
-        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-12-task.md")), Some(12));
+        assert_eq!(
+            TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-1-task.md")),
+            Some(1)
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-5-task.md")),
+            Some(5)
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-12-task.md")),
+            Some(12)
+        );
 
-        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-")), None);
-        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-foo-task.md")), None);
-        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-task.md")), None);
-        assert_eq!(TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-1.md")), None);
+        assert_eq!(
+            TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-")),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-foo-task.md")),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-task.md")),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_fusion_variant(&PathBuf::from("fusion-variant-1.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_debate_round() {
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from(
+                "debate-debater-1-round-1-task.md"
+            )),
+            Some((1, 1))
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from(
+                "debate-debater-3-round-12-task.md"
+            )),
+            Some((3, 12))
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from(
+                "debate-debater-x-round-1-task.md"
+            )),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from("debate-debater-1-task.md")),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from(
+                "debate-debater-0-round-1-task.md"
+            )),
+            None
+        );
+        assert_eq!(
+            TaskFileWatcher::extract_debate_round(&PathBuf::from(
+                "debate-debater-1-round-0-task.md"
+            )),
+            None
+        );
     }
 
     #[test]

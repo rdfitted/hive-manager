@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use parking_lot::RwLock;
-use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 
 use super::session::{AgentRole, AgentStatus, PtyError, PtySession, read_from_reader};
+use crate::tauri_shim::{AppHandle, Emitter};
 
 #[derive(Clone, Serialize)]
 pub struct PtyOutput {

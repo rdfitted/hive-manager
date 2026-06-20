@@ -22,6 +22,7 @@ use crate::session::{Session, SessionType};
 ///
 /// - Hive mode: `hive/<session-id>/<cell-name>`
 /// - Fusion candidate: `fusion/<session-id>/<candidate-name>`
+/// - Debate debater: `debate/<session-id>/<debater-name>`
 /// - Resolver: `resolver/<session-id>`
 pub fn generate_branch_name(
     session_id: &str,
@@ -37,7 +38,13 @@ pub fn generate_branch_name(
             // Fusion candidates are isolated cells
             format!("fusion/{}/{}", session_id, cell_name)
         }
-        (SessionMode::Hive, CellType::Resolver) | (SessionMode::Fusion, CellType::Resolver) => {
+        (SessionMode::Debate, CellType::Hive) => {
+            // Debate debaters are isolated cells
+            format!("debate/{}/{}", session_id, cell_name)
+        }
+        (SessionMode::Hive, CellType::Resolver)
+        | (SessionMode::Fusion, CellType::Resolver)
+        | (SessionMode::Debate, CellType::Resolver) => {
             format!("resolver/{}", session_id)
         }
     }
@@ -83,7 +90,11 @@ pub fn current_head(worktree_path: &Path) -> Result<String, String> {
 pub fn branch_exists(worktree_path: &Path, branch_name: &str) -> Result<bool, String> {
     match run_git(
         worktree_path,
-        &["rev-parse", "--verify", &format!("refs/heads/{}", branch_name)],
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{}", branch_name),
+        ],
     ) {
         Ok(output) => Ok(!output.trim().is_empty()),
         Err(_) => Ok(false),
@@ -93,8 +104,7 @@ pub fn branch_exists(worktree_path: &Path, branch_name: &str) -> Result<bool, St
 /// Fetch the latest state of a branch from origin.
 /// Returns Ok(()) on success, Err on failure (e.g. no remote, network issues).
 pub fn fetch_origin_branch(project_path: &Path, branch: &str) -> Result<(), String> {
-    run_git(project_path, &["fetch", "origin", branch])
-        .map(|_| ())
+    run_git(project_path, &["fetch", "origin", branch]).map(|_| ())
 }
 
 /// Determine the best base ref for creating a new worktree.
@@ -116,7 +126,11 @@ pub fn resolve_fresh_base(project_path: &Path) -> String {
         Ok(()) => {
             match run_git(
                 project_path,
-                &["rev-parse", "--verify", &format!("refs/remotes/{}", remote_ref)],
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/remotes/{}", remote_ref),
+                ],
             ) {
                 Ok(_) => return remote_ref,
                 Err(err) => format!("fetched but remote tracking ref verify failed: {}", err),
@@ -244,7 +258,12 @@ pub fn cleanup_session_worktrees(session: &Session) -> Result<(), String> {
         .map_err(|e| format!("worktree list: {}", e.message))?;
 
     let session_prefixes = match &session.session_type {
-        SessionType::Fusion { .. } => vec![session.project_path.join(".hive-fusion").join(&session.id)],
+        SessionType::Fusion { .. } => {
+            vec![session.project_path.join(".hive-fusion").join(&session.id)]
+        }
+        SessionType::Debate { .. } => {
+            vec![session.project_path.join(".hive-debate").join(&session.id)]
+        }
         _ => vec![session
             .project_path
             .join(".hive-manager")
@@ -254,7 +273,10 @@ pub fn cleanup_session_worktrees(session: &Session) -> Result<(), String> {
 
     let mut cleanup_errors = Vec::new();
     for worktree in worktrees {
-        if !session_prefixes.iter().any(|prefix| worktree.path.starts_with(prefix)) {
+        if !session_prefixes
+            .iter()
+            .any(|prefix| worktree.path.starts_with(prefix))
+        {
             continue;
         }
 
@@ -326,12 +348,8 @@ mod tests {
 
     #[test]
     fn test_generate_branch_name_hive() {
-        let branch = generate_branch_name(
-            "session-123",
-            "worker-1",
-            SessionMode::Hive,
-            CellType::Hive,
-        );
+        let branch =
+            generate_branch_name("session-123", "worker-1", SessionMode::Hive, CellType::Hive);
         assert_eq!(branch, "hive/session-123/worker-1");
     }
 

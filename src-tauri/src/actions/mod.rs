@@ -17,9 +17,12 @@
 //! this contract.
 
 pub mod context;
+pub mod coordination;
 pub mod error;
 pub mod git;
+pub mod pty;
 pub mod registry;
+pub mod render;
 pub mod session;
 
 #[cfg(test)]

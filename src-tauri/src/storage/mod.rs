@@ -54,9 +54,7 @@ fn stable_learning_id(learning: &Learning) -> String {
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, content.as_bytes()).to_string()
 }
 
-fn deserialize_optional_trimmed_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
+fn deserialize_optional_trimmed_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -176,6 +174,7 @@ pub enum SessionTypeInfo {
     Hive { worker_count: u8 },
     Swarm { planner_count: u8 },
     Fusion { variants: Vec<String> },
+    Debate { variants: Vec<String> },
     Solo { cli: String, model: Option<String> },
 }
 
@@ -306,13 +305,22 @@ impl SessionStorage {
         fs::create_dir_all(session_dir.join("lessons"))?;
         fs::create_dir_all(session_dir.join("lessons").join("archive"))?;
         // Initialize empty state files
-        fs::write(session_dir.join("state").join("workers.md"), "# Available Workers\n\nNo workers yet.\n")?;
+        fs::write(
+            session_dir.join("state").join("workers.md"),
+            "# Available Workers\n\nNo workers yet.\n",
+        )?;
         fs::write(session_dir.join("state").join("hierarchy.json"), "[]")?;
         fs::write(session_dir.join("state").join("assignments.json"), "{}")?;
 
         // Initialize coordination files
-        fs::write(session_dir.join("coordination").join("coordination.log"), "")?;
-        fs::write(session_dir.join("coordination").join("queen-inbox.md"), "# Queen Inbox\n\nNo messages yet.\n")?;
+        fs::write(
+            session_dir.join("coordination").join("coordination.log"),
+            "",
+        )?;
+        fs::write(
+            session_dir.join("coordination").join("queen-inbox.md"),
+            "# Queen Inbox\n\nNo messages yet.\n",
+        )?;
         self.create_conversation_dir(session_id)?;
 
         Ok(session_dir)
@@ -330,7 +338,6 @@ impl SessionStorage {
         }
         Ok(())
     }
-
 
     /// Save session metadata to disk
     #[allow(dead_code)]
@@ -456,9 +463,18 @@ impl SessionStorage {
                 let session_id = entry.file_name().to_string_lossy().to_string();
                 if let Ok(session) = self.load_session(&session_id) {
                     let session_type = match &session.session_type {
-                        SessionTypeInfo::Hive { worker_count } => format!("Hive ({})", worker_count),
-                        SessionTypeInfo::Swarm { planner_count } => format!("Swarm ({})", planner_count),
-                        SessionTypeInfo::Fusion { variants } => format!("Fusion ({})", variants.len()),
+                        SessionTypeInfo::Hive { worker_count } => {
+                            format!("Hive ({})", worker_count)
+                        }
+                        SessionTypeInfo::Swarm { planner_count } => {
+                            format!("Swarm ({})", planner_count)
+                        }
+                        SessionTypeInfo::Fusion { variants } => {
+                            format!("Fusion ({})", variants.len())
+                        }
+                        SessionTypeInfo::Debate { variants } => {
+                            format!("Debate ({})", variants.len())
+                        }
                         SessionTypeInfo::Solo { cli, .. } => format!("Solo ({})", cli),
                     };
 
@@ -469,9 +485,7 @@ impl SessionStorage {
                         session_type,
                         project_path: session.project_path,
                         created_at: session.created_at,
-                        last_activity_at: session
-                            .last_activity_at
-                            .unwrap_or(session.created_at),
+                        last_activity_at: session.last_activity_at.unwrap_or(session.created_at),
                         agent_count: session.agents.len(),
                         state: session.state,
                     });
@@ -525,125 +539,185 @@ impl SessionStorage {
     fn default_config() -> AppConfig {
         let mut clis = HashMap::new();
 
-        clis.insert("claude".to_string(), CliConfig {
-            command: "claude".to_string(),
-            auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
-            model_flag: Some("--model".to_string()),
-            default_model: "opus".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "claude".to_string(),
+            CliConfig {
+                command: "claude".to_string(),
+                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
+                model_flag: Some("--model".to_string()),
+                default_model: "opus".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("gemini".to_string(), CliConfig {
-            command: "gemini".to_string(),
-            auto_approve_flag: Some("-y".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "gemini-2.5-pro".to_string(),
-            env: None,
-        });
-        clis.insert("antigravity".to_string(), CliConfig {
-            command: "agy".to_string(),
-            auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
-            // agy has no --model flag. Model lives in ~/.gemini/antigravity-cli/settings.json.
-            model_flag: None,
-            default_model: String::new(),
-            env: None,
-        });
+        clis.insert(
+            "gemini".to_string(),
+            CliConfig {
+                command: "gemini".to_string(),
+                auto_approve_flag: Some("-y".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "gemini-2.5-pro".to_string(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "antigravity".to_string(),
+            CliConfig {
+                command: "agy".to_string(),
+                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
+                // agy has no --model flag. Model lives in ~/.gemini/antigravity-cli/settings.json.
+                model_flag: None,
+                default_model: String::new(),
+                env: None,
+            },
+        );
 
-        clis.insert("opencode".to_string(), CliConfig {
-            command: "opencode".to_string(),
-            auto_approve_flag: None,
-            model_flag: Some("-m".to_string()),
-            default_model: "opencode/big-pickle".to_string(),
-            env: Some({
-                let mut env = HashMap::new();
-                env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
-                env
-            }),
-        });
+        clis.insert(
+            "opencode".to_string(),
+            CliConfig {
+                command: "opencode".to_string(),
+                auto_approve_flag: None,
+                model_flag: Some("-m".to_string()),
+                default_model: "opencode/big-pickle".to_string(),
+                env: Some({
+                    let mut env = HashMap::new();
+                    env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
+                    env
+                }),
+            },
+        );
 
-        clis.insert("codex".to_string(), CliConfig {
-            command: "codex".to_string(),
-            auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "gpt-5.5".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "codex".to_string(),
+            CliConfig {
+                command: "codex".to_string(),
+                auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "gpt-5.5".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("cursor".to_string(), CliConfig {
-            command: "wsl".to_string(),
-            auto_approve_flag: Some("--force".to_string()),
-            model_flag: None,  // Cursor uses global model setting
-            default_model: "composer-2.5".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "cursor".to_string(),
+            CliConfig {
+                command: "wsl".to_string(),
+                auto_approve_flag: Some("--force".to_string()),
+                model_flag: None, // Cursor uses global model setting
+                default_model: "composer-2.5".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("droid".to_string(), CliConfig {
-            command: "droid".to_string(),
-            auto_approve_flag: None,  // Interactive mode - no auto-approve flag
-            model_flag: None,  // Model selected via /model command in TUI
-            default_model: "glm-5.1".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "droid".to_string(),
+            CliConfig {
+                command: "droid".to_string(),
+                auto_approve_flag: None, // Interactive mode - no auto-approve flag
+                model_flag: None,        // Model selected via /model command in TUI
+                default_model: "glm-5.1".to_string(),
+                env: None,
+            },
+        );
 
-        clis.insert("qwen".to_string(), CliConfig {
-            command: "qwen".to_string(),
-            auto_approve_flag: Some("-y".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "qwen3-coder".to_string(),
-            env: None,
-        });
+        clis.insert(
+            "qwen".to_string(),
+            CliConfig {
+                command: "qwen".to_string(),
+                auto_approve_flag: Some("-y".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "qwen3-coder".to_string(),
+                env: None,
+            },
+        );
 
         let mut default_roles = HashMap::new();
-        default_roles.insert("backend".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("frontend".to_string(), RoleDefaults {
-            cli: "antigravity".to_string(),
-            // antigravity uses settings.json for model selection; this field is
-            // retained for serde stability but ignored at launch time.
-            model: String::new(),
-        });
-        default_roles.insert("coherence".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("simplify".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("reviewer".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("reviewer-quick".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("resolver".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("tester".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("code-quality".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("evaluator".to_string(), RoleDefaults {
-            cli: "claude".to_string(),
-            model: "opus".to_string(),
-        });
-        default_roles.insert("qa-worker".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
-        default_roles.insert("general".to_string(), RoleDefaults {
-            cli: "codex".to_string(),
-            model: "gpt-5.5".to_string(),
-        });
+        default_roles.insert(
+            "backend".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "frontend".to_string(),
+            RoleDefaults {
+                cli: "antigravity".to_string(),
+                // antigravity uses settings.json for model selection; this field is
+                // retained for serde stability but ignored at launch time.
+                model: String::new(),
+            },
+        );
+        default_roles.insert(
+            "coherence".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "simplify".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "reviewer".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "reviewer-quick".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "resolver".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "tester".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "code-quality".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "evaluator".to_string(),
+            RoleDefaults {
+                cli: "claude".to_string(),
+                model: "opus".to_string(),
+            },
+        );
+        default_roles.insert(
+            "qa-worker".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
+        default_roles.insert(
+            "general".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.5".to_string(),
+            },
+        );
 
         AppConfig {
             clis,
@@ -662,7 +736,8 @@ impl SessionStorage {
         session_id: &str,
         message: &CoordinationMessage,
     ) -> Result<(), StorageError> {
-        let log_path = self.session_dir(session_id)
+        let log_path = self
+            .session_dir(session_id)
             .join("coordination")
             .join("coordination.log");
 
@@ -693,7 +768,8 @@ impl SessionStorage {
         session_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<CoordinationMessage>, StorageError> {
-        let log_path = self.session_dir(session_id)
+        let log_path = self
+            .session_dir(session_id)
             .join("coordination")
             .join("coordination.log");
 
@@ -770,7 +846,9 @@ impl SessionStorage {
             Ok(())
         })
         .await
-        .map_err(|e| StorageError::InvalidPath(format!("Join error in append conversation: {}", e)))??;
+        .map_err(|e| {
+            StorageError::InvalidPath(format!("Join error in append conversation: {}", e))
+        })??;
 
         Ok(message)
     }
@@ -810,7 +888,8 @@ impl SessionStorage {
     }
 
     fn artifact_file_path(&self, session_id: &str, cell_id: &str) -> PathBuf {
-        self.artifact_dir(session_id).join(format!("{}.json", cell_id))
+        self.artifact_dir(session_id)
+            .join(format!("{}.json", cell_id))
     }
 
     fn artifact_lock(&self, session_id: &str, cell_id: &str) -> Arc<Mutex<()>> {
@@ -827,7 +906,8 @@ impl SessionStorage {
     }
 
     fn user_template_path(&self, template_id: &str) -> PathBuf {
-        self.user_templates_dir().join(format!("{}.json", template_id))
+        self.user_templates_dir()
+            .join(format!("{}.json", template_id))
     }
 
     fn ai_docs_dir(project_path: &Path) -> PathBuf {
@@ -844,7 +924,11 @@ impl SessionStorage {
 
     /// Append a learning to the .ai-docs/learnings.jsonl file (project-scoped, legacy)
     /// DEPRECATED: Use append_learning_session for new code
-    pub fn append_learning(&self, project_path: &Path, learning: &Learning) -> Result<(), StorageError> {
+    pub fn append_learning(
+        &self,
+        project_path: &Path,
+        learning: &Learning,
+    ) -> Result<(), StorageError> {
         let ai_docs_dir = Self::ai_docs_dir(project_path);
         fs::create_dir_all(&ai_docs_dir)?;
         // Also ensure archive folder exists for /curate-learnings skill
@@ -869,7 +953,11 @@ impl SessionStorage {
 
     /// Append a learning to the session-scoped lessons directory
     /// Stores in .hive-manager/{session_id}/lessons/learnings.jsonl
-    pub fn append_learning_session(&self, session_id: &str, learning: &Learning) -> Result<(), StorageError> {
+    pub fn append_learning_session(
+        &self,
+        session_id: &str,
+        learning: &Learning,
+    ) -> Result<(), StorageError> {
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
         // Also ensure archive folder exists
@@ -926,7 +1014,11 @@ impl SessionStorage {
 
     /// Delete a learning by ID from the session-scoped learnings file
     /// Uses temp-file + rename for atomicity
-    pub fn delete_learning_session(&self, session_id: &str, learning_id: &str) -> Result<bool, StorageError> {
+    pub fn delete_learning_session(
+        &self,
+        session_id: &str,
+        learning_id: &str,
+    ) -> Result<bool, StorageError> {
         let learnings_file = self.session_lessons_dir(session_id).join("learnings.jsonl");
 
         if !learnings_file.exists() {
@@ -966,11 +1058,10 @@ impl SessionStorage {
 
         // Write to temp file then rename for atomicity using tempfile crate
         let lessons_dir = self.session_lessons_dir(session_id);
-        let mut temp = tempfile::NamedTempFile::new_in(&lessons_dir)
-            .map_err(|e| StorageError::Io(e))?;
+        let mut temp =
+            tempfile::NamedTempFile::new_in(&lessons_dir).map_err(|e| StorageError::Io(e))?;
         for line in &remaining_lines {
-            writeln!(temp, "{}", line)
-                .map_err(|e| StorageError::Io(e))?;
+            writeln!(temp, "{}", line).map_err(|e| StorageError::Io(e))?;
         }
         temp.persist(&learnings_file)
             .map_err(|e| StorageError::Io(e.error))?;
@@ -1044,7 +1135,11 @@ impl SessionStorage {
     /// Save curated project DNA to the session-scoped lessons directory
     /// Saves to .hive-manager/{session_id}/lessons/project-dna.md
     #[allow(dead_code)]
-    pub fn save_project_dna_session(&self, session_id: &str, content: &str) -> Result<(), StorageError> {
+    pub fn save_project_dna_session(
+        &self,
+        session_id: &str,
+        content: &str,
+    ) -> Result<(), StorageError> {
         let lessons_dir = self.session_lessons_dir(session_id);
         fs::create_dir_all(&lessons_dir)?;
         let project_dna_file = lessons_dir.join("project-dna.md");
@@ -1148,7 +1243,8 @@ impl SessionStorage {
                 continue;
             }
 
-            let template: SessionTemplate = serde_json::from_str(&fs::read_to_string(entry.path())?)?;
+            let template: SessionTemplate =
+                serde_json::from_str(&fs::read_to_string(entry.path())?)?;
             templates.push(template);
         }
 
@@ -1311,7 +1407,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            enabled: true,   // Enabled by default for Queen to spawn workers
+            enabled: true, // Enabled by default for Queen to spawn workers
             port: 18800,
         }
     }
@@ -1366,7 +1462,10 @@ mod tests {
         ] {
             let defaults = config.default_roles.get(role).unwrap();
             assert_eq!(defaults.cli, "codex", "role {role} should default to codex");
-            assert_eq!(defaults.model, "gpt-5.5", "role {role} should default to gpt-5.5");
+            assert_eq!(
+                defaults.model, "gpt-5.5",
+                "role {role} should default to gpt-5.5"
+            );
         }
 
         let frontend = config.default_roles.get("frontend").unwrap();
@@ -1390,9 +1489,15 @@ mod tests {
         assert_eq!(gemini.auto_approve_flag.as_deref(), Some("-y"));
         assert_eq!(gemini.model_flag.as_deref(), Some("-m"));
 
-        let antigravity = config.clis.get("antigravity").expect("antigravity entry present");
+        let antigravity = config
+            .clis
+            .get("antigravity")
+            .expect("antigravity entry present");
         assert_eq!(antigravity.command, "agy");
-        assert_eq!(antigravity.auto_approve_flag.as_deref(), Some("--dangerously-skip-permissions"));
+        assert_eq!(
+            antigravity.auto_approve_flag.as_deref(),
+            Some("--dangerously-skip-permissions")
+        );
         assert!(antigravity.model_flag.is_none(), "agy has no model flag");
     }
 
@@ -1544,16 +1649,12 @@ mod tests {
 
         let mut updated = session.clone();
         updated.state = "QaPassed".to_string();
-        let baseline_mtime = storage
-            .session_file_modified_at(&session.id)
-            .unwrap();
+        let baseline_mtime = storage.session_file_modified_at(&session.id).unwrap();
         let session_file = storage.session_file_path(&session.id);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             storage.atomic_write_json(&session_file, &updated).unwrap();
-            let now_mtime = storage
-                .session_file_modified_at(&session.id)
-                .unwrap();
+            let now_mtime = storage.session_file_modified_at(&session.id).unwrap();
             if now_mtime != baseline_mtime {
                 break;
             }
@@ -1603,7 +1704,9 @@ mod tests {
         };
 
         // Append learning
-        storage.append_learning_session(session_id, &learning).unwrap();
+        storage
+            .append_learning_session(session_id, &learning)
+            .unwrap();
 
         // Read learnings
         let learnings = storage.read_learnings_session(session_id).unwrap();
@@ -1654,12 +1757,20 @@ mod tests {
             files_touched: vec![],
         };
 
-        storage.append_learning_session(session_id, &learning1).unwrap();
-        storage.append_learning_session(session_id, &learning2).unwrap();
-        storage.append_learning_session(session_id, &learning3).unwrap();
+        storage
+            .append_learning_session(session_id, &learning1)
+            .unwrap();
+        storage
+            .append_learning_session(session_id, &learning2)
+            .unwrap();
+        storage
+            .append_learning_session(session_id, &learning3)
+            .unwrap();
 
         // Delete the middle one
-        let deleted = storage.delete_learning_session(session_id, "learning-2").unwrap();
+        let deleted = storage
+            .delete_learning_session(session_id, "learning-2")
+            .unwrap();
         assert!(deleted);
 
         // Read learnings - should only have 2
@@ -1689,10 +1800,14 @@ mod tests {
             files_touched: vec![],
         };
 
-        storage.append_learning_session(session_id, &learning).unwrap();
+        storage
+            .append_learning_session(session_id, &learning)
+            .unwrap();
 
         // Try to delete non-existent learning
-        let deleted = storage.delete_learning_session(session_id, "nonexistent-id").unwrap();
+        let deleted = storage
+            .delete_learning_session(session_id, "nonexistent-id")
+            .unwrap();
         assert!(!deleted);
 
         // Verify original learning still exists
@@ -1719,8 +1834,10 @@ mod tests {
 
         storage.create_session_dir(session_id).unwrap();
 
-        let learnings_file = storage.session_lessons_dir(session_id).join("learnings.jsonl");
-        
+        let learnings_file = storage
+            .session_lessons_dir(session_id)
+            .join("learnings.jsonl");
+
         // Write a file with valid and invalid lines
         let content = r#"{"id":"valid-1","date":"2024-01-01","session":"test","task":"task1","outcome":"success","keywords":[],"insight":"insight1","files_touched":[]}
 invalid json line

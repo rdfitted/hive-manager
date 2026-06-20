@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 
 use crate::pty::PtyManager;
 use crate::storage::SessionStorage;
+use crate::tauri_shim::{AppHandle, Emitter};
 
 use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 

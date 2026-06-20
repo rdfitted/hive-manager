@@ -7,8 +7,10 @@
   import ShortcutsOverlay from '$lib/components/ShortcutsOverlay.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
   import FusionPanel from '$lib/components/FusionPanel.svelte';
+  import DebatePanel from '$lib/components/DebatePanel.svelte';
   import SessionOverview from '$lib/components/session/SessionOverview.svelte';
-  import { sessions, activeSession, activeAgents, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig } from '$lib/stores/sessions';
+  import { readTerminalSelection } from '$lib/components/Terminal.svelte';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
   import { layout } from '$lib/stores/layout';
@@ -19,6 +21,7 @@
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
+  let activeSessionState = $derived(serdeEnumVariantName($activeSession?.state));
 
   onMount(() => {
     sessions.loadSessions();
@@ -33,7 +36,7 @@
   $effect(() => {
     const session = $activeSession;
     const sessionId = session?.id ?? null;
-    const sessionState = session ? (typeof session.state === 'string' ? session.state : Object.keys(session.state)[0]) : null;
+    const sessionState = session ? serdeEnumVariantName(session.state) ?? null : null;
 
     if (sessionId && sessionId !== prevSessionId) {
       prevSessionId = sessionId;
@@ -46,7 +49,7 @@
         if (!isTransitioning) {
           isTransitioning = true;
           tick().then(() => {
-            const queen = $activeAgents.find(a => a.role === 'Queen' || a.id.endsWith('-queen'));
+            const queen = $activeAgents.find(a => serdeEnumVariantName(a.role) === 'Queen' || a.id.endsWith('-queen'));
             if (queen) {
               ui.setFocusedAgent(queen.id);
               ui.setSelectedAgent(queen.id);
@@ -106,6 +109,10 @@
     await sessions.launchFusion(config);
   }
 
+  async function handleLaunchDebate(config: DebateLaunchConfig): Promise<void> {
+    await sessions.launchDebate(config);
+  }
+
   function openAddWorkerDialog() {
     showAddWorkerDialog = true;
   }
@@ -116,11 +123,7 @@
 
   // Read an xterm terminal selection if the focused/under-cursor element is inside one.
   function readXtermSelection(): string | null {
-    const term = document.querySelector('.xterm-helper-textarea, .xterm') as HTMLElement | null;
-    // xterm exposes selection via the DOM Selection API over the .xterm-rows; the
-    // window selection below covers it, so this is a placeholder for buffer-level reads.
-    if (!term) return null;
-    return null;
+    return readTerminalSelection($ui.focusedAgentId);
   }
 
   // Capture the operator's current selection (terminal or page) or selected cell as a
@@ -219,6 +222,7 @@
     onLaunchHiveV2={handleLaunchHiveV2}
     onLaunchSwarm={handleLaunchSwarm}
     onLaunchFusion={handleLaunchFusion}
+    onLaunchDebate={handleLaunchDebate}
     onOpenAddWorker={openAddWorkerDialog}
   />
 
@@ -264,8 +268,10 @@
           <div class="no-agents">
             <p>No agents in this session</p>
           </div>
-        {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && $activeSession.state !== 'Planning' && $activeSession.state !== 'PlanReady'}
+        {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && activeSessionState !== 'Planning' && activeSessionState !== 'PlanReady'}
           <FusionPanel />
+        {:else if $activeSession?.session_type && 'Debate' in $activeSession.session_type && activeSessionState !== 'Planning' && activeSessionState !== 'PlanReady'}
+          <DebatePanel />
         {:else}
           <SessionOverview />
         {/if}

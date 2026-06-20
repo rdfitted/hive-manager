@@ -1,11 +1,15 @@
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use super::validate_agent_id;
+use super::validate_session_id;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
-use super::validate_session_id;
-use super::validate_agent_id;
 
 /// POST /api/sessions/{id}/heartbeat - Body
 #[derive(Debug, Deserialize)]
@@ -68,11 +72,19 @@ pub async fn post_heartbeat(
     {
         let controller = state.session_controller.read();
         if controller.get_session(&session_id).is_none() {
-            return Err(ApiError::not_found(format!("Session {} not found", session_id)));
+            return Err(ApiError::not_found(format!(
+                "Session {} not found",
+                session_id
+            )));
         }
 
         controller
-            .update_heartbeat(&session_id, &req.agent_id, &req.status, req.summary.as_deref())
+            .update_heartbeat(
+                &session_id,
+                &req.agent_id,
+                &req.status,
+                req.summary.as_deref(),
+            )
             .map_err(|e| ApiError::internal(e))?;
     }
 
@@ -130,6 +142,7 @@ pub async fn get_active_sessions(
                         format!("Swarm ({})", planner_count)
                     }
                     crate::session::SessionType::Fusion { .. } => "Fusion".to_string(),
+                    crate::session::SessionType::Debate { .. } => "Debate".to_string(),
                     crate::session::SessionType::Solo { cli, .. } => format!("Solo ({})", cli),
                 },
                 project_path: session.project_path.to_string_lossy().to_string(),

@@ -105,9 +105,10 @@ impl WorkspaceManager {
         match (&session.mode, &cell.cell_type) {
             (SessionMode::Hive, CellType::Hive) => Some(WorkspaceStrategy::SharedCell),
             (SessionMode::Fusion, CellType::Hive) => Some(WorkspaceStrategy::IsolatedCell),
-            (SessionMode::Hive, CellType::Resolver) | (SessionMode::Fusion, CellType::Resolver) => {
-                None
-            }
+            (SessionMode::Debate, CellType::Hive) => Some(WorkspaceStrategy::IsolatedCell),
+            (SessionMode::Hive, CellType::Resolver)
+            | (SessionMode::Fusion, CellType::Resolver)
+            | (SessionMode::Debate, CellType::Resolver) => None,
         }
     }
 
@@ -227,8 +228,7 @@ impl WorkspaceManager {
                     .join(&cell.id);
 
                 // Create the worktree
-                let info = self
-                    .create_or_attach_worktree(&worktree_path, &branch_name)?;
+                let info = self.create_or_attach_worktree(&worktree_path, &branch_name)?;
 
                 Ok(Workspace {
                     strategy: WorkspaceStrategy::IsolatedCell,
@@ -349,14 +349,12 @@ impl WorkspaceManager {
         workspace: &Workspace,
     ) -> Result<WorkspaceStatus, WorkspaceError> {
         match (&workspace.strategy, &workspace.worktree_path) {
-            (WorkspaceStrategy::None, _) => {
-                Ok(WorkspaceStatus {
-                    is_dirty: false,
-                    branch: String::new(),
-                    head: String::new(),
-                    worktree_path: None,
-                })
-            }
+            (WorkspaceStrategy::None, _) => Ok(WorkspaceStatus {
+                is_dirty: false,
+                branch: String::new(),
+                head: String::new(),
+                worktree_path: None,
+            }),
             (_, None) => {
                 // Workspace without a worktree - check main repo
                 let is_dirty = git::is_dirty(&workspace.repo_path)?;
@@ -391,8 +389,8 @@ mod tests {
     use super::*;
 
     fn make_test_session(mode: SessionMode) -> Session {
-        use chrono::Utc;
         use crate::domain::{LaunchConfig, SessionStatus};
+        use chrono::Utc;
 
         Session {
             id: "test-session-123".to_string(),

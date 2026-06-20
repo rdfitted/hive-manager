@@ -39,6 +39,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     expand: () => '/fusion ',
   },
   {
+    name: 'debate',
+    label: '/debate',
+    description: 'Debate mode (argue positions)',
+    action: 'insert',
+    expand: () => '/debate ',
+  },
+  {
     name: 'research',
     label: '/research',
     description: 'Research mode',

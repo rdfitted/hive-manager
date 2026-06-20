@@ -27,6 +27,9 @@ fn session_type_from_persisted(session_type: &crate::storage::SessionTypeInfo) -
         crate::storage::SessionTypeInfo::Fusion { variants } => SessionType::Fusion {
             variants: variants.clone(),
         },
+        crate::storage::SessionTypeInfo::Debate { variants } => SessionType::Debate {
+            variants: variants.clone(),
+        },
         crate::storage::SessionTypeInfo::Solo { cli, model } => SessionType::Solo {
             cli: cli.clone(),
             model: model.clone(),
@@ -40,6 +43,8 @@ fn session_state_from_persisted(state: &str) -> SessionState {
         "PlanReady" => SessionState::PlanReady,
         "Starting" => SessionState::Starting,
         "WaitingForFusionVariants" => SessionState::WaitingForFusionVariants,
+        "SpawningDebateRound" => SessionState::SpawningDebateRound(0),
+        "WaitingForDebateRound" => SessionState::WaitingForDebateRound(0),
         "SpawningJudge" => SessionState::SpawningJudge,
         "Judging" => SessionState::Judging,
         "AwaitingVerdictSelection" => SessionState::AwaitingVerdictSelection,
@@ -92,7 +97,25 @@ fn session_state_from_persisted(state: &str) -> SessionState {
                 .unwrap_or(1);
             SessionState::SpawningFusionVariant(index)
         }
-        value if value.starts_with("QaInProgress") => SessionState::QaInProgress { iteration: None },
+        value if value.starts_with("SpawningDebateRound(") => {
+            let round = value
+                .trim_start_matches("SpawningDebateRound(")
+                .trim_end_matches(')')
+                .parse()
+                .unwrap_or(1);
+            SessionState::SpawningDebateRound(round)
+        }
+        value if value.starts_with("WaitingForDebateRound(") => {
+            let round = value
+                .trim_start_matches("WaitingForDebateRound(")
+                .trim_end_matches(')')
+                .parse()
+                .unwrap_or(1);
+            SessionState::WaitingForDebateRound(round)
+        }
+        value if value.starts_with("QaInProgress") => {
+            SessionState::QaInProgress { iteration: None }
+        }
         value if value.starts_with("QaFailed") => SessionState::QaFailed { iteration: 1 },
         value if value.starts_with("Failed(") => SessionState::Failed(
             value
@@ -101,6 +124,24 @@ fn session_state_from_persisted(state: &str) -> SessionState {
                 .to_string(),
         ),
         _ => SessionState::Completed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_state_from_persisted;
+    use crate::session::SessionState;
+
+    #[test]
+    fn persisted_indexed_debate_states_keep_round_index() {
+        assert_eq!(
+            session_state_from_persisted("SpawningDebateRound(2)"),
+            SessionState::SpawningDebateRound(2)
+        );
+        assert_eq!(
+            session_state_from_persisted("WaitingForDebateRound(3)"),
+            SessionState::WaitingForDebateRound(3)
+        );
     }
 }
 
@@ -113,9 +154,7 @@ fn session_from_persisted(persisted: PersistedSession) -> Session {
         project_path: persisted.project_path.into(),
         state: session_state_from_persisted(&persisted.state),
         created_at: persisted.created_at,
-        last_activity_at: persisted
-            .last_activity_at
-            .unwrap_or(persisted.created_at),
+        last_activity_at: persisted.last_activity_at.unwrap_or(persisted.created_at),
         agents: vec![],
         default_cli: persisted.default_cli,
         default_model: persisted.default_model,
@@ -140,9 +179,10 @@ fn load_session_for_cells(state: &AppState, session_id: &str) -> Result<Session,
 
     match state.storage.load_session(session_id) {
         Ok(session) => Ok(session_from_persisted(session)),
-        Err(StorageError::SessionNotFound(_)) => {
-            Err(ApiError::not_found(format!("Session {} not found", session_id)))
-        }
+        Err(StorageError::SessionNotFound(_)) => Err(ApiError::not_found(format!(
+            "Session {} not found",
+            session_id
+        ))),
         Err(err) => Err(ApiError::internal(err.to_string())),
     }
 }
@@ -188,7 +228,9 @@ pub async fn post_artifact(
         return Err(ApiError::bad_request("artifact.commits must not be empty"));
     }
     if req.artifact.changed_files.is_empty() {
-        return Err(ApiError::bad_request("artifact.changed_files must not be empty"));
+        return Err(ApiError::bad_request(
+            "artifact.changed_files must not be empty",
+        ));
     }
 
     state

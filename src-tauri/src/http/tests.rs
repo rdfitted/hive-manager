@@ -1,21 +1,25 @@
+use crate::coordination::InjectionManager;
+use crate::coordination::{PeerMessageRecord, StateManager};
+use crate::events::EventBus;
+use crate::http::routes::create_router;
+use crate::http::state::AppState;
+use crate::pty::PtyManager;
+use crate::pty::{AgentConfig, AgentRole, AgentStatus};
+use crate::session::{
+    AgentInfo, AuthStrategy, Session, SessionController, SessionState, SessionType,
+    DEFAULT_MAX_QA_ITERATIONS,
+};
+use crate::storage::{ConversationMessage, PersistedSession, SessionStorage, SessionTypeInfo};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use std::path::PathBuf;
+use parking_lot::RwLock;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use crate::http::routes::create_router;
-use crate::http::state::AppState;
-use crate::coordination::{PeerMessageRecord, StateManager};
-use crate::storage::{SessionStorage, PersistedSession, SessionTypeInfo};
-use crate::pty::PtyManager;
-use crate::session::{Session, SessionController, SessionState, SessionType, AgentInfo, AuthStrategy, DEFAULT_MAX_QA_ITERATIONS};
-use crate::pty::{AgentRole, AgentStatus, AgentConfig};
-use crate::coordination::InjectionManager;
-use crate::events::EventBus;
-use parking_lot::RwLock;
 
 /// Helper to get the default max_qa_iterations for test fixtures
 fn test_default_max_qa_iterations() -> u8 {
@@ -56,6 +60,39 @@ async fn setup_test_app() -> axum::Router {
     create_router(state)
 }
 
+async fn setup_test_state() -> Arc<AppState> {
+    let storage = Arc::new(SessionStorage::new().unwrap());
+    let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new().unwrap(),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        session_controller,
+        injection_manager,
+        storage,
+        event_bus,
+        app_state_db,
+        queue_manager,
+        None,
+    ));
+    state.set_registry(Arc::new(crate::actions::build_registry()));
+    state
+}
+
 /// Setup test app with a specific storage base dir (hermetic). Returns router, controller, and the storage.
 async fn setup_test_app_with_controller_at(
     base_dir: std::path::PathBuf,
@@ -74,9 +111,8 @@ async fn setup_test_app_with_controller_at(
         SessionStorage::new_with_base(base_dir).unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
-    let app_state_db = Arc::new(
-        crate::storage::ApplicationStateDb::open(storage.base_dir()).unwrap(),
-    );
+    let app_state_db =
+        Arc::new(crate::storage::ApplicationStateDb::open(storage.base_dir()).unwrap());
     let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
     queue_repo.ensure_schema().unwrap();
     let queue_manager = Arc::new(crate::coordination::QueueManager::new(
@@ -97,6 +133,18 @@ async fn setup_test_app_with_controller_at(
     state.set_registry(Arc::new(crate::actions::build_registry()));
 
     (create_router(state), session_controller, storage)
+}
+
+async fn setup_isolated_test_app_with_controller() -> (
+    TempDir,
+    axum::Router,
+    Arc<RwLock<SessionController>>,
+    Arc<SessionStorage>,
+) {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    (storage_dir, app, controller, storage)
 }
 
 /// Setup test app and return both the router and session controller for inserting test sessions
@@ -132,6 +180,24 @@ async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionCo
     state.set_registry(Arc::new(crate::actions::build_registry()));
 
     (create_router(state), session_controller)
+}
+
+fn run_git_for_test(repo_path: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .status()
+        .expect("run git command");
+    assert!(status.success(), "git {:?} should succeed", args);
+}
+
+fn init_git_repo_for_launch_fixture(repo_path: &Path) {
+    run_git_for_test(repo_path, &["init", "-q"]);
+    run_git_for_test(repo_path, &["config", "user.email", "hive@example.com"]);
+    run_git_for_test(repo_path, &["config", "user.name", "Hive Test"]);
+    std::fs::write(repo_path.join("README.md"), "launch fixture\n").expect("write fixture file");
+    run_git_for_test(repo_path, &["add", "README.md"]);
+    run_git_for_test(repo_path, &["commit", "-q", "-m", "initial commit"]);
 }
 
 fn make_test_session(id: &str, project_path: &str) -> Session {
@@ -234,7 +300,12 @@ async fn test_health_check() {
     let app = setup_test_app().await;
 
     let response = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -282,9 +353,10 @@ async fn test_patch_session_updates_name_and_color() {
     let temp_dir = std::env::temp_dir().join("hive-test-patch-session");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-patch", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-patch",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "name": "Alpha Session",
@@ -305,10 +377,18 @@ async fn test_patch_session_updates_name_and_color() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(response_json.get("name").unwrap().as_str().unwrap(), "Alpha Session");
-    assert_eq!(response_json.get("color").unwrap().as_str().unwrap(), "#7aa2f7");
+    assert_eq!(
+        response_json.get("name").unwrap().as_str().unwrap(),
+        "Alpha Session"
+    );
+    assert_eq!(
+        response_json.get("color").unwrap().as_str().unwrap(),
+        "#7aa2f7"
+    );
 
     let session = controller.read().get_session("session-patch").unwrap();
     assert_eq!(session.name.as_deref(), Some("Alpha Session"));
@@ -432,13 +512,14 @@ async fn test_patch_session_rejects_invalid_color() {
     let temp_dir = std::env::temp_dir().join("hive-test-patch-invalid-color");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-patch-color", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-patch-color",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "name": "Alpha Session",
-        "color": "#ffffff"
+        "color": "not-a-color"
     });
 
     let response = app
@@ -465,9 +546,10 @@ async fn test_patch_session_rejects_whitespace_name() {
     let temp_dir = std::env::temp_dir().join("hive-test-patch-whitespace-name");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-patch-whitespace", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-patch-whitespace",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "name": "   ",
@@ -498,9 +580,10 @@ async fn test_patch_session_rejects_invalid_name() {
     let temp_dir = std::env::temp_dir().join("hive-test-patch-invalid-name");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-patch-name", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-patch-name",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "name": "../escape",
@@ -537,7 +620,10 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         name: Some("Stored".to_string()),
         color: Some("#7aa2f7".to_string()),
         session_type: SessionTypeInfo::Hive { worker_count: 1 },
-        project_path: std::env::temp_dir().join("hive-test-persisted-update").to_string_lossy().to_string(),
+        project_path: std::env::temp_dir()
+            .join("hive-test-persisted-update")
+            .to_string_lossy()
+            .to_string(),
         created_at: chrono::Utc::now(),
         last_activity_at: None,
         agents: vec![],
@@ -623,9 +709,9 @@ async fn test_session_scoped_list_learnings_for_valid_session() {
     let temp_dir = std::env::temp_dir().join("hive-test-session-a");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-a", temp_dir.to_str().unwrap())
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-a", temp_dir.to_str().unwrap()));
 
     let response = app
         .oneshot(
@@ -650,9 +736,9 @@ async fn test_session_scoped_project_dna_for_valid_session() {
     let temp_dir = std::env::temp_dir().join("hive-test-session-dna");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-dna", temp_dir.to_str().unwrap())
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-dna", temp_dir.to_str().unwrap()));
 
     let response = app
         .oneshot(
@@ -676,9 +762,10 @@ async fn test_legacy_learnings_works_with_single_session() {
     let temp_dir = std::env::temp_dir().join("hive-test-single-session");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-single", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-single",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let response = app
         .oneshot(
@@ -706,12 +793,14 @@ async fn test_legacy_learnings_returns_error_with_multiple_projects() {
     let _ = std::fs::create_dir_all(&temp_dir_b);
 
     // Insert two sessions with different project paths
-    controller.read().insert_test_session(
-        make_test_session("session-multi-a", temp_dir_a.to_str().unwrap())
-    );
-    controller.read().insert_test_session(
-        make_test_session("session-multi-b", temp_dir_b.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-multi-a",
+        temp_dir_a.to_str().unwrap(),
+    ));
+    controller.read().insert_test_session(make_test_session(
+        "session-multi-b",
+        temp_dir_b.to_str().unwrap(),
+    ));
 
     let response = app
         .oneshot(
@@ -739,12 +828,12 @@ async fn test_session_scoped_learnings_work_with_multiple_projects() {
     let _ = std::fs::create_dir_all(&temp_dir_a);
     let _ = std::fs::create_dir_all(&temp_dir_b);
 
-    controller.read().insert_test_session(
-        make_test_session("scoped-a", temp_dir_a.to_str().unwrap())
-    );
-    controller.read().insert_test_session(
-        make_test_session("scoped-b", temp_dir_b.to_str().unwrap())
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session("scoped-a", temp_dir_a.to_str().unwrap()));
+    controller
+        .read()
+        .insert_test_session(make_test_session("scoped-b", temp_dir_b.to_str().unwrap()));
 
     // Session-scoped endpoint should work even with multiple projects
     let response = app
@@ -770,9 +859,10 @@ async fn test_session_scoped_submit_learning_validates_input() {
     let temp_dir = std::env::temp_dir().join("hive-test-submit-validation");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-submit", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-submit",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit with empty insight should fail
     let body = serde_json::json!({
@@ -808,9 +898,10 @@ async fn test_session_scoped_submit_learning_rejects_path_traversal() {
     let temp_dir = std::env::temp_dir().join("hive-test-path-traversal");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-traversal", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-traversal",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit with path traversal in files_touched should fail
     let body = serde_json::json!({
@@ -846,9 +937,9 @@ async fn test_session_scoped_submit_learning_success() {
     let temp_dir = std::env::temp_dir().join("hive-test-submit-success");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-ok", temp_dir.to_str().unwrap())
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session("session-ok", temp_dir.to_str().unwrap()));
 
     let body = serde_json::json!({
         "session": "session-ok",
@@ -938,9 +1029,10 @@ async fn test_session_scoped_submit_learning_validates_empty_session() {
     let temp_dir = std::env::temp_dir().join("hive-test-empty-session");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-empty-session", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-empty-session",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "session": "",
@@ -975,9 +1067,10 @@ async fn test_session_scoped_submit_learning_validates_empty_task() {
     let temp_dir = std::env::temp_dir().join("hive-test-empty-task");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-empty-task", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-empty-task",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "session": "session-empty-task",
@@ -1012,9 +1105,10 @@ async fn test_session_scoped_submit_learning_validates_invalid_outcome() {
     let temp_dir = std::env::temp_dir().join("hive-test-invalid-outcome");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-invalid-outcome", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-invalid-outcome",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "session": "session-invalid-outcome",
@@ -1049,9 +1143,10 @@ async fn test_session_scoped_submit_learning_validates_all_outcomes() {
     let temp_dir = std::env::temp_dir().join("hive-test-all-outcomes");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-outcomes", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-outcomes",
+        temp_dir.to_str().unwrap(),
+    ));
 
     for outcome in ["success", "partial", "failed"] {
         let body = serde_json::json!({
@@ -1089,9 +1184,10 @@ async fn test_session_scoped_submit_learning_rejects_absolute_paths() {
     let temp_dir = std::env::temp_dir().join("hive-test-absolute-path");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-absolute", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-absolute",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Test absolute Unix path
     let body = serde_json::json!({
@@ -1152,9 +1248,10 @@ async fn test_session_scoped_submit_learning_returns_learning_id() {
     let temp_dir = std::env::temp_dir().join("hive-test-learning-id");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-learning-id", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-learning-id",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "session": "session-learning-id",
@@ -1179,29 +1276,43 @@ async fn test_session_scoped_submit_learning_returns_learning_id() {
 
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     assert!(response_json.get("learning_id").is_some());
-    assert_eq!(response_json.get("message").unwrap().as_str().unwrap(), "Learning submitted successfully");
-    assert!(!response_json.get("learning_id").unwrap().as_str().unwrap().is_empty());
+    assert_eq!(
+        response_json.get("message").unwrap().as_str().unwrap(),
+        "Learning submitted successfully"
+    );
+    assert!(!response_json
+        .get("learning_id")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .is_empty());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_with_filtering_by_category() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-filter-category");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-filter", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-filter",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit multiple learnings with different outcomes
-    for (i, outcome) in ["success", "partial", "failed", "success"].iter().enumerate() {
+    for (i, outcome) in ["success", "partial", "failed", "success"]
+        .iter()
+        .enumerate()
+    {
         let body = serde_json::json!({
             "session": "session-filter",
             "task": format!("task {}", i),
@@ -1239,12 +1350,16 @@ async fn test_session_scoped_list_learnings_with_filtering_by_category() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 2);
-    assert!(learnings.iter().all(|l| l.get("outcome").unwrap().as_str().unwrap() == "success"));
+    assert!(learnings
+        .iter()
+        .all(|l| l.get("outcome").unwrap().as_str().unwrap() == "success"));
 
     // Filter by failed
     let response = app
@@ -1259,26 +1374,32 @@ async fn test_session_scoped_list_learnings_with_filtering_by_category() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 1);
-    assert_eq!(learnings[0].get("outcome").unwrap().as_str().unwrap(), "failed");
+    assert_eq!(
+        learnings[0].get("outcome").unwrap().as_str().unwrap(),
+        "failed"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_with_filtering_by_keywords() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-filter-keywords");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-filter-kw", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-filter-kw",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit learnings with different keywords
     let test_cases = vec![
@@ -1326,13 +1447,19 @@ async fn test_session_scoped_list_learnings_with_filtering_by_keywords() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 2);
-    assert!(learnings.iter().any(|l| l.get("task").unwrap().as_str().unwrap() == "task 1"));
-    assert!(learnings.iter().any(|l| l.get("task").unwrap().as_str().unwrap() == "task 3"));
+    assert!(learnings
+        .iter()
+        .any(|l| l.get("task").unwrap().as_str().unwrap() == "task 1"));
+    assert!(learnings
+        .iter()
+        .any(|l| l.get("task").unwrap().as_str().unwrap() == "task 3"));
 
     // Filter by multiple keywords (comma-separated)
     let response = app
@@ -1348,7 +1475,9 @@ async fn test_session_scoped_list_learnings_with_filtering_by_keywords() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
@@ -1368,7 +1497,9 @@ async fn test_session_scoped_list_learnings_with_filtering_by_keywords() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
@@ -1379,14 +1510,15 @@ async fn test_session_scoped_list_learnings_with_filtering_by_keywords() {
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_with_combined_filters() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-combined-filters");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-combined", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-combined",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit learnings with different combinations
     let test_cases = vec![
@@ -1433,27 +1565,36 @@ async fn test_session_scoped_list_learnings_with_combined_filters() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 1);
-    assert_eq!(learnings[0].get("task").unwrap().as_str().unwrap(), "task 1");
-    assert_eq!(learnings[0].get("outcome").unwrap().as_str().unwrap(), "success");
+    assert_eq!(
+        learnings[0].get("task").unwrap().as_str().unwrap(),
+        "task 1"
+    );
+    assert_eq!(
+        learnings[0].get("outcome").unwrap().as_str().unwrap(),
+        "success"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[tokio::test]
 async fn test_session_scoped_list_learnings_returns_correct_structure() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-structure");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-structure", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-structure",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit a learning
     let body = serde_json::json!({
@@ -1491,7 +1632,9 @@ async fn test_session_scoped_list_learnings_returns_correct_structure() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     assert!(response_json.get("learnings").is_some());
@@ -1504,11 +1647,20 @@ async fn test_session_scoped_list_learnings_returns_correct_structure() {
     let learning = &learnings[0];
     assert!(learning.get("id").is_some());
     assert!(learning.get("date").is_some());
-    assert_eq!(learning.get("session").unwrap().as_str().unwrap(), "session-structure");
+    assert_eq!(
+        learning.get("session").unwrap().as_str().unwrap(),
+        "session-structure"
+    );
     assert_eq!(learning.get("task").unwrap().as_str().unwrap(), "test task");
-    assert_eq!(learning.get("outcome").unwrap().as_str().unwrap(), "success");
-    assert_eq!(learning.get("insight").unwrap().as_str().unwrap(), "test insight");
-    
+    assert_eq!(
+        learning.get("outcome").unwrap().as_str().unwrap(),
+        "success"
+    );
+    assert_eq!(
+        learning.get("insight").unwrap().as_str().unwrap(),
+        "test insight"
+    );
+
     let keywords = learning.get("keywords").unwrap().as_array().unwrap();
     assert_eq!(keywords.len(), 2);
     assert!(keywords.iter().any(|k| k.as_str().unwrap() == "test"));
@@ -1529,9 +1681,10 @@ async fn test_session_scoped_delete_learning_success() {
     let temp_dir = std::env::temp_dir().join("hive-test-delete-success");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-delete", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-delete",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit a learning
     let body = serde_json::json!({
@@ -1558,7 +1711,9 @@ async fn test_session_scoped_delete_learning_success() {
 
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learning_id = response_json.get("learning_id").unwrap().as_str().unwrap();
 
@@ -1568,7 +1723,10 @@ async fn test_session_scoped_delete_learning_success() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/api/sessions/session-delete/learnings/{}", learning_id))
+                .uri(format!(
+                    "/api/sessions/session-delete/learnings/{}",
+                    learning_id
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1590,7 +1748,9 @@ async fn test_session_scoped_delete_learning_success() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 0);
@@ -1605,9 +1765,10 @@ async fn test_session_scoped_delete_learning_not_found() {
     let temp_dir = std::env::temp_dir().join("hive-test-delete-notfound");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-delete-nf", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-delete-nf",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Try to delete a non-existent learning
     let response = app
@@ -1646,14 +1807,15 @@ async fn test_session_scoped_delete_learning_returns_404_for_nonexistent_session
 
 #[tokio::test]
 async fn test_session_scoped_delete_learning_preserves_other_learnings() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir = std::env::temp_dir().join("hive-test-delete-preserve");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-delete-preserve", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-delete-preserve",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit two learnings
     let mut learning_ids = Vec::new();
@@ -1682,9 +1844,16 @@ async fn test_session_scoped_delete_learning_preserves_other_learnings() {
 
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        let learning_id = response_json.get("learning_id").unwrap().as_str().unwrap().to_string();
+        let learning_id = response_json
+            .get("learning_id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
         learning_ids.push(learning_id);
     }
 
@@ -1694,7 +1863,10 @@ async fn test_session_scoped_delete_learning_preserves_other_learnings() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/api/sessions/session-delete-preserve/learnings/{}", learning_ids[0]))
+                .uri(format!(
+                    "/api/sessions/session-delete-preserve/learnings/{}",
+                    learning_ids[0]
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1716,11 +1888,16 @@ async fn test_session_scoped_delete_learning_preserves_other_learnings() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 1);
-    assert_eq!(learnings[0].get("task").unwrap().as_str().unwrap(), "task 1");
+    assert_eq!(
+        learnings[0].get("task").unwrap().as_str().unwrap(),
+        "task 1"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -1732,9 +1909,10 @@ async fn test_legacy_submit_learning_validates_input() {
     let temp_dir = std::env::temp_dir().join("hive-test-legacy-submit");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-legacy", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-legacy",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Test empty session
     let body = serde_json::json!({
@@ -1795,9 +1973,10 @@ async fn test_legacy_list_learnings_with_filtering() {
     let temp_dir = std::env::temp_dir().join("hive-test-legacy-filter");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-legacy-filter", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-legacy-filter",
+        temp_dir.to_str().unwrap(),
+    ));
 
     // Submit learnings via legacy endpoint
     for (i, outcome) in ["success", "failed"].iter().enumerate() {
@@ -1838,11 +2017,16 @@ async fn test_legacy_list_learnings_with_filtering() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 1);
-    assert_eq!(learnings[0].get("outcome").unwrap().as_str().unwrap(), "success");
+    assert_eq!(
+        learnings[0].get("outcome").unwrap().as_str().unwrap(),
+        "success"
+    );
 
     // Filter by keywords
     let response = app
@@ -1857,7 +2041,9 @@ async fn test_legacy_list_learnings_with_filtering() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 2);
@@ -1869,19 +2055,21 @@ async fn test_legacy_list_learnings_with_filtering() {
 
 #[tokio::test]
 async fn test_e2e_session_isolation() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir_a = std::env::temp_dir().join("hive-test-isolation-a");
     let temp_dir_b = std::env::temp_dir().join("hive-test-isolation-b");
     let _ = std::fs::create_dir_all(&temp_dir_a);
     let _ = std::fs::create_dir_all(&temp_dir_b);
 
-    controller.read().insert_test_session(
-        make_test_session("iso-session-a", temp_dir_a.to_str().unwrap())
-    );
-    controller.read().insert_test_session(
-        make_test_session("iso-session-b", temp_dir_b.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "iso-session-a",
+        temp_dir_a.to_str().unwrap(),
+    ));
+    controller.read().insert_test_session(make_test_session(
+        "iso-session-b",
+        temp_dir_b.to_str().unwrap(),
+    ));
 
     // POST a learning to session A only
     let body = serde_json::json!({
@@ -1921,11 +2109,16 @@ async fn test_e2e_session_isolation() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings_a = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings_a.len(), 1);
-    assert_eq!(learnings_a[0].get("task").unwrap().as_str().unwrap(), "implement isolation feature");
+    assert_eq!(
+        learnings_a[0].get("task").unwrap().as_str().unwrap(),
+        "implement isolation feature"
+    );
 
     // Verify session B has NO learnings (isolation)
     let response = app
@@ -1940,10 +2133,16 @@ async fn test_e2e_session_isolation() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings_b = response_json.get("learnings").unwrap().as_array().unwrap();
-    assert_eq!(learnings_b.len(), 0, "Session B should have no learnings - session isolation violated");
+    assert_eq!(
+        learnings_b.len(),
+        0,
+        "Session B should have no learnings - session isolation violated"
+    );
 
     // Now POST to session B and verify both are independent
     let body_b = serde_json::json!({
@@ -1982,10 +2181,16 @@ async fn test_e2e_session_isolation() {
         .await
         .unwrap();
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings_a = response_json.get("learnings").unwrap().as_array().unwrap();
-    assert_eq!(learnings_a.len(), 1, "Session A should still have exactly 1 learning after B got a new one");
+    assert_eq!(
+        learnings_a.len(),
+        1,
+        "Session A should still have exactly 1 learning after B got a new one"
+    );
 
     // Check session B has exactly 1 learning
     let response = app
@@ -1998,11 +2203,16 @@ async fn test_e2e_session_isolation() {
         .await
         .unwrap();
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings_b = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings_b.len(), 1);
-    assert_eq!(learnings_b[0].get("outcome").unwrap().as_str().unwrap(), "partial");
+    assert_eq!(
+        learnings_b[0].get("outcome").unwrap().as_str().unwrap(),
+        "partial"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir_a);
     let _ = std::fs::remove_dir_all(&temp_dir_b);
@@ -2010,19 +2220,19 @@ async fn test_e2e_session_isolation() {
 
 #[tokio::test]
 async fn test_e2e_delete_does_not_affect_other_sessions() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (_storage_dir, app, controller, _storage) = setup_isolated_test_app_with_controller().await;
 
     let temp_dir_a = std::env::temp_dir().join("hive-test-delete-iso-a");
     let temp_dir_b = std::env::temp_dir().join("hive-test-delete-iso-b");
     let _ = std::fs::create_dir_all(&temp_dir_a);
     let _ = std::fs::create_dir_all(&temp_dir_b);
 
-    controller.read().insert_test_session(
-        make_test_session("del-iso-a", temp_dir_a.to_str().unwrap())
-    );
-    controller.read().insert_test_session(
-        make_test_session("del-iso-b", temp_dir_b.to_str().unwrap())
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session("del-iso-a", temp_dir_a.to_str().unwrap()));
+    controller
+        .read()
+        .insert_test_session(make_test_session("del-iso-b", temp_dir_b.to_str().unwrap()));
 
     // POST learnings to both sessions
     for (session_id, task) in [("del-iso-a", "task A"), ("del-iso-b", "task B")] {
@@ -2063,7 +2273,9 @@ async fn test_e2e_delete_does_not_affect_other_sessions() {
         .await
         .unwrap();
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     let learning_id = learnings[0].get("id").unwrap().as_str().unwrap();
@@ -2095,7 +2307,9 @@ async fn test_e2e_delete_does_not_affect_other_sessions() {
         .await
         .unwrap();
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
     assert_eq!(learnings.len(), 0);
@@ -2111,11 +2325,20 @@ async fn test_e2e_delete_does_not_affect_other_sessions() {
         .await
         .unwrap();
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let learnings = response_json.get("learnings").unwrap().as_array().unwrap();
-    assert_eq!(learnings.len(), 1, "Session B should still have its learning after deleting from session A");
-    assert_eq!(learnings[0].get("task").unwrap().as_str().unwrap(), "task B");
+    assert_eq!(
+        learnings.len(),
+        1,
+        "Session B should still have its learning after deleting from session A"
+    );
+    assert_eq!(
+        learnings[0].get("task").unwrap().as_str().unwrap(),
+        "task B"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir_a);
     let _ = std::fs::remove_dir_all(&temp_dir_b);
@@ -2147,9 +2370,10 @@ async fn test_add_worker_rejects_invalid_cli() {
     let temp_dir = std::env::temp_dir().join("hive-test-invalid-cli");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session("session-cli-test", temp_dir.to_str().unwrap())
-    );
+    controller.read().insert_test_session(make_test_session(
+        "session-cli-test",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "role_type": "backend",
@@ -2170,10 +2394,16 @@ async fn test_add_worker_rejects_invalid_cli() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let error_msg = response_json.get("error").unwrap().as_str().unwrap();
-    assert!(error_msg.contains("Invalid CLI"), "Error should mention invalid CLI: {}", error_msg);
+    assert!(
+        error_msg.contains("Invalid CLI"),
+        "Error should mention invalid CLI: {}",
+        error_msg
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -2201,10 +2431,16 @@ async fn test_add_worker_rejects_path_traversal_session_id() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let error_msg = response_json.get("error").unwrap().as_str().unwrap();
-    assert!(error_msg.contains("Invalid session ID"), "Error should mention invalid session ID: {}", error_msg);
+    assert!(
+        error_msg.contains("Invalid session ID"),
+        "Error should mention invalid session ID: {}",
+        error_msg
+    );
 }
 
 #[tokio::test]
@@ -2375,7 +2611,9 @@ async fn test_add_worker_accepts_latest_worker_models() {
             "{cli}/{model} should be accepted as a worker model"
         );
         if status == StatusCode::CREATED {
-            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
             let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
             let worker_id = response_json
                 .get("worker_id")
@@ -2400,16 +2638,15 @@ async fn test_add_worker_accepts_latest_worker_models() {
 
 #[test]
 fn test_add_worker_request_accepts_name_and_description_fields() {
-    let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
-        serde_json::json!({
+    let request: crate::http::handlers::workers::AddWorkerRequest =
+        serde_json::from_value(serde_json::json!({
             "role_type": "frontend",
             "cli": "codex",
             "name": "Worker 2 (Frontend)",
             "description": "SSE resync + chat/timeline event handling",
             "initial_task": "Handle SSE lagged events"
-        }),
-    )
-    .unwrap();
+        }))
+        .unwrap();
 
     assert_eq!(request.name.as_deref(), Some("Worker 2 (Frontend)"));
     assert_eq!(
@@ -2421,16 +2658,15 @@ fn test_add_worker_request_accepts_name_and_description_fields() {
 #[test]
 fn test_add_worker_request_blank_name_deserializes_to_none() {
     for raw_name in ["", "   "] {
-        let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
-            serde_json::json!({
+        let request: crate::http::handlers::workers::AddWorkerRequest =
+            serde_json::from_value(serde_json::json!({
                 "role_type": "frontend",
                 "cli": "codex",
                 "name": raw_name,
                 "description": "SSE resync + chat/timeline event handling",
                 "initial_task": "Handle SSE lagged events"
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
 
         assert!(
             request.name.is_none(),
@@ -2443,16 +2679,15 @@ fn test_add_worker_request_blank_name_deserializes_to_none() {
 #[test]
 fn test_add_worker_request_blank_description_deserializes_to_none() {
     for raw_description in ["", "   "] {
-        let request: crate::http::handlers::workers::AddWorkerRequest = serde_json::from_value(
-            serde_json::json!({
+        let request: crate::http::handlers::workers::AddWorkerRequest =
+            serde_json::from_value(serde_json::json!({
                 "role_type": "frontend",
                 "cli": "codex",
                 "name": "Worker 2 (Frontend)",
                 "description": raw_description,
                 "initial_task": "Handle SSE lagged events"
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
 
         assert!(
             request.description.is_none(),
@@ -2496,7 +2731,9 @@ fn test_persisted_agent_config_blank_name_round_trip_uses_indexed_default_behavi
             cli: "codex".to_string(),
             model: Some("gpt-5.5".to_string()),
             flags: vec![],
-            label: Some("Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string()),
+            label: Some(
+                "Worker 2 (Frontend) — SSE resync + chat/timeline event handling".to_string(),
+            ),
             name: Some(raw_name.to_string()),
             description: Some("SSE resync + chat/timeline event handling".to_string()),
             role_type: Some("frontend".to_string()),
@@ -2525,9 +2762,10 @@ async fn test_add_qa_worker_rejects_invalid_cli() {
     let temp_dir = std::env::temp_dir().join("hive-test-invalid-qa-cli");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-qa-cli-test", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-qa-cli-test",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "specialization": "ui",
@@ -2548,10 +2786,16 @@ async fn test_add_qa_worker_rejects_invalid_cli() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let error_msg = response_json.get("error").unwrap().as_str().unwrap();
-    assert!(error_msg.contains("Invalid CLI"), "Error should mention invalid CLI: {}", error_msg);
+    assert!(
+        error_msg.contains("Invalid CLI"),
+        "Error should mention invalid CLI: {}",
+        error_msg
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -2563,9 +2807,10 @@ async fn test_add_qa_worker_rejects_invalid_specialization() {
     let temp_dir = std::env::temp_dir().join("hive-test-invalid-qa-specialization");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-qa-specialization", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-qa-specialization",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({
         "specialization": "performance"
@@ -2585,10 +2830,16 @@ async fn test_add_qa_worker_rejects_invalid_specialization() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let error_msg = response_json.get("error").unwrap().as_str().unwrap();
-    assert!(error_msg.contains("Invalid QA specialization"), "Error should mention invalid specialization: {}", error_msg);
+    assert!(
+        error_msg.contains("Invalid QA specialization"),
+        "Error should mention invalid specialization: {}",
+        error_msg
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -2615,10 +2866,16 @@ async fn test_add_qa_worker_rejects_path_traversal_session_id() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let error_msg = response_json.get("error").unwrap().as_str().unwrap();
-    assert!(error_msg.contains("Invalid session ID"), "Error should mention invalid session ID: {}", error_msg);
+    assert!(
+        error_msg.contains("Invalid session ID"),
+        "Error should mention invalid session ID: {}",
+        error_msg
+    );
 }
 
 #[tokio::test]
@@ -2764,6 +3021,39 @@ async fn test_launch_fusion_success() {
 }
 
 #[tokio::test]
+async fn test_launch_debate_success() {
+    let app = setup_test_app().await;
+
+    let body = serde_json::json!({
+        "project_path": std::env::temp_dir().to_str().unwrap(),
+        "topic": "Should we adopt approach X?",
+        "rounds": 2,
+        "debaters": [
+            { "name": "affirmative", "stance": "Argue for approach X" },
+            { "name": "negative", "stance": "Argue against approach X" }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/debate")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "launch should either create the session or fail at PTY/worktree setup, got {status}"
+    );
+}
+
+#[tokio::test]
 async fn test_create_hive_accepts_per_worker_model_overrides() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
@@ -2809,7 +3099,9 @@ async fn test_create_hive_accepts_per_worker_model_overrides() {
         "launch should either create the session or fail at PTY/worktree setup, got {status}"
     );
     if status == StatusCode::CREATED {
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         let session_id = launch_response
             .get("session_id")
@@ -2902,7 +3194,10 @@ async fn test_create_hive_with_evaluator_config_propagates_to_evaluator() {
         assert_eq!(evaluator.config.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(evaluator.config.flags, vec!["--search".to_string()]);
         assert_eq!(evaluator.config.label.as_deref(), Some("Config evaluator"));
-        assert_eq!(session.state, SessionState::QaInProgress { iteration: None });
+        assert_eq!(
+            session.state,
+            SessionState::QaInProgress { iteration: None }
+        );
 
         controller.write().close_session(session_id).unwrap();
     }
@@ -2956,7 +3251,9 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
         "launch should either create the session or fail at PTY/worktree setup, got {status}"
     );
     if status == StatusCode::CREATED {
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         let session_id = launch_response
             .get("session_id")
@@ -2975,20 +3272,35 @@ async fn test_launch_swarm_accepts_model_capable_configs() {
             .expect("swarm session should include queen");
         assert_eq!(queen.config.cli, "qwen");
         assert_eq!(queen.config.model.as_deref(), Some("qwen3-coder"));
-        let planner = session
-            .agents
-            .iter()
-            .find(|agent| matches!(agent.role, AgentRole::Planner { .. }))
-            .expect("swarm session should include planner");
-        assert_eq!(planner.config.cli, "droid");
-        assert_eq!(planner.config.model.as_deref(), Some("glm-5.1"));
-        let worker = session
-            .agents
-            .iter()
-            .find(|agent| matches!(agent.role, AgentRole::Worker { .. }))
-            .expect("swarm session should include worker");
-        assert_eq!(worker.config.cli, "codex");
-        assert_eq!(worker.config.model.as_deref(), Some("gpt-5.5"));
+        let planners_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join(session_id)
+            .join("swarm-planners.json");
+        let planners_json = std::fs::read_to_string(planners_path).unwrap();
+        let planners: Vec<serde_json::Value> = serde_json::from_str(&planners_json).unwrap();
+        let planner_config = planners[0].get("config").unwrap();
+        assert_eq!(
+            planner_config.get("cli").and_then(|value| value.as_str()),
+            Some("droid")
+        );
+        assert_eq!(
+            planner_config.get("model").and_then(|value| value.as_str()),
+            Some("glm-5.1")
+        );
+        let worker_config = planners[0]
+            .get("workers")
+            .and_then(|workers| workers.as_array())
+            .and_then(|workers| workers.first())
+            .unwrap();
+        assert_eq!(
+            worker_config.get("cli").and_then(|value| value.as_str()),
+            Some("codex")
+        );
+        assert_eq!(
+            worker_config.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.5")
+        );
     }
 }
 
@@ -3017,7 +3329,9 @@ async fn test_launch_swarm_rejects_explicit_empty_workers_per_planner() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let error_msg = response_json.get("error").unwrap().as_str().unwrap();
     assert!(
@@ -3057,7 +3371,9 @@ async fn test_launch_solo_accepts_droid_model_config() {
         "launch should either create the session or fail at PTY/worktree setup, got {status}"
     );
     if status == StatusCode::CREATED {
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let launch_response: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         let session_id = launch_response
             .get("session_id")
@@ -3174,6 +3490,7 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
 async fn test_launch_solo_with_same_cli_evaluator_preserves_custom_session_model() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
 
     let body = serde_json::json!({
         "project_path": temp_dir.path().to_string_lossy(),
@@ -3480,7 +3797,10 @@ async fn test_append_conversation_and_verify_file_content() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/sessions/{}/conversations/worker-1/append", session_id))
+                .uri(format!(
+                    "/api/sessions/{}/conversations/worker-1/append",
+                    session_id
+                ))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -3521,7 +3841,10 @@ async fn test_read_conversation_since_filter() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/sessions/{}/conversations/shared/append", session_id))
+                .uri(format!(
+                    "/api/sessions/{}/conversations/shared/append",
+                    session_id
+                ))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body_1).unwrap()))
                 .unwrap(),
@@ -3531,6 +3854,7 @@ async fn test_read_conversation_since_filter() {
 
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let marker = chrono::Utc::now().to_rfc3339();
+    let encoded_marker = marker.replace('+', "%2B").replace(':', "%3A");
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let body_2 = serde_json::json!({
@@ -3542,7 +3866,10 @@ async fn test_read_conversation_since_filter() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/sessions/{}/conversations/shared/append", session_id))
+                .uri(format!(
+                    "/api/sessions/{}/conversations/shared/append",
+                    session_id
+                ))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body_2).unwrap()))
                 .unwrap(),
@@ -3555,7 +3882,7 @@ async fn test_read_conversation_since_filter() {
             Request::builder()
                 .uri(format!(
                     "/api/sessions/{}/conversations/shared?since={}",
-                    session_id, marker
+                    session_id, encoded_marker
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -3564,11 +3891,16 @@ async fn test_read_conversation_since_filter() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let messages = response_json.get("messages").unwrap().as_array().unwrap();
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].get("from").unwrap().as_str().unwrap(), "worker-1");
+    assert_eq!(
+        messages[0].get("from").unwrap().as_str().unwrap(),
+        "worker-1"
+    );
     assert_eq!(
         messages[0].get("content").unwrap().as_str().unwrap(),
         "After marker"
@@ -3605,7 +3937,7 @@ async fn test_conversation_rejects_path_traversal_and_invalid_agent_id() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/sessions/session-safe/conversations/worker 1/append")
+                .uri("/api/sessions/session-safe/conversations/worker%201/append")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
@@ -3639,7 +3971,10 @@ async fn test_conversation_concurrent_appends() {
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri(format!("/api/sessions/{}/conversations/shared/append", session_id_clone))
+                        .uri(format!(
+                            "/api/sessions/{}/conversations/shared/append",
+                            session_id_clone
+                        ))
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_string(&body).unwrap()))
                         .unwrap(),
@@ -3666,7 +4001,9 @@ async fn test_conversation_concurrent_appends() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let messages = response_json.get("messages").unwrap().as_array().unwrap();
     assert_eq!(messages.len(), 5);
@@ -3703,9 +4040,7 @@ async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
     let temp_dir = TempDir::new().unwrap();
 
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
-    session.state = SessionState::QaInProgress {
-        iteration: Some(1),
-    };
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
     controller.write().insert_test_session(session);
 
     let response = app
@@ -3775,9 +4110,7 @@ async fn test_post_verdict_persists_commit_sha_and_rationale() {
     let temp_dir = TempDir::new().unwrap();
 
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
-    session.state = SessionState::QaInProgress {
-        iteration: Some(2),
-    };
+    session.state = SessionState::QaInProgress { iteration: Some(2) };
     session.agents.push(AgentInfo {
         id: format!("{session_id}-evaluator"),
         role: AgentRole::Evaluator,
@@ -3813,15 +4146,21 @@ async fn test_post_verdict_persists_commit_sha_and_rationale() {
         .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
-        response_json.get("verdict").and_then(|value| value.as_str()),
+        response_json
+            .get("verdict")
+            .and_then(|value| value.as_str()),
         Some("PASS")
     );
     assert_eq!(
-        response_json.get("new_state").and_then(|value| value.as_str()),
+        response_json
+            .get("new_state")
+            .and_then(|value| value.as_str()),
         Some("QaPassed")
     );
     assert_eq!(
-        response_json.get("commit_sha").and_then(|value| value.as_str()),
+        response_json
+            .get("commit_sha")
+            .and_then(|value| value.as_str()),
         Some("abc123def")
     );
 
@@ -3858,15 +4197,21 @@ async fn test_post_verdict_persists_commit_sha_and_rationale() {
     assert!(!record.content.contains('\n'));
     let audit_payload: serde_json::Value = serde_json::from_str(&record.content).unwrap();
     assert_eq!(
-        audit_payload.get("verdict").and_then(|value| value.as_str()),
+        audit_payload
+            .get("verdict")
+            .and_then(|value| value.as_str()),
         Some("PASS")
     );
     assert_eq!(
-        audit_payload.get("rationale").and_then(|value| value.as_str()),
+        audit_payload
+            .get("rationale")
+            .and_then(|value| value.as_str()),
         Some("Looks good")
     );
     assert_eq!(
-        audit_payload.get("commit_sha").and_then(|value| value.as_str()),
+        audit_payload
+            .get("commit_sha")
+            .and_then(|value| value.as_str()),
         Some("abc123def")
     );
 }
@@ -3880,9 +4225,7 @@ async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
     let temp_dir = TempDir::new().unwrap();
 
     let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
-    session.state = SessionState::QaInProgress {
-        iteration: Some(2),
-    };
+    session.state = SessionState::QaInProgress { iteration: Some(2) };
     session.agents.push(AgentInfo {
         id: format!("{session_id}-evaluator"),
         role: AgentRole::Evaluator,
@@ -3918,11 +4261,15 @@ async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
         .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
-        response_json.get("verdict").and_then(|value| value.as_str()),
+        response_json
+            .get("verdict")
+            .and_then(|value| value.as_str()),
         Some("FAIL")
     );
     assert_eq!(
-        response_json.get("commit_sha").and_then(|value| value.as_str()),
+        response_json
+            .get("commit_sha")
+            .and_then(|value| value.as_str()),
         Some("deadbeef")
     );
 
@@ -3963,11 +4310,15 @@ async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
     assert!(!record.content.contains('\n'));
     let audit_payload: serde_json::Value = serde_json::from_str(&record.content).unwrap();
     assert_eq!(
-        audit_payload.get("verdict").and_then(|value| value.as_str()),
+        audit_payload
+            .get("verdict")
+            .and_then(|value| value.as_str()),
         Some("FAIL")
     );
     assert_eq!(
-        audit_payload.get("rationale").and_then(|value| value.as_str()),
+        audit_payload
+            .get("rationale")
+            .and_then(|value| value.as_str()),
         Some("Needs follow-up")
     );
 }
@@ -3978,7 +4329,12 @@ fn test_peer_message_record_commit_sha_round_trips_through_peer_json() {
     let manager = StateManager::new(temp_dir.path().to_path_buf());
 
     manager
-        .write_qa_verdict("session-evaluator", "session-queen", "QA_VERDICT: PASS", Some("abc123def"))
+        .write_qa_verdict(
+            "session-evaluator",
+            "session-queen",
+            "QA_VERDICT: PASS",
+            Some("abc123def"),
+        )
         .unwrap();
 
     let record: PeerMessageRecord = serde_json::from_str(
@@ -3997,9 +4353,13 @@ async fn test_list_cells_returns_primary_cell_for_hive_session() {
     let temp_dir = std::env::temp_dir().join("hive-test-cells-primary");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session_with_agents("session-cells", temp_dir.to_str().unwrap(), &["session-cells-queen", "session-cells-worker-1"]),
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-cells",
+            temp_dir.to_str().unwrap(),
+            &["session-cells-queen", "session-cells-worker-1"],
+        ));
 
     let response = app
         .oneshot(
@@ -4013,12 +4373,17 @@ async fn test_list_cells_returns_primary_cell_for_hive_session() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let cells = response_json.as_array().unwrap();
     assert_eq!(cells.len(), 1);
     assert_eq!(cells[0].get("id").unwrap().as_str().unwrap(), "primary");
-    assert_eq!(cells[0].get("session_id").unwrap().as_str().unwrap(), "session-cells");
+    assert_eq!(
+        cells[0].get("session_id").unwrap().as_str().unwrap(),
+        "session-cells"
+    );
     assert_eq!(cells[0].get("status").unwrap().as_str().unwrap(), "running");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -4038,7 +4403,8 @@ async fn test_get_cell_rejects_invalid_cell_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4048,9 +4414,10 @@ async fn test_stop_cell_returns_bad_request() {
     let temp_dir = std::env::temp_dir().join("hive-test-stop-cell");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-stop-cell", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-stop-cell",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let response = app
         .clone()
@@ -4079,9 +4446,13 @@ async fn test_list_agents_in_cell_returns_session_agents() {
     let temp_dir = std::env::temp_dir().join("hive-test-cell-agents");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session_with_agents("session-cell-agents", temp_dir.to_str().unwrap(), &["worker-1", "worker-2"]),
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-cell-agents",
+            temp_dir.to_str().unwrap(),
+            &["worker-1", "worker-2"],
+        ));
 
     let response = app
         .oneshot(
@@ -4095,12 +4466,20 @@ async fn test_list_agents_in_cell_returns_session_agents() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let agents = response_json.as_array().unwrap();
     assert_eq!(agents.len(), 2);
-    assert_eq!(agents[0].get("cell_id").unwrap().as_str().unwrap(), "primary");
-    assert_eq!(agents[0].get("status").unwrap().as_str().unwrap(), "running");
+    assert_eq!(
+        agents[0].get("cell_id").unwrap().as_str().unwrap(),
+        "primary"
+    );
+    assert_eq!(
+        agents[0].get("status").unwrap().as_str().unwrap(),
+        "running"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -4119,7 +4498,8 @@ async fn test_list_agents_in_cell_rejects_invalid_cell_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4129,9 +4509,10 @@ async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
     let temp_dir = std::env::temp_dir().join("hive-test-cell-artifacts");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-cell-artifacts", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-cell-artifacts",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let response = app
         .oneshot(
@@ -4145,7 +4526,9 @@ async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(response_json.as_array().unwrap().len(), 0);
 
@@ -4203,7 +4586,10 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .uri(format!(
+                    "/api/sessions/{}/cells/primary/artifacts",
+                    session_id
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4211,7 +4597,9 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let artifacts = response_json.as_array().unwrap();
     assert_eq!(artifacts.len(), 1);
@@ -4235,7 +4623,8 @@ async fn test_list_artifacts_rejects_invalid_cell_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4246,12 +4635,10 @@ async fn test_post_artifact_round_trip_and_cell_projection() {
     let storage = SessionStorage::new().unwrap();
     let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session(
-            &session_id,
-            temp_dir.path().to_str().unwrap(),
-        ));
+    controller.read().insert_test_session(make_test_session(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+    ));
 
     let artifact = serde_json::json!({
         "artifact": {
@@ -4272,7 +4659,10 @@ async fn test_post_artifact_round_trip_and_cell_projection() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .uri(format!(
+                    "/api/sessions/{}/cells/primary/artifacts",
+                    session_id
+                ))
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&artifact).unwrap()))
                 .unwrap(),
@@ -4286,7 +4676,10 @@ async fn test_post_artifact_round_trip_and_cell_projection() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/sessions/{}/cells/primary/artifacts", session_id))
+                .uri(format!(
+                    "/api/sessions/{}/cells/primary/artifacts",
+                    session_id
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4294,11 +4687,16 @@ async fn test_post_artifact_round_trip_and_cell_projection() {
         .unwrap();
 
     assert_eq!(get_response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let artifacts = response_json.as_array().unwrap();
     assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].get("branch").unwrap().as_str().unwrap(), "feature/artifacts");
+    assert_eq!(
+        artifacts[0].get("branch").unwrap().as_str().unwrap(),
+        "feature/artifacts"
+    );
 
     let cell_response = app
         .oneshot(
@@ -4311,7 +4709,9 @@ async fn test_post_artifact_round_trip_and_cell_projection() {
         .unwrap();
 
     assert_eq!(cell_response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(cell_response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(cell_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         response_json
@@ -4333,12 +4733,10 @@ async fn test_get_resolver_output_endpoint_returns_persisted_output() {
     let storage = SessionStorage::new().unwrap();
     let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
-    controller
-        .read()
-        .insert_test_session(make_test_session(
-            &session_id,
-            temp_dir.path().to_str().unwrap(),
-        ));
+    controller.read().insert_test_session(make_test_session(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+    ));
 
     storage
         .save_resolver_output(
@@ -4364,7 +4762,9 @@ async fn test_get_resolver_output_endpoint_returns_persisted_output() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         response_json
@@ -4462,7 +4862,9 @@ async fn test_template_crud_endpoints() {
         .await
         .unwrap();
     assert_eq!(list_response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(response_json
         .get("templates")
@@ -4471,13 +4873,15 @@ async fn test_template_crud_endpoints() {
         .unwrap()
         .iter()
         .any(|item| item.get("id").unwrap().as_str().unwrap() == template_id));
-    assert!(response_json
-        .get("role_packs")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .len()
-        >= 4);
+    assert!(
+        response_json
+            .get("role_packs")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len()
+            >= 4
+    );
 
     let delete_response = app
         .clone()
@@ -4514,9 +4918,13 @@ async fn test_send_agent_input_rejects_empty_input() {
     let temp_dir = std::env::temp_dir().join("hive-test-agent-input");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session_with_agents("session-agent-input", temp_dir.to_str().unwrap(), &["worker-1"]),
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-agent-input",
+            temp_dir.to_str().unwrap(),
+            &["worker-1"],
+        ));
 
     let response = app
         .oneshot(
@@ -4551,7 +4959,8 @@ async fn test_send_agent_input_rejects_invalid_agent_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -4611,9 +5020,13 @@ async fn test_post_heartbeat_updates_timestamp() {
     let temp_dir = std::env::temp_dir().join("hive-test-heartbeat");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session_with_agents("session-hb", temp_dir.to_str().unwrap(), &["worker-1"]),
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-hb",
+            temp_dir.to_str().unwrap(),
+            &["worker-1"],
+        ));
 
     let response = app
         .oneshot(
@@ -4641,9 +5054,13 @@ async fn test_post_heartbeat_rejects_invalid_status() {
     let temp_dir = std::env::temp_dir().join("hive-test-heartbeat-invalid");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session_with_agents("session-hb-inv", temp_dir.to_str().unwrap(), &["worker-1"]),
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-hb-inv",
+            temp_dir.to_str().unwrap(),
+            &["worker-1"],
+        ));
 
     let response = app
         .oneshot(
@@ -4671,9 +5088,13 @@ async fn test_get_active_sessions_returns_only_running() {
     let temp_dir = std::env::temp_dir().join("hive-test-active");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session_with_agents("session-running", temp_dir.to_str().unwrap(), &["worker-1"]),
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-running",
+            temp_dir.to_str().unwrap(),
+            &["worker-1"],
+        ));
 
     let response = app
         .oneshot(
@@ -4686,11 +5107,16 @@ async fn test_get_active_sessions_returns_only_running() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let sessions = response_json.get("sessions").unwrap().as_array().unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].get("id").unwrap().as_str().unwrap(), "session-running");
+    assert_eq!(
+        sessions[0].get("id").unwrap().as_str().unwrap(),
+        "session-running"
+    );
     let agents = sessions[0].get("agents").unwrap().as_array().unwrap();
     assert_eq!(agents.len(), 1);
 
@@ -4704,12 +5130,17 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
     let temp_dir = std::env::temp_dir().join("hive-test-active-hb");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(
-        make_test_session_with_agents("session-active-hb", temp_dir.to_str().unwrap(), &["worker-1"]),
-    );
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-active-hb",
+            temp_dir.to_str().unwrap(),
+            &["worker-1"],
+        ));
 
     // POST heartbeat first
-    let _ = app.clone()
+    let _ = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -4735,15 +5166,23 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let sessions = response_json.get("sessions").unwrap().as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     let agents = sessions[0].get("agents").unwrap().as_array().unwrap();
     assert_eq!(agents.len(), 1);
     assert!(agents[0].get("last_activity").unwrap().as_str().is_some());
-    assert_eq!(agents[0].get("status").unwrap().as_str().unwrap(), "working");
-    assert_eq!(agents[0].get("summary").unwrap().as_str().unwrap(), "2/3 done");
+    assert_eq!(
+        agents[0].get("status").unwrap().as_str().unwrap(),
+        "working"
+    );
+    assert_eq!(
+        agents[0].get("summary").unwrap().as_str().unwrap(),
+        "2/3 done"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -4767,9 +5206,7 @@ async fn test_list_sessions_reflects_fresh_heartbeat_activity_and_persists_it() 
         ));
     {
         let sessions = controller.write();
-        let session = sessions
-            .get_session(&session_id)
-            .expect("session inserted");
+        let session = sessions.get_session(&session_id).expect("session inserted");
         let mut updated = session.clone();
         updated.last_activity_at = before;
         updated.created_at = before - chrono::Duration::minutes(1);
@@ -4803,15 +5240,17 @@ async fn test_list_sessions_reflects_fresh_heartbeat_activity_and_persists_it() 
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let listed = response_json
         .get("sessions")
         .and_then(|sessions| sessions.as_array())
         .and_then(|sessions| {
-            sessions
-                .iter()
-                .find(|session| session.get("id").and_then(|id| id.as_str()) == Some(session_id.as_str()))
+            sessions.iter().find(|session| {
+                session.get("id").and_then(|id| id.as_str()) == Some(session_id.as_str())
+            })
         })
         .expect("session should be listed");
 
@@ -4837,13 +5276,15 @@ async fn test_complete_session_returns_conflict_when_not_quiescent() {
     let temp_dir = std::env::temp_dir().join("hive-test-complete-blocked");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(make_test_session_for_completion(
-        "session-complete-blocked",
-        temp_dir.to_str().unwrap(),
-        SessionState::Running,
-        chrono::Utc::now() - chrono::Duration::minutes(11),
-        true,
-    ));
+    controller
+        .read()
+        .insert_test_session(make_test_session_for_completion(
+            "session-complete-blocked",
+            temp_dir.to_str().unwrap(),
+            SessionState::Running,
+            chrono::Utc::now() - chrono::Duration::minutes(11),
+            true,
+        ));
 
     let response = app
         .oneshot(
@@ -4858,9 +5299,14 @@ async fn test_complete_session_returns_conflict_when_not_quiescent() {
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let error = response_json.get("error").and_then(|value| value.as_str()).unwrap();
+    let error = response_json
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap();
     assert!(error.contains("QaPassed"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -4872,13 +5318,15 @@ async fn test_complete_session_returns_conflict_for_recent_qa_passed_session() {
     let temp_dir = std::env::temp_dir().join("hive-test-complete-recent-pass");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(make_test_session_for_completion(
-        "session-complete-recent-pass",
-        temp_dir.to_str().unwrap(),
-        SessionState::QaPassed,
-        chrono::Utc::now() - chrono::Duration::minutes(5),
-        true,
-    ));
+    controller
+        .read()
+        .insert_test_session(make_test_session_for_completion(
+            "session-complete-recent-pass",
+            temp_dir.to_str().unwrap(),
+            SessionState::QaPassed,
+            chrono::Utc::now() - chrono::Duration::minutes(5),
+            true,
+        ));
 
     let response = app
         .oneshot(
@@ -4893,9 +5341,14 @@ async fn test_complete_session_returns_conflict_for_recent_qa_passed_session() {
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let error = response_json.get("error").and_then(|value| value.as_str()).unwrap();
+    let error = response_json
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap();
     assert!(error.contains("10 minutes"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -4907,13 +5360,15 @@ async fn test_complete_session_allows_quiet_evaluator_backed_session() {
     let temp_dir = std::env::temp_dir().join("hive-test-complete-ok");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(make_test_session_for_completion(
-        "session-complete-ok",
-        temp_dir.to_str().unwrap(),
-        SessionState::QaPassed,
-        chrono::Utc::now() - chrono::Duration::minutes(11),
-        true,
-    ));
+    controller
+        .read()
+        .insert_test_session(make_test_session_for_completion(
+            "session-complete-ok",
+            temp_dir.to_str().unwrap(),
+            SessionState::QaPassed,
+            chrono::Utc::now() - chrono::Duration::minutes(11),
+            true,
+        ));
 
     let response = app
         .oneshot(
@@ -4942,13 +5397,15 @@ async fn test_complete_session_allows_quiet_fusion_session_without_evaluator() {
     let temp_dir = std::env::temp_dir().join("hive-test-complete-fusion");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    controller.read().insert_test_session(make_test_session_for_completion(
-        "session-complete-fusion",
-        temp_dir.to_str().unwrap(),
-        SessionState::Running,
-        chrono::Utc::now() - chrono::Duration::minutes(11),
-        false,
-    ));
+    controller
+        .read()
+        .insert_test_session(make_test_session_for_completion(
+            "session-complete-fusion",
+            temp_dir.to_str().unwrap(),
+            SessionState::Running,
+            chrono::Utc::now() - chrono::Duration::minutes(11),
+            false,
+        ));
 
     let response = app
         .oneshot(
@@ -4990,7 +5447,9 @@ async fn test_get_events_returns_empty_for_new_session() {
     // Should return OK with empty array for non-existent session
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let response_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     let events = response_json.as_array().unwrap();
     assert_eq!(events.len(), 0);
@@ -5010,7 +5469,8 @@ async fn test_get_events_rejects_path_traversal_session_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -5033,8 +5493,9 @@ async fn test_stream_events_endpoint_exists() {
     // SSE endpoint should return OK (it will keep connection open)
     // The response should have content-type: text/event-stream
     assert_eq!(response.status(), StatusCode::OK);
-    
-    let content_type = response.headers()
+
+    let content_type = response
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -5055,7 +5516,8 @@ async fn test_stream_events_rejects_path_traversal_session_id() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Path traversal is rejected before handler validation by route matching.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // ── Resolver launch endpoint tests ──────────────────────────────────────
@@ -5066,7 +5528,9 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         id: id.to_string(),
         name: None,
         color: None,
-        session_type: SessionType::Fusion { variants: vec!["variant-a".to_string(), "variant-b".to_string()] },
+        session_type: SessionType::Fusion {
+            variants: vec!["variant-a".to_string(), "variant-b".to_string()],
+        },
         project_path: PathBuf::from(project_path),
         state: SessionState::Running,
         created_at: now,
@@ -5130,6 +5594,8 @@ async fn test_resolver_launch_success_with_artifacts() {
 
     // Register Fusion session in controller
     let session = make_fusion_session(&session_id, &std::env::temp_dir().to_string_lossy());
+    let mut session = session;
+    session.last_activity_at = chrono::Utc::now() - chrono::Duration::minutes(11);
     controller.write().insert_test_session(session);
 
     let body = serde_json::json!({
@@ -5514,9 +5980,10 @@ async fn test_http_dispatch_session_list_via_registry() {
 
     let temp_dir = std::env::temp_dir().join("hive-test-action-session-list");
     let _ = std::fs::create_dir_all(&temp_dir);
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-actionlist", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-actionlist",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let response = app
         .oneshot(
@@ -5535,7 +6002,11 @@ async fn test_http_dispatch_session_list_via_registry() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    let sessions = json.as_array().expect("session.list returns an array");
+    assert_eq!(json.get("renderer").and_then(|v| v.as_str()), Some("table"));
+    let sessions = json
+        .get("data")
+        .and_then(|v| v.as_array())
+        .expect("session.list data returns an array");
     assert!(sessions
         .iter()
         .any(|s| s.get("id").and_then(|v| v.as_str()) == Some("session-actionlist")));
@@ -5585,7 +6056,10 @@ async fn test_same_handler_both_callers() {
     let _ = std::fs::create_dir_all(&temp_dir);
     session_controller
         .read()
-        .insert_test_session(make_test_session("session-both", temp_dir.to_str().unwrap()));
+        .insert_test_session(make_test_session(
+            "session-both",
+            temp_dir.to_str().unwrap(),
+        ));
 
     let registry = state.registry().clone();
 
@@ -5653,6 +6127,46 @@ async fn test_http_action_unknown_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn test_conversation_emit_includes_render_envelope() {
+    let state = setup_test_state().await;
+    let mut events = state
+        .event_bus
+        .subscribe_session("session-render".to_string());
+
+    let table_message = ConversationMessage {
+        timestamp: chrono::Utc::now(),
+        from: "worker-3".to_string(),
+        content: "| file | status |\n| --- | --- |\n| src/lib.rs | changed |".to_string(),
+    };
+    state
+        .emit_conversation_message("session-render", "worker-3", &table_message)
+        .await
+        .unwrap();
+
+    let table_event = events.recv().await.unwrap();
+    assert_eq!(table_event.payload["renderer"], "table");
+    assert_eq!(
+        table_event.payload["data"]["content"],
+        table_message.content
+    );
+    assert_eq!(table_event.payload["data"]["agent_id"], "worker-3");
+
+    let diff_message = ConversationMessage {
+        timestamp: chrono::Utc::now(),
+        from: "worker-3".to_string(),
+        content: "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new".to_string(),
+    };
+    state
+        .emit_conversation_message("session-render", "worker-3", &diff_message)
+        .await
+        .unwrap();
+
+    let diff_event = events.recv().await.unwrap();
+    assert_eq!(diff_event.payload["renderer"], "diff");
+    assert_eq!(diff_event.payload["data"]["content"], diff_message.content);
+}
+
 // ---- #125 run-journal endpoint ----
 
 #[tokio::test]
@@ -5695,9 +6209,17 @@ async fn test_get_run_journal_returns_seeded_entries() {
         .record_step_started(run_id, StepKind::GitCommit, 1, Some("worker-1"))
         .unwrap();
     store
-        .record_ledger(run_id, &step_id, "git_commit", Some("abc123"), Confidence::High)
+        .record_ledger(
+            run_id,
+            &step_id,
+            "git_commit",
+            Some("abc123"),
+            Confidence::High,
+        )
         .unwrap();
-    store.confirm_ledger(run_id, &step_id, None, Confidence::High).unwrap();
+    store
+        .confirm_ledger(run_id, &step_id, None, Confidence::High)
+        .unwrap();
     store
         .record_step_finished(run_id, &step_id, StepStatus::Completed)
         .unwrap();
@@ -5760,7 +6282,9 @@ async fn fetch_queue_snapshot(app: &axum::Router, session_id: &str) -> serde_jso
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
 
@@ -5769,9 +6293,10 @@ async fn test_queue_endpoint_empty_snapshot() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = std::env::temp_dir().join("hive-test-queue-empty");
     let _ = std::fs::create_dir_all(&temp_dir);
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-queue-empty", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-queue-empty",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let snap = fetch_queue_snapshot(&app, "session-queue-empty").await;
     assert_eq!(snap["queued"], 0);
@@ -5791,9 +6316,10 @@ async fn test_add_worker_enqueues_and_claims() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = std::env::temp_dir().join("hive-test-queue-claim");
     let _ = std::fs::create_dir_all(&temp_dir);
-    controller
-        .read()
-        .insert_test_session(make_test_session("session-queue-claim", temp_dir.to_str().unwrap()));
+    controller.read().insert_test_session(make_test_session(
+        "session-queue-claim",
+        temp_dir.to_str().unwrap(),
+    ));
 
     let body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
 
@@ -5850,11 +6376,13 @@ async fn test_heartbeat_advances_queue_counters() {
     let (app, controller) = setup_test_app_with_controller().await;
     let temp_dir = std::env::temp_dir().join("hive-test-queue-heartbeat");
     let _ = std::fs::create_dir_all(&temp_dir);
-    controller.read().insert_test_session(make_test_session_with_agents(
-        "session-queue-hb",
-        temp_dir.to_str().unwrap(),
-        &["session-queue-hb-worker-1"],
-    ));
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-queue-hb",
+            temp_dir.to_str().unwrap(),
+            &["session-queue-hb-worker-1"],
+        ));
 
     // Claim the worker row directly via the queue path used by add_worker (enqueue+claim).
     let worker_body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
@@ -5901,8 +6429,14 @@ async fn test_heartbeat_advances_queue_counters() {
         .iter()
         .find(|r| r["worker_id"] == "session-queue-hb-worker-2")
         .expect("queue row for worker-2");
-    assert!(row["heartbeat_at"].as_i64().is_some(), "heartbeat recorded onto the queue row");
-    assert_eq!(row["no_progress_count"], 1, "second identical heartbeat is no-progress");
+    assert!(
+        row["heartbeat_at"].as_i64().is_some(),
+        "heartbeat recorded onto the queue row"
+    );
+    assert_eq!(
+        row["no_progress_count"], 1,
+        "second identical heartbeat is no-progress"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

@@ -26,6 +26,7 @@ pub struct Session {
 pub enum SessionMode {
     Hive,
     Fusion,
+    Debate,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

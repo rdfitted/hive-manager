@@ -1,49 +1,70 @@
+#[cfg(not(test))]
 mod commands;
 pub mod actions;
-pub mod artifacts;
-pub mod domain;
 pub mod adapters;
-pub mod runtime;
+pub mod artifacts;
+pub mod cli;
+mod coordination;
+pub mod domain;
+pub mod events;
+mod http;
 pub mod orchestrator;
-pub mod workspace;
 mod pty;
+pub mod runtime;
 mod session;
 mod storage;
-mod coordination;
+mod tauri_shim;
 mod templates;
-pub mod cli;
-mod http;
 mod watcher;
-pub mod events;
+pub mod workspace;
 
+#[cfg(not(test))]
 use std::collections::HashSet;
+#[cfg(not(test))]
 use std::sync::Arc;
+#[cfg(not(test))]
 use std::time::Duration;
+#[cfg(not(test))]
 use parking_lot::RwLock;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+#[cfg(not(test))]
 use crate::actions::ActionRegistry;
+#[cfg(not(test))]
 use crate::domain::event::EventType;
+#[cfg(not(test))]
 use crate::http::handlers::cells::build_cells;
+#[cfg(not(test))]
 use crate::http::state::AppState;
+#[cfg(not(test))]
 use tauri::{Emitter, Manager};
+#[cfg(not(test))]
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[cfg(not(test))]
 use commands::{
-    create_pty, get_pty_status, kill_pty, list_ptys, paste_to_pty, resize_pty, write_to_pty, inject_to_pty,
-    launch_hive, launch_hive_v2, launch_research, launch_swarm, launch_solo, launch_fusion, get_session, list_sessions, stop_session, close_session, stop_agent, update_session_metadata,
-    continue_after_planning, mark_plan_ready, resume_session, get_run_journal,
-    queen_inject, queen_switch_branch, operator_inject, add_worker_to_session, get_coordination_log, log_coordination_message,
-    get_workers_state, assign_task, get_session_storage_path, list_stored_sessions, get_current_directory,
-    get_app_config, update_app_config, get_session_plan,
-    list_branches, get_current_branch, switch_branch, git_pull, git_push, git_fetch,
-    git_worktree_add, git_worktree_list, git_worktree_remove, git_worktree_prune,
-    PtyManagerState, SessionControllerState, CoordinationState, StorageState,
+    add_worker_to_session, assign_task, close_session, continue_after_planning, create_pty,
+    get_app_config, get_coordination_log, get_current_branch, get_current_directory,
+    get_pty_status, get_run_journal, get_session, get_session_plan, get_session_storage_path,
+    get_workers_state, git_fetch, git_pull, git_push, git_worktree_add, git_worktree_list,
+    git_worktree_prune, git_worktree_remove, inject_to_pty, kill_pty, launch_debate, launch_fusion,
+    launch_hive, launch_hive_v2, launch_research, launch_solo, launch_swarm, list_branches,
+    list_ptys, list_session_files, list_sessions, list_stored_sessions, log_coordination_message,
+    mark_plan_ready, operator_inject, paste_to_pty, queen_inject, queen_switch_branch, resize_pty,
+    resume_session, stop_agent, stop_session, switch_branch, update_app_config,
+    update_session_metadata, write_to_pty, CoordinationState, PtyManagerState,
+    SessionControllerState, StorageState,
 };
+#[cfg(not(test))]
 use pty::PtyManager;
+#[cfg(not(test))]
 use session::SessionController;
+#[cfg(not(test))]
 use storage::{ApplicationStateDb, SessionStorage};
+#[cfg(not(test))]
 use coordination::InjectionManager;
+#[cfg(not(test))]
 use events::EventBus;
 
+#[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize tracing
@@ -68,7 +89,9 @@ pub fn run() {
 
     // Create shared state
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
-    let session_controller = Arc::new(RwLock::new(SessionController::new(Arc::clone(&pty_manager))));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(Arc::clone(
+        &pty_manager,
+    ))));
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         Arc::clone(&pty_manager),
         SessionStorage::new().expect("Failed to initialize injection manager storage"),
@@ -428,6 +451,54 @@ pub fn run() {
                 }
             });
 
+            let debate_controller_clone = session_controller.clone();
+            app.listen("debate-round-completed", move |event: tauri::Event| {
+                let payload = event.payload();
+
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let session_id = json.get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let debater_index = json.get("debater_index")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|value| u8::try_from(value).ok())
+                        .unwrap_or(0);
+                    let round = json.get("round")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|value| u8::try_from(value).ok())
+                        .unwrap_or(0);
+
+                    if session_id.is_empty() || debater_index == 0 || round == 0 {
+                        tracing::warn!("Invalid debate-round-completed payload: {}", payload);
+                        return;
+                    }
+
+                    tracing::info!(
+                        "Debate debater {} completed round {} for session {}, checking next step",
+                        debater_index,
+                        round,
+                        session_id
+                    );
+
+                    let controller = debate_controller_clone.clone();
+                    let session_id_clone = session_id.to_string();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        let result = tauri::async_runtime::block_on(async {
+                            let controller_read = controller.read();
+                            controller_read
+                                .on_debate_round_completed(&session_id_clone, debater_index, round)
+                                .await
+                        });
+
+                        if let Err(e) = result {
+                            tracing::error!("Failed to handle debate round completion: {}", e);
+                        }
+                    });
+                } else {
+                    tracing::warn!("Failed to parse debate-round-completed payload: {}", payload);
+                }
+            });
+
             let milestone_controller_clone = session_controller.clone();
             app.listen("milestone-ready", move |event: tauri::Event| {
                 let payload = event.payload();
@@ -484,6 +555,7 @@ pub fn run() {
             launch_swarm,
             launch_solo,
             launch_fusion,
+            launch_debate,
             get_session,
             list_sessions,
             stop_session,
@@ -521,7 +593,11 @@ pub fn run() {
             mark_plan_ready,
             resume_session,
             get_run_journal,
+            list_session_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+pub fn run() {}

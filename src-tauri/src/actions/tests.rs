@@ -85,9 +85,13 @@ fn test_registry_lists_all_actions() {
         "session.stop",
         "session.close",
         "session.launch_hive_v2",
+        "session.launch_debate",
         "session.update_metadata",
     ] {
-        assert!(names.contains(&expected), "missing session action {expected}");
+        assert!(
+            names.contains(&expected),
+            "missing session action {expected}"
+        );
     }
 
     // Git actions (AC2-required set).

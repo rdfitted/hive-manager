@@ -1,5 +1,5 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { sessions } from './sessions';
+import { buildResumeReportFromJournal, sessions } from './sessions';
 import { invoke } from '@tauri-apps/api/core';
 
 // Mock Tauri invoke
@@ -141,5 +141,46 @@ describe('sessions store', () => {
       expect(payload.config).not.toHaveProperty('evaluator_model');
     });
 
+  });
+
+  describe('buildResumeReportFromJournal', () => {
+    it('classifies completed write steps as skipped and unconfirmed started steps as warnings', () => {
+      const report = buildResumeReportFromJournal({
+        journal: [
+          {
+            run_id: 'session-1',
+            step_id: 'step-complete',
+            kind: 'git_commit',
+            status: 'completed',
+            started_at: '2026-06-19T00:00:00Z',
+          },
+          {
+            run_id: 'session-1',
+            step_id: 'step-started',
+            kind: 'worker_spawn',
+            status: 'started',
+            started_at: '2026-06-19T00:01:00Z',
+          },
+        ],
+        ledger: [
+          {
+            run_id: 'session-1',
+            step_id: 'step-started',
+            effect_kind: 'branch',
+            effect_ref: 'worker-branch',
+            confirmed: false,
+            confidence: 'uncertain',
+            recorded_at: '2026-06-19T00:01:01Z',
+          },
+        ],
+      });
+
+      expect(report.skipped).toHaveLength(1);
+      expect(report.skipped[0].status).toBe('skipped');
+      expect(report.interrupted).toHaveLength(1);
+      expect(report.interrupted[0].status).toBe('unknown');
+      expect(report.uncertain).toHaveLength(1);
+      expect(report.uncertain[0].effect_ref).toBe('worker-branch');
+    });
   });
 });

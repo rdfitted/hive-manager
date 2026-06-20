@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
-  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { invoke } from '@tauri-apps/api/core';
@@ -10,6 +10,7 @@
   import AgentTree from './AgentTree.svelte';
   import QueenControls from './QueenControls.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
+  import ResumeConfirmModal from './ResumeConfirmModal.svelte';
 
   let closingSessionId = $state<string | null>(null);
   let showCloseConfirm = $state<string | null>(null);
@@ -52,6 +53,7 @@
     onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
     onLaunchFusion?: (config: FusionLaunchConfig) => Promise<void>;
     onLaunchSolo?: (config: SoloLaunchConfig) => Promise<void>;
+    onLaunchDebate?: (config: DebateLaunchConfig) => Promise<void>;
     onOpenAddWorker?: () => void;
   }
 
@@ -65,13 +67,21 @@
     state: string;
   }
 
-  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onOpenAddWorker }: Props = $props();
+  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onLaunchDebate, onOpenAddWorker }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
   let persistedSessions = $state<SessionSummary[]>([]);
   let loadingPersisted = $state(false);
   let currentDirectory = $state<string | null>(null);
+  let resumeModalOpen = $state(false);
+  let resumeTargetSessionId = $state<string | null>(null);
+  let resumeTargetName = $state<string | null>(null);
+  let resumeReport = $state<ResumeReport | null>(null);
+  let resumeLoading = $state(false);
+  let resuming = $state(false);
+  let resumeError = $state<string | null>(null);
+  let resumeReportRequestId = 0;
 
   let collapsed = $derived($layout.leftCollapsed);
   let sidebarWidth = $derived(collapsed ? RAIL_WIDTH : $layout.leftWidth);
@@ -145,13 +155,67 @@
     ui.setSelectedAgent(e.detail);
   }
 
-  async function handleResumeSession(sessionId: string) {
+  function sessionDisplayName(session: SessionSummary): string {
+    return session.project_path.split(/[/\\]/).pop() || session.id.slice(0, 8);
+  }
+
+  async function handleResumeSession(session: SessionSummary) {
+    const targetSessionId = session.id;
+    const requestId = ++resumeReportRequestId;
+    resumeTargetSessionId = targetSessionId;
+    resumeTargetName = sessionDisplayName(session);
+    resumeReport = null;
+    resumeError = null;
+    resumeModalOpen = true;
+    resumeLoading = true;
+
     try {
-      await sessions.resumeSession(sessionId);
-      // Remove from persisted list after successful resume
-      persistedSessions = persistedSessions.filter(s => s.id !== sessionId);
+      const report = await sessions.getResumeReport(targetSessionId);
+      if (resumeReportRequestId === requestId && resumeTargetSessionId === targetSessionId) {
+        resumeReport = report;
+      }
     } catch (err) {
+      if (resumeReportRequestId === requestId && resumeTargetSessionId === targetSessionId) {
+        resumeError = String(err);
+        console.error('Failed to prepare resume:', err);
+      }
+    } finally {
+      if (resumeReportRequestId === requestId && resumeTargetSessionId === targetSessionId) {
+        resumeLoading = false;
+      }
+    }
+  }
+
+  function resetResumeModal() {
+    resumeReportRequestId += 1;
+    resumeModalOpen = false;
+    resumeTargetSessionId = null;
+    resumeTargetName = null;
+    resumeReport = null;
+    resumeError = null;
+  }
+
+  function dismissResumeModal() {
+    if (resuming) return;
+    resetResumeModal();
+  }
+
+  async function confirmResumeSession(e: CustomEvent<{ skipCompletedWriteSteps: boolean }>) {
+    const targetSessionId = resumeTargetSessionId;
+    if (!targetSessionId) return;
+
+    resuming = true;
+    resumeError = null;
+    try {
+      await sessions.resumeSession(targetSessionId, e.detail);
+      // Remove from persisted list after successful resume
+      persistedSessions = persistedSessions.filter(s => s.id !== targetSessionId);
+      resetResumeModal();
+    } catch (err) {
+      resumeError = String(err);
       console.error('Failed to resume session:', err);
+    } finally {
+      resuming = false;
     }
   }
 
@@ -232,6 +296,22 @@
         await onLaunchSolo(e.detail);
       } else {
         await sessions.launchSolo(e.detail);
+      }
+      showLaunchDialog = false;
+    } catch (err) {
+      console.error('Launch failed:', err);
+    } finally {
+      launching = false;
+    }
+  }
+
+  async function handleLaunchDebate(e: CustomEvent<DebateLaunchConfig>) {
+    launching = true;
+    try {
+      if (onLaunchDebate) {
+        await onLaunchDebate(e.detail);
+      } else {
+        await sessions.launchDebate(e.detail);
       }
       showLaunchDialog = false;
     } catch (err) {
@@ -482,7 +562,7 @@
                     {formatTimestamp(session.last_activity_at ?? session.created_at)}
                   </span>
                 </div>
-                <button class="load-button" onclick={() => handleResumeSession(session.id)} title="Load Session" aria-label="Load session" type="button">
+                <button class="load-button" onclick={() => handleResumeSession(session)} title="Load Session" aria-label="Load session" type="button">
                   <CaretRight size={14} weight="light" />
                 </button>
               </li>
@@ -545,6 +625,18 @@
   on:launchSwarm={handleLaunchSwarm}
   on:launchFusion={handleLaunchFusion}
   on:launchSolo={handleLaunchSolo}
+  on:launchDebate={handleLaunchDebate}
+/>
+
+<ResumeConfirmModal
+  open={resumeModalOpen}
+  sessionName={resumeTargetName}
+  report={resumeReport}
+  loading={resumeLoading}
+  confirming={resuming}
+  error={resumeError}
+  on:confirm={confirmResumeSession}
+  on:cancel={dismissResumeModal}
 />
 
 <!-- Close confirmation dialog -->

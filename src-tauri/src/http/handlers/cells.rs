@@ -25,7 +25,9 @@ pub(crate) use crate::session::cell_status::agent_in_cell;
 
 pub(crate) fn build_cells(session: &Session, storage: &SessionStorage) -> Vec<Cell> {
     match &session.session_type {
-        SessionType::Fusion { variants } if !variants.is_empty() => {
+        SessionType::Fusion { variants } | SessionType::Debate { variants }
+            if !variants.is_empty() =>
+        {
             let mut cells: Vec<Cell> = variants
                 .iter()
                 .map(|variant| build_fusion_cell(session, storage, variant))
@@ -38,7 +40,11 @@ pub(crate) fn build_cells(session: &Session, storage: &SessionStorage) -> Vec<Ce
     }
 }
 
-pub(crate) fn find_cell(session: &Session, storage: &SessionStorage, cell_id: &str) -> Option<Cell> {
+pub(crate) fn find_cell(
+    session: &Session,
+    storage: &SessionStorage,
+    cell_id: &str,
+) -> Option<Cell> {
     build_cells(session, storage)
         .into_iter()
         .find(|cell| cell.id == cell_id)
@@ -64,8 +70,15 @@ fn build_primary_cell(session: &Session, storage: &SessionStorage) -> Cell {
             CellType::Hive,
             PRIMARY_CELL_ID,
         ),
-        agents: session.agents.iter().map(|agent| agent.id.clone()).collect(),
-        artifacts: storage.load_artifact(&session.id, PRIMARY_CELL_ID).ok().flatten(),
+        agents: session
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect(),
+        artifacts: storage
+            .load_artifact(&session.id, PRIMARY_CELL_ID)
+            .ok()
+            .flatten(),
         events: vec![],
         depends_on: vec![],
     }
@@ -88,7 +101,11 @@ fn build_fusion_cell(session: &Session, storage: &SessionStorage, variant: &str)
         cell_type: CellType::Hive,
         name: variant.to_string(),
         status,
-        objective: format!("Fusion variant {}", variant),
+        objective: if matches!(&session.session_type, SessionType::Debate { .. }) {
+            format!("Debate debater {}", variant)
+        } else {
+            format!("Fusion variant {}", variant)
+        },
         workspace: synthetic_workspace(
             session,
             WorkspaceStrategy::IsolatedCell,
@@ -126,7 +143,10 @@ fn build_resolver_cell(session: &Session, storage: &SessionStorage) -> Cell {
             RESOLVER_CELL_ID,
         ),
         agents,
-        artifacts: storage.load_artifact(&session.id, RESOLVER_CELL_ID).ok().flatten(),
+        artifacts: storage
+            .load_artifact(&session.id, RESOLVER_CELL_ID)
+            .ok()
+            .flatten(),
         events: vec![],
         depends_on: vec![],
     }
@@ -154,8 +174,9 @@ fn synthetic_workspace(
 }
 
 fn session_mode(session: &Session) -> SessionMode {
-    match session.session_type {
+    match &session.session_type {
         SessionType::Fusion { .. } => SessionMode::Fusion,
+        SessionType::Debate { .. } => SessionMode::Debate,
         SessionType::Hive { .. } | SessionType::Swarm { .. } | SessionType::Solo { .. } => {
             SessionMode::Hive
         }

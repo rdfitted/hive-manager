@@ -16,8 +16,14 @@ use super::{validate_candidate_ids, validate_session_id};
 
 fn completion_blocked_to_api_error(error: CompletionBlockedError) -> ApiError {
     let mut details = std::collections::HashMap::new();
-    details.insert("current_state".to_string(), serde_json::json!(error.current_state));
-    details.insert("unblock_paths".to_string(), serde_json::json!(error.unblock_paths));
+    details.insert(
+        "current_state".to_string(),
+        serde_json::json!(error.current_state),
+    );
+    details.insert(
+        "unblock_paths".to_string(),
+        serde_json::json!(error.unblock_paths),
+    );
     details.insert(
         "remaining_quiescence_seconds".to_string(),
         serde_json::json!(error.remaining_quiescence_seconds),
@@ -52,7 +58,7 @@ pub async fn launch_resolver(
         return Err(ApiError::bad_request("candidate_ids must not be empty"));
     }
 
-    // Check session exists and is Fusion mode
+    // Check session exists and is Fusion/Debate mode
     let session = {
         let controller = state.session_controller.read();
         controller.get_session(&session_id)
@@ -61,6 +67,7 @@ pub async fn launch_resolver(
     let variants = if let Some(ref session) = session {
         match &session.session_type {
             SessionType::Fusion { variants } => Some(variants.clone()),
+            SessionType::Debate { variants } => Some(variants.clone()),
             _ => None,
         }
     } else {
@@ -68,6 +75,7 @@ pub async fn launch_resolver(
         match state.storage.load_session(&session_id) {
             Ok(persisted) => match persisted.session_type {
                 crate::storage::SessionTypeInfo::Fusion { variants } => Some(variants),
+                crate::storage::SessionTypeInfo::Debate { variants } => Some(variants),
                 _ => None,
             },
             Err(StorageError::SessionNotFound(_)) => {
@@ -83,9 +91,9 @@ pub async fn launch_resolver(
     let variants = match variants {
         Some(variants) => variants,
         None => {
-        return Err(ApiError::bad_request(
-            "Resolver launch is only available for Fusion sessions",
-        ))
+            return Err(ApiError::bad_request(
+                "Resolver launch is only available for Fusion or Debate sessions",
+            ))
         }
     };
 
@@ -96,7 +104,7 @@ pub async fn launch_resolver(
         .find(|candidate_id| !allowed_candidates.contains(candidate_id.as_str()))
     {
         return Err(ApiError::bad_request(format!(
-            "Unknown candidate ID '{}' for Fusion session {}",
+            "Unknown candidate ID '{}' for Fusion/Debate session {}",
             unknown_candidate, session_id
         )));
     }
@@ -122,17 +130,18 @@ pub async fn launch_resolver(
             let resolver = Resolver::new(wait_storage);
             resolver.wait_for_candidates(&session_id, &candidate_ids, timeout)
         })
-            .await
-            .map_err(|err| ApiError::internal(format!("Resolver wait task failed: {}", err)))?
-            .map_err(|err| match err {
-                ResolverError::Timeout => {
-                    ApiError::new(StatusCode::REQUEST_TIMEOUT, "Timed out waiting for candidate artifacts")
-                }
-                ResolverError::NoCandidates => {
-                    ApiError::bad_request("No candidate artifacts available")
-                }
-                other => ApiError::internal(other.to_string()),
-            })?;
+        .await
+        .map_err(|err| ApiError::internal(format!("Resolver wait task failed: {}", err)))?
+        .map_err(|err| match err {
+            ResolverError::Timeout => ApiError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "Timed out waiting for candidate artifacts",
+            ),
+            ResolverError::NoCandidates => {
+                ApiError::bad_request("No candidate artifacts available")
+            }
+            other => ApiError::internal(other.to_string()),
+        })?;
     }
 
     let output = resolver
@@ -198,7 +207,9 @@ pub async fn get_resolver_output(
         .storage
         .load_resolver_output(&session_id)
         .map_err(|err| ApiError::internal(err.to_string()))?
-        .ok_or_else(|| ApiError::not_found(format!("Resolver output not found for {}", session_id)))?;
+        .ok_or_else(|| {
+            ApiError::not_found(format!("Resolver output not found for {}", session_id))
+        })?;
 
     Ok(Json(output))
 }
