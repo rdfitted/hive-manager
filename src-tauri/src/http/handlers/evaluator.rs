@@ -53,12 +53,12 @@ pub struct AddQaWorkerResponse {
 }
 
 fn validate_qa_specialization(specialization: &str) -> Result<(), ApiError> {
-    if matches!(specialization, "ui" | "api" | "a11y") {
+    if matches!(specialization, "ui" | "api" | "a11y" | "adversarial") {
         return Ok(());
     }
 
     Err(ApiError::bad_request(format!(
-        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
+        "Invalid QA specialization '{}'. Valid options: ui, api, a11y, adversarial",
         specialization
     )))
 }
@@ -68,6 +68,7 @@ fn qa_specialization_label(specialization: &str) -> &'static str {
         "ui" => "UI QA",
         "api" => "API QA",
         "a11y" => "A11Y QA",
+        "adversarial" => "Adversarial QA",
         _ => "QA Worker",
     }
 }
@@ -271,6 +272,27 @@ pub struct PostVerdictRequest {
     pub commit_sha: Option<String>,
     #[serde(default)]
     pub rationale: Option<String>,
+    /// When the Evaluator cannot reach a PASS/FAIL it submits `verdict: "BLOCKED"`
+    /// with a machine-readable category so the operator knows whether the blocker is
+    /// an absent UI/host (criteria can't be exercised) or a transport failure
+    /// (per-worker verdicts didn't arrive over HTTP) — the (a)-vs-(b) distinction.
+    /// Examples: "ui-unavailable", "http-failure", "inconclusive".
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
+    /// Free-text detail accompanying a BLOCKED verdict (which criterion, which worker).
+    #[serde(default)]
+    pub blocked_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostPrinceVerdictRequest {
+    /// "PASS"/"DONE"/"RESOLVED" to clear the gate; "BLOCKED"/"ESCALATE" to surface
+    /// to the operator when the Prince's team could not resolve the findings.
+    pub verdict: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 pub async fn dev_login(
@@ -323,6 +345,34 @@ fn require_qa_in_progress(
     )))
 }
 
+/// Operator overrides (force-pass / force-fail) are valid whenever QA is unresolved:
+/// in progress, stalled as inconclusive, or mid-Prince-remediation. This lets the
+/// operator unblock a session that QA left inconclusive or that the Prince couldn't
+/// resolve.
+fn require_qa_overridable(
+    controller: &SessionController,
+    session_id: &str,
+    action: &str,
+) -> Result<(), ApiError> {
+    let session = controller
+        .get_session(session_id)
+        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+
+    if matches!(
+        session.state,
+        SessionState::QaInProgress { .. }
+            | SessionState::QaInconclusive
+            | SessionState::PrinceRemediation
+    ) {
+        return Ok(());
+    }
+
+    Err(ApiError::bad_request(format!(
+        "Cannot {}: session is in {:?} state, expected QaInProgress, QaInconclusive, or PrinceRemediation",
+        action, session.state
+    )))
+}
+
 fn append_operator_log(state: &AppState, session_id: &str, action: &str, detail: &str) {
     let msg = crate::coordination::CoordinationMessage::system(
         "OPERATOR",
@@ -347,10 +397,24 @@ fn normalize_post_verdict(verdict: &str) -> Result<&'static str, ApiError> {
     match verdict.trim().to_ascii_uppercase().as_str() {
         "PASS" => Ok("PASS"),
         "FAIL" => Ok("FAIL"),
+        "BLOCKED" => Ok("BLOCKED"),
         other => Err(ApiError::bad_request(format!(
-            "Unsupported QA verdict '{}'. Expected PASS or FAIL",
+            "Unsupported QA verdict '{}'. Expected PASS, FAIL, or BLOCKED",
             other
         ))),
+    }
+}
+
+/// Map controller state-guard errors to the right HTTP status: a state-precondition
+/// miss is a 409 conflict (caller should re-read state), a missing session is 404,
+/// everything else is a 500.
+fn map_verdict_state_error(error: String) -> ApiError {
+    if error.contains("Session not found") {
+        ApiError::not_found(error)
+    } else if error.contains("expected") || error.contains("Cannot ") {
+        ApiError::new(StatusCode::CONFLICT, error)
+    } else {
+        ApiError::internal(error)
     }
 }
 
@@ -389,7 +453,7 @@ pub(crate) fn apply_verdict(
     };
 
     let controller = state.session_controller.read();
-    require_qa_in_progress(&controller, session_id, action)?;
+    require_qa_overridable(&controller, session_id, action)?;
     let new_state = controller
         .on_qa_verdict(session_id, verdict)
         .map_err(ApiError::internal)?;
@@ -422,8 +486,10 @@ pub async fn post_verdict(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    let verdict_content = build_verdict_content(verdict, rationale, commit_sha);
-    let (project_path, evaluator_id, queen_id, new_state) = {
+    // Resolve peer identities + project path up front (needed for both BLOCKED and
+    // PASS/FAIL paths). require_qa_in_progress rejects verdicts posted outside the
+    // QaInProgress window so a stale POST can't jump the state machine.
+    let (project_path, evaluator_id, queen_id) = {
         let controller = state.session_controller.read();
         require_qa_in_progress(&controller, &session_id, "qa-verdict")?;
         let session = controller
@@ -435,16 +501,58 @@ pub async fn post_verdict(
             .find(|agent| matches!(agent.role, AgentRole::Evaluator))
             .map(|agent| agent.id.clone())
             .unwrap_or_else(|| format!("{}-evaluator", session_id));
-        let new_state = controller
-            .record_http_qa_verdict(&session_id, &evaluator_id, verdict, commit_sha)
-            .map_err(ApiError::internal)?;
         (
             session.project_path.clone(),
             evaluator_id,
             format!("{}-queen", session_id),
-            new_state,
         )
     };
+
+    // BLOCKED: the Evaluator could not produce a usable PASS/FAIL. Mark the session
+    // inconclusive (which writes the BLOCKED peer file + emits to the operator) and
+    // return without shipping. This is root-cause (a)/(b)/(c): the operator can see
+    // *why* it stalled instead of the Queen waiting forever.
+    if verdict == "BLOCKED" {
+        let reason = blocked_reason_message(
+            req.blocked_reason.as_deref(),
+            req.blocked_detail.as_deref(),
+            rationale,
+        );
+        let new_state = {
+            let controller = state.session_controller.read();
+            controller
+                .mark_qa_inconclusive(&session_id, &reason)
+                .map_err(map_verdict_state_error)?
+        };
+        return Ok(Json(json!({
+            "session_id": session_id,
+            "action": "qa-verdict",
+            "verdict": "BLOCKED",
+            "blocked_reason": req.blocked_reason,
+            "new_state": format!("{:?}", new_state),
+            "persisted": true,
+            "peer_file_written": true,
+            "rationale": reason,
+        })));
+    }
+
+    let verdict_content = build_verdict_content(verdict, rationale, commit_sha);
+
+    // Persist the verdict peer file FIRST, while the session is still QaInProgress.
+    // If this write fails we return 500 (the Evaluator's protocol retries) WITHOUT
+    // having transitioned the state machine — so the retry lands cleanly instead of
+    // hitting an "expected QaInProgress" rejection. This closes root-cause (b):
+    // a failed peer-file write is no longer swallowed behind an HTTP 200.
+    let state_manager = StateManager::new(project_path.join(".hive-manager").join(&session_id));
+    state_manager
+        .write_qa_verdict_async(&evaluator_id, &queen_id, &verdict_content, commit_sha)
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "Failed to persist QA verdict peer record (retry the POST): {}",
+                err
+            ))
+        })?;
 
     let verdict_message = CoordinationMessage::qa_verdict(&evaluator_id, &queen_id, &verdict_content);
     if let Err(err) = state
@@ -458,22 +566,12 @@ pub async fn post_verdict(
         );
     }
 
-    let state_manager = StateManager::new(project_path.join(".hive-manager").join(&session_id));
-    if let Err(err) = state_manager
-        .write_qa_verdict_async(
-        &evaluator_id,
-        &queen_id,
-        &verdict_content,
-        commit_sha,
-    )
-        .await
-    {
-        tracing::warn!(
-            session_id = %session_id,
-            error = %err,
-            "Failed to persist QA verdict peer record after HTTP verdict"
-        );
-    }
+    let new_state = {
+        let controller = state.session_controller.read();
+        controller
+            .record_http_qa_verdict(&session_id, &evaluator_id, verdict, commit_sha)
+            .map_err(map_verdict_state_error)?
+    };
 
     Ok(Json(json!({
         "session_id": session_id,
@@ -482,6 +580,136 @@ pub async fn post_verdict(
         "new_state": format!("{:?}", new_state),
         "commit_sha": commit_sha,
         "rationale": rationale,
+        "persisted": true,
+        "peer_file_written": true,
+    })))
+}
+
+/// Build a human-readable reason for a BLOCKED verdict from the structured category
+/// plus any free-text detail, so the operator banner explains the (a)-vs-(b) cause.
+fn blocked_reason_message(
+    blocked_reason: Option<&str>,
+    blocked_detail: Option<&str>,
+    rationale: Option<&str>,
+) -> String {
+    let category = match blocked_reason.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("ui-unavailable") | Some("ui_unavailable") => {
+            "A pass-criterion requires a UI/host that isn't running, so it can't be exercised."
+        }
+        Some("http-failure") | Some("http_failure") => {
+            "One or more QA-worker verdicts could not be delivered over HTTP."
+        }
+        Some(other) => return match blocked_detail.or(rationale) {
+            Some(detail) if !detail.trim().is_empty() => {
+                format!("QA blocked ({}): {}", other, detail.trim())
+            }
+            _ => format!("QA blocked: {}", other),
+        },
+        None => "QA could not reach a PASS/FAIL verdict.",
+    };
+    match blocked_detail.or(rationale) {
+        Some(detail) if !detail.trim().is_empty() => format!("{} {}", category, detail.trim()),
+        _ => category.to_string(),
+    }
+}
+
+/// The Prince's remediation verdict. Posted after the Prince's fix team resolves the
+/// QA findings: PASS/DONE clears the gate so the Queen may push; BLOCKED escalates to
+/// the operator. Mirrors `post_verdict`: persist the peer file before transitioning,
+/// and surface a persistence failure as a 500 so the Prince retries.
+pub async fn post_prince_verdict(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(req): Json<PostPrinceVerdictRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    let normalized = req.verdict.trim().to_ascii_uppercase();
+    if !matches!(
+        normalized.as_str(),
+        "PASS" | "DONE" | "RESOLVED" | "BLOCKED" | "FAIL" | "ESCALATE"
+    ) {
+        return Err(ApiError::bad_request(format!(
+            "Unsupported Prince verdict '{}'. Expected PASS/DONE or BLOCKED",
+            req.verdict
+        )));
+    }
+    let commit_sha = req
+        .commit_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let rationale = req
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let (project_path, prince_id, queen_id) = {
+        let controller = state.session_controller.read();
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+        if !matches!(session.state, SessionState::PrinceRemediation) {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "Cannot record Prince verdict: session is in {:?} state, expected PrinceRemediation",
+                    session.state
+                ),
+            ));
+        }
+        let prince_id = session
+            .agents
+            .iter()
+            .find(|agent| matches!(agent.role, AgentRole::Prince))
+            .map(|agent| agent.id.clone())
+            .unwrap_or_else(|| format!("{}-prince", session_id));
+        (
+            session.project_path.clone(),
+            prince_id,
+            format!("{}-queen", session_id),
+        )
+    };
+
+    let mut content = serde_json::Map::new();
+    content.insert("kind".to_string(), json!("prince-verdict"));
+    content.insert("verdict".to_string(), json!(normalized));
+    if let Some(rationale) = rationale {
+        content.insert("rationale".to_string(), json!(rationale));
+    }
+    if let Some(commit_sha) = commit_sha {
+        content.insert("commit_sha".to_string(), json!(commit_sha));
+    }
+    let verdict_content = Value::Object(content).to_string();
+
+    let state_manager = StateManager::new(project_path.join(".hive-manager").join(&session_id));
+    state_manager
+        .write_prince_verdict_async(&prince_id, &queen_id, &verdict_content, commit_sha)
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "Failed to persist Prince verdict peer record (retry the POST): {}",
+                err
+            ))
+        })?;
+
+    let new_state = {
+        let controller = state.session_controller.read();
+        controller
+            .record_prince_verdict(&session_id, &normalized)
+            .map_err(map_verdict_state_error)?
+    };
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "action": "prince-verdict",
+        "verdict": normalized,
+        "new_state": format!("{:?}", new_state),
+        "commit_sha": commit_sha,
+        "rationale": rationale,
+        "persisted": true,
+        "peer_file_written": true,
     })))
 }
 

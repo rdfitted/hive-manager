@@ -275,6 +275,16 @@ pub enum SessionState {
     QaPassed,
     QaFailed { iteration: u8 },
     QaMaxRetriesExceeded,
+    /// The Evaluator returned a verdict (or a non-zero set of findings) and a
+    /// Prince peer is now resolving them with its own fix team. Blocks PR push /
+    /// completion until the Prince self-certifies via `prince/verdict`.
+    PrinceRemediation,
+    /// QA could not produce a usable verdict — the verdict timed out with no
+    /// response, or the Evaluator reported BLOCKED (e.g. a pass-criterion needs a
+    /// UI that isn't present, or QA workers failed to report over HTTP). Terminal
+    /// for the automated loop: never auto-ships. Operator unblocks via
+    /// force-pass / force-fail.
+    QaInconclusive,
     Running,
     Paused,
     Completed,
@@ -294,6 +304,8 @@ impl SessionState {
                 | SessionState::QaInProgress { .. }
                 | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
+                | SessionState::PrinceRemediation
+                | SessionState::QaInconclusive
         )
     }
 }
@@ -1426,7 +1438,7 @@ impl SessionController {
         heartbeats.get(session_id).cloned().unwrap_or_default()
     }
 
-    fn emit_session_update(&self, session_id: &str) {
+    pub(crate) fn emit_session_update(&self, session_id: &str) {
         let session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -3226,6 +3238,21 @@ Last updated: {timestamp}
         )
     }
 
+    fn prince_required_protocol(session_id: &str) -> String {
+        format!(
+            r#"## Required Protocol
+```text
+1. You MUST follow every numbered protocol in this prompt exactly as written.
+2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
+3. The backend already launched you as `AgentRole::Prince`. You MUST NOT spawn another Prince or an Evaluator.
+4. You MUST wait for `.hive-manager/{session_id}/peer/qa-verdict.json` before you plan or spawn fixers.
+5. You MUST spawn fixers via `POST /api/sessions/{session_id}/workers` using the session CLI, and self-certify via `POST /api/sessions/{session_id}/prince/verdict`.
+6. You MUST NOT push the PR or call `/complete` — the Queen pushes after you certify.
+```"#,
+            session_id = session_id,
+        )
+    }
+
     fn queen_post_workers_protocol(
         session_id: &str,
         session_root: &Path,
@@ -3234,6 +3261,8 @@ Last updated: {timestamp}
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
         let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let prince_verdict_path =
+            Self::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
 
         if !has_evaluator {
             return format!(
@@ -3264,7 +3293,7 @@ Last updated: {timestamp}
         format!(
             r#"## Post-Workers Protocol (MANDATORY)
 
-Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). It already exists as `AgentRole::Evaluator`. You MUST NOT spawn an Evaluator. DO NOT `curl POST /workers` with `role=evaluator`. DO NOT `curl POST /evaluators`. Signal via `{milestone_ready_path}` and WAIT for `{qa_verdict_path}`.
+Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). They already exist as `AgentRole::Evaluator` and `AgentRole::Prince`. You MUST NOT spawn either one. DO NOT `curl POST /workers` with `role=evaluator`, DO NOT `curl POST /evaluators`, and DO NOT spawn a Prince. Signal QA via `{milestone_ready_path}`, WAIT for `{qa_verdict_path}`, then WAIT for `{prince_verdict_path}` before you push.
 
 1. You MUST execute the QA Milestone Handoff block below exactly as written. Treat Step 2 of that handoff as blocking.
 2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
@@ -3277,27 +3306,40 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
    done
    cat "{qa_verdict_path}"
    ```
-3. You MUST inspect the verdict. If it says `PASS`, continue to Step 5. If it says `FAIL`, continue to Step 4.
-4. You MUST spawn a Reconciler worker and the required resolver workers via `POST /api/sessions/{session_id}/workers`. Reconcile Evaluator findings, external review comments, and your own integrity concerns before continuing.
+3. You MUST inspect the verdict.
+   - If it says `PASS` or `FAIL`, the Prince automatically takes over remediation of the QA findings. Continue to Step 4.
+   - If it says `BLOCKED`, QA could not produce a usable verdict (read the rationale — typically a missing UI/host or a transport failure). STOP. Do NOT push. Surface to the operator (they will force-pass / force-fail).
+4. You MUST wait for the Prince to finish remediation by polling `{prince_verdict_path}` inline. The Prince reads the QA findings, fixes them with its OWN fix team, and self-certifies. You MUST NOT spawn Reconciler or Resolver workers for QA findings — remediating QA findings is the Prince's job, not yours.
    ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate evaluator verdicts, external review comments, and integrity findings into one fix list"}}'
-
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
+   while [ ! -f "{prince_verdict_path}" ]; do
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Prince remediation"}}'
+     sleep 30
+   done
+   cat "{prince_verdict_path}"
    ```
+   - If the Prince verdict is `PASS`/`DONE`, continue to Step 5.
+   - If the Prince verdict is `BLOCKED`, STOP. Do NOT push. Surface to the operator.
 5. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
-6. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow before looping back to Step 4 whenever unresolved findings remain:
+6. You MUST wait 10 minutes, then collect EXTERNAL PR review comments and resolve them. The Reconciler/Resolver workers here are for PR review comments ONLY — a separate concern from the QA findings the Prince already handled. Whenever unresolved PR comments remain, spawn them, integrate their fixes, and return to Step 5:
    ```bash
    gh api repos/<owner>/<repo>/issues/<pr-number>/comments
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external PR review comments into one fix list"}}'
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM external PR review comments from the reconciled list"}}'
    ```
-7. You MUST call `POST /api/sessions/{session_id}/complete` only after QA is PASS, the latest push has aged at least 10 minutes, and there are no new unresolved PR comments.
+7. You MUST call `POST /api/sessions/{session_id}/complete` only after QA is resolved, the Prince has certified `PASS`, the latest push has aged at least 10 minutes, and there are no new unresolved PR comments.
 "#,
             milestone_ready_path = milestone_ready_path,
             qa_verdict_path = qa_verdict_path,
+            prince_verdict_path = prince_verdict_path,
             session_id = session_id,
         )
     }
@@ -3306,12 +3348,20 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         project_path.join(".hive-manager").join(session_id)
     }
 
+    /// Roughly one adversarial QA agent for every two of the Queen's coding workers
+    /// (`ceil(worker_count / 2)`), computed without overflow. A hive with no coding
+    /// workers gets none.
+    fn adversarial_worker_count(worker_count: u8) -> u8 {
+        (worker_count / 2) + (worker_count % 2)
+    }
+
     fn build_evaluator_qa_plan(
         default_config: &AgentConfig,
         qa_workers: &[QaWorkerConfig],
+        worker_count: u8,
     ) -> (String, String, String, String) {
         let configured_workers = if qa_workers.is_empty() {
-            vec![
+            let mut workers = vec![
                 QaWorkerConfig {
                     specialization: "api".to_string(),
                     cli: default_config.cli.clone(),
@@ -3333,7 +3383,19 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
                     label: Some(Self::qa_worker_label("a11y").to_string()),
                     flags: None,
                 },
-            ]
+            ];
+            // Adversarial agents (~1 per 2 coding workers) probe for the edge cases,
+            // races, and unhandled errors the happy-path specialists miss.
+            for _ in 0..Self::adversarial_worker_count(worker_count) {
+                workers.push(QaWorkerConfig {
+                    specialization: "adversarial".to_string(),
+                    cli: default_config.cli.clone(),
+                    model: default_config.model.clone(),
+                    label: Some(Self::qa_worker_label("adversarial").to_string()),
+                    flags: None,
+                });
+            }
+            workers
         } else {
             qa_workers.to_vec()
         };
@@ -3362,7 +3424,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         }
 
         let intro = if qa_workers.is_empty() {
-            "You start with NO QA workers. You MUST spawn all three specializations before you grade any criterion.".to_string()
+            format!(
+                "You start with NO QA workers. You MUST spawn all {} QA workers listed below (UI, API, accessibility, plus adversarial coverage) before you grade any criterion.",
+                configured_workers.len()
+            )
         } else {
             format!(
                 "You start with NO QA workers. You MUST spawn the configured QA workers below ({} total) before you grade any criterion.",
@@ -3390,6 +3455,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         session_id: &str,
         config: &AgentConfig,
         qa_workers: &[QaWorkerConfig],
+        worker_count: u8,
         smoke_test: bool,
     ) -> String {
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
@@ -3407,7 +3473,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             format!(r#""model": "{}", "#, default_model)
         };
         let (qa_worker_intro, qa_worker_spawn_plan, qa_worker_count, qa_worker_coverage_rule) =
-            Self::build_evaluator_qa_plan(config, qa_workers);
+            Self::build_evaluator_qa_plan(config, qa_workers, worker_count);
         let required_protocol = Self::evaluator_required_protocol(session_id);
 
         let mut variables = HashMap::new();
@@ -3484,6 +3550,51 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
     }
 
     #[allow(dead_code)]
+    fn build_prince_prompt(session_id: &str, config: &AgentConfig, smoke_test: bool) -> String {
+        let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
+            "You MUST resolve every QA finding with your fix team before the Queen pushes, then self-certify PASS (or BLOCKED if you cannot).",
+        );
+        let default_model = config.model.as_deref().unwrap_or("");
+        let default_model_suffix = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(", Model: {}", default_model)
+        };
+        let default_model_field = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(r#""model": "{}", "#, default_model)
+        };
+
+        let mut variables = HashMap::new();
+        variables.insert(
+            "custom_instructions".to_string(),
+            custom_instructions.to_string(),
+        );
+        variables.insert("default_cli".to_string(), config.cli.clone());
+        variables.insert("default_model".to_string(), default_model.to_string());
+        variables.insert("default_model_field".to_string(), default_model_field);
+        variables.insert("default_model_suffix".to_string(), default_model_suffix);
+        variables.insert(
+            "required_protocol".to_string(),
+            Self::prince_required_protocol(session_id),
+        );
+
+        let (idle_secs, active_secs) = if smoke_test {
+            (SMOKE_IDLE_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL)
+        } else {
+            (STANDARD_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL)
+        };
+        variables.insert("idle_poll_secs".to_string(), idle_secs.as_secs().to_string());
+        variables.insert(
+            "active_poll_secs".to_string(),
+            active_secs.as_secs().to_string(),
+        );
+
+        Self::render_named_prompt("roles/prince", session_id, None, variables)
+    }
+
+    #[allow(dead_code)]
     fn build_qa_worker_prompt(
         session_id: &str,
         index: u8,
@@ -3503,6 +3614,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             "a11y" => (
                 "roles/qa-worker-a11y",
                 "Audit accessibility rigorously with tooling and manual keyboard checks, then report criterion-numbered findings with exact defects.",
+            ),
+            "adversarial" => (
+                "roles/qa-worker-adversarial",
+                "Attack the implementation: hunt edge cases, race conditions, malformed input, boundary values, and unhandled errors the happy-path QA workers miss. Report criterion-numbered defects with a concrete reproduction.",
             ),
             _ => (
                 "roles/qa-worker-api",
@@ -3537,6 +3652,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             "ui" => "UI QA",
             "api" => "API QA",
             "a11y" => "A11Y QA",
+            "adversarial" => "Adversarial QA",
             _ => "QA Worker",
         }
     }
@@ -9578,6 +9694,7 @@ phases and do EXACTLY this, then stop:
         normalized_verdict: &str,
         evaluator_id: Option<&str>,
         commit_sha: Option<&str>,
+        route_to_prince: bool,
     ) -> (SessionState, Vec<(String, String, String)>) {
         if let Some(evaluator_id) = evaluator_id {
             if let Some(agent) = session
@@ -9587,6 +9704,17 @@ phases and do EXACTLY this, then stop:
             {
                 agent.commit_sha = commit_sha.map(str::to_string);
             }
+        }
+
+        // When a Prince peer is present, every Evaluator verdict (PASS or FAIL) hands
+        // off to Prince remediation before the Queen may push. The verdict label and
+        // findings live in qa-verdict.json for the Prince to read; the state machine
+        // only needs to know remediation is owed. Operator overrides (force-pass /
+        // force-fail) bypass this with route_to_prince = false.
+        if route_to_prince {
+            let changes =
+                self.set_session_state_with_events(session, SessionState::PrinceRemediation);
+            return (SessionState::PrinceRemediation, changes);
         }
 
         match normalized_verdict {
@@ -9654,11 +9782,16 @@ phases and do EXACTLY this, then stop:
             if now > session.last_activity_at {
                 session.last_activity_at = now;
             }
+            let has_prince = session
+                .agents
+                .iter()
+                .any(|agent| matches!(agent.role, AgentRole::Prince));
             let (new_state, changes) = self.apply_qa_verdict_to_session(
                 session,
                 normalized.as_str(),
                 Some(evaluator_id),
                 commit_sha,
+                has_prince,
             );
             (previous_session, session.clone(), changes, new_state)
         };
@@ -9680,6 +9813,141 @@ phases and do EXACTLY this, then stop:
         self.emit_cell_status_changes(session_id, changes);
 
         Ok(new_state)
+    }
+
+    /// Mark QA inconclusive — the Evaluator reported BLOCKED, or the verdict timed
+    /// out with no usable response. Transitions QaInProgress -> QaInconclusive,
+    /// which blocks PR push / completion and surfaces to the operator. Writes a
+    /// BLOCKED verdict file so the Queen's poll loop terminates (instead of hanging)
+    /// and escalates rather than pushing. Operator unblocks via force-pass / force-fail.
+    pub fn mark_qa_inconclusive(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<SessionState, String> {
+        self.cancel_qa_timeout(session_id);
+
+        let (previous_session, updated_session, changes) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            if !matches!(session.state, SessionState::QaInProgress { .. }) {
+                return Err(format!(
+                    "Cannot mark QA inconclusive: session is in {:?} state, expected QaInProgress",
+                    session.state
+                ));
+            }
+            let previous_session = session.clone();
+            let changes =
+                self.set_session_state_with_events(session, SessionState::QaInconclusive);
+            (previous_session, session.clone(), changes)
+        };
+
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id) {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    *session = previous_session;
+                }
+                return Err(err);
+            }
+        }
+
+        // Write a BLOCKED verdict so the Queen's poll loop terminates and escalates.
+        let verdict_content = serde_json::json!({
+            "kind": "qa-verdict",
+            "verdict": "BLOCKED",
+            "blocked_reason": "inconclusive",
+            "rationale": reason,
+        })
+        .to_string();
+        let state_manager = StateManager::new(
+            updated_session
+                .project_path
+                .join(".hive-manager")
+                .join(session_id),
+        );
+        if let Err(err) = state_manager.write_qa_verdict(
+            &format!("{}-evaluator", session_id),
+            &format!("{}-queen", session_id),
+            &verdict_content,
+            None,
+        ) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "Failed to persist BLOCKED verdict file while marking QA inconclusive"
+            );
+        }
+
+        self.emit_session_update(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit(
+                "qa-inconclusive",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "action": "blocked",
+                    "reason": reason,
+                }),
+            );
+        }
+
+        Ok(SessionState::QaInconclusive)
+    }
+
+    /// Record the Prince's remediation verdict. The Prince self-certifies after its
+    /// fix team resolves the QA findings: PASS/DONE clears the gate (PrinceRemediation
+    /// -> QaPassed, allowing the Queen to push), while BLOCKED escalates to the
+    /// operator (PrinceRemediation -> QaInconclusive). Requires PrinceRemediation so
+    /// a Prince can't jump the session straight to QaPassed before QA has run.
+    pub fn record_prince_verdict(
+        &self,
+        session_id: &str,
+        verdict: &str,
+    ) -> Result<SessionState, String> {
+        let normalized = verdict.trim().to_ascii_uppercase();
+        let target_state = match normalized.as_str() {
+            "PASS" | "DONE" | "RESOLVED" => SessionState::QaPassed,
+            "BLOCKED" | "FAIL" | "ESCALATE" => SessionState::QaInconclusive,
+            other => return Err(format!("Unsupported Prince verdict '{}'", other)),
+        };
+
+        let (previous_session, updated_session, changes) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            if !matches!(session.state, SessionState::PrinceRemediation) {
+                return Err(format!(
+                    "Cannot record Prince verdict: session is in {:?} state, expected PrinceRemediation",
+                    session.state
+                ));
+            }
+            let previous_session = session.clone();
+            let now = Utc::now();
+            if now > session.last_activity_at {
+                session.last_activity_at = now;
+            }
+            let changes = self.set_session_state_with_events(session, target_state.clone());
+            (previous_session, session.clone(), changes)
+        };
+
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id) {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    *session = previous_session;
+                }
+                return Err(err);
+            }
+        }
+
+        self.emit_session_update(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+
+        Ok(target_state)
     }
 
     fn try_begin_evaluator_respawn(&self, session_id: &str) -> bool {
@@ -9888,7 +10156,9 @@ phases and do EXACTLY this, then stop:
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            self.apply_qa_verdict_to_session(session, normalized.as_str(), None, None)
+            // Operator overrides (force-pass / force-fail) and the legacy timeout path
+            // are explicit decisions to resolve QA directly — they bypass the Prince.
+            self.apply_qa_verdict_to_session(session, normalized.as_str(), None, None, false)
         };
 
         self.emit_session_update(session_id);
@@ -9900,26 +10170,20 @@ phases and do EXACTLY this, then stop:
 
     #[allow(dead_code)]
     pub fn on_qa_timeout(&self, session_id: &str) -> Result<(), String> {
+        let timeout_secs = self
+            .get_session(session_id)
+            .map(|session| session.qa_timeout_secs)
+            .unwrap_or(DEFAULT_QA_TIMEOUT_SECS);
         tracing::warn!(
-            "QA timed out for session {}; defaulting to pass-with-warning after {} seconds",
+            "QA timed out for session {} after {} seconds; marking inconclusive (no auto-pass)",
             session_id,
-            self.get_session(session_id)
-                .map(|session| session.qa_timeout_secs)
-                .unwrap_or(DEFAULT_QA_TIMEOUT_SECS)
+            timeout_secs
         );
-        self.on_qa_verdict(session_id, "QA_VERDICT: PASS")?;
-
-        // Emit qa-timeout event
-        if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit(
-                "qa-timeout",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "action": "pass-with-warning"
-                }),
-            );
-        }
-
+        let reason = format!(
+            "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
+            timeout_secs
+        );
+        self.mark_qa_inconclusive(session_id, &reason)?;
         Ok(())
     }
 
@@ -9949,20 +10213,23 @@ phases and do EXACTLY this, then stop:
 
             if is_qa {
                 tracing::warn!(
-                    "QA timeout fired for session {} after {}s — auto-passing",
+                    "QA timeout fired for session {} after {}s — marking QA inconclusive (no auto-pass)",
                     sid,
                     timeout_secs
                 );
 
-                // A timeout auto-pass should leave the session in QaPassed so the server can enforce
-                // the same quiescence gate as an explicit evaluator PASS.
+                // A timed-out QA must NOT silently ship. Transition to QaInconclusive,
+                // which blocks PR push / completion and surfaces to the operator. The
+                // operator unblocks with force-pass / force-fail.
                 let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
                         let previous_state = session.state.clone();
-                        let changes =
-                            cell_status_changes_for_transition(session, &SessionState::QaPassed);
-                        session.state = SessionState::QaPassed;
+                        let changes = cell_status_changes_for_transition(
+                            session,
+                            &SessionState::QaInconclusive,
+                        );
+                        session.state = SessionState::QaInconclusive;
                         Some((previous_state, changes, session.clone()))
                     } else {
                         None
@@ -9993,6 +10260,38 @@ phases and do EXACTLY this, then stop:
                         SessionController::fire_cell_status_changes(emitter, sid.clone(), changes);
                     }
 
+                    // Write a BLOCKED verdict file so the Queen's poll loop terminates
+                    // (instead of hanging forever) and she escalates rather than pushes.
+                    let reason = format!(
+                        "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
+                        timeout_secs
+                    );
+                    let verdict_content = serde_json::json!({
+                        "kind": "qa-verdict",
+                        "verdict": "BLOCKED",
+                        "blocked_reason": "timeout",
+                        "rationale": reason,
+                    })
+                    .to_string();
+                    let state_manager = StateManager::new(
+                        updated_session
+                            .project_path
+                            .join(".hive-manager")
+                            .join(&sid),
+                    );
+                    if let Err(err) = state_manager.write_qa_verdict(
+                        &format!("{}-evaluator", sid),
+                        &format!("{}-queen", sid),
+                        &verdict_content,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            "Failed to persist BLOCKED verdict file on QA timeout for {}: {}",
+                            sid,
+                            err
+                        );
+                    }
+
                     if let Some(ref app_handle) = app_handle {
                         let _ = app_handle.emit(
                             "session-update",
@@ -10001,10 +10300,11 @@ phases and do EXACTLY this, then stop:
                             },
                         );
                         let _ = app_handle.emit(
-                            "qa-timeout",
+                            "qa-inconclusive",
                             serde_json::json!({
                                 "session_id": sid,
-                                "action": "pass-with-warning"
+                                "action": "blocked-on-timeout",
+                                "reason": reason,
                             }),
                         );
                     }
@@ -11570,6 +11870,22 @@ phases and do EXACTLY this, then stop:
         // itself after activation, based on milestone contract criteria
         let _evaluator = self.launch_evaluator(session_id, evaluator_config, smoke_test)?;
 
+        // The Prince is a peer to the Queen and Evaluator, auto-spawned alongside the
+        // Evaluator. It idles until the QA verdict lands, then resolves the findings
+        // with its own fix team and gates the Queen's PR push. Inherits the session
+        // default CLI (empty cli -> resolved in launch_prince).
+        let prince_config = AgentConfig {
+            cli: String::new(),
+            model: None,
+            flags: vec![],
+            label: Some("Prince".to_string()),
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+        let _prince = self.launch_prince(session_id, prince_config, smoke_test)?;
+
         Ok(())
     }
 
@@ -11598,6 +11914,7 @@ phases and do EXACTLY this, then stop:
                 | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
                 | SessionState::QaMaxRetriesExceeded
+                | SessionState::PrinceRemediation
         );
         if !can_add_worker {
             return Err(format!(
@@ -11834,8 +12151,17 @@ phases and do EXACTLY this, then stop:
 
         Self::write_tool_files(&session.project_path, session_id, &config.cli)?;
 
-        let evaluator_prompt =
-            Self::build_evaluator_prompt(session_id, &config, &session.qa_workers, smoke_test);
+        let worker_count = match session.session_type {
+            SessionType::Hive { worker_count } => worker_count,
+            _ => 0,
+        };
+        let evaluator_prompt = Self::build_evaluator_prompt(
+            session_id,
+            &config,
+            &session.qa_workers,
+            worker_count,
+            smoke_test,
+        );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -11915,6 +12241,113 @@ phases and do EXACTLY this, then stop:
                 crate::domain::run_journal::StepStatus::Completed,
             );
         }
+
+        Ok(agent_info)
+    }
+
+    /// Launch the Prince peer. Mirrors `launch_evaluator` but does NOT touch the
+    /// session state or arm the QA timeout: the Prince idles, polling for the QA
+    /// verdict, and only acts once findings exist. Inherits the session default CLI
+    /// so its fix team uses the single agent type the operator selected.
+    pub fn launch_prince(
+        &self,
+        session_id: &str,
+        mut config: AgentConfig,
+        smoke_test: bool,
+    ) -> Result<AgentInfo, String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        let prince_id = format!("{}-prince", session_id);
+        if let Some(existing) = session.agents.iter().find(|agent| agent.id == prince_id) {
+            let prince_alive = self.pty_manager.read().is_alive(&prince_id);
+            if prince_alive {
+                return Ok(existing.clone());
+            }
+            tracing::info!(
+                session_id = %session_id,
+                prince_id = %prince_id,
+                "Respawning stale prince after PTY exit"
+            );
+        }
+
+        let uses_session_default_cli = config.cli.trim().is_empty();
+        if uses_session_default_cli {
+            config.cli = session.default_cli.clone();
+        }
+        let uses_session_cli = uses_session_default_cli || config.cli.trim() == session.default_cli;
+        if config.model.is_none() {
+            config.model = if uses_session_cli {
+                session.default_model.clone()
+            } else {
+                CliRegistry::default_model(&config.cli)
+                    .map(ToString::to_string)
+                    .or_else(|| session.default_model.clone())
+            };
+        }
+        if config.label.is_none() {
+            config.label = Some("Prince".to_string());
+        }
+
+        Self::write_tool_files(&session.project_path, session_id, &config.cli)?;
+
+        let prince_prompt = Self::build_prince_prompt(session_id, &config, smoke_test);
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            "prince-prompt.md",
+            &prince_prompt,
+        )?;
+
+        let (cmd, mut args) = Self::build_command(&config);
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_file.to_string_lossy());
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(current) = sessions.get_mut(session_id) {
+                current.agents.retain(|agent| agent.id != prince_id);
+            }
+        }
+
+        let cwd = session.project_path.to_str().unwrap_or(".");
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    prince_id.clone(),
+                    AgentRole::Prince,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Prince: {}", e))?;
+        }
+
+        let agent_info = AgentInfo {
+            id: prince_id,
+            role: AgentRole::Prince,
+            status: AgentStatus::Running,
+            config,
+            parent_id: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            let current = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            current.agents.push(agent_info.clone());
+            self.emit_agent_launched(current, &agent_info);
+        }
+
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &session.project_path);
 
         Ok(agent_info)
     }
@@ -12501,6 +12934,8 @@ fn parse_agent_role(role: &str) -> Option<AgentRole> {
         Some(AgentRole::Queen)
     } else if role == "Evaluator" {
         Some(AgentRole::Evaluator)
+    } else if role == "Prince" {
+        Some(AgentRole::Prince)
     } else if role.starts_with("Planner(") {
         let index = role
             .trim_start_matches("Planner(")
@@ -12588,6 +13023,8 @@ fn parse_persisted_session_state(state: &str) -> SessionState {
         "QaPassed" => SessionState::QaPassed,
         "QaFailed" => SessionState::QaFailed { iteration: 1 },
         "QaMaxRetriesExceeded" => SessionState::QaMaxRetriesExceeded,
+        "PrinceRemediation" => SessionState::PrinceRemediation,
+        "QaInconclusive" => SessionState::QaInconclusive,
         "Running" => SessionState::Running,
         "Paused" => SessionState::Paused,
         "Closing" => SessionState::Closing,
@@ -12622,6 +13059,8 @@ fn serialize_session_state(state: &SessionState) -> String {
         SessionState::QaPassed => "QaPassed".to_string(),
         SessionState::QaFailed { iteration } => format!("QaFailed:{}", iteration),
         SessionState::QaMaxRetriesExceeded => "QaMaxRetriesExceeded".to_string(),
+        SessionState::PrinceRemediation => "PrinceRemediation".to_string(),
+        SessionState::QaInconclusive => "QaInconclusive".to_string(),
         SessionState::Running => "Running".to_string(),
         SessionState::Paused => "Paused".to_string(),
         SessionState::Completed => "Completed".to_string(),
@@ -12649,6 +13088,7 @@ fn serialize_persisted_agent_role(role: &AgentRole) -> String {
                 parent.as_deref().unwrap_or("None")
             )
         }
+        AgentRole::Prince => "Prince".to_string(),
     }
 }
 
@@ -12662,6 +13102,7 @@ fn serialize_agent_role(role: &AgentRole) -> &'static str {
         AgentRole::Judge { .. } => "judge",
         AgentRole::Evaluator => "evaluator",
         AgentRole::QaWorker { .. } => "qa-worker",
+        AgentRole::Prince => "prince",
     }
 }
 
@@ -12675,13 +13116,14 @@ fn format_agent_display(role: &AgentRole) -> String {
         AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
         AgentRole::Evaluator => "Evaluator".to_string(),
         AgentRole::QaWorker { index, .. } => format!("QaWorker-{}", index),
+        AgentRole::Prince => "Prince".to_string(),
     }
 }
 
 fn include_in_worker_roster(role: &AgentRole) -> bool {
     !matches!(
         serialize_agent_role(role),
-        "queen" | "evaluator" | "qa-worker"
+        "queen" | "evaluator" | "qa-worker" | "prince"
     )
 }
 
@@ -13052,6 +13494,7 @@ mod tests {
                 ..AgentConfig::default()
             },
             &[],
+            0,
             false,
         );
 
@@ -13085,6 +13528,7 @@ mod tests {
                 label: Some("Visual QA".to_string()),
                 flags: None,
             }],
+            0,
             false,
         );
 
@@ -13249,6 +13693,7 @@ mod tests {
                 ..AgentConfig::default()
             },
             &[],
+            0,
             false,
         );
         let required_protocol = extract_markdown_section(&evaluator_prompt, "## Required Protocol");
@@ -13497,6 +13942,184 @@ mod tests {
         ));
 
         assert!(controller.can_complete_session("fusion-ok").is_ok());
+    }
+
+    fn qa_session_with(
+        id: &str,
+        state: SessionState,
+        project_path: PathBuf,
+        with_prince: bool,
+    ) -> Session {
+        let mut agents = vec![AgentInfo {
+            id: format!("{id}-evaluator"),
+            role: AgentRole::Evaluator,
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        }];
+        if with_prince {
+            agents.push(AgentInfo {
+                id: format!("{id}-prince"),
+                role: AgentRole::Prince,
+                status: AgentStatus::Running,
+                config: AgentConfig::default(),
+                parent_id: None,
+                commit_sha: None,
+                base_commit_sha: None,
+            });
+        }
+        Session {
+            id: id.to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Hive { worker_count: 2 },
+            project_path,
+            state,
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents,
+            default_cli: "claude".to_string(),
+            default_model: None,
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
+            no_git: false,
+            resume_report: None,
+        }
+    }
+
+    #[test]
+    fn qa_verdict_routes_to_prince_when_prince_present() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-route",
+            SessionState::QaInProgress { iteration: None },
+            PathBuf::from("."),
+            true,
+        ));
+        let new_state = controller
+            .record_http_qa_verdict("prince-route", "prince-route-evaluator", "PASS", None)
+            .expect("verdict recorded");
+        // With a Prince present, even a PASS hands off to remediation before push.
+        assert_eq!(new_state, SessionState::PrinceRemediation);
+    }
+
+    #[test]
+    fn qa_verdict_passes_directly_without_prince() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "no-prince",
+            SessionState::QaInProgress { iteration: None },
+            PathBuf::from("."),
+            false,
+        ));
+        let new_state = controller
+            .record_http_qa_verdict("no-prince", "no-prince-evaluator", "PASS", None)
+            .expect("verdict recorded");
+        assert_eq!(new_state, SessionState::QaPassed);
+    }
+
+    #[test]
+    fn prince_verdict_clears_remediation_to_qa_passed() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-clear",
+            SessionState::PrinceRemediation,
+            PathBuf::from("."),
+            true,
+        ));
+        let new_state = controller
+            .record_prince_verdict("prince-clear", "PASS")
+            .expect("prince verdict recorded");
+        assert_eq!(new_state, SessionState::QaPassed);
+    }
+
+    #[test]
+    fn prince_verdict_blocked_marks_inconclusive() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-blocked",
+            SessionState::PrinceRemediation,
+            PathBuf::from("."),
+            true,
+        ));
+        let new_state = controller
+            .record_prince_verdict("prince-blocked", "BLOCKED")
+            .expect("prince verdict recorded");
+        assert_eq!(new_state, SessionState::QaInconclusive);
+    }
+
+    #[test]
+    fn prince_verdict_rejected_outside_remediation() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-bad-state",
+            SessionState::QaInProgress { iteration: None },
+            PathBuf::from("."),
+            true,
+        ));
+        assert!(controller
+            .record_prince_verdict("prince-bad-state", "PASS")
+            .is_err());
+    }
+
+    #[test]
+    fn qa_timeout_marks_inconclusive_blocks_completion_and_writes_verdict_file() {
+        let temp = tempfile::tempdir().expect("temp");
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "inconclusive",
+            SessionState::QaInProgress { iteration: None },
+            temp.path().to_path_buf(),
+            true,
+        ));
+        let new_state = controller
+            .mark_qa_inconclusive("inconclusive", "timed out")
+            .expect("marked inconclusive");
+        assert_eq!(new_state, SessionState::QaInconclusive);
+
+        // Inconclusive sessions must never auto-complete — push/complete stays blocked.
+        let session = controller.get_session("inconclusive").expect("session");
+        assert!(!SessionController::state_allows_completion(&session));
+
+        // A BLOCKED verdict file is written so the Queen's poll loop terminates instead
+        // of hanging forever.
+        let verdict_path = temp
+            .path()
+            .join(".hive-manager")
+            .join("inconclusive")
+            .join("peer")
+            .join("qa-verdict.json");
+        assert!(verdict_path.exists());
+        let body = std::fs::read_to_string(&verdict_path).expect("verdict body");
+        assert!(body.contains("BLOCKED"));
+    }
+
+    #[test]
+    fn adversarial_worker_count_is_ceil_half_of_workers() {
+        assert_eq!(SessionController::adversarial_worker_count(0), 0);
+        assert_eq!(SessionController::adversarial_worker_count(1), 1);
+        assert_eq!(SessionController::adversarial_worker_count(2), 1);
+        assert_eq!(SessionController::adversarial_worker_count(3), 2);
+        assert_eq!(SessionController::adversarial_worker_count(4), 2);
+        assert_eq!(SessionController::adversarial_worker_count(5), 3);
+    }
+
+    #[test]
+    fn prince_remediation_and_inconclusive_block_completion() {
+        for state in [SessionState::PrinceRemediation, SessionState::QaInconclusive] {
+            let session = qa_session_with("gate", state.clone(), PathBuf::from("."), true);
+            assert!(
+                !SessionController::state_allows_completion(&session),
+                "state {:?} must block completion",
+                state
+            );
+        }
     }
 
     #[test]

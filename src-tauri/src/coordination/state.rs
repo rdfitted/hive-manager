@@ -312,6 +312,53 @@ impl StateManager {
         ))))?
     }
 
+    /// Write the Prince's remediation verdict (peer/prince-verdict.json). The Queen
+    /// polls this file and only pushes the PR once the Prince has self-certified.
+    pub fn write_prince_verdict(
+        &self,
+        from: &str,
+        to: &str,
+        content: &str,
+        commit_sha: Option<&str>,
+    ) -> Result<(), StateError> {
+        self.write_peer_record(
+            "prince-verdict.json",
+            &PeerMessageRecord {
+                kind: "prince-verdict".to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
+                content: content.to_string(),
+                timestamp: Utc::now(),
+                commit_sha: commit_sha.map(str::to_string),
+            },
+        )
+    }
+
+    pub async fn write_prince_verdict_async(
+        &self,
+        from: &str,
+        to: &str,
+        content: &str,
+        commit_sha: Option<&str>,
+    ) -> Result<(), StateError> {
+        let session_path = self.session_path.clone();
+        let from = from.to_string();
+        let to = to.to_string();
+        let content = content.to_string();
+        let commit_sha = commit_sha.map(str::to_string);
+
+        tokio::task::spawn_blocking(move || {
+            StateManager::new(session_path)
+                .write_prince_verdict(&from, &to, &content, commit_sha.as_deref())
+        })
+        .await
+        .map_err(|err| {
+            StateError::Io(std::io::Error::other(format!(
+                "Prince verdict write task failed: {err}"
+            )))
+        })?
+    }
+
     pub fn write_evaluator_feedback(
         &self,
         from: &str,

@@ -126,8 +126,8 @@
     return readTerminalSelection($ui.focusedAgentId);
   }
 
-  // Capture the operator's current selection (terminal or page) or selected cell as a
-  // one-shot context for the next composer submit. CRLF is normalized and the text trimmed.
+  // Capture the operator's current selection (terminal or page) as a one-shot context
+  // for the next composer submit. CRLF is normalized and the text trimmed.
   function captureSelectionContext(sessionId: string) {
     const xtermText = readXtermSelection();
     const winText = window.getSelection()?.toString() ?? '';
@@ -139,19 +139,6 @@
         agentId: $ui.focusedAgentId,
         kind: 'selection',
         text: raw,
-        capturedAt: Date.now(),
-      });
-      return;
-    }
-
-    // No text selection — fall back to the selected session cell, if any.
-    const cellId = $ui.selectedCellId;
-    if (cellId) {
-      pendingContext.capture({
-        sessionId,
-        agentId: $ui.focusedAgentId,
-        kind: 'cell',
-        cellId,
         capturedAt: Date.now(),
       });
     }

@@ -536,6 +536,36 @@ pub fn run() {
                 }
             });
 
+            // Fast-path consumers for verdict files. The watcher emits these when
+            // qa-verdict.json / prince-verdict.json appear; without a listener the
+            // signal was silently dropped and the UI only refreshed on the next poll.
+            // We push an immediate session-update so operators see the new state at once.
+            for verdict_event in ["qa-verdict", "prince-verdict"] {
+                let verdict_controller_clone = session_controller.clone();
+                app.listen(verdict_event, move |event: tauri::Event| {
+                    let payload = event.payload();
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+                        let session_id = json
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if session_id.is_empty() {
+                            return;
+                        }
+                        tracing::info!(
+                            event = %verdict_event,
+                            session_id = %session_id,
+                            "Verdict file observed; emitting session update"
+                        );
+                        let controller = verdict_controller_clone.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            controller.read().emit_session_update(&session_id);
+                        });
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

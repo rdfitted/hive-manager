@@ -5,11 +5,8 @@ export type LayoutMode = 'focused';
 
 interface UIState {
   focusedAgentId: string | null;
-  selectedCellId: string | null;
   selectedAgentId: string | null;
   layoutMode: LayoutMode;
-  cellGridCollapsed: boolean;
-  terminalMaximized: boolean;
 }
 
 /**
@@ -52,11 +49,8 @@ function persistUiState(key: string, value: unknown) {
 function createUIStore() {
   const { subscribe, set, update } = writable<UIState>({
     focusedAgentId: null,
-    selectedCellId: null,
     selectedAgentId: null,
     layoutMode: 'focused',
-    cellGridCollapsed: false,
-    terminalMaximized: false,
   });
 
   return {
@@ -69,10 +63,6 @@ function createUIStore() {
       update((state) => ({ ...state, focusedAgentId: id }));
       persistUiState('focusedAgentId', id);
     },
-    setSelectedCell(id: string | null) {
-      update((state) => ({ ...state, selectedCellId: id }));
-      persistUiState('selectedCellId', id);
-    },
     setSelectedAgent(id: string | null) {
       update((state) => ({ ...state, selectedAgentId: id }));
       persistUiState('selectedAgentId', id);
@@ -80,12 +70,6 @@ function createUIStore() {
     setLayoutMode(mode: LayoutMode) {
       update((state) => ({ ...state, layoutMode: mode }));
       persistUiState('layoutMode', mode);
-    },
-    setCellGridCollapsed(collapsed: boolean) {
-      update((state) => ({ ...state, cellGridCollapsed: collapsed }));
-    },
-    setTerminalMaximized(maximized: boolean) {
-      update((state) => ({ ...state, terminalMaximized: maximized }));
     },
   };
 }
