@@ -3360,8 +3360,8 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         qa_workers: &[QaWorkerConfig],
         worker_count: u8,
     ) -> (String, String, String, String) {
-        let configured_workers = if qa_workers.is_empty() {
-            let mut workers = vec![
+        let mut configured_workers = if qa_workers.is_empty() {
+            vec![
                 QaWorkerConfig {
                     specialization: "api".to_string(),
                     cli: default_config.cli.clone(),
@@ -3383,11 +3383,19 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                     label: Some(Self::qa_worker_label("a11y").to_string()),
                     flags: None,
                 },
-            ];
+            ]
+        } else {
+            qa_workers.to_vec()
+        };
+
+        if !configured_workers
+            .iter()
+            .any(|worker| worker.specialization == "adversarial")
+        {
             // Adversarial agents (~1 per 2 coding workers) probe for the edge cases,
             // races, and unhandled errors the happy-path specialists miss.
             for _ in 0..Self::adversarial_worker_count(worker_count) {
-                workers.push(QaWorkerConfig {
+                configured_workers.push(QaWorkerConfig {
                     specialization: "adversarial".to_string(),
                     cli: default_config.cli.clone(),
                     model: default_config.model.clone(),
@@ -3395,10 +3403,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                     flags: None,
                 });
             }
-            workers
-        } else {
-            qa_workers.to_vec()
-        };
+        }
 
         let mut command_block = String::new();
         for (index, worker) in configured_workers.iter().enumerate() {
@@ -9809,6 +9814,36 @@ phases and do EXACTLY this, then stop:
 
         self.cancel_qa_timeout(session_id);
 
+        if matches!(&new_state, SessionState::PrinceRemediation) {
+            let prince_id = format!("{}-prince", session_id);
+            let prince_alive = self.pty_manager.read().is_alive(&prince_id);
+            if !prince_alive {
+                tracing::warn!(
+                    session_id = %session_id,
+                    prince_id = %prince_id,
+                    "Respawning Prince after QA verdict because PTY is not alive"
+                );
+                let prince_config = AgentConfig {
+                    cli: String::new(),
+                    model: None,
+                    flags: vec![],
+                    label: Some("Prince".to_string()),
+                    name: None,
+                    description: None,
+                    role: None,
+                    initial_prompt: None,
+                };
+                if let Err(err) = self.launch_prince(session_id, prince_config, false) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        prince_id = %prince_id,
+                        error = %err,
+                        "Failed to respawn Prince after QA verdict"
+                    );
+                }
+            }
+        }
+
         self.emit_session_update(session_id);
         self.emit_cell_status_changes(session_id, changes);
 
@@ -10074,6 +10109,21 @@ phases and do EXACTLY this, then stop:
             let session = sessions
                 .get(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+            if matches!(
+                &session.state,
+                SessionState::PrinceRemediation
+                    | SessionState::QaInconclusive
+                    | SessionState::QaPassed
+                    | SessionState::QaMaxRetriesExceeded
+            ) {
+                tracing::debug!(
+                    session_id = %session_id,
+                    state = ?session.state,
+                    "Ignoring duplicate milestone-ready signal for gated QA session"
+                );
+                return Ok(());
+            }
 
             let maybe_evaluator = session
                 .agents
@@ -14117,6 +14167,57 @@ mod tests {
             assert!(
                 !SessionController::state_allows_completion(&session),
                 "state {:?} must block completion",
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_workers_appended_even_with_configured_qa_workers() {
+        // Regression: the UI always sends ui/api/a11y, so adversarial coverage must be
+        // added on top of an explicitly-configured QA list — not only when it's empty.
+        let prompt = SessionController::build_evaluator_prompt(
+            "adv-config",
+            &AgentConfig {
+                cli: "claude".to_string(),
+                model: Some("opus".to_string()),
+                ..AgentConfig::default()
+            },
+            &[QaWorkerConfig {
+                specialization: "ui".to_string(),
+                cli: "claude".to_string(),
+                model: Some("opus".to_string()),
+                label: Some("UI QA".to_string()),
+                flags: None,
+            }],
+            4, // ceil(4/2) = 2 adversarial agents expected
+            false,
+        );
+        assert!(
+            prompt.contains(r#""specialization":"adversarial""#),
+            "configured QA list must still get adversarial coverage"
+        );
+    }
+
+    #[test]
+    fn milestone_ready_does_not_regress_gated_states() {
+        // Regression: a duplicate milestone-ready must not drag PrinceRemediation /
+        // QaInconclusive back to QaInProgress (which would re-arm the QA timeout).
+        for state in [SessionState::PrinceRemediation, SessionState::QaInconclusive] {
+            let controller = test_controller();
+            controller.insert_test_session(qa_session_with(
+                "gated-milestone",
+                state.clone(),
+                PathBuf::from("."),
+                true,
+            ));
+            controller
+                .on_milestone_ready("gated-milestone")
+                .expect("milestone-ready handled");
+            let session = controller.get_session("gated-milestone").expect("session");
+            assert_eq!(
+                session.state, state,
+                "milestone-ready must not regress {:?}",
                 state
             );
         }

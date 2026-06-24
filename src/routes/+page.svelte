@@ -126,7 +126,7 @@
     return readTerminalSelection($ui.focusedAgentId);
   }
 
-  // Capture the operator's current selection (terminal or page) as a one-shot context
+  // Capture the operator's current terminal/window text selection as one-shot context
   // for the next composer submit. CRLF is normalized and the text trimmed.
   function captureSelectionContext(sessionId: string) {
     const xtermText = readXtermSelection();
@@ -165,10 +165,9 @@
     if (event.key === 'Escape' && showShortcuts) {
       showShortcuts = false;
     }
-    // Ctrl+I: capture the active selection / cell as one-shot operator context for the
+    // Ctrl+I: capture the terminal/window text selection as one-shot operator context for the
     // next composer submit. Skip when focus is inside the composer (don't hijack its own
-    // selection). Reads xterm selection first, then the window selection, else the
-    // selected session cell.
+    // selection). Reads xterm selection first, then the window selection.
     if (mod && (event.key === 'i' || event.key === 'I')) {
       const ctxTarget = event.target as HTMLElement | null;
       if (ctxTarget?.closest('[data-composer]')) return; // composer owns its selection

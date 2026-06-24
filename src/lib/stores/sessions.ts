@@ -77,7 +77,7 @@ export interface ResearchLaunchConfig {
 }
 
 export interface QaWorkerConfig {
-  specialization: 'ui' | 'api' | 'a11y';
+  specialization: 'ui' | 'api' | 'a11y' | 'adversarial';
   cli: string;
   model?: string;
   flags: string[];

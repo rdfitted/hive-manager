@@ -286,8 +286,8 @@ pub struct PostVerdictRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PostPrinceVerdictRequest {
-    /// "PASS"/"DONE"/"RESOLVED" to clear the gate; "BLOCKED"/"ESCALATE" to surface
-    /// to the operator when the Prince's team could not resolve the findings.
+    /// PASS/DONE/RESOLVED clear the gate; BLOCKED/FAIL/ESCALATE escalate to the
+    /// operator when the Prince's team could not resolve the findings.
     pub verdict: String,
     #[serde(default)]
     pub commit_sha: Option<String>,
@@ -630,7 +630,7 @@ pub async fn post_prince_verdict(
         "PASS" | "DONE" | "RESOLVED" | "BLOCKED" | "FAIL" | "ESCALATE"
     ) {
         return Err(ApiError::bad_request(format!(
-            "Unsupported Prince verdict '{}'. Expected PASS/DONE or BLOCKED",
+            "Unsupported Prince verdict '{}'. Expected PASS/DONE/RESOLVED (clear) or BLOCKED/FAIL/ESCALATE (escalate)",
             req.verdict
         )));
     }

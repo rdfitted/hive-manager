@@ -587,17 +587,18 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
      -H "Content-Type: application/json" \
      -d '{"verdict":"<PASS|FAIL>","commit_sha":"<sha>","rationale":"<one-line rationale based on contract criteria>"}'
    ```
-2. After the POST, you MUST confirm that `.hive-manager/{{session_id}}/peer/qa-verdict.json` appears within a bounded interval:
+2. If a pass-criterion cannot be exercised because the required UI/host is not running, OR a QA worker could not report over HTTP, you MUST POST `{"verdict":"BLOCKED","blocked_reason":"ui-unavailable"|"http-failure","blocked_detail":"<which criterion/worker>"}` to the same `/qa/verdict` endpoint instead of guessing or stalling.
+3. After the POST, you MUST confirm that `.hive-manager/{{session_id}}/peer/qa-verdict.json` appears within a bounded interval:
    ```bash
    for attempt in $(seq 1 6); do
      [ -f ".hive-manager/{{session_id}}/peer/qa-verdict.json" ] && break
      sleep 5
    done
    ```
-3. If the peer file is still missing, you MUST retry the same POST exactly once and poll again for up to 30 seconds.
-4. If `.hive-manager/{{session_id}}/peer/qa-verdict.json` is still missing after the retry window, you MUST report `BLOCKED` and stop.
-5. You MUST rely on that POST to write `.hive-manager/{{session_id}}/peer/qa-verdict.json`.
-6. You MUST NOT write `.hive-manager/{{session_id}}/peer/qa-verdict.md` or any other shadow verdict file.
+4. If the peer file is still missing, you MUST retry the same POST exactly once and poll again for up to 30 seconds.
+5. If `.hive-manager/{{session_id}}/peer/qa-verdict.json` is still missing after the retry window, you MUST report `BLOCKED` and stop.
+6. You MUST rely on that POST to write `.hive-manager/{{session_id}}/peer/qa-verdict.json`.
+7. You MUST NOT write `.hive-manager/{{session_id}}/peer/qa-verdict.md` or any other shadow verdict file.
 
 ## Coordination Tools
 
@@ -938,14 +939,15 @@ prompt to the specific finding; do not hand them a generic instruction.
 
 ## Phase 3: Spawn And Drive Your Fix Team
 
-1. For each unit of work, spawn a fixer worker. Shape the `description` to that exact finding:
+1. For each unit of work, spawn a fixer worker. Shape the `description` to that exact finding and put the full finding text in `initial_task` verbatim:
    ```bash
    curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/workers" \
      -H "Content-Type: application/json" \
-     -d '{"role_type":"prince-fixer", {{default_model_field}}"cli":"{{default_cli}}","name":"Fixer 1","description":"<the specific finding to resolve, with the criterion number and acceptance bar>"}'
+     -d '{"role_type":"prince-fixer", {{default_model_field}}"cli":"{{default_cli}}","name":"Fixer 1","description":"<the specific finding to resolve, with the criterion number and acceptance bar>","initial_task":"<the specific finding to resolve, verbatim>"}'
    ```
    - You MUST set `cli` to `{{default_cli}}` for every fixer.
    - You MUST give each fixer a precise, self-contained task derived from the QA finding.
+   - You MUST put the full finding text to resolve, verbatim, in `initial_task`.
 2. You MUST poll your fixers' task files every {{active_poll_secs}}s until each reaches
    `COMPLETED` or `BLOCKED`, emitting a heartbeat inside each iteration:
    ```bash
@@ -955,6 +957,13 @@ prompt to the specific finding; do not hand them a generic instruction.
    ```
 3. You MUST verify each finding is actually resolved (inspect the diff / re-run the relevant check).
    You own the outcome — do not certify on a fixer's say-so alone.
+
+## Phase 3.5: Integrate Fixer Work
+
+1. Before self-certifying, you MUST integrate each fixer's committed changes onto the session's working branch. Merge or cherry-pick the fixer worktree branches `hive/{{session_id}}/worker-N`.
+2. You MUST resolve any conflicts and confirm the fixes are present in the working tree.
+3. You MUST NOT certify PASS while any fixer's work is unintegrated.
+4. If integration cannot be completed, submit `BLOCKED`.
 
 ## Phase 4: Self-Certify
 
