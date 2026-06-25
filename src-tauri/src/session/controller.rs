@@ -4687,7 +4687,10 @@ Write to `.hive-manager/{session_id}/plan.md`:
 ## Evaluator & QA Configuration
 
 An **Evaluator** agent will be spawned after workers complete. It reviews the milestone handoff
-and coordinates QA workers to validate the work.
+and coordinates QA workers to validate the work. The Evaluator also auto-adds an **Adversarial**
+QA agent (~1 per 2 coding workers) on top of the list below. A **Prince** peer is spawned
+alongside the Evaluator: it owns remediation of QA findings and self-certifies before the PR is
+pushed, so the QA verdict gates through Prince clearance.
 
 | QA Worker | Label | Specialization | CLI |
 |-----------|-------|----------------|-----|
@@ -4702,6 +4705,13 @@ After all worker tasks complete, the Evaluator will:
 {qa_tasks}### Evaluator Verdict:
 1. Collect QA worker results
 2. Submit verdict via HTTP endpoint: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/qa/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke test validated"}}'`
+
+### Prince Remediation (auto-spawned peer):
+The QA verdict transitions the session to **PrinceRemediation** (not QaPassed). The Prince peer
+reads the verdict from `.hive-manager/{session_id}/peer/qa-verdict.json`. For a clean smoke PASS there
+are no findings, so the Prince self-certifies immediately, clearing the gate to QaPassed:
+1. `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/prince/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke - no findings to remediate"}}'`
+The Queen waits for `.hive-manager/{session_id}/peer/prince-verdict.json` before completing.
 "#,
                 qa_table = qa_table.trim_end(),
                 qa_tasks = qa_tasks,
@@ -4715,8 +4725,10 @@ After all worker tasks complete, the Evaluator will:
             let qa_count = qa_workers.map(|q| q.len()).unwrap_or(0);
             format!(
                 "\n4. Evaluator spawns and reviews worker output\n\
-                 5. {} QA worker(s) exercise their specialization\n\
-                 6. Evaluator submits verdict via POST /api/sessions/{session_id}/qa/verdict",
+                 5. {} QA worker(s) plus an auto-added adversarial agent exercise their specialization\n\
+                 6. Evaluator submits verdict via POST /api/sessions/{session_id}/qa/verdict\n\
+                 7. Prince peer spawns, reads the verdict, and self-certifies via POST /api/sessions/{session_id}/prince/verdict\n\
+                 8. Session reaches QaPassed only after Prince clearance (PrinceRemediation -> QaPassed)",
                 qa_count
             )
         } else {
