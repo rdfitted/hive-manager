@@ -771,6 +771,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                         <option value="ui">UI Tester</option>
                         <option value="api">API Tester</option>
                         <option value="a11y">A11Y Tester</option>
+                        <option value="adversarial">Adversarial</option>
                       </select>
                     </div>
                     <AgentConfigEditor bind:config={worker} showLabel={false} />

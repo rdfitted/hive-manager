@@ -77,7 +77,7 @@ export interface ResearchLaunchConfig {
 }
 
 export interface QaWorkerConfig {
-  specialization: 'ui' | 'api' | 'a11y';
+  specialization: 'ui' | 'api' | 'a11y' | 'adversarial';
   cli: string;
   model?: string;
   flags: string[];
@@ -168,6 +168,8 @@ export type SessionState =
   | 'QaPassed'
   | { QaFailed: { iteration: number } }
   | 'QaMaxRetriesExceeded'
+  | 'PrinceRemediation'
+  | 'QaInconclusive'
   | 'Paused'
   | 'Completed'
   | 'Closed'
@@ -203,11 +205,13 @@ export function sessionStateToCellStatus(state: SessionState | unknown): CellSta
     case 'Judging':
     case 'MergingWinner':
     case 'QaInProgress':
+    case 'PrinceRemediation':
     case 'Running':
       return 'running';
     case 'AwaitingVerdictSelection':
     case 'Paused':
     case 'QaPassed':
+    case 'QaInconclusive':
       return 'waiting_input';
     case 'Completed':
     case 'Closed':

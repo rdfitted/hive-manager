@@ -64,10 +64,12 @@ pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
         | SessionState::Judging
         | SessionState::MergingWinner
         | SessionState::QaInProgress { .. }
+        | SessionState::PrinceRemediation
         | SessionState::Running => CellStatus::Running,
-        SessionState::AwaitingVerdictSelection | SessionState::Paused | SessionState::QaPassed => {
-            CellStatus::WaitingInput
-        }
+        SessionState::AwaitingVerdictSelection
+        | SessionState::Paused
+        | SessionState::QaPassed
+        | SessionState::QaInconclusive => CellStatus::WaitingInput,
         SessionState::Completed | SessionState::Closed => CellStatus::Completed,
         SessionState::QaFailed { .. }
         | SessionState::QaMaxRetriesExceeded

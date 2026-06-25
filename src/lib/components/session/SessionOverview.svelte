@@ -7,7 +7,6 @@
     import { conversationStore } from '../../stores/conversations';
     import { activeSession, activeAgents, type AgentInfo } from '../../stores/sessions';
     import SessionHeader from './SessionHeader.svelte';
-    import CellGrid from '../cell/CellGrid.svelte';
     import Terminal from '../Terminal.svelte';
     import TimelineView from '../timeline/TimelineView.svelte';
     import ReplayView from '../replay/ReplayView.svelte';
@@ -18,7 +17,6 @@
     type SessionView = 'terminal' | 'observability' | 'artifacts';
     let activeView: SessionView = $state('terminal');
     const sessionId = $derived($activeSession?.id);
-    const terminalMaximized = $derived($ui.terminalMaximized);
     const terminalAgentId = $derived($ui.selectedAgentId || $ui.focusedAgentId);
 
     function getAgentRoleName(agent: AgentInfo): string {
@@ -116,13 +114,9 @@
         cells.setExternalRefreshHandler(null);
         events.disconnect();
     });
-
-    function toggleTerminal() {
-        ui.setTerminalMaximized(!terminalMaximized);
-    }
 </script>
 
-<div class="session-overview" class:terminal-maximized={terminalMaximized}>
+<div class="session-overview">
     <header>
         <SessionHeader />
     </header>
@@ -135,10 +129,6 @@
                 <p>ID: {sessionId}</p>
             </div>
         {:else}
-            <div class="grid-section">
-                <CellGrid />
-            </div>
-
             <div class="terminal-section">
                 <div class="terminal-controls">
                     <div class="tab-bar">
@@ -146,9 +136,6 @@
                         <button class="tab-btn" class:active={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
                         <button class="tab-btn" class:active={activeView === 'artifacts'} onclick={() => activeView = 'artifacts'}>Artifacts</button>
                     </div>
-                    <button class="expand-btn" onclick={toggleTerminal}>
-                        {terminalMaximized ? 'Minimize' : 'Maximize'}
-                    </button>
                 </div>
                 <div class="terminal-wrapper">
                     <div class="terminal-panel" class:hidden={activeView !== 'terminal'}>
@@ -232,11 +219,6 @@
         overflow: hidden;
     }
 
-    .grid-section {
-        flex: 1;
-        overflow: hidden;
-    }
-
     .session-not-found {
         flex: 1;
         display: flex;
@@ -260,16 +242,11 @@
     }
 
     .terminal-section {
-        flex: 0 0 45%;
+        flex: 1;
+        min-height: 0;
         background: var(--color-surface);
-        border-top: 1px solid var(--color-border);
         display: flex;
         flex-direction: column;
-        transition: flex 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    .session-overview.terminal-maximized .terminal-section {
-        flex: 0 0 90%;
     }
 
     .terminal-controls {
@@ -306,20 +283,6 @@
     .tab-btn.active {
         color: var(--color-accent);
         border-bottom-color: var(--color-accent);
-    }
-
-    .expand-btn {
-        background: transparent;
-        border: none;
-        color: var(--color-text-muted);
-        font-size: 10px;
-        cursor: pointer;
-        text-transform: uppercase;
-        font-weight: bold;
-    }
-
-    .expand-btn:hover {
-        color: var(--color-text);
     }
 
     .terminal-wrapper {

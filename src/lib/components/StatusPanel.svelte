@@ -51,7 +51,9 @@
     const v = serdeEnumVariantName(state);
     if (v === 'SpawningEvaluator') return 'starting';
     if (v === 'QaInProgress') return 'running';
+    if (v === 'PrinceRemediation') return 'running';
     if (v === 'QaPassed') return 'completed';
+    if (v === 'QaInconclusive') return 'warning';
     if (v === 'QaMaxRetriesExceeded') return 'failed';
     if (v) return v.toLowerCase();
     return 'unknown';
@@ -65,7 +67,9 @@
     const v = serdeEnumVariantName(state);
     if (v === 'SpawningEvaluator') return 'Spawning Evaluator';
     if (v === 'QaInProgress') return 'QA In Progress';
+    if (v === 'PrinceRemediation') return 'Prince Remediation';
     if (v === 'QaPassed') return 'QA Passed';
+    if (v === 'QaInconclusive') return 'QA Inconclusive — operator action needed';
     if (v === 'QaMaxRetriesExceeded') return 'QA Max Retries Exceeded';
     return v ?? 'Unknown';
   }
@@ -175,6 +179,8 @@
     return (
       v === 'SpawningEvaluator' ||
       v === 'QaInProgress' ||
+      v === 'PrinceRemediation' ||
+      v === 'QaInconclusive' ||
       v === 'QaPassed' ||
       v === 'QaMaxRetriesExceeded' ||
       (typeof state === 'object' && state !== null && 'QaFailed' in state)

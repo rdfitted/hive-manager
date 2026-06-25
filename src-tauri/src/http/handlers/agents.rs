@@ -150,6 +150,7 @@ fn map_agent_role(role: &PtyAgentRole) -> AgentRole {
             AgentRole::Reviewer
         }
         PtyAgentRole::Evaluator | PtyAgentRole::QaWorker { .. } => AgentRole::Tester,
+        PtyAgentRole::Prince => AgentRole::Reviewer,
     }
 }
 

@@ -15,6 +15,10 @@ pub enum AgentRole {
     Judge { session_id: String },
     Evaluator,
     QaWorker { index: u8, parent: Option<String> },
+    /// Remediation authority — a peer to the Queen and Evaluator. Receives the QA
+    /// team's findings and spawns its own fix team (regular `Worker`s parented to
+    /// the Prince) to resolve them before the Queen pushes the PR.
+    Prince,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

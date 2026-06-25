@@ -172,6 +172,7 @@ impl TaskFileWatcher {
         match path.file_name()?.to_str()? {
             "milestone-ready.json" => Some("milestone-ready"),
             "qa-verdict.json" => Some("qa-verdict"),
+            "prince-verdict.json" => Some("prince-verdict"),
             "evaluator-feedback.json" => Some("evaluator-feedback"),
             _ => None,
         }
