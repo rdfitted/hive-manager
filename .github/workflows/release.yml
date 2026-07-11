@@ -58,8 +58,8 @@ jobs:
           releaseBody: |
             ## Highlights
 
-            - Adds model presets/defaults for Claude Opus 4.7, OpenAI GPT-5.5, and Droid GLM 5.1
-            - Standardizes evaluator/QA polling heartbeat cadence for long-running sessions
+            - Adds model presets/defaults for Claude Fable 5, OpenAI GPT-5.6, and Droid GLM 5.1
+            - Adds operator-controlled Hive delegation and shared/isolated workspace policies
 
             ## Installation
 

@@ -30,7 +30,7 @@
                 bind:value={searchQuery}
             />
         </div>
-        <button class="new-btn" on:click={() => {/* Open editor for new */}}>
+        <button type="button" class="new-btn" on:click={() => {/* Open editor for new */}}>
             + New Template
         </button>
     </div>
@@ -42,7 +42,8 @@
     {:else}
         <div class="templates-grid">
             {#each filteredTemplates as template (template.id)}
-                <button 
+                <button
+                    type="button"
                     class="template-card" 
                     on:click={() => selectTemplate(template)}
                     title={template.description}

@@ -3,6 +3,7 @@
     import { templates } from '../../stores/templates';
     import type { SessionTemplate, CellTemplate, SessionMode } from '../../types/domain';
     import AgentConfigEditor from '../AgentConfigEditor.svelte';
+    import { routeFusionTemplateCells } from './templateLaunch';
 
     export let template: SessionTemplate | null = null;
 
@@ -13,15 +14,21 @@
     let description = template?.description || '';
     let mode: SessionMode = template?.mode || 'hive';
     let cells: CellTemplate[] = template?.cells ? JSON.parse(JSON.stringify(template.cells)) : [];
-    let workspace_strategy: SessionTemplate['workspace_strategy'] = template?.workspace_strategy || 'shared_cell';
+    // `none` is reserved for the direct Research launch profile, which does
+    // not use custom templates. Normalize historical template values here.
+    let workspace_strategy: SessionTemplate['workspace_strategy'] =
+        template?.workspace_strategy === 'isolated_cell' ? 'isolated_cell' : 'shared_cell';
     let is_builtin = template?.is_builtin || false;
     let error = '';
 
+    $: if (mode !== 'hive') workspace_strategy = 'isolated_cell';
+
     function addCell() {
         cells = [...cells, {
-            role: 'general',
-            cli: 'claude',
-            prompt_template: 'general'
+            role: 'principal',
+            cli: 'codex',
+            model: 'gpt-5.6',
+            prompt_template: 'principal'
         }];
     }
 
@@ -35,6 +42,11 @@
             return;
         }
 
+        if (mode === 'fusion' && routeFusionTemplateCells(cells).variants.length === 0) {
+            error = 'Fusion templates need at least one candidate cell in addition to any judge or resolver.';
+            return;
+        }
+
         error = '';
         const newTemplate: SessionTemplate = {
             id: id || crypto.randomUUID(),
@@ -42,7 +54,7 @@
             description,
             mode,
             cells,
-            workspace_strategy,
+            workspace_strategy: mode === 'hive' ? workspace_strategy : 'isolated_cell',
             is_builtin: false // User saved templates are never builtin
         };
 
@@ -88,17 +100,21 @@
                 <select id="template-mode" bind:value={mode}>
                     <option value="hive">Hive</option>
                     <option value="fusion">Fusion</option>
-                    <option value="research">Research</option>
                     <option value="debate">Debate</option>
                 </select>
             </div>
             <div class="form-group">
                 <label for="template-strategy">Workspace Strategy</label>
-                <select id="template-strategy" bind:value={workspace_strategy}>
-                    <option value="none">None</option>
-                    <option value="shared_cell">Shared Cell</option>
-                    <option value="isolated_cell">Isolated Cell</option>
-                </select>
+                {#if mode === 'hive'}
+                    <select id="template-strategy" bind:value={workspace_strategy}>
+                        <option value="shared_cell">Shared Cell</option>
+                        <option value="isolated_cell">Isolated Cell</option>
+                    </select>
+                {:else}
+                    <div id="template-strategy" class="fixed-value">
+                        Isolated worktrees (fixed for {mode === 'fusion' ? 'Fusion' : 'Debate'})
+                    </div>
+                {/if}
             </div>
         </div>
     </div>
@@ -106,7 +122,7 @@
     <div class="cells-section">
         <div class="section-header">
             <h4>Cells ({cells.length})</h4>
-            <button class="add-btn" on:click={addCell}>+ Add Cell</button>
+            <button type="button" class="add-btn" on:click={addCell}>+ Add Cell</button>
         </div>
 
         <div class="cells-list">
@@ -114,7 +130,7 @@
                 <div class="cell-editor-card">
                     <div class="card-header">
                         <span class="cell-num">Cell {i + 1}</span>
-                        <button class="remove-btn" on:click={() => removeCell(i)}>Remove</button>
+                        <button type="button" class="remove-btn" on:click={() => removeCell(i)}>Remove</button>
                     </div>
                     
                     <div class="form-row">
@@ -143,8 +159,8 @@
     </div>
 
     <div class="actions">
-        <button class="cancel-btn" on:click={handleCancel}>Cancel</button>
-        <button class="save-btn" on:click={handleSave} disabled={!name}>Save Template</button>
+        <button type="button" class="cancel-btn" on:click={handleCancel}>Cancel</button>
+        <button type="button" class="save-btn" on:click={handleSave} disabled={!name}>Save Template</button>
     </div>
 </div>
 

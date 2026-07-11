@@ -2,16 +2,18 @@
 
 ## Product Intent
 
-Hive Manager is a **human-first desktop cockpit for CLI agents**.
+Hive Manager is a **human-first, operator-controlled local meta-harness for CLI agents**.
 
 It helps an operator launch, supervise, compare, and steer multi-agent coding sessions without turning into a bloated infrastructure platform.
 
-The next version simplifies the mental model:
+The next version simplifies the mental model while exposing topology decisions:
 
-- **Hive** = one collaborative cell in one shared worktree
+- **Hive** = an Opus Queen plus manager-launched coding principals
+- **Native children** = bounded micro-delegation inside a capable principal harness
 - **Fusion** = multiple peer Hives in separate worktrees
+- **Solo** = one directly supervised coding agent
 - **Resolver** = synthesis across Fusion outputs
-- **Swarm** = deprecated from active investment
+- **Swarm** = legacy-compatible programmatic surface, removed from the primary launch flow
 
 ---
 
@@ -33,6 +35,8 @@ This plan keeps it in the first camp while stealing only the best architectural 
 3. Introduce Resolver as a first-class synthesis role
 4. Replace terminal-only visibility with state, events, and artifacts
 5. Preserve speed and operator clarity
+6. Keep capability facts separate from operator delegation policy
+7. Make Master Planner produce bounded Assignment Contracts, never implementation
 
 ### Non-goals
 - Kubernetes support
@@ -40,6 +44,7 @@ This plan keeps it in the first camp while stealing only the best architectural 
 - Enterprise credential isolation systems
 - Generic agent infrastructure platform ambitions
 - Deeper investment in nested Swarm orchestration
+- Hidden topology expansion beyond the operator's configured policy
 
 ---
 
@@ -69,7 +74,9 @@ The top-level run.
 A Session contains:
 - one objective
 - one project/repo target
-- one mode (`Hive` or `Fusion`)
+- one primary launch profile (`Hive`, `Fusion`, or `Solo`; the internal
+  `SessionMode` enum still models Hive/Fusion/Debate while Solo is represented
+  by the launch/session type contract)
 - one or more Cells
 - state, events, artifacts, and operator actions
 
@@ -77,7 +84,7 @@ A Session contains:
 The true unit of execution and isolation.
 
 A Cell contains:
-- one shared workspace/worktree
+- one operator-selected workspace topology
 - one or more agents
 - one local objective
 - one lifecycle state
@@ -86,9 +93,9 @@ A Cell contains:
 
 ### HiveCell
 A collaborating unit:
-- Queen + Workers
-- shared worktree
-- shared branch strategy
+- Queen + manager-launched coding principals
+- shared worktree by recommendation, or isolated worktrees per managed principal when the operator selects `isolated_cell`
+- operator-selected branch/worktree plan
 
 ### ResolverCell
 A synthesis unit:
@@ -99,12 +106,28 @@ A synthesis unit:
 - single agent by default (review pair available as a template variant)
 
 ### Workspace
-Attached to the **Cell**, not the individual agent.
+Selected for the **Cell** by execution policy, not inferred from an agent's CLI.
 
-- Agents **within** a cell share one workspace/worktree
+- `shared_cell` gives the Queen and managed principals one collaborative workspace/worktree
+- `isolated_cell` gives managed principals explicit per-principal isolation while preserving the Cell as the supervision boundary
 - Cells **between** each other have separate worktrees when isolation matters
 
-**Principle:** Share context where collaboration is the point. Split context where comparison is the point.
+**Principle:** Recommend shared context where collaboration is the point, but keep workspace topology under operator control. Split context where comparison or explicit isolation is the point.
+
+### ExecutionPolicy
+The operator-owned launch contract:
+- launch kind (`auto`, `hive`, or `solo`; Fusion remains an explicit session mode)
+- workspace strategy
+- separate Queen and principal native-delegation policies
+- optional maximum child count and delegation depth
+
+### CapabilityCard
+Harness support facts declared by Hive Manager's current CLI adapter profile. This is not yet a live binary/version probe. Claude and Codex are profiled as supporting native delegation; unprofiled harnesses remain `unknown`, not guessed supported or unsupported.
+
+Capability and authorization are deliberately different. `disabled` always wins. `auto` permits only known support. `encouraged` is explicit operator authorization without changing the underlying support fact; a harness known to be unsupported remains off.
+
+### AssignmentContract
+A bounded work package for a managed principal. It states the objective, acceptance criteria, owned paths, prohibited actions, required validation, and delivery format. Native children inherit that contract and cannot expand its authority or path ownership.
 
 ### Artifact
 Standardized output from each Cell:
@@ -128,25 +151,29 @@ Structured record of something meaningful that happened. Raw terminal output sti
 ## Product Principles
 
 1. **Cells, not terminals, are the main object**
-2. **Shared context inside a Hive; isolation between peer Hives**
+2. **Shared context is recommended inside a Hive; explicit principal isolation remains available**
 3. **Artifacts matter more than raw output volume**
 4. **State should be explicit, not inferred from vibes**
 5. **Fusion is parallel exploration; Resolver is judgment**
 6. **If a feature makes the app feel like infra software, it's probably wrong**
+7. **The operator owns topology, workspaces, models, and delegation policy**
+8. **Capability inference reports adapter-profile facts; it does not grant permission**
+9. **Native children remain inside their parent's Assignment Contract**
 
 ---
 
 ## Mode Strategy
 
 ### Hive
-One collaborative cell in one shared worktree. The default mode for most real work.
+One collaborative cell with an operator-selected workspace strategy. `shared_cell` is recommended for close collaboration; `isolated_cell` is available when each managed principal needs a separate worktree. An Opus Queen coordinates the principals, and the built-in recommendation assigns Codex `gpt-5.6` to backend and frontend work. These are defaults, and explicit operator choices remain authoritative.
 
 **Success criteria:**
 - clear roster of agents
-- shared workspace visible
+- selected workspace topology visible
 - strong Queen coordination
 - easy intervention when an agent stalls
 - clean cell-level summary at the end
+- native children, when authorized, stay within their principal's contract
 
 ### Fusion
 Multiple peer HiveCells in separate worktrees tackling the same objective. The mode for ambiguity, high stakes, and comparison.
@@ -159,6 +186,9 @@ Multiple peer HiveCells in separate worktrees tackling the same objective. The m
 - consistent artifact bundle from each Hive
 - Resolver can compare results without terminal archaeology
 
+### Solo
+One directly supervised agent with no manager-created principal topology. Use it when the objective is already bounded or orchestration would add ceremony without useful separation.
+
 ### Resolver
 A dedicated synthesis lane, not a queen-above-queens.
 
@@ -168,7 +198,10 @@ A dedicated synthesis lane, not a queen-above-queens.
 - gives the operator a useful final recommendation
 
 ### Swarm
-Deprecated from active roadmap. Keep launchable for backward compat but remove from the session builder's primary flow. A "Legacy" or "Advanced" section is fine. If nobody complains, remove entirely in a later version.
+Removed from the session builder's primary flow and deprecated from active investment. Keep existing sessions and programmatic launch callers compatible; a labeled Legacy surface may expose it without presenting it as a recommended topology.
+
+### Master Planner
+Master Planner is a contract-authoring phase, not an implementer. It may inspect context and divide the objective into bounded Assignment Contracts, then must stop before editing code or launching an unapproved topology. The operator reviews or amends the proposed contracts before execution.
 
 ---
 
@@ -186,7 +219,10 @@ One API, one set of handlers, one test surface. External CLI processes cannot in
 ## UX Direction
 
 ### Session builder
-Should ask: objective, repo/project, mode (Hive or Fusion), number of candidate Hives (if Fusion), CLI/model assignments per cell, workspace strategy, optional Resolver configuration.
+Should ask: objective, repo/project, primary launch type (Hive, Fusion, or Solo), number of candidate Hives (if Fusion), CLI/model assignments per managed principal, workspace strategy, Queen/principal delegation policies, optional child/depth limits, and optional Resolver configuration. Topology preview must distinguish manager-launched principals from potential native children.
+
+### Models and labels
+Use canonical model IDs in configuration and launch payloads. The current canonical IDs are `gpt-5.6` and `fable`; **Sol** and **Fable** are display labels only. A direct Hive recommends an Opus Queen plus one generic Codex `gpt-5.6` principal; specialized built-in templates can provide backend/frontend principals. Older models remain selectable, and an explicit operator selection always overrides a recommendation.
 
 ### Main session screen
 Should emphasize: Cells, statuses, worktrees/branches, summaries, artifacts, terminal drill-downs. Not just a wall of terminals.
@@ -205,12 +241,13 @@ Must make it obvious at a glance: which candidate is progressing, which failed, 
 - explicit session/cell/agent lifecycle states
 - structured event log alongside terminal output
 - normalized CLI adapter contract
+- capability cards and persisted execution/delegation policy
 
 ### v0.19 — Cell-Based Workspace Model
-"Hive now works the way it should: one collaborative cell, one shared workspace."
+"Hive workspaces are explicit: shared by recommendation, isolated when the operator chooses."
 
-- worktree attached to Cell, not individual agent
-- shared-worktree Hive mode
+- workspace plan owned by the Cell, with per-principal assignments only when `isolated_cell` is selected
+- shared-cell and isolated-per-principal Hive strategies
 - isolated worktree per Fusion candidate
 - branch/worktree visibility in UI
 - launch preview before session start
@@ -231,6 +268,7 @@ Must make it obvious at a glance: which candidate is progressing, which failed, 
 - role packs
 - saved launch presets
 - editable bootstrap prompt bundles
+- Assignment Contract templates for Master Planner and principals
 
 ### v0.22 — Observability
 "See what happened, not just what scrolled by."

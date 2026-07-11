@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::domain::{CapabilityCard, CapabilitySupport, DelegationPolicy, NativeDelegationMode};
 use crate::pty::AgentConfig;
 use crate::storage::{AppConfig, CliConfig};
 
@@ -38,11 +39,11 @@ impl CliRegistry {
     }
 
     /// Build command, arguments, and environment variables from an agent config
-    pub fn build_command(
-        &self,
-        agent_config: &AgentConfig,
-    ) -> Result<BuiltCommand, RegistryError> {
-        let cli = self.config.clis.get(&agent_config.cli)
+    pub fn build_command(&self, agent_config: &AgentConfig) -> Result<BuiltCommand, RegistryError> {
+        let cli = self
+            .config
+            .clis
+            .get(&agent_config.cli)
             .ok_or_else(|| RegistryError::UnknownCli(agent_config.cli.clone()))?;
 
         let mut args = Vec::new();
@@ -55,8 +56,7 @@ impl CliRegistry {
 
         // Add model flag
         if let Some(ref model_flag) = cli.model_flag {
-            let model = agent_config.model.as_ref()
-                .unwrap_or(&cli.default_model);
+            let model = agent_config.model.as_ref().unwrap_or(&cli.default_model);
             args.push(model_flag.clone());
             args.push(model.clone());
         }
@@ -105,7 +105,9 @@ impl CliRegistry {
 
     /// Get default CLI and model for a role type
     pub fn get_role_defaults(&self, role_type: &str) -> Option<(&str, &str)> {
-        self.config.default_roles.get(role_type)
+        self.config
+            .default_roles
+            .get(role_type)
             .map(|defaults| (defaults.cli.as_str(), defaults.model.as_str()))
     }
 
@@ -121,11 +123,41 @@ impl CliRegistry {
             // antigravity (agy) has no model flag; settings.json owns the model.
             "antigravity" => None,
             "opencode" => Some("opencode/big-pickle"),
-            "codex" => Some("gpt-5.5"),
+            "codex" => Some("gpt-5.6"),
             "cursor" => Some("composer-2.5"),
             "droid" => Some("glm-5.1"),
             "qwen" => Some("qwen3-coder"),
             _ => None,
+        }
+    }
+
+    /// Infer runtime capability facts for a CLI harness.
+    ///
+    /// Capability support and operator authorization are deliberately separate:
+    /// this method reports only facts the harness integration knows. A custom or
+    /// not-yet-profiled CLI remains `Unknown` rather than being treated as either
+    /// supported or unsupported.
+    pub fn infer_capabilities(cli: &str) -> CapabilityCard {
+        CapabilityCard {
+            native_delegation: match cli {
+                "claude" | "codex" => CapabilitySupport::Supported,
+                _ => CapabilitySupport::Unknown,
+            },
+        }
+    }
+
+    /// Resolve whether native delegation is authorized for this launch.
+    ///
+    /// `Encouraged` is an explicit operator authorization, including for a
+    /// capability whose support is not yet known. It never rewrites the card's
+    /// factual support value, and a known `Unsupported` capability remains off.
+    pub fn native_delegation_authorized(card: &CapabilityCard, policy: &DelegationPolicy) -> bool {
+        match policy.mode {
+            NativeDelegationMode::Disabled => false,
+            NativeDelegationMode::Auto => card.native_delegation == CapabilitySupport::Supported,
+            NativeDelegationMode::Encouraged => {
+                card.native_delegation != CapabilitySupport::Unsupported
+            }
         }
     }
 
@@ -139,6 +171,9 @@ impl CliRegistry {
         match cli {
             "claude" | "antigravity" | "gemini" => CliBehavior::ActionProne,
             "qwen" => CliBehavior::InstructionFollowing,
+            // Codex principals commonly start in STANDBY and are activated by
+            // a task-file update. Until the runtime injects an explicit wake-up,
+            // they need the same durable activation loop as OpenCode.
             "codex" | "opencode" => CliBehavior::ExplicitPolling,
             "droid" | "cursor" => CliBehavior::Interactive,
             _ => CliBehavior::ActionProne, // Default to most constrained
@@ -192,67 +227,91 @@ mod tests {
 
     fn test_config() -> AppConfig {
         let mut clis = HashMap::new();
-        clis.insert("claude".to_string(), CliConfig {
-            command: "claude".to_string(),
-            auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
-            model_flag: Some("--model".to_string()),
-            default_model: "opus".to_string(),
-            env: None,
-        });
-        clis.insert("gemini".to_string(), CliConfig {
-            command: "gemini".to_string(),
-            auto_approve_flag: Some("-y".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "gemini-2.5-pro".to_string(),
-            env: None,
-        });
-        clis.insert("antigravity".to_string(), CliConfig {
-            command: "agy".to_string(),
-            auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
-            // agy has no model flag — model lives in ~/.gemini/antigravity-cli/settings.json
-            model_flag: None,
-            default_model: String::new(),
-            env: None,
-        });
-        clis.insert("cursor".to_string(), CliConfig {
-            command: "wsl".to_string(),
-            auto_approve_flag: Some("--force".to_string()),
-            model_flag: None,  // Cursor uses global model setting
-            default_model: "composer-2.5".to_string(),
-            env: None,
-        });
-        clis.insert("droid".to_string(), CliConfig {
-            command: "droid".to_string(),
-            auto_approve_flag: None,  // Interactive mode - no auto-approve flag
-            model_flag: None,  // Model selected via /model command in TUI
-            default_model: "glm-5.1".to_string(),
-            env: None,
-        });
-        clis.insert("qwen".to_string(), CliConfig {
-            command: "qwen".to_string(),
-            auto_approve_flag: Some("-y".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "qwen3-coder".to_string(),
-            env: None,
-        });
-        clis.insert("codex".to_string(), CliConfig {
-            command: "codex".to_string(),
-            auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
-            model_flag: Some("-m".to_string()),
-            default_model: "gpt-5.5".to_string(),
-            env: None,
-        });
-        clis.insert("opencode".to_string(), CliConfig {
-            command: "opencode".to_string(),
-            auto_approve_flag: None,
-            model_flag: Some("-m".to_string()),
-            default_model: "opencode/big-pickle".to_string(),
-            env: Some({
-                let mut env = HashMap::new();
-                env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
-                env
-            }),
-        });
+        clis.insert(
+            "claude".to_string(),
+            CliConfig {
+                command: "claude".to_string(),
+                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
+                model_flag: Some("--model".to_string()),
+                default_model: "opus".to_string(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "gemini".to_string(),
+            CliConfig {
+                command: "gemini".to_string(),
+                auto_approve_flag: Some("-y".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "gemini-2.5-pro".to_string(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "antigravity".to_string(),
+            CliConfig {
+                command: "agy".to_string(),
+                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
+                // agy has no model flag — model lives in ~/.gemini/antigravity-cli/settings.json
+                model_flag: None,
+                default_model: String::new(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "cursor".to_string(),
+            CliConfig {
+                command: "wsl".to_string(),
+                auto_approve_flag: Some("--force".to_string()),
+                model_flag: None, // Cursor uses global model setting
+                default_model: "composer-2.5".to_string(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "droid".to_string(),
+            CliConfig {
+                command: "droid".to_string(),
+                auto_approve_flag: None, // Interactive mode - no auto-approve flag
+                model_flag: None,        // Model selected via /model command in TUI
+                default_model: "glm-5.1".to_string(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "qwen".to_string(),
+            CliConfig {
+                command: "qwen".to_string(),
+                auto_approve_flag: Some("-y".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "qwen3-coder".to_string(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "codex".to_string(),
+            CliConfig {
+                command: "codex".to_string(),
+                auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
+                model_flag: Some("-m".to_string()),
+                default_model: "gpt-5.6".to_string(),
+                env: None,
+            },
+        );
+        clis.insert(
+            "opencode".to_string(),
+            CliConfig {
+                command: "opencode".to_string(),
+                auto_approve_flag: None,
+                model_flag: Some("-m".to_string()),
+                default_model: "opencode/big-pickle".to_string(),
+                env: Some({
+                    let mut env = HashMap::new();
+                    env.insert("OPENCODE_YOLO".to_string(), "true".to_string());
+                    env
+                }),
+            },
+        );
 
         AppConfig {
             clis,
@@ -281,7 +340,9 @@ mod tests {
 
         let built = registry.build_command(&config).unwrap();
         assert_eq!(built.command, "claude");
-        assert!(built.args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(built
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
         assert!(built.args.contains(&"--model".to_string()));
         assert!(built.args.contains(&"sonnet".to_string()));
     }
@@ -300,7 +361,9 @@ mod tests {
             initial_prompt: None,
         };
 
-        let built = registry.build_command_with_prompt(&config, Some("Test prompt")).unwrap();
+        let built = registry
+            .build_command_with_prompt(&config, Some("Test prompt"))
+            .unwrap();
         assert!(built.args.contains(&"-p".to_string()));
         assert!(built.args.contains(&"Test prompt".to_string()));
     }
@@ -382,9 +445,11 @@ mod tests {
 
         let built = registry.build_command(&config).unwrap();
         assert_eq!(built.command, "codex");
-        assert!(built.args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(built
+            .args
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"gpt-5.5".to_string()));
+        assert!(built.args.contains(&"gpt-5.6".to_string()));
     }
 
     #[test]
@@ -411,15 +476,39 @@ mod tests {
 
     #[test]
     fn test_cli_behavior_profiles() {
-        assert_eq!(CliRegistry::get_behavior("claude"), CliBehavior::ActionProne);
-        assert_eq!(CliRegistry::get_behavior("gemini"), CliBehavior::ActionProne);
-        assert_eq!(CliRegistry::get_behavior("antigravity"), CliBehavior::ActionProne);
-        assert_eq!(CliRegistry::get_behavior("qwen"), CliBehavior::InstructionFollowing);
-        assert_eq!(CliRegistry::get_behavior("codex"), CliBehavior::ExplicitPolling);
-        assert_eq!(CliRegistry::get_behavior("opencode"), CliBehavior::ExplicitPolling);
+        assert_eq!(
+            CliRegistry::get_behavior("claude"),
+            CliBehavior::ActionProne
+        );
+        assert_eq!(
+            CliRegistry::get_behavior("gemini"),
+            CliBehavior::ActionProne
+        );
+        assert_eq!(
+            CliRegistry::get_behavior("antigravity"),
+            CliBehavior::ActionProne
+        );
+        assert_eq!(
+            CliRegistry::get_behavior("qwen"),
+            CliBehavior::InstructionFollowing
+        );
+        assert_eq!(
+            CliRegistry::get_behavior("codex"),
+            CliBehavior::ExplicitPolling
+        );
+        assert_eq!(
+            CliRegistry::get_behavior("opencode"),
+            CliBehavior::ExplicitPolling
+        );
         assert_eq!(CliRegistry::get_behavior("droid"), CliBehavior::Interactive);
-        assert_eq!(CliRegistry::get_behavior("cursor"), CliBehavior::Interactive);
-        assert_eq!(CliRegistry::get_behavior("unknown-cli"), CliBehavior::ActionProne);
+        assert_eq!(
+            CliRegistry::get_behavior("cursor"),
+            CliBehavior::Interactive
+        );
+        assert_eq!(
+            CliRegistry::get_behavior("unknown-cli"),
+            CliBehavior::ActionProne
+        );
     }
 
     #[test]
@@ -462,7 +551,9 @@ mod tests {
 
         let built = registry.build_command(&config).unwrap();
         assert_eq!(built.command, "agy");
-        assert!(built.args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(built
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
         assert!(
             !built.args.iter().any(|a| a == "-m" || a == "--model"),
             "antigravity must not produce a model flag (model lives in settings.json)"
@@ -477,12 +568,71 @@ mod tests {
     fn test_default_model_lookup() {
         assert_eq!(CliRegistry::default_model("claude"), Some("opus"));
         assert_eq!(CliRegistry::default_model("gemini"), Some("gemini-2.5-pro"));
-        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.5"));
+        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.6"));
         assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
         assert_eq!(CliRegistry::default_model("cursor"), Some("composer-2.5"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
         // antigravity has no model flag — None signals the UI to hide the field.
         assert_eq!(CliRegistry::default_model("antigravity"), None);
+    }
+
+    #[test]
+    fn test_capability_inference_is_conservative() {
+        assert_eq!(
+            CliRegistry::infer_capabilities("claude").native_delegation,
+            CapabilitySupport::Supported
+        );
+        assert_eq!(
+            CliRegistry::infer_capabilities("codex").native_delegation,
+            CapabilitySupport::Supported
+        );
+        assert_eq!(
+            CliRegistry::infer_capabilities("custom-harness").native_delegation,
+            CapabilitySupport::Unknown
+        );
+        assert_eq!(
+            CliRegistry::infer_capabilities("antigravity").native_delegation,
+            CapabilitySupport::Unknown
+        );
+    }
+
+    #[test]
+    fn test_native_delegation_policy_preserves_support_facts() {
+        let supported = CapabilityCard {
+            native_delegation: CapabilitySupport::Supported,
+        };
+        let unsupported = CapabilityCard {
+            native_delegation: CapabilitySupport::Unsupported,
+        };
+        let unknown = CapabilityCard::default();
+
+        let policy = |mode| DelegationPolicy {
+            mode,
+            max_children: Some(3),
+            max_depth: Some(1),
+        };
+
+        assert!(!CliRegistry::native_delegation_authorized(
+            &supported,
+            &policy(NativeDelegationMode::Disabled)
+        ));
+        assert!(CliRegistry::native_delegation_authorized(
+            &supported,
+            &policy(NativeDelegationMode::Auto)
+        ));
+        assert!(!CliRegistry::native_delegation_authorized(
+            &unknown,
+            &policy(NativeDelegationMode::Auto)
+        ));
+        assert!(CliRegistry::native_delegation_authorized(
+            &unknown,
+            &policy(NativeDelegationMode::Encouraged)
+        ));
+        assert!(!CliRegistry::native_delegation_authorized(
+            &unsupported,
+            &policy(NativeDelegationMode::Encouraged)
+        ));
+        assert_eq!(unknown.native_delegation, CapabilitySupport::Unknown);
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub fn is_valid_cli(cli: &str) -> bool {
 pub struct AgentLaunchSpec {
     /// CLI name (e.g., "claude", "antigravity")
     pub cli: String,
-    /// Model identifier (e.g., "opus", "gpt-5.5"). Ignored by adapters whose
+    /// Canonical model identifier (e.g., "opus", "gpt-5.6"). Ignored by adapters whose
     /// CLI does not accept a model flag (e.g., antigravity — model lives in
     /// `~/.gemini/antigravity-cli/settings.json`).
     pub model: Option<String>,

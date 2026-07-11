@@ -1,5 +1,7 @@
 # Hive Manager - Product Requirements Document
 
+> **Historical baseline:** This document captures the original Queen → Planner → Worker product model and is retained for design history. It is not the current launch contract. The active direction is the operator-controlled meta-harness described in [`docs/hive-manager-vnext-prd.md`](docs/hive-manager-vnext-prd.md) and [`plans/meta-harness-modernization.md`](plans/meta-harness-modernization.md): Hive is the configurable orchestration container, visible coding principals may use harness-native children, worktree and delegation topology are independent choices, and Swarm is no longer a primary new-session choice. Legacy Swarm sessions remain readable and resumable.
+
 ## Overview
 
 **Product Name:** Hive Manager

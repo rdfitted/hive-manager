@@ -10,7 +10,7 @@
   import DebatePanel from '$lib/components/DebatePanel.svelte';
   import SessionOverview from '$lib/components/session/SessionOverview.svelte';
   import { readTerminalSelection } from '$lib/components/Terminal.svelte';
-  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type HiveLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type HiveLaunchConfig, type FusionLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
   import { layout } from '$lib/stores/layout';
@@ -93,16 +93,8 @@
     }
   });
 
-  async function handleLaunch(projectPath: string, workerCount: number, command: string, prompt?: string): Promise<void> {
-    await sessions.launchHive(projectPath, workerCount, command, prompt);
-  }
-
   async function handleLaunchHiveV2(config: HiveLaunchConfig): Promise<void> {
     await sessions.launchHiveV2(config);
-  }
-
-  async function handleLaunchSwarm(config: SwarmLaunchConfig): Promise<void> {
-    await sessions.launchSwarm(config);
   }
 
   async function handleLaunchFusion(config: FusionLaunchConfig): Promise<void> {
@@ -204,9 +196,7 @@
 
 <div class="app">
   <SessionSidebar
-    onLaunch={handleLaunch}
     onLaunchHiveV2={handleLaunchHiveV2}
-    onLaunchSwarm={handleLaunchSwarm}
     onLaunchFusion={handleLaunchFusion}
     onLaunchDebate={handleLaunchDebate}
     onOpenAddWorker={openAddWorkerDialog}
@@ -223,7 +213,7 @@
               <span class="feature-icon">
                 <Crown size={24} weight="light" />
               </span>
-              <span class="feature-text">Launch Hive or Swarm sessions with hierarchical agents</span>
+              <span class="feature-text">Launch principal-led Hive or comparative Fusion sessions</span>
             </div>
             <div class="feature">
               <span class="feature-icon">

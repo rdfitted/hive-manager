@@ -142,7 +142,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
         SessionTemplate {
             id: "bug-fix-hive".to_string(),
             name: "Bug-fix Hive".to_string(),
-            description: "Queen-led bug fix session with backend and frontend implementers."
+            description: "Opus Queen with GPT-5.6 backend and frontend coding principals."
                 .to_string(),
             mode: SessionMode::Hive,
             cells: vec![
@@ -155,14 +155,13 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.5".to_string()),
+                    model: Some("gpt-5.6".to_string()),
                     prompt_template: "roles/backend".to_string(),
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
-                    cli: "antigravity".to_string(),
-                    // agy has no --model flag; model lives in ~/.gemini/antigravity-cli/settings.json
-                    model: None,
+                    cli: "codex".to_string(),
+                    model: Some("gpt-5.6".to_string()),
                     prompt_template: "roles/frontend".to_string(),
                 },
             ],
@@ -180,7 +179,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
             id: "feature-build-hive".to_string(),
             name: "Feature-build Hive".to_string(),
             description:
-                "Queen plus backend, frontend, and coherence workers for feature delivery."
+                "Opus Queen plus GPT-5.6 backend/frontend coding principals and a Droid coherence specialist."
                     .to_string(),
             mode: SessionMode::Hive,
             cells: vec![
@@ -193,14 +192,13 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.5".to_string()),
+                    model: Some("gpt-5.6".to_string()),
                     prompt_template: "roles/backend".to_string(),
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
-                    cli: "antigravity".to_string(),
-                    // agy has no --model flag; model lives in ~/.gemini/antigravity-cli/settings.json
-                    model: None,
+                    cli: "codex".to_string(),
+                    model: Some("gpt-5.6".to_string()),
                     prompt_template: "roles/frontend".to_string(),
                 },
                 CellTemplate {
@@ -223,7 +221,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "candidate-a".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.5".to_string()),
+                    model: Some("gpt-5.6".to_string()),
                     prompt_template: "fusion-worker".to_string(),
                 },
                 CellTemplate {
@@ -259,11 +257,11 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
         },
         RolePack {
             id: "implementer".to_string(),
-            name: "Implementer".to_string(),
+            name: "Coding Principal".to_string(),
             roles: vec![CellTemplate {
                 role: "backend".to_string(),
                 cli: "codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-5.6".to_string()),
                 prompt_template: "roles/backend".to_string(),
             }],
         },
@@ -479,6 +477,14 @@ You are the Evaluator for session `{{session_id}}`.
 
 You are a ruthless QA engineer. Grade against the contract. Do not rationalize failures.
 
+## Workspace Boundaries
+
+Your control-plane CWD remains the project root so `.hive-manager/{{session_id}}/` paths work.
+The implementation under test lives at `{{execution_workspace}}`. Run source, git, build, and
+test commands there (for example with `cd "{{execution_workspace}}"` in a subshell or
+`git -C "{{execution_workspace}}" ...`). Do not mistake the control-plane checkout for the
+implementation being evaluated.
+
 ## Phase 1: Warm Up And Wait
 
 1. You MUST read project context via HTTP API:
@@ -656,6 +662,13 @@ You are the UI QA specialist for session `{{session_id}}`.
    ```
 2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
+## Execution Workspace
+
+Your control-plane CWD remains the project root so `.hive-manager/{{session_id}}/` paths work.
+The implementation under test lives at `{{execution_workspace}}`. Run source, git, build, and
+test commands there (for example with `cd "{{execution_workspace}}"` in a subshell or
+`git -C "{{execution_workspace}}" ...`).
+
 ## Execution Focus
 
 1. You MUST run click-through flows end to end using your UI automation or browser tooling.
@@ -748,6 +761,11 @@ You are the API QA specialist for session `{{session_id}}`.
 ## Execution Focus
 
 1. You MUST exercise the HTTP surface directly.
+
+The implementation under test lives at `{{execution_workspace}}`; your control-plane CWD stays
+at the project root for `.hive-manager/{{session_id}}/`. Run source, git, build, and test commands
+against the execution workspace (for example with `cd "{{execution_workspace}}"` in a subshell).
+
 2. You MUST validate status codes, payload shape, and error handling.
 3. You MUST record exact requests, responses, and broken invariants.
 
@@ -805,6 +823,11 @@ You are the accessibility QA specialist for session `{{session_id}}`.
 ## Execution Focus
 
 1. You MUST run axe-core, Lighthouse, or equivalent tooling when available.
+
+The implementation under test lives at `{{execution_workspace}}`; your control-plane CWD stays
+at the project root for `.hive-manager/{{session_id}}/`. Run source, git, build, and test commands
+against the execution workspace (for example with `cd "{{execution_workspace}}"` in a subshell).
+
 2. You MUST check keyboard navigation, focus order, semantic roles, ARIA, and contrast.
 3. You MUST record the exact defect and the affected criterion.
 
@@ -861,6 +884,12 @@ have tried hard to prove it.
    ```
 2. Read the contract path resolved from the Evaluator handoff in `.hive-manager/{{session_id}}/peer/milestone-ready.json`. If the handoff does not name a contract path, read `.hive-manager/{{session_id}}/contracts/milestone-1.md`.
 
+## Execution Workspace
+
+Your control-plane CWD remains the project root so `.hive-manager/{{session_id}}/` paths work.
+The implementation under attack lives at `{{execution_workspace}}`. Run source, git, build, and
+test commands there (for example with `cd "{{execution_workspace}}"` in a subshell).
+
 ## Attack Surface (be relentless)
 
 1. Boundary and extreme values: empty, zero, negative, max, unicode, very long inputs.
@@ -909,9 +938,15 @@ the work is done.
 
 ## CLI & Model Configuration
 
-This session uses CLI: {{default_cli}}{{default_model_suffix}}. You MUST spawn every fixer with
-this same CLI — the operator chose ONE agent type for the whole session. Shape each fixer's task
-prompt to the specific finding; do not hand them a generic instruction.
+You run as {{default_cli}}{{default_model_suffix}}. Fixers use the session's independently
+configured principal default: {{fixer_cli}}{{fixer_model_suffix}}.
+Shape each fixer's task prompt to the specific finding; do not hand them a generic instruction.
+
+## Workspace Boundaries
+
+Your control-plane CWD remains the project root so `.hive-manager/{{session_id}}/` paths work.
+The implementation to inspect and remediate lives at `{{execution_workspace}}`. Run source,
+git, build, and test commands against that path.
 
 ## Phase 1: Wait For The QA Verdict
 
@@ -943,9 +978,10 @@ prompt to the specific finding; do not hand them a generic instruction.
    ```bash
    curl -s -X POST "{{api_base_url}}/api/sessions/{{session_id}}/workers" \
      -H "Content-Type: application/json" \
-     -d '{"role_type":"prince-fixer", {{default_model_field}}"cli":"{{default_cli}}","name":"Fixer 1","description":"<the specific finding to resolve, with the criterion number and acceptance bar>","initial_task":"<the specific finding to resolve, verbatim>"}'
+     -d '{"role_type":"prince-fixer","parent_id":"{{session_id}}-prince",{{fixer_model_field}}{{fixer_flags_field}}"cli":"{{fixer_cli}}","name":"Fixer 1","description":"<the specific finding to resolve, with the criterion number and acceptance bar>","initial_task":"<the specific finding to resolve, verbatim>"}'
    ```
-   - You MUST set `cli` to `{{default_cli}}` for every fixer.
+   - You MUST set `cli` to `{{fixer_cli}}` for every fixer.
+   - You MUST set `parent_id` to `{{session_id}}-prince` so fixer lineage remains under you.
    - You MUST give each fixer a precise, self-contained task derived from the QA finding.
    - You MUST put the full finding text to resolve, verbatim, in `initial_task`.
 2. You MUST poll your fixers' task files every {{active_poll_secs}}s until each reaches
@@ -960,10 +996,10 @@ prompt to the specific finding; do not hand them a generic instruction.
 
 ## Phase 3.5: Integrate Fixer Work
 
-1. Before self-certifying, you MUST integrate each fixer's committed changes onto the session's working branch. Merge or cherry-pick the fixer worktree branches `hive/{{session_id}}/worker-N`.
-2. You MUST resolve any conflicts and confirm the fixes are present in the working tree.
-3. You MUST NOT certify PASS while any fixer's work is unintegrated.
-4. If integration cannot be completed, submit `BLOCKED`.
+{{integration_protocol}}
+
+You MUST NOT certify PASS while any completed fix is absent from the execution workspace. If
+integration or verification cannot be completed, submit `BLOCKED`.
 
 ## Phase 4: Self-Certify
 
@@ -2010,6 +2046,45 @@ mod tests {
         assert!(catalog.templates.len() >= 3);
         assert!(catalog.role_packs.len() >= 4);
         assert!(catalog.templates.iter().all(|template| template.is_builtin));
+    }
+
+    #[test]
+    fn builtin_hives_use_opus_queens_and_gpt56_coding_principals() {
+        let templates = builtin_session_templates();
+
+        for template in templates.iter().filter(|template| {
+            matches!(template.id.as_str(), "bug-fix-hive" | "feature-build-hive")
+        }) {
+            let queen = template
+                .cells
+                .iter()
+                .find(|cell| cell.role == "queen")
+                .expect("built-in Hive must include a Queen");
+            assert_eq!(queen.cli, "claude");
+            assert_eq!(queen.model.as_deref(), Some("opus"));
+
+            for role in ["backend", "frontend"] {
+                let principal = template
+                    .cells
+                    .iter()
+                    .find(|cell| cell.role == role)
+                    .unwrap_or_else(|| panic!("built-in Hive must include {role}"));
+                assert_eq!(principal.cli, "codex", "{role} CLI drifted");
+                assert_eq!(
+                    principal.model.as_deref(),
+                    Some("gpt-5.6"),
+                    "{role} model drifted"
+                );
+            }
+        }
+
+        let implementer = builtin_role_packs()
+            .into_iter()
+            .find(|pack| pack.id == "implementer")
+            .expect("implementer role pack must remain available");
+        assert_eq!(implementer.name, "Coding Principal");
+        assert_eq!(implementer.roles[0].cli, "codex");
+        assert_eq!(implementer.roles[0].model.as_deref(), Some("gpt-5.6"));
     }
 
     #[test]

@@ -1,8 +1,14 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { coordination, type WorkerRole, type AddWorkerRequest } from '$lib/stores/coordination';
-  import { activeSession, activeAgents, serdeEnumVariantName } from '$lib/stores/sessions';
-  import { cliOptions, defaultRoles } from '$lib/config/clis';
+  import {
+    activeSession,
+    activeAgents,
+    serdeEnumVariantName,
+    type AgentConfig,
+  } from '$lib/stores/sessions';
+  import { createSessionPrincipalConfig } from './hiveLaunch';
+  import AgentConfigEditor from './AgentConfigEditor.svelte';
   import Composer from './composer/Composer.svelte';
 
   export let open = false;
@@ -12,26 +18,28 @@
     added: { workerId: string };
   }>();
 
-  // Predefined roles with CLI defaults matching backend default_roles
-  const predefinedRoles: { type: string; label: string; cli: string; description: string; category: 'dev' | 'review' }[] = [
+  // A role describes ownership. CLI/model/effort come from the session's
+  // principal defaults and remain operator-selectable below.
+  const predefinedRoles: { type: string; label: string; description: string; category: 'dev' | 'review' }[] = [
     // Development roles
-    { type: 'backend', label: 'Backend', cli: 'claude', description: 'Server-side logic, APIs, databases', category: 'dev' },
-    { type: 'frontend', label: 'Frontend', cli: 'antigravity', description: 'UI components, state management', category: 'dev' },
-    { type: 'coherence', label: 'Coherence', cli: 'droid', description: 'Code consistency, API contracts', category: 'dev' },
-    { type: 'simplify', label: 'Simplify', cli: 'codex', description: 'Code simplification, refactoring', category: 'dev' },
+    { type: 'backend', label: 'Backend', description: 'Server-side logic, APIs, databases', category: 'dev' },
+    { type: 'frontend', label: 'Frontend', description: 'UI components, state management', category: 'dev' },
+    { type: 'coherence', label: 'Coherence', description: 'Code consistency, API contracts', category: 'dev' },
+    { type: 'simplify', label: 'Simplify', description: 'Code simplification, refactoring', category: 'dev' },
     // Review & QA roles
-    { type: 'reviewer', label: 'Reviewer', cli: 'claude', description: 'Deep code review: security, edge cases, architecture', category: 'review' },
-    { type: 'reviewer-quick', label: 'Quick Review', cli: 'claude', description: 'Fast review: obvious bugs, code style', category: 'review' },
-    { type: 'resolver', label: 'Resolver', cli: 'claude', description: 'Address review findings, fix issues', category: 'review' },
-    { type: 'tester', label: 'Tester', cli: 'claude', description: 'Run tests, fix failures, document issues', category: 'review' },
-    { type: 'code-quality', label: 'Code Quality', cli: 'claude', description: 'Resolve PR comments, ensure standards', category: 'review' },
+    { type: 'reviewer', label: 'Reviewer', description: 'Deep code review: security, edge cases, architecture', category: 'review' },
+    { type: 'reviewer-quick', label: 'Quick Review', description: 'Fast review: obvious bugs, code style', category: 'review' },
+    { type: 'resolver', label: 'Resolver', description: 'Address review findings, fix issues', category: 'review' },
+    { type: 'tester', label: 'Tester', description: 'Run tests, fix failures, document issues', category: 'review' },
+    { type: 'code-quality', label: 'Code Quality', description: 'Resolve PR comments, ensure standards', category: 'review' },
     // Custom
-    { type: 'custom', label: 'Custom', cli: 'claude', description: 'Define your own role', category: 'dev' },
+    { type: 'custom', label: 'Custom', description: 'Define your own role', category: 'dev' },
   ];
 
   let selectedRoleType = 'backend';
   let customRoleName = '';
-  let selectedCli = 'claude';
+  let workerConfig: AgentConfig = createSessionPrincipalConfig(null);
+  let initializedSessionId: string | null = null;
   let workerName = '';
   let workerDescription = '';
   let initialTask = '';
@@ -39,12 +47,13 @@
   let loading = false;
   let error: string | null = null;
 
-  // Update CLI when role changes
-  $: {
-    const role = predefinedRoles.find((r) => r.type === selectedRoleType);
-    if (role) {
-      selectedCli = role.cli;
-    }
+  // Re-open with the active session's durable principal defaults. Once open,
+  // the editor owns the values so an operator override is never reset.
+  $: if (!open) initializedSessionId = null;
+  $: if (open && $activeSession?.id && initializedSessionId !== $activeSession.id) {
+    workerConfig = createSessionPrincipalConfig($activeSession);
+    selectedParent = null;
+    initializedSessionId = $activeSession.id;
   }
 
   // Get possible parents (Queen or Planners)
@@ -57,6 +66,7 @@
   function close() {
     open = false;
     error = null;
+    selectedParent = null;
     dispatch('close');
   }
 
@@ -80,7 +90,7 @@
     const role: WorkerRole = {
       role_type: roleType,
       label: roleLabel,
-      default_cli: selectedCli,
+      default_cli: workerConfig.cli,
       prompt_template: null,
     };
 
@@ -89,8 +99,7 @@
       ...(explicitName ? { name: explicitName } : {}),
       description: trimmedDescription,
       config: {
-        cli: selectedCli,
-        flags: [],
+        ...workerConfig,
         ...(explicitName ? { name: explicitName } : {}),
         description: trimmedDescription,
         role,
@@ -129,7 +138,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
     <div class="dialog" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
       <div class="dialog-header">
-        <h2>Add Worker</h2>
+        <h2>Add Managed Principal</h2>
         <button class="close-btn" on:click={close}>&times;</button>
       </div>
 
@@ -182,19 +191,12 @@
         </div>
 
         <div class="form-section">
-          <label class="section-label" for="cli-select">CLI</label>
-          <select
-            id="cli-select"
-            bind:value={selectedCli}
-            class="select-input"
-          >
-            {#each cliOptions as cli}
-              <option value={cli.value}>{cli.label}</option>
-            {/each}
-          </select>
-          <span class="cli-description">
-            {cliOptions.find(c => c.value === selectedCli)?.description || ''}
-          </span>
+          <span class="section-label">Principal Runtime</span>
+          <AgentConfigEditor
+            bind:config={workerConfig}
+            showLabel={false}
+            idPrefix="add-worker-principal"
+          />
         </div>
 
         {#if parentOptions.length > 1}
@@ -212,7 +214,7 @@
         {/if}
 
         <div class="form-section">
-          <label class="section-label" for="name-input">Worker Name</label>
+          <label class="section-label" for="name-input">Principal Name</label>
           <input
             id="name-input"
             type="text"
@@ -253,9 +255,9 @@
           <button type="button" class="btn-secondary" on:click={close}>Cancel</button>
           <button type="submit" class="btn-primary" disabled={loading}>
             {#if loading}
-              Adding...
+              Adding principal...
             {:else}
-              Add Worker
+              Add Managed Principal
             {/if}
           </button>
         </div>
@@ -412,13 +414,6 @@
 
   .composer-host {
     display: flex;
-  }
-
-  .cli-description {
-    font-size: 11px;
-    color: var(--text-secondary);
-    margin-top: 4px;
-    display: block;
   }
 
   .error-message {
