@@ -1,5 +1,6 @@
 use crate::coordination::InjectionManager;
 use crate::coordination::{PeerMessageRecord, StateManager};
+use crate::domain::WorkspaceStrategy;
 use crate::events::EventBus;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
@@ -4415,6 +4416,40 @@ async fn test_list_cells_returns_primary_cell_for_hive_session() {
     assert_eq!(cells[0].get("status").unwrap().as_str().unwrap(), "running");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_list_cells_marks_no_git_workspace_branch_unavailable() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = tempfile::tempdir().expect("temp project");
+    let mut session = make_test_session_with_agents(
+        "session-cells-research",
+        temp_dir.path().to_str().unwrap(),
+        &["session-cells-research-queen"],
+    );
+    session.no_git = true;
+    session.execution_policy.workspace_strategy = WorkspaceStrategy::None;
+    controller.read().insert_test_session(session);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-cells-research/cells")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cells: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let workspace = &cells[0]["workspace"];
+    assert_eq!(workspace["strategy"], "none");
+    assert_eq!(workspace["branch_name"], "unavailable");
+    assert!(workspace["worktree_path"].is_null());
 }
 
 #[tokio::test]

@@ -182,22 +182,26 @@ fn primary_workspace(session: &Session) -> Workspace {
     } else {
         session.worktree_path.as_ref().map(std::path::PathBuf::from)
     };
-    let branch_name = session
-        .worktree_branch
-        .clone()
-        .or_else(|| {
-            worktree_path
-                .as_deref()
-                .and_then(|path| git::current_branch(path).ok())
-        })
-        .unwrap_or_else(|| {
-            git::generate_branch_name(
-                &session.id,
-                PRIMARY_CELL_ID,
-                session_mode(session),
-                CellType::Hive,
-            )
-        });
+    let branch_name = if session.no_git {
+        "unavailable".to_string()
+    } else {
+        session
+            .worktree_branch
+            .clone()
+            .or_else(|| {
+                worktree_path
+                    .as_deref()
+                    .and_then(|path| git::current_branch(path).ok())
+            })
+            .unwrap_or_else(|| {
+                git::generate_branch_name(
+                    &session.id,
+                    PRIMARY_CELL_ID,
+                    session_mode(session),
+                    CellType::Hive,
+                )
+            })
+    };
     let is_dirty = worktree_path
         .as_deref()
         .and_then(|path| git::is_dirty(path).ok())

@@ -2651,6 +2651,10 @@ impl SessionController {
         (command, args)
     }
 
+    fn qa_blocked_verdict_grep_pattern() -> &'static str {
+        r#""verdict"[[:space:]]*:[[:space:]]*"BLOCKED"|\\\"verdict\\\"[[:space:]]*:[[:space:]]*\\\"BLOCKED\\\""#
+    }
+
     fn build_solo_evaluator_prompt(
         session_id: &str,
         project_path: &Path,
@@ -2666,6 +2670,7 @@ impl SessionController {
         let qa_verdict = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
         let prince_verdict =
             Self::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
+        let qa_blocked_pattern = Self::qa_blocked_verdict_grep_pattern();
         let objective = task.unwrap_or("Complete the operator's bounded Solo assignment.");
 
         format!(
@@ -2705,7 +2710,7 @@ while [ ! -f "{qa_verdict}" ]; do
 done
 cat "{qa_verdict}"
 
-if grep -Eq '"verdict"[[:space:]]*:[[:space:]]*"BLOCKED"' "{qa_verdict}"; then
+if grep -Eq '{qa_blocked_pattern}' "{qa_verdict}"; then
   echo "QA is BLOCKED; stop and escalate to the operator. Do not wait for Prince remediation." >&2
   exit 1
 fi
@@ -10541,8 +10546,9 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
-    /// Start a QA timeout timer. On expiry, auto-passes QA with a warning.
-    /// Cancel by calling `cancel_qa_timeout`.
+    /// Start a QA timeout timer. On expiry, marks QA inconclusive, writes a
+    /// BLOCKED verdict, and surfaces the session for operator action. Cancel by
+    /// calling `cancel_qa_timeout`.
     pub fn start_qa_timeout(&self, session_id: &str, timeout_secs: u64) {
         // Cancel any existing timer
         self.cancel_qa_timeout(session_id);
@@ -11412,16 +11418,6 @@ phases and do EXACTLY this, then stop:
         }
         .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-        if !matches!(
-            &session.session_type,
-            SessionType::Hive { .. } | SessionType::Swarm { .. }
-        ) {
-            return Err(format!(
-                "Managed workers can only be added to Hive sessions (session {} is {:?})",
-                session_id, session.session_type
-            ));
-        }
-
         // Verify session is in Planning or PlanReady state
         if session.state != SessionState::Planning && session.state != SessionState::PlanReady {
             return Err(format!(
@@ -11927,6 +11923,14 @@ phases and do EXACTLY this, then stop:
             AuthStrategy::from_persisted(&persisted.auth_strategy)
         };
 
+        let mut execution_policy = persisted.execution_policy.clone();
+        if persisted.no_git {
+            // Legacy Research snapshots predate execution_policy and therefore
+            // deserialize to IsolatedCell. No-git sessions always execute in the
+            // project checkout and use session-qualified task files.
+            execution_policy.workspace_strategy = WorkspaceStrategy::None;
+        }
+
         Ok(Session {
             id: persisted.id.clone(),
             name: persisted.name.clone(),
@@ -11942,7 +11946,7 @@ phases and do EXACTLY this, then stop:
             default_principal_cli: persisted.default_principal_cli.clone(),
             default_principal_model: persisted.default_principal_model.clone(),
             default_principal_flags: persisted.default_principal_flags.clone(),
-            execution_policy: persisted.execution_policy.clone(),
+            execution_policy,
             qa_workers: persisted.qa_workers.clone(),
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
@@ -13787,6 +13791,43 @@ mod tests {
     }
 
     #[test]
+    fn fusion_and_debate_planning_continuations_reach_type_dispatch() {
+        let temp = tempfile::tempdir().expect("temp project");
+        let controller = test_controller();
+        let cases = [
+            (
+                "planning-fusion",
+                SessionType::Fusion {
+                    variants: vec!["Variant A".to_string()],
+                },
+                "Failed to read pending fusion config",
+            ),
+            (
+                "planning-debate",
+                SessionType::Debate {
+                    variants: vec!["Debater A".to_string()],
+                },
+                "Failed to read pending debate config",
+            ),
+        ];
+
+        for (session_id, session_type, expected_dispatch_error) in cases {
+            let mut session = waiting_worker_session(session_id, temp.path(), 1);
+            session.session_type = session_type;
+            session.state = SessionState::Planning;
+            controller.insert_test_session(session);
+
+            let error = controller
+                .continue_after_planning(session_id)
+                .expect_err("missing pending config should stop after type dispatch");
+            assert!(
+                error.contains(expected_dispatch_error),
+                "unexpected continuation error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn session_state_serialization() {
         let state = SessionState::SpawningWorker(3);
         let json = serde_json::to_string(&state).expect("serialize SessionState");
@@ -13970,6 +14011,7 @@ mod tests {
         assert!(prompt.contains("prince-verdict.json"));
         assert!(prompt.contains("commit the completed Solo implementation"));
         assert!(prompt.contains("solo-123-worker-1"));
+        assert!(prompt.contains(SessionController::qa_blocked_verdict_grep_pattern()));
         let blocked_guard = prompt.find("QA is BLOCKED").expect("BLOCKED guard");
         let prince_wait = prompt
             .find("while [ ! -f \"/repo/.hive-manager/solo-123/peer/prince-verdict.json\" ]")
@@ -14042,6 +14084,52 @@ mod tests {
             research,
             PathBuf::from("/repo/.hive-manager/session-123/tasks/worker-2-task.md")
         );
+    }
+
+    #[test]
+    fn legacy_no_git_restore_normalizes_research_workspace_and_prompt_path() {
+        let temp = tempfile::tempdir().expect("temp project");
+        let controller = test_controller();
+        let mut source = waiting_worker_session("legacy-research", temp.path(), 1);
+        source.no_git = true;
+        source.execution_policy = HiveExecutionPolicy::default();
+
+        let persisted = SessionController::session_to_persisted_snapshot(&source);
+        let mut legacy_json = serde_json::to_value(persisted).expect("persisted session JSON");
+        legacy_json
+            .as_object_mut()
+            .expect("persisted object")
+            .remove("execution_policy");
+        let legacy: crate::storage::PersistedSession =
+            serde_json::from_value(legacy_json).expect("legacy session");
+        assert_eq!(
+            legacy.execution_policy.workspace_strategy,
+            WorkspaceStrategy::IsolatedCell
+        );
+
+        let restored = controller
+            .session_from_persisted(&legacy)
+            .expect("restore legacy Research session");
+        assert_eq!(
+            restored.execution_policy.workspace_strategy,
+            WorkspaceStrategy::None
+        );
+
+        let task_path = SessionController::task_file_path_for_session_worker(&restored, 2)
+            .expect("Research task path");
+        let prompt = SessionController::build_worker_prompt(
+            2,
+            &AgentConfig {
+                role: Some(WorkerRole::new("researcher", "Researcher", "claude")),
+                ..AgentConfig::default()
+            },
+            "legacy-research-queen",
+            &restored.id,
+            &restored.project_path,
+            &restored.project_path,
+            &restored.execution_policy,
+        );
+        assert!(prompt.contains(&SessionController::prompt_path(&task_path)));
     }
 
     #[test]
@@ -14393,8 +14481,9 @@ mod tests {
     #[test]
     fn research_worker_surfaces_are_read_only() {
         let session_id = "session-research-readonly";
-        let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
-        let _ = std::fs::create_dir_all(&worktree_path);
+        let temp = tempfile::tempdir().expect("temp project");
+        let worktree_path = temp.path().join("worker-1");
+        std::fs::create_dir_all(&worktree_path).expect("create worker directory");
 
         let cfg = AgentConfig {
             role: Some(WorkerRole::new("researcher", "Researcher", "claude")),
@@ -14411,13 +14500,16 @@ mod tests {
             &cfg,
             "queen",
             session_id,
-            Path::new("."),
+            temp.path(),
             &worktree_path,
             &research_policy,
         );
         assert!(prompt.contains("RESEARCHER"));
         assert!(prompt.contains("Read-Only"));
-        assert!(prompt.contains(".hive-manager/session-research-readonly/tasks/worker-1-task.md"));
+        let expected_task_path = SessionController::prompt_path(
+            &SessionController::session_task_file_path(temp.path(), session_id, 1),
+        );
+        assert!(prompt.contains(&expected_task_path));
         assert!(!prompt.contains("## Your Role: EXECUTOR"));
         assert!(!prompt.contains("Learnings Protocol (MANDATORY)"));
 
@@ -14433,20 +14525,13 @@ mod tests {
         let task = std::fs::read_to_string(&task_path).unwrap();
         assert!(task.contains("RESEARCHER (READ-ONLY)"));
         assert!(!task.contains("EXECUTOR"));
-
-        let _ = std::fs::remove_dir_all(format!(".hive-manager/worktrees/{session_id}"));
     }
 
     #[test]
     fn scope_block_is_identical_across_worker_and_task_surfaces() {
         let session_id = "session-scope-equality";
-        let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
-        let session_worktree_root = worktree_path
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("session worktree root");
-
-        let _ = std::fs::remove_dir_all(session_worktree_root);
+        let temp = tempfile::tempdir().expect("temp project");
+        let worktree_path = temp.path().join("worker-1");
         std::fs::create_dir_all(&worktree_path).expect("create worktree");
 
         let fusion_prompt = SessionController::build_fusion_worker_prompt(
@@ -14454,7 +14539,7 @@ mod tests {
             1,
             "Variant 1",
             "feat/test",
-            ".hive-manager/worktrees/session-scope-equality/worker-1",
+            worktree_path.to_str().expect("utf8 worktree path"),
             "Test task",
             "claude",
         );
@@ -14490,8 +14575,6 @@ mod tests {
             expected
         );
         assert_eq!(extract_markdown_section(&task_file, "## Scope"), expected);
-
-        std::fs::remove_dir_all(session_worktree_root).expect("remove test worktree");
     }
 
     #[test]
@@ -14972,6 +15055,13 @@ mod tests {
         assert!(verdict_path.exists());
         let body = std::fs::read_to_string(&verdict_path).expect("verdict body");
         assert!(body.contains("BLOCKED"));
+        let blocked_pattern =
+            regex::Regex::new(SessionController::qa_blocked_verdict_grep_pattern())
+                .expect("valid grep-compatible BLOCKED pattern");
+        assert!(
+            blocked_pattern.is_match(&body),
+            "Solo's shell guard must match the actual PeerMessageRecord envelope"
+        );
     }
 
     #[test]

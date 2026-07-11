@@ -92,9 +92,10 @@ pub async fn add_worker(
     }
     .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
 
-    let inherits_principal_defaults = requested_cli
-        .as_deref()
-        .is_none_or(|requested| requested == principal_defaults.cli.as_str());
+    let inherits_principal_defaults = match requested_cli.as_deref() {
+        None => true,
+        Some(requested) => requested == principal_defaults.cli.as_str(),
+    };
     let cli = requested_cli.unwrap_or_else(|| principal_defaults.cli.clone());
     validate_cli(&cli)?;
     let model = requested_model.or_else(|| {

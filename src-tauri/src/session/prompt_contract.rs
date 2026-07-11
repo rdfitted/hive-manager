@@ -115,7 +115,7 @@ pub(crate) fn render_delegation_guidance(
     policy: &DelegationPolicy,
     delegation_authorized: bool,
 ) -> String {
-    if !delegation_authorized {
+    if !delegation_authorized || policy.mode == NativeDelegationMode::Disabled {
         return "## Native Delegation\n\nWork directly. Do not create native children under the current capability/policy contract."
             .to_string();
     }
@@ -127,7 +127,10 @@ pub(crate) fn render_delegation_guidance(
         NativeDelegationMode::Auto => {
             "Delegate when independent, bounded lanes would materially improve speed or confidence; otherwise work directly."
         }
-        NativeDelegationMode::Disabled => unreachable!("disabled policy cannot enable delegation"),
+        NativeDelegationMode::Disabled => {
+            return "## Native Delegation\n\nWork directly. Do not create native children under the current capability/policy contract."
+                .to_string();
+        }
     };
     let authority = match role {
         ContractRole::MasterPlanner | ContractRole::Queen => {
@@ -258,15 +261,25 @@ mod tests {
     }
 
     #[test]
-    fn disabled_or_unknown_auto_policy_does_not_claim_delegation() {
-        let guidance = render_delegation_guidance(
+    fn unauthorized_or_disabled_policy_does_not_claim_delegation() {
+        let unauthorized = render_delegation_guidance(
             ContractRole::Principal,
             &DelegationPolicy::default(),
             false,
         );
+        let disabled = render_delegation_guidance(
+            ContractRole::Principal,
+            &DelegationPolicy {
+                mode: NativeDelegationMode::Disabled,
+                ..DelegationPolicy::default()
+            },
+            true,
+        );
 
-        assert!(guidance.contains("Work directly"));
-        assert!(!guidance.contains("Proactively delegate"));
+        for guidance in [unauthorized, disabled] {
+            assert!(guidance.contains("Work directly"));
+            assert!(!guidance.contains("Proactively delegate"));
+        }
     }
 
     #[test]
