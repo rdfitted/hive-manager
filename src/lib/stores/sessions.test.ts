@@ -49,7 +49,13 @@ describe('sessions store', () => {
           }),
           qa_workers: expect.arrayContaining([
             expect.objectContaining({ specialization: 'ui' })
-          ])
+          ]),
+          execution_policy: {
+            launch_kind: 'solo',
+            workspace_strategy: 'shared_cell',
+            queen_delegation: { mode: 'disabled' },
+            principal_delegation: { mode: 'disabled' },
+          },
         })
       }));
     });
@@ -68,9 +74,59 @@ describe('sessions store', () => {
         config: expect.objectContaining({
           with_evaluator: false,
           evaluator_config: undefined,
-          qa_workers: undefined
+          qa_workers: undefined,
+          execution_policy: expect.objectContaining({ launch_kind: 'solo' }),
         })
       }));
+    });
+
+    it('preserves Solo metadata and CLI flags in the Hive wire payload', async () => {
+      await sessions.launchSolo({
+        name: 'Focused fix',
+        color: '#7aa2f7',
+        projectPath: '/test/path',
+        cli: 'codex',
+        model: 'gpt-5.6-sol',
+        flags: ['--full-auto'],
+        taskDescription: 'repair the regression',
+      });
+
+      expect(invoke).toHaveBeenCalledWith('launch_hive_v2', {
+        config: expect.objectContaining({
+          name: 'Focused fix',
+          color: '#7aa2f7',
+          queen_config: expect.objectContaining({
+            cli: 'codex',
+            model: 'gpt-5.6-sol',
+            flags: ['--full-auto'],
+          }),
+          execution_policy: expect.objectContaining({ launch_kind: 'solo' }),
+        }),
+      });
+    });
+  });
+
+  describe('launchHiveV2', () => {
+    it('passes the explicit execution policy through unchanged', async () => {
+      const config = {
+        project_path: '/test/path',
+        queen_config: { cli: 'claude', model: 'opus', flags: [] },
+        workers: [{ cli: 'codex', model: 'gpt-5.6-sol', flags: [], label: 'Coding Principal 1' }],
+        execution_policy: {
+          launch_kind: 'hive' as const,
+          workspace_strategy: 'isolated_cell' as const,
+          queen_delegation: { mode: 'encouraged' as const, max_children: 3, max_depth: 1 },
+          principal_delegation: { mode: 'auto' as const, max_children: 2, max_depth: 1 },
+        },
+      };
+
+      await sessions.launchHiveV2(config);
+
+      expect(invoke).toHaveBeenCalledWith('launch_hive_v2', {
+        config: expect.objectContaining({
+          execution_policy: config.execution_policy,
+        }),
+      });
     });
   });
 

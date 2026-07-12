@@ -139,6 +139,16 @@ pub struct PersistedSession {
     pub default_cli: String,
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Additive principal defaults. Legacy sessions leave the CLI unset and fall
+    /// back to their existing session defaults at runtime.
+    #[serde(default)]
+    pub default_principal_cli: Option<String>,
+    #[serde(default)]
+    pub default_principal_model: Option<String>,
+    #[serde(default)]
+    pub default_principal_flags: Vec<String>,
+    #[serde(default)]
+    pub execution_policy: crate::domain::HiveExecutionPolicy,
     #[serde(default)]
     pub qa_workers: Vec<crate::session::QaWorkerConfig>,
     #[serde(default = "default_max_qa_iterations")]
@@ -593,7 +603,7 @@ impl SessionStorage {
                 command: "codex".to_string(),
                 auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
                 model_flag: Some("-m".to_string()),
-                default_model: "gpt-5.5".to_string(),
+                default_model: "gpt-5.6-sol".to_string(),
                 env: None,
             },
         );
@@ -633,68 +643,80 @@ impl SessionStorage {
 
         let mut default_roles = HashMap::new();
         default_roles.insert(
+            "queen".to_string(),
+            RoleDefaults {
+                cli: "claude".to_string(),
+                model: "opus".to_string(),
+            },
+        );
+        default_roles.insert(
+            "principal".to_string(),
+            RoleDefaults {
+                cli: "codex".to_string(),
+                model: "gpt-5.6-sol".to_string(),
+            },
+        );
+        default_roles.insert(
             "backend".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "frontend".to_string(),
             RoleDefaults {
-                cli: "antigravity".to_string(),
-                // antigravity uses settings.json for model selection; this field is
-                // retained for serde stability but ignored at launch time.
-                model: String::new(),
+                cli: "codex".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "coherence".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "simplify".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "reviewer".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "reviewer-quick".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "resolver".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "tester".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "code-quality".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
@@ -708,14 +730,14 @@ impl SessionStorage {
             "qa-worker".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
         default_roles.insert(
             "general".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.5".to_string(),
+                model: "gpt-5.6-sol".to_string(),
             },
         );
 
@@ -1463,15 +1485,22 @@ mod tests {
             let defaults = config.default_roles.get(role).unwrap();
             assert_eq!(defaults.cli, "codex", "role {role} should default to codex");
             assert_eq!(
-                defaults.model, "gpt-5.5",
-                "role {role} should default to gpt-5.5"
+                defaults.model, "gpt-5.6-sol",
+                "role {role} should default to gpt-5.6-sol"
             );
         }
 
+        let queen = config.default_roles.get("queen").unwrap();
+        assert_eq!(queen.cli, "claude");
+        assert_eq!(queen.model, "opus");
+
+        let principal = config.default_roles.get("principal").unwrap();
+        assert_eq!(principal.cli, "codex");
+        assert_eq!(principal.model, "gpt-5.6-sol");
+
         let frontend = config.default_roles.get("frontend").unwrap();
-        assert_eq!(frontend.cli, "antigravity");
-        // antigravity has no model flag; model comes from settings.json.
-        assert_eq!(frontend.model, "");
+        assert_eq!(frontend.cli, "codex");
+        assert_eq!(frontend.model, "gpt-5.6-sol");
 
         let evaluator = config.default_roles.get("evaluator").unwrap();
         assert_eq!(evaluator.cli, "claude");
@@ -1530,6 +1559,10 @@ mod tests {
             state: "Running".to_string(),
             default_cli: "codex".to_string(),
             default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: vec![],
+            execution_policy: crate::domain::HiveExecutionPolicy::default(),
             qa_workers: vec![],
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
@@ -1538,6 +1571,63 @@ mod tests {
             worktree_branch: None,
             no_git: false,
         }
+    }
+
+    #[test]
+    fn persisted_session_missing_execution_policy_uses_legacy_default() {
+        let mut value = serde_json::to_value(sample_persisted_session("legacy-policy")).unwrap();
+        value.as_object_mut().unwrap().remove("execution_policy");
+
+        let restored: PersistedSession = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored.execution_policy,
+            crate::domain::HiveExecutionPolicy::default()
+        );
+    }
+
+    #[test]
+    fn persisted_session_principal_defaults_are_additive_and_roundtrip() {
+        let mut legacy_value =
+            serde_json::to_value(sample_persisted_session("legacy-principal")).unwrap();
+        let object = legacy_value.as_object_mut().unwrap();
+        object.remove("default_principal_cli");
+        object.remove("default_principal_model");
+        object.remove("default_principal_flags");
+        let legacy: PersistedSession = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(legacy.default_principal_cli, None);
+        assert_eq!(legacy.default_principal_model, None);
+        assert!(legacy.default_principal_flags.is_empty());
+
+        let mut current = sample_persisted_session("current-principal");
+        current.default_principal_cli = Some("codex".to_string());
+        current.default_principal_model = Some("gpt-5.6-sol".to_string());
+        current.default_principal_flags = vec!["--full-auto".to_string()];
+        let restored: PersistedSession =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(restored.default_principal_cli.as_deref(), Some("codex"));
+        assert_eq!(
+            restored.default_principal_model.as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(restored.default_principal_flags, vec!["--full-auto"]);
+    }
+
+    #[test]
+    fn persisted_session_roundtrips_explicit_shared_policy() {
+        let mut session = sample_persisted_session("shared-policy");
+        session.execution_policy = crate::domain::HiveExecutionPolicy {
+            launch_kind: crate::domain::HiveLaunchKind::Hive,
+            workspace_strategy: crate::domain::WorkspaceStrategy::SharedCell,
+            queen_delegation: crate::domain::DelegationPolicy::default(),
+            principal_delegation: crate::domain::DelegationPolicy {
+                mode: crate::domain::NativeDelegationMode::Encouraged,
+                ..crate::domain::DelegationPolicy::default()
+            },
+        };
+
+        let restored: PersistedSession =
+            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(restored.execution_policy, session.execution_policy);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+use crate::domain::{HiveLaunchKind, WorkspaceStrategy};
 use crate::http::handlers::{validate_cli, validate_project_path};
 use crate::session::{
     DebateLaunchConfig, FusionLaunchConfig, HiveLaunchConfig, ResearchLaunchConfig, Session,
@@ -24,6 +25,20 @@ use super::ActionContext;
 const SESSION_COLOR_ALLOWLIST: &[&str] = &[
     "#7aa2f7", "#bb9af7", "#9ece6a", "#e0af68", "#7dcfff", "#f7768e", "#ff9e64", "#f7b1d1",
 ];
+
+const QA_SPECIALIZATIONS: &[&str] = &["ui", "api", "a11y", "adversarial"];
+
+fn validate_qa_specialization(specialization: &str) -> Result<(), ActionError> {
+    if QA_SPECIALIZATIONS.contains(&specialization) {
+        Ok(())
+    } else {
+        Err(ActionError::bad_request(format!(
+            "Invalid QA specialization '{}'. Valid options: {}",
+            specialization,
+            QA_SPECIALIZATIONS.join(", ")
+        )))
+    }
+}
 
 /// Shared name validation (consolidated from the two former copies).
 pub(crate) fn validate_session_name(name: Option<&str>) -> Result<(), ActionError> {
@@ -76,6 +91,24 @@ pub(crate) fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(
     validate_session_color(config.color.as_deref())?;
     validate_cli(&config.queen_config.cli)?;
 
+    if config.execution_policy.workspace_strategy == WorkspaceStrategy::None {
+        return Err(ActionError::bad_request(
+            "Hive launches require a shared_cell or isolated_cell workspace strategy",
+        ));
+    }
+    if config.execution_policy.launch_kind == HiveLaunchKind::Solo {
+        if !config.workers.is_empty() {
+            return Err(ActionError::bad_request(
+                "Explicit Solo launches cannot include managed principals",
+            ));
+        }
+        if config.with_planning {
+            return Err(ActionError::bad_request(
+                "Explicit Solo launches do not support the Master Planner phase",
+            ));
+        }
+    }
+
     for worker in &config.workers {
         validate_cli(&worker.cli)?;
     }
@@ -89,15 +122,7 @@ pub(crate) fn validate_hive_launch_config(config: &HiveLaunchConfig) -> Result<(
     if let Some(qa_workers) = &config.qa_workers {
         for qa_worker in qa_workers {
             validate_cli(&qa_worker.cli)?;
-            match qa_worker.specialization.as_str() {
-                "ui" | "api" | "a11y" => {}
-                other => {
-                    return Err(ActionError::bad_request(format!(
-                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
-                        other
-                    )));
-                }
-            }
+            validate_qa_specialization(&qa_worker.specialization)?;
         }
     }
 
@@ -182,15 +207,7 @@ fn validate_swarm_launch_config(config: &SwarmLaunchConfig) -> Result<(), Action
     if let Some(qa_workers) = &config.qa_workers {
         for qa_worker in qa_workers {
             validate_cli(&qa_worker.cli)?;
-            match qa_worker.specialization.as_str() {
-                "ui" | "api" | "a11y" => {}
-                other => {
-                    return Err(ActionError::bad_request(format!(
-                        "Invalid QA specialization '{}'. Valid options: ui, api, a11y",
-                        other
-                    )));
-                }
-            }
+            validate_qa_specialization(&qa_worker.specialization)?;
         }
     }
 
@@ -882,4 +899,15 @@ pub fn register(registry: &mut ActionRegistry) {
     registry.register(Box::new(LaunchDebate));
     registry.register(Box::new(UpdateSessionMetadata));
     registry.register(Box::new(UpdateSessionMetadataInfo));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_qa_specialization;
+
+    #[test]
+    fn adversarial_qa_specialization_matches_the_launch_ui() {
+        assert!(validate_qa_specialization("adversarial").is_ok());
+        assert!(validate_qa_specialization("security").is_err());
+    }
 }

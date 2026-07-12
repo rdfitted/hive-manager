@@ -17,6 +17,7 @@ pub enum AgentRole {
     Judge { session_id: String },
     Evaluator,
     QaWorker { index: u8, parent: Option<String> },
+    Prince,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

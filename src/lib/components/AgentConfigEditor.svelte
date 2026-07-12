@@ -1,10 +1,11 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { AgentConfig } from '$lib/stores/sessions';
-  import { cliOptions } from '$lib/config/clis';
+  import { cliOptions, getDefaultModel, normalizeModelId } from '$lib/config/clis';
 
   export let config: AgentConfig;
   export let showLabel: boolean = true;
+  export let idPrefix: string;
 
   const dispatch = createEventDispatcher<{ change: AgentConfig }>();
 
@@ -14,6 +15,9 @@
   }
 
   const claudePresets: PresetOption[] = [
+    { value: 'fable-high', label: 'Fable 5 (High effort)' },
+    { value: 'fable-max', label: 'Fable 5 (Max effort)' },
+    { value: 'fable', label: 'Fable 5' },
     { value: 'opus-high', label: 'Opus (High effort)' },
     { value: 'opus-low', label: 'Opus (Low effort)' },
     { value: 'opus', label: 'Opus' },
@@ -26,6 +30,13 @@
   ];
 
   const codexPresets: PresetOption[] = [
+    { value: 'codex-gpt-5-6-sol', label: 'GPT-5.6 Sol' },
+    { value: 'codex-gpt-5-6-sol-low', label: 'GPT-5.6 Sol (Low effort)' },
+    { value: 'codex-gpt-5-6-sol-medium', label: 'GPT-5.6 Sol (Medium effort)' },
+    { value: 'codex-gpt-5-6-sol-high', label: 'GPT-5.6 Sol (High effort)' },
+    { value: 'codex-gpt-5-6-sol-xhigh', label: 'GPT-5.6 Sol (Extra high effort)' },
+    { value: 'codex-gpt-5-6-sol-max', label: 'GPT-5.6 Sol (Max effort)' },
+    { value: 'codex-gpt-5-6-sol-ultra', label: 'GPT-5.6 Sol (Ultra effort)' },
     { value: 'codex-gpt-5-5-low', label: 'GPT-5.5 (Low effort)' },
     { value: 'codex-gpt-5-5-medium', label: 'GPT-5.5 (Medium effort)' },
     { value: 'codex-gpt-5-5-high', label: 'GPT-5.5 (High effort)' },
@@ -89,14 +100,68 @@
 
   $: presetOptions = presetsByCliType[config.cli] ?? [];
 
-  // Default the preset selector to "custom" so the current model/flags are preserved
-  // unless the user explicitly chooses a preset.
-  $: selectedPreset = 'custom';
+  function configuredEffort(value: AgentConfig): string | undefined {
+    const flags = value.flags || [];
+    if (value.cli === 'codex') {
+      for (let i = 0; i < flags.length - 1; i += 1) {
+        if (flags[i] === '-c' || flags[i] === '--config') {
+          const match = flags[i + 1].match(/^model_reasoning_effort=["']?([^"']+)["']?$/);
+          if (match) return match[1];
+        }
+      }
+    }
+
+    if (value.cli === 'claude') {
+      for (let i = 0; i < flags.length - 1; i += 1) {
+        if (flags[i] !== '--settings') continue;
+        try {
+          const settings = JSON.parse(flags[i + 1]) as { effortLevel?: string };
+          if (settings.effortLevel) return settings.effortLevel;
+        } catch {
+          // Preserve custom settings; they simply cannot map to a preset.
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  function inferSelectedPreset(value: AgentConfig): string {
+    const effort = configuredEffort(value);
+    if (value.cli === 'codex' && value.model && effort) {
+      const model = normalizeModelId(value.cli, value.model);
+      const candidate = `codex-${model.replaceAll('.', '-')}-${effort}`;
+      if (codexPresets.some((preset) => preset.value === candidate)) return candidate;
+    }
+    if (value.cli === 'codex' && value.model && !effort) {
+      const model = normalizeModelId(value.cli, value.model);
+      const candidate = `codex-${model.replaceAll('.', '-')}`;
+      if (codexPresets.some((preset) => preset.value === candidate)) return candidate;
+    }
+    if (value.cli === 'claude' && value.model === 'opus') {
+      if (effort === 'high' || effort === 'low') return `opus-${effort}`;
+      return 'opus';
+    }
+    if (value.cli === 'claude' && value.model === 'fable') {
+      if (effort === 'high' || effort === 'max') return `fable-${effort}`;
+      return 'fable';
+    }
+    if (value.model && presetOptions.some((preset) => preset.value === value.model)) {
+      return value.model;
+    }
+    return 'custom';
+  }
+
+  $: selectedPreset = inferSelectedPreset(config);
+  $: effectiveModel = config.model
+    ? normalizeModelId(config.cli, config.model)
+    : getDefaultModel(config.cli) || 'CLI default';
+  $: effectiveEffort = configuredEffort(config);
 
   $: presetDescription = config.cli === 'claude'
-    ? 'Opus presets add --settings {"effortLevel":"high|low"}'
+    ? 'Claude effort presets add --settings {"effortLevel":"low|high|max"}'
     : config.cli === 'codex'
-      ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh"'
+      ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh|max|ultra"'
       : config.cli === 'gemini'
         ? 'Gemini model IDs for `gemini -m`'
         : config.cli === 'cursor'
@@ -114,30 +179,28 @@
     const nextCli = target.value;
     const baseFlags = stripManagedEffortFlags('codex', stripManagedEffortFlags('claude', config.flags || []));
 
-    let model: string | undefined = undefined;
+    let model: string | undefined = getDefaultModel(nextCli) || undefined;
     let flags = [...baseFlags];
 
     if (nextCli === 'claude') {
-      model = 'opus';
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
-      model = 'gpt-5.5';
       flags.push('-c', 'model_reasoning_effort="medium"');
     } else if (nextCli === 'gemini') {
       // Aligns with clis.ts defaultModel, Rust storage::default_config, and
       // CliRegistry::default_model("gemini") — single source of truth.
-      model = 'gemini-2.5-pro';
+      model = getDefaultModel('gemini');
     } else if (nextCli === 'antigravity') {
       // agy has no --model flag; model is set globally in settings.json.
       model = undefined;
     } else if (nextCli === 'droid') {
-      model = 'glm-5.1';
+      model = getDefaultModel('droid');
     } else if (nextCli === 'cursor') {
-      model = 'composer-2.5';
+      model = getDefaultModel('cursor');
     } else if (nextCli === 'opencode') {
-      model = 'opencode/big-pickle';
+      model = getDefaultModel('opencode');
     } else if (nextCli === 'qwen') {
-      model = 'qwen3-coder';
+      model = getDefaultModel('qwen');
     }
 
     config = {
@@ -238,6 +301,44 @@
       case 'claude-haiku-4-5':
         model = 'claude-haiku-4-5';
         break;
+      case 'fable-high':
+        model = 'fable';
+        flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
+        break;
+      case 'fable-max':
+        model = 'fable';
+        flags.push('--settings', JSON.stringify({ effortLevel: 'max' }));
+        break;
+      case 'fable':
+        model = 'fable';
+        break;
+      case 'codex-gpt-5-6-sol-low':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="low"');
+        break;
+      case 'codex-gpt-5-6-sol-medium':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="medium"');
+        break;
+      case 'codex-gpt-5-6-sol-high':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="high"');
+        break;
+      case 'codex-gpt-5-6-sol-xhigh':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="xhigh"');
+        break;
+      case 'codex-gpt-5-6-sol-max':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="max"');
+        break;
+      case 'codex-gpt-5-6-sol-ultra':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="ultra"');
+        break;
+      case 'codex-gpt-5-6-sol':
+        model = 'gpt-5.6-sol';
+        break;
       case 'codex-gpt-5-5-low':
         model = 'gpt-5.5';
         flags.push('-c', 'model_reasoning_effort="low"');
@@ -333,9 +434,9 @@
 <div class="config-editor">
   {#if showLabel}
     <div class="field">
-      <label for="label">Label</label>
+      <label for={`${idPrefix}-label`}>Label</label>
       <input
-        id="label"
+        id={`${idPrefix}-label`}
         type="text"
         placeholder="Optional display name"
         value={config.label || ''}
@@ -345,12 +446,13 @@
   {/if}
 
   <div class="field">
-    <label for="cli">CLI</label>
+    <label for={`${idPrefix}-cli`}>CLI</label>
     <select
-      id="cli"
+      id={`${idPrefix}-cli`}
       value={config.cli}
       on:change={handleCliChange}
       class="cli-select"
+      aria-describedby={`${idPrefix}-cli-description`}
     >
       {#each cliOptions as cli}
         <option value={cli.value} title={cli.description}>
@@ -358,14 +460,14 @@
         </option>
       {/each}
     </select>
-    <span class="cli-description">
+    <span class="cli-description" id={`${idPrefix}-cli-description`}>
       {cliOptions.find(c => c.value === config.cli)?.description || ''}
     </span>
   </div>
 
   {#if config.cli === 'antigravity'}
     <div class="field">
-      <span class="label-text">Model</span>
+      <span class="label-text" id={`${idPrefix}-model-label`}>Model</span>
       <div class="settings-note">
         Set globally in <code>~/.gemini/antigravity-cli/settings.json</code>
         (<code>"model"</code> key). Per-worker override is not supported by
@@ -374,12 +476,13 @@
     </div>
   {:else if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini' || config.cli === 'cursor' || config.cli === 'droid' || config.cli === 'opencode' || config.cli === 'qwen'}
     <div class="field">
-      <label for="preset">Model &amp; Effort</label>
+      <label for={`${idPrefix}-preset`}>Model &amp; Effort</label>
       <select
-        id="preset"
+        id={`${idPrefix}-preset`}
         value={selectedPreset}
         on:change={handlePresetChange}
         class="cli-select"
+        aria-describedby={`${idPrefix}-preset-description ${idPrefix}-effective-model`}
       >
         <option value="custom">Custom (keep current model)</option>
         {#each presetOptions as preset}
@@ -388,7 +491,10 @@
           </option>
         {/each}
       </select>
-      <span class="cli-description">{presetDescription}</span>
+      <span class="effective-model" id={`${idPrefix}-effective-model`}>
+        Effective: {effectiveModel}{effectiveEffort ? ` · ${effectiveEffort} effort` : ''}
+      </span>
+      <span class="cli-description" id={`${idPrefix}-preset-description`}>{presetDescription}</span>
     </div>
   {/if}
 </div>
@@ -437,6 +543,12 @@
     font-size: 11px;
     color: var(--text-secondary);
     opacity: 0.7;
+  }
+
+  .effective-model {
+    font-size: 11px;
+    color: var(--accent-cyan);
+    font-family: var(--font-mono);
   }
 
   input::placeholder {

@@ -36,6 +36,8 @@ The Evaluator must be a **peer** to the Queen, not a subordinate. Each preserves
 
 ## Architecture
 
+> **vNext terminology:** The Workers and QA Workers shown in this historical design are manager-launched **principals** in the macro topology. Any native children created inside a capable Claude or Codex harness are micro topology: they inherit the principal's Assignment Contract and cannot expand its authority. Master Planner is contract-only and stops before implementation.
+
 ### Bicameral Hive Structure
 
 ```
@@ -80,11 +82,11 @@ The Evaluator synthesizes their reports into a single verdict per milestone.
 ## Communication Flow
 
 ### Planning Phase
-1. Master Planner drafts spec
+1. Master Planner drafts the spec and bounded Assignment Contracts, then stops before implementation
 2. Spec sent to **both** Queen and Evaluator simultaneously
 3. Evaluator reviews spec and asks: "How will I verify this? What's testable?"
 4. Evaluator ←→ Master Planner negotiate until spec has concrete, gradable acceptance criteria
-5. Output: approved spec with embedded test plan and grading weights
+5. Output: approved spec plus operator-reviewable Assignment Contracts with embedded test plans and grading weights
 
 ### Build Phase
 1. Queen assigns work to Workers (existing flow)

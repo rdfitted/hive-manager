@@ -1,3 +1,4 @@
+use crate::tauri_shim::{AppHandle, Emitter};
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -6,14 +7,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::tauri_shim::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::artifacts::collector::ArtifactCollector;
 use crate::cli::{CliBehavior, CliRegistry};
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
-use crate::domain::ArtifactBundle;
+use crate::domain::{ArtifactBundle, HiveExecutionPolicy, HiveLaunchKind, WorkspaceStrategy};
 use crate::events::{EventBus, EventEmitter};
+use crate::orchestrator::session_orchestrator::SessionOrchestrator;
 use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager, WorkerRole};
 use crate::session::cell_status::{
     agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids,
@@ -23,6 +24,10 @@ use crate::session::polling_intervals::{
     format_poll_label, ACTIVATION_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL,
     SMOKE_EVALUATOR_FIRST_POLL_INTERVAL, SMOKE_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL,
     STANDARD_EVALUATOR_FIRST_POLL_INTERVAL, STANDARD_IDLE_POLL_INTERVAL,
+};
+use crate::session::prompt_contract::{
+    render_assignment_contract, render_capability_card, render_delegation_guidance,
+    render_role_kernel, render_workspace_contract, AssignmentSpec, ContractRole,
 };
 use crate::storage::{SessionStorage, StorageError};
 use crate::templates::{heartbeat_snippet, PromptContext, TemplateEngine};
@@ -271,10 +276,24 @@ pub enum SessionState {
     AwaitingVerdictSelection,
     MergingWinner,
     SpawningEvaluator,
-    QaInProgress { iteration: Option<u8> },
+    QaInProgress {
+        iteration: Option<u8>,
+    },
     QaPassed,
-    QaFailed { iteration: u8 },
+    QaFailed {
+        iteration: u8,
+    },
     QaMaxRetriesExceeded,
+    /// The Evaluator returned a verdict (or a non-zero set of findings) and a
+    /// Prince peer is now resolving them with its own fix team. Blocks PR push /
+    /// completion until the Prince self-certifies via `prince/verdict`.
+    PrinceRemediation,
+    /// QA could not produce a usable verdict — the verdict timed out with no
+    /// response, or the Evaluator reported BLOCKED (e.g. a pass-criterion needs a
+    /// UI that isn't present, or QA workers failed to report over HTTP). Terminal
+    /// for the automated loop: never auto-ships. Operator unblocks via
+    /// force-pass / force-fail.
+    QaInconclusive,
     Running,
     Paused,
     Completed,
@@ -294,6 +313,8 @@ impl SessionState {
                 | SessionState::QaInProgress { .. }
                 | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
+                | SessionState::PrinceRemediation
+                | SessionState::QaInconclusive
         )
     }
 }
@@ -331,6 +352,8 @@ pub struct HiveLaunchConfig {
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
     #[serde(default)]
     pub smoke_test: bool, // If true, create a minimal test plan without real investigation
+    #[serde(default)]
+    pub execution_policy: HiveExecutionPolicy,
 }
 
 /// Launch config for **Research** mode.
@@ -589,6 +612,16 @@ pub struct Session {
     pub agents: Vec<AgentInfo>,
     pub default_cli: String,
     pub default_model: Option<String>,
+    /// Default managed-principal CLI/model/flags. `None` CLI is the legacy sentinel:
+    /// dynamic workers fall back to the historical session (Queen) defaults.
+    #[serde(default)]
+    pub default_principal_cli: Option<String>,
+    #[serde(default)]
+    pub default_principal_model: Option<String>,
+    #[serde(default)]
+    pub default_principal_flags: Vec<String>,
+    #[serde(default)]
+    pub execution_policy: HiveExecutionPolicy,
     #[serde(default)]
     pub qa_workers: Vec<QaWorkerConfig>,
     pub max_qa_iterations: u8,
@@ -1035,6 +1068,10 @@ impl SessionController {
             agents,
             default_cli: cmd.to_string(),
             default_model: launch_model,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -1260,6 +1297,50 @@ impl SessionController {
         sessions.get(session_id).map(|s| s.default_cli.clone())
     }
 
+    /// Return the durable defaults for a newly managed principal. Sessions from
+    /// before this contract keep `default_principal_cli = None`, which deliberately
+    /// falls back to their historical session/Queen defaults.
+    pub fn get_session_principal_defaults(&self, session_id: &str) -> Option<AgentConfig> {
+        let sessions = self.sessions.read();
+        sessions.get(session_id).map(|session| {
+            let has_explicit_principal_default = session
+                .default_principal_cli
+                .as_deref()
+                .is_some_and(|cli| !cli.trim().is_empty());
+            let cli = session
+                .default_principal_cli
+                .clone()
+                .filter(|cli| !cli.trim().is_empty())
+                .unwrap_or_else(|| session.default_cli.clone());
+            let model = if has_explicit_principal_default {
+                session
+                    .default_principal_model
+                    .clone()
+                    .or_else(|| CliRegistry::default_model(&cli).map(ToString::to_string))
+            } else {
+                session
+                    .default_model
+                    .clone()
+                    .or_else(|| CliRegistry::default_model(&cli).map(ToString::to_string))
+            };
+
+            AgentConfig {
+                cli,
+                model,
+                flags: if has_explicit_principal_default {
+                    session.default_principal_flags.clone()
+                } else {
+                    Vec::new()
+                },
+                label: None,
+                name: None,
+                description: None,
+                role: None,
+                initial_prompt: None,
+            }
+        })
+    }
+
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
         let heartbeats = self.agent_heartbeats.read();
@@ -1426,7 +1507,7 @@ impl SessionController {
         heartbeats.get(session_id).cloned().unwrap_or_default()
     }
 
-    fn emit_session_update(&self, session_id: &str) {
+    pub(crate) fn emit_session_update(&self, session_id: &str) {
         let session = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -1492,17 +1573,16 @@ impl SessionController {
             existing.branch.clone(),
             incoming.branch.clone(),
         ]);
-        let summary = match (existing.summary, incoming.summary) {
-            (Some(a), Some(b)) if a != b => Some(format!("{} · {}", a, b)),
-            (Some(a), _) => Some(a),
-            (_, Some(b)) => Some(b),
-            _ => None,
-        };
+        let summary = Self::merge_primary_cell_summaries(existing.summary, incoming.summary);
         let test_results = incoming.test_results.or(existing.test_results);
         let diff_summary =
             Self::merge_primary_cell_diff_summaries(existing.diff_summary, incoming.diff_summary);
         let mut unresolved_issues = existing.unresolved_issues;
-        unresolved_issues.extend(incoming.unresolved_issues);
+        for issue in incoming.unresolved_issues {
+            if !unresolved_issues.iter().any(|existing| existing == &issue) {
+                unresolved_issues.push(issue);
+            }
+        }
         let confidence = match (existing.confidence, incoming.confidence) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) => Some(a),
@@ -1526,22 +1606,15 @@ impl SessionController {
     }
 
     fn merge_primary_cell_branch_labels(branches: [String; 2]) -> String {
-        let unique = branches
-            .into_iter()
-            .filter_map(|branch| {
+        let mut unique = Vec::new();
+        for branch_group in branches {
+            for branch in branch_group.split(" | ") {
                 let trimmed = branch.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
+                if !trimmed.is_empty() && !unique.iter().any(|value| value == trimmed) {
+                    unique.push(trimmed.to_string());
                 }
-            })
-            .fold(Vec::new(), |mut acc, branch| {
-                if !acc.contains(&branch) {
-                    acc.push(branch);
-                }
-                acc
-            });
+            }
+        }
 
         match unique.len() {
             0 => String::new(),
@@ -1558,18 +1631,33 @@ impl SessionController {
         }
     }
 
+    fn merge_primary_cell_summaries(
+        existing: Option<String>,
+        incoming: Option<String>,
+    ) -> Option<String> {
+        let mut unique = Vec::new();
+        for summary in [existing, incoming].into_iter().flatten() {
+            for segment in summary.split(" · ") {
+                let trimmed = segment.trim();
+                if !trimmed.is_empty() && !unique.iter().any(|value: &String| value == trimmed) {
+                    unique.push(trimmed.to_string());
+                }
+            }
+        }
+        (!unique.is_empty()).then(|| unique.join(" · "))
+    }
+
     fn merge_primary_cell_diff_summaries(
         existing: Option<String>,
         incoming: Option<String>,
     ) -> Option<String> {
         let mut unique = Vec::new();
         for summary in [existing, incoming].into_iter().flatten() {
-            let trimmed = summary.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if !unique.iter().any(|value: &String| value == trimmed) {
-                unique.push(trimmed.to_string());
+            for segment in summary.split("\n---\n") {
+                let trimmed = segment.trim();
+                if !trimmed.is_empty() && !unique.iter().any(|value: &String| value == trimmed) {
+                    unique.push(trimmed.to_string());
+                }
             }
         }
 
@@ -1593,6 +1681,16 @@ impl SessionController {
         session: &Session,
         agent: &AgentInfo,
     ) -> Option<PathBuf> {
+        if session.no_git {
+            return None;
+        }
+        if matches!(&session.session_type, SessionType::Hive { .. })
+            && session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell
+            && matches!(&agent.role, AgentRole::Queen | AgentRole::Worker { .. })
+        {
+            return session.worktree_path.as_ref().map(PathBuf::from);
+        }
+
         match &agent.role {
             AgentRole::Fusion { variant } => match &session.session_type {
                 SessionType::Debate { .. } => {
@@ -1659,6 +1757,9 @@ impl SessionController {
         let cell_id = agent_cell_id(session, agent);
         let session_id = session.id.as_str();
         if cell_id == PRIMARY_CELL_ID {
+            // Primary-cell artifacts are cumulative evidence. The merge helpers
+            // deduplicate repeated shared-workspace snapshots while preserving an
+            // earlier worker's evidence after the Queen commits and the live diff changes.
             let incoming_bundle = bundle;
             if let Err(err) =
                 storage.atomic_update_artifact(session_id, &cell_id, move |existing| {
@@ -2063,11 +2164,15 @@ impl SessionController {
         worker_cell_name: &str,
         task_file_path: &Path,
         prompt_file_path: Option<&Path>,
+        remove_worktree: bool,
     ) {
         if let Some(prompt_file_path) = prompt_file_path {
             Self::remove_worker_launch_file(session_id, worker_cell_name, prompt_file_path);
         }
         Self::remove_worker_launch_file(session_id, worker_cell_name, task_file_path);
+        if !remove_worktree {
+            return;
+        }
         if let Err(err) = remove_session_worktree_cell(project_path, session_id, worker_cell_name) {
             tracing::warn!(
                 "Worker launch rollback failed to remove worktree for session {} cell {}: {}",
@@ -2230,27 +2335,99 @@ impl SessionController {
         config
     }
 
+    fn configured_principal_defaults(
+        workers: &[AgentConfig],
+    ) -> (Option<String>, Option<String>, Vec<String>) {
+        if let Some(principal) = workers.first() {
+            let model = principal
+                .model
+                .clone()
+                .or_else(|| CliRegistry::default_model(&principal.cli).map(ToString::to_string));
+            return (Some(principal.cli.clone()), model, principal.flags.clone());
+        }
+
+        (
+            Some("codex".to_string()),
+            Some("gpt-5.6-sol".to_string()),
+            Vec::new(),
+        )
+    }
+
+    fn session_principal_cli(session: &Session) -> &str {
+        session
+            .default_principal_cli
+            .as_deref()
+            .filter(|cli| !cli.trim().is_empty())
+            .unwrap_or(&session.default_cli)
+    }
+
+    /// Code under review/remediation lives in the managed primary/Queen worktree.
+    /// Control-plane files remain rooted at `project_path`, so QA peers keep their
+    /// PTY CWD there and receive this path as explicit execution guidance.
+    fn execution_workspace(session: &Session) -> String {
+        if !session.no_git
+            && matches!(
+                &session.session_type,
+                SessionType::Hive { .. } | SessionType::Solo { .. }
+            )
+        {
+            if let Some(path) = session.worktree_path.as_ref() {
+                return path.clone();
+            }
+        }
+        session.project_path.to_string_lossy().to_string()
+    }
+
+    fn session_type_supports_dynamic_principals(session_type: &SessionType) -> bool {
+        matches!(
+            session_type,
+            SessionType::Hive { .. } | SessionType::Swarm { .. }
+        )
+    }
+
+    fn session_allows_dynamic_principal(
+        session: &Session,
+        role: &WorkerRole,
+        parent_id: Option<&str>,
+    ) -> bool {
+        if Self::session_type_supports_dynamic_principals(&session.session_type) {
+            return true;
+        }
+
+        let prince_id = format!("{}-prince", session.id);
+        matches!(&session.session_type, SessionType::Solo { .. })
+            && session.state == SessionState::PrinceRemediation
+            && role.role_type.eq_ignore_ascii_case("prince-fixer")
+            && parent_id == Some(prince_id.as_str())
+    }
+
     /// Build command and args from AgentConfig
     /// Returns (command, args) with CLI-specific flags already added
     fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
         let mut args = Vec::new();
+        let (effective_model, extra_flags) = CliRegistry::resolve_model_and_flags(
+            &config.cli,
+            config.model.as_deref(),
+            CliRegistry::default_model(&config.cli),
+            &config.flags,
+        );
 
         // Add CLI-specific flags
         match config.cli.as_str() {
             "claude" => {
                 // Claude CLI requires --dangerously-skip-permissions for automated use
                 args.push("--dangerously-skip-permissions".to_string());
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "gemini" => {
                 // Gemini CLI uses -y for auto-approve and -m for model.
                 args.push("-y".to_string());
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "antigravity" => {
@@ -2263,16 +2440,16 @@ impl SessionController {
             "codex" => {
                 // Codex CLI uses --dangerously-bypass-approvals-and-sandbox
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "opencode" => {
                 // OpenCode relies on OPENCODE_YOLO=true env var (set in batch file)
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "cursor" => {
@@ -2291,22 +2468,22 @@ impl SessionController {
             "qwen" => {
                 // Qwen Code CLI - interactive mode with auto-approve
                 args.push("-y".to_string()); // YOLO mode for auto-approve
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             _ => {
                 // For other CLIs, just add model flag if specified
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
         }
 
         // Add any extra flags from config
-        args.extend(config.flags.clone());
+        args.extend(extra_flags);
 
         // Determine the actual command to run
         let command = match config.cli.as_str() {
@@ -2398,21 +2575,27 @@ impl SessionController {
     /// When task is None, opens the CLI in interactive mode.
     fn build_solo_command(config: &AgentConfig, task: Option<&str>) -> (String, Vec<String>) {
         let mut args = Vec::new();
+        let (effective_model, extra_flags) = CliRegistry::resolve_model_and_flags(
+            &config.cli,
+            config.model.as_deref(),
+            CliRegistry::default_model(&config.cli),
+            &config.flags,
+        );
 
         // Add CLI-specific auto-approve flags (matching build_command for hive/swarm modes)
         match config.cli.as_str() {
             "claude" => {
                 args.push("--dangerously-skip-permissions".to_string());
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "gemini" => {
                 args.push("-y".to_string());
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "antigravity" => {
@@ -2422,22 +2605,22 @@ impl SessionController {
             }
             "codex" => {
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "qwen" => {
                 args.push("-y".to_string());
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "opencode" => {
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
             "cursor" => {
@@ -2450,9 +2633,9 @@ impl SessionController {
                 // No auto-approve flag available
             }
             _ => {
-                if let Some(ref model) = config.model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             }
         }
@@ -2462,7 +2645,7 @@ impl SessionController {
             Self::add_inline_task_to_args(&config.cli, &mut args, task);
         }
 
-        args.extend(config.flags.clone());
+        args.extend(extra_flags);
 
         let command = match config.cli.as_str() {
             "cursor" => "wsl".to_string(),
@@ -2470,6 +2653,82 @@ impl SessionController {
             _ => config.cli.clone(),
         };
         (command, args)
+    }
+
+    fn qa_blocked_verdict_grep_pattern() -> &'static str {
+        r#""verdict"[[:space:]]*:[[:space:]]*"BLOCKED"|\\\"verdict\\\"[[:space:]]*:[[:space:]]*\\\"BLOCKED\\\""#
+    }
+
+    fn build_solo_evaluator_prompt(
+        session_id: &str,
+        project_path: &Path,
+        execution_workspace: &str,
+        task: Option<&str>,
+    ) -> String {
+        let session_root = Self::session_root_path(project_path, session_id);
+        let qa_handoff = Self::build_qa_milestone_handoff(
+            session_id,
+            &session_root,
+            "the Solo implementation and its focused validation",
+        );
+        let qa_verdict = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let prince_verdict =
+            Self::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
+        let qa_blocked_pattern = Self::qa_blocked_verdict_grep_pattern();
+        let objective = task.unwrap_or("Complete the operator's bounded Solo assignment.");
+
+        format!(
+            r#"# Solo Implementation Contract
+
+You are the sole implementation agent for session `{session_id}`. Work in
+`{execution_workspace}`. The backend has already launched an Evaluator and a
+Prince as verification peers; do not spawn either one.
+
+## Objective
+
+{objective}
+
+## Required Delivery Protocol
+
+1. Implement the objective and run focused validation in `{execution_workspace}`.
+2. Review the diff and commit the completed Solo implementation on the current
+   backend-created branch before signaling QA. Do not push or switch branches.
+3. Execute the QA Milestone Handoff below exactly once.
+4. Poll `{qa_verdict}` until the Evaluator responds. If the verdict is BLOCKED,
+   stop immediately and escalate to the operator; do not wait for Prince or
+   claim completion.
+5. For PASS or FAIL, poll `{prince_verdict}` until the Prince has integrated and
+   certified any required remediation. On PASS/DONE, re-run focused validation
+   and report the final result. Do not create generic managed principals yourself.
+
+{qa_handoff}
+
+## Verification Wait
+
+```bash
+while [ ! -f "{qa_verdict}" ]; do
+  curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+    -H "Content-Type: application/json" \
+    -d '{{"agent_id":"{session_id}-worker-1","status":"working","summary":"Waiting for Evaluator verdict"}}'
+  sleep 30
+done
+cat "{qa_verdict}"
+
+if grep -Eq '{qa_blocked_pattern}' "{qa_verdict}"; then
+  echo "QA is BLOCKED; stop and escalate to the operator. Do not wait for Prince remediation." >&2
+  exit 1
+fi
+
+while [ ! -f "{prince_verdict}" ]; do
+  curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+    -H "Content-Type: application/json" \
+    -d '{{"agent_id":"{session_id}-worker-1","status":"working","summary":"Waiting for Prince remediation"}}'
+  sleep 30
+done
+cat "{prince_verdict}"
+```
+"#,
+        )
     }
 
     fn run_git_in_dir(project_path: &PathBuf, args: &[&str]) -> Result<String, String> {
@@ -2764,6 +3023,16 @@ Last updated: {timestamp}
             .join(format!("worker-{}-task.md", worker_index))
     }
 
+    fn session_task_file_path(
+        project_path: &Path,
+        session_id: &str,
+        worker_index: usize,
+    ) -> PathBuf {
+        Self::session_root_path(project_path, session_id)
+            .join("tasks")
+            .join(format!("worker-{}-task.md", worker_index))
+    }
+
     pub(crate) fn absolute_task_file_path_for_worker(
         project_path: &Path,
         session_id: &str,
@@ -2775,6 +3044,40 @@ Last updated: {timestamp}
             .join(session_id)
             .join(format!("worker-{}", worker_index));
         Self::task_file_path_for_worker(&worktree_path, worker_index)
+    }
+
+    pub(crate) fn task_file_path_for_session_worker(
+        session: &Session,
+        worker_index: usize,
+    ) -> Result<PathBuf, String> {
+        if session.no_git {
+            return Ok(Self::session_task_file_path(
+                &session.project_path,
+                &session.id,
+                worker_index,
+            ));
+        }
+
+        if matches!(&session.session_type, SessionType::Hive { .. })
+            && session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell
+        {
+            let primary = session.worktree_path.as_deref().ok_or_else(|| {
+                format!(
+                    "Shared-cell session {} is missing its primary worktree path",
+                    session.id
+                )
+            })?;
+            return Ok(Self::task_file_path_for_worker(
+                Path::new(primary),
+                worker_index,
+            ));
+        }
+
+        Ok(Self::absolute_task_file_path_for_worker(
+            &session.project_path,
+            &session.id,
+            worker_index,
+        ))
     }
 
     pub(crate) fn absolute_task_file_path_for_qa_worker(
@@ -3226,6 +3529,21 @@ Last updated: {timestamp}
         )
     }
 
+    fn prince_required_protocol(session_id: &str) -> String {
+        format!(
+            r#"## Required Protocol
+```text
+1. You MUST follow every numbered protocol in this prompt exactly as written.
+2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
+3. The backend already launched you as `AgentRole::Prince`. You MUST NOT spawn another Prince or an Evaluator.
+4. You MUST wait for `.hive-manager/{session_id}/peer/qa-verdict.json` before you plan or spawn fixers.
+5. You MUST spawn fixers via `POST /api/sessions/{session_id}/workers` using the session CLI, and self-certify via `POST /api/sessions/{session_id}/prince/verdict`.
+6. You MUST NOT push the PR or call `/complete` — the Queen pushes after you certify.
+```"#,
+            session_id = session_id,
+        )
+    }
+
     fn queen_post_workers_protocol(
         session_id: &str,
         session_root: &Path,
@@ -3234,6 +3552,8 @@ Last updated: {timestamp}
         let milestone_ready_path =
             Self::prompt_path(&session_root.join("peer").join("milestone-ready.json"));
         let qa_verdict_path = Self::prompt_path(&session_root.join("peer").join("qa-verdict.json"));
+        let prince_verdict_path =
+            Self::prompt_path(&session_root.join("peer").join("prince-verdict.json"));
 
         if !has_evaluator {
             return format!(
@@ -3264,7 +3584,7 @@ Last updated: {timestamp}
         format!(
             r#"## Post-Workers Protocol (MANDATORY)
 
-Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). It already exists as `AgentRole::Evaluator`. You MUST NOT spawn an Evaluator. DO NOT `curl POST /workers` with `role=evaluator`. DO NOT `curl POST /evaluators`. Signal via `{milestone_ready_path}` and WAIT for `{qa_verdict_path}`.
+Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). They already exist as `AgentRole::Evaluator` and `AgentRole::Prince`. You MUST NOT spawn either one. DO NOT `curl POST /workers` with `role=evaluator`, DO NOT `curl POST /evaluators`, and DO NOT spawn a Prince. Signal QA via `{milestone_ready_path}`, WAIT for `{qa_verdict_path}`, then WAIT for `{prince_verdict_path}` before you push.
 
 1. You MUST execute the QA Milestone Handoff block below exactly as written. Treat Step 2 of that handoff as blocking.
 2. You MUST wait for the Evaluator verdict by polling `{qa_verdict_path}` inline. You MUST NOT use `/loop`.
@@ -3277,27 +3597,40 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
    done
    cat "{qa_verdict_path}"
    ```
-3. You MUST inspect the verdict. If it says `PASS`, continue to Step 5. If it says `FAIL`, continue to Step 4.
-4. You MUST spawn a Reconciler worker and the required resolver workers via `POST /api/sessions/{session_id}/workers`. Reconcile Evaluator findings, external review comments, and your own integrity concerns before continuing.
+3. You MUST inspect the verdict.
+   - If it says `PASS` or `FAIL`, the Prince automatically takes over remediation of the QA findings. Continue to Step 4.
+   - If it says `BLOCKED`, QA could not produce a usable verdict (read the rationale — typically a missing UI/host or a transport failure). STOP. Do NOT push. Surface to the operator (they will force-pass / force-fail).
+4. You MUST wait for the Prince to finish remediation by polling `{prince_verdict_path}` inline. The Prince reads the QA findings, fixes them with its OWN fix team, and self-certifies. You MUST NOT spawn Reconciler or Resolver workers for QA findings — remediating QA findings is the Prince's job, not yours.
    ```bash
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate evaluator verdicts, external review comments, and integrity findings into one fix list"}}'
-
-   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-     -H "Content-Type: application/json" \
-     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM findings from the reconciled list"}}'
+   while [ ! -f "{prince_verdict_path}" ]; do
+     curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{{"agent_id":"queen","status":"working","summary":"Waiting for Prince remediation"}}'
+     sleep 30
+   done
+   cat "{prince_verdict_path}"
    ```
+   - If the Prince verdict is `PASS`/`DONE`, continue to Step 5.
+   - If the Prince verdict is `BLOCKED`, STOP. Do NOT push. Surface to the operator.
 5. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
-6. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow before looping back to Step 4 whenever unresolved findings remain:
+6. You MUST wait 10 minutes, then collect EXTERNAL PR review comments and resolve them. The Reconciler/Resolver workers here are for PR review comments ONLY — a separate concern from the QA findings the Prince already handled. Whenever unresolved PR comments remain, spawn them, integrate their fixes, and return to Step 5:
    ```bash
    gh api repos/<owner>/<repo>/issues/<pr-number>/comments
    gh api repos/<owner>/<repo>/pulls/<pr-number>/comments
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"reconciler","cli":"<configured-cli>","name":"Reconciler","description":"Consolidate external PR review comments into one fix list"}}'
+
+   curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
+     -H "Content-Type: application/json" \
+     -d '{{"role_type":"resolver","cli":"<configured-cli>","name":"Resolver 1","description":"Fix HIGH/MEDIUM external PR review comments from the reconciled list"}}'
    ```
-7. You MUST call `POST /api/sessions/{session_id}/complete` only after QA is PASS, the latest push has aged at least 10 minutes, and there are no new unresolved PR comments.
+7. You MUST call `POST /api/sessions/{session_id}/complete` only after QA is resolved, the Prince has certified `PASS`, the latest push has aged at least 10 minutes, and there are no new unresolved PR comments.
 "#,
             milestone_ready_path = milestone_ready_path,
             qa_verdict_path = qa_verdict_path,
+            prince_verdict_path = prince_verdict_path,
             session_id = session_id,
         )
     }
@@ -3306,11 +3639,19 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         project_path.join(".hive-manager").join(session_id)
     }
 
+    /// Roughly one adversarial QA agent for every two of the Queen's coding workers
+    /// (`ceil(worker_count / 2)`), computed without overflow. A hive with no coding
+    /// workers gets none.
+    fn adversarial_worker_count(worker_count: u8) -> u8 {
+        (worker_count / 2) + (worker_count % 2)
+    }
+
     fn build_evaluator_qa_plan(
         default_config: &AgentConfig,
         qa_workers: &[QaWorkerConfig],
+        worker_count: u8,
     ) -> (String, String, String, String) {
-        let configured_workers = if qa_workers.is_empty() {
+        let mut configured_workers = if qa_workers.is_empty() {
             vec![
                 QaWorkerConfig {
                     specialization: "api".to_string(),
@@ -3338,6 +3679,25 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             qa_workers.to_vec()
         };
 
+        let configured_adversarial_count = configured_workers
+            .iter()
+            .filter(|worker| worker.specialization.eq_ignore_ascii_case("adversarial"))
+            .count();
+        let adversarial_target = Self::adversarial_worker_count(worker_count) as usize;
+
+        // Adversarial agents (~1 per 2 coding workers) probe for the edge cases,
+        // races, and unhandled errors the happy-path specialists miss. Manually
+        // configured adversarial workers count toward, rather than suppress, the target.
+        for _ in configured_adversarial_count..adversarial_target {
+            configured_workers.push(QaWorkerConfig {
+                specialization: "adversarial".to_string(),
+                cli: default_config.cli.clone(),
+                model: default_config.model.clone(),
+                label: Some(Self::qa_worker_label("adversarial").to_string()),
+                flags: None,
+            });
+        }
+
         let mut command_block = String::new();
         for (index, worker) in configured_workers.iter().enumerate() {
             let label = worker
@@ -3362,7 +3722,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         }
 
         let intro = if qa_workers.is_empty() {
-            "You start with NO QA workers. You MUST spawn all three specializations before you grade any criterion.".to_string()
+            format!(
+                "You start with NO QA workers. You MUST spawn all {} QA workers listed below (UI, API, accessibility, plus adversarial coverage) before you grade any criterion.",
+                configured_workers.len()
+            )
         } else {
             format!(
                 "You start with NO QA workers. You MUST spawn the configured QA workers below ({} total) before you grade any criterion.",
@@ -3390,6 +3753,8 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         session_id: &str,
         config: &AgentConfig,
         qa_workers: &[QaWorkerConfig],
+        worker_count: u8,
+        execution_workspace: &str,
         smoke_test: bool,
     ) -> String {
         let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
@@ -3407,7 +3772,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             format!(r#""model": "{}", "#, default_model)
         };
         let (qa_worker_intro, qa_worker_spawn_plan, qa_worker_count, qa_worker_coverage_rule) =
-            Self::build_evaluator_qa_plan(config, qa_workers);
+            Self::build_evaluator_qa_plan(config, qa_workers, worker_count);
         let required_protocol = Self::evaluator_required_protocol(session_id);
 
         let mut variables = HashMap::new();
@@ -3423,6 +3788,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
         variables.insert("qa_worker_intro".to_string(), qa_worker_intro);
         variables.insert("qa_worker_spawn_plan".to_string(), qa_worker_spawn_plan);
         variables.insert("qa_worker_count".to_string(), qa_worker_count);
+        variables.insert(
+            "execution_workspace".to_string(),
+            execution_workspace.to_string(),
+        );
         variables.insert(
             "qa_worker_coverage_rule".to_string(),
             qa_worker_coverage_rule,
@@ -3484,12 +3853,108 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
     }
 
     #[allow(dead_code)]
+    fn build_prince_prompt(
+        session_id: &str,
+        config: &AgentConfig,
+        principal_defaults: &AgentConfig,
+        execution_workspace: &str,
+        workspace_strategy: WorkspaceStrategy,
+        smoke_test: bool,
+    ) -> String {
+        let custom_instructions = config.initial_prompt.as_deref().unwrap_or(
+            "You MUST resolve every QA finding with your fix team before the Queen pushes, then self-certify PASS (or BLOCKED if you cannot).",
+        );
+        let default_model = config.model.as_deref().unwrap_or("");
+        let default_model_suffix = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(", Model: {}", default_model)
+        };
+        let default_model_field = if default_model.is_empty() {
+            String::new()
+        } else {
+            format!(r#""model": "{}", "#, default_model)
+        };
+        let fixer_model = principal_defaults
+            .model
+            .as_deref()
+            .or_else(|| CliRegistry::default_model(&principal_defaults.cli))
+            .unwrap_or("");
+        let fixer_model_field = if fixer_model.is_empty() {
+            String::new()
+        } else {
+            format!(r#""model": "{}", "#, fixer_model)
+        };
+        let fixer_model_suffix = if fixer_model.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", fixer_model)
+        };
+        let fixer_flags_field = format!(
+            r#""flags": {}, "#,
+            serde_json::to_string(&principal_defaults.flags).unwrap_or_else(|_| "[]".to_string())
+        );
+        let integration_protocol = match workspace_strategy {
+            WorkspaceStrategy::SharedCell => format!(
+                "Fixers run in the shared execution workspace `{execution_workspace}`. Their edits are already present there: do not merge or cherry-pick fixer branches. Wait for every fixer, inspect the shared diff, and rerun the relevant checks before certifying. The Queen owns final commit and push authority."
+            ),
+            WorkspaceStrategy::IsolatedCell => format!(
+                "Each fixer runs in an isolated `hive/{session_id}/worker-N` worktree. Before certifying, obtain each completed fixer's commit SHA and integrate it into `{execution_workspace}` with `git -C \"{execution_workspace}\" cherry-pick <sha>` (or an equivalent explicit integration), resolve conflicts, and rerun the relevant checks there. The Queen owns final push authority."
+            ),
+            WorkspaceStrategy::None => format!(
+                "This session has no managed git worktrees. Fixers edit `{execution_workspace}` directly. Do not invent branches, merges, or cherry-picks; inspect the resulting files and rerun the relevant checks before certifying."
+            ),
+        };
+
+        let mut variables = HashMap::new();
+        variables.insert(
+            "custom_instructions".to_string(),
+            custom_instructions.to_string(),
+        );
+        variables.insert("default_cli".to_string(), config.cli.clone());
+        variables.insert("default_model".to_string(), default_model.to_string());
+        variables.insert("default_model_field".to_string(), default_model_field);
+        variables.insert("default_model_suffix".to_string(), default_model_suffix);
+        variables.insert("fixer_cli".to_string(), principal_defaults.cli.clone());
+        variables.insert("fixer_model".to_string(), fixer_model.to_string());
+        variables.insert("fixer_model_field".to_string(), fixer_model_field);
+        variables.insert("fixer_model_suffix".to_string(), fixer_model_suffix);
+        variables.insert("fixer_flags_field".to_string(), fixer_flags_field);
+        variables.insert(
+            "execution_workspace".to_string(),
+            execution_workspace.to_string(),
+        );
+        variables.insert("integration_protocol".to_string(), integration_protocol);
+        variables.insert(
+            "required_protocol".to_string(),
+            Self::prince_required_protocol(session_id),
+        );
+
+        let (idle_secs, active_secs) = if smoke_test {
+            (SMOKE_IDLE_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL)
+        } else {
+            (STANDARD_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL)
+        };
+        variables.insert(
+            "idle_poll_secs".to_string(),
+            idle_secs.as_secs().to_string(),
+        );
+        variables.insert(
+            "active_poll_secs".to_string(),
+            active_secs.as_secs().to_string(),
+        );
+
+        Self::render_named_prompt("roles/prince", session_id, None, variables)
+    }
+
+    #[allow(dead_code)]
     fn build_qa_worker_prompt(
         session_id: &str,
         index: u8,
         specialization: &str,
         config: &AgentConfig,
         auth: &AuthStrategy,
+        execution_workspace: &str,
     ) -> String {
         let (template_name, default_guidance) = match specialization {
             "ui" => (
@@ -3503,6 +3968,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             "a11y" => (
                 "roles/qa-worker-a11y",
                 "Audit accessibility rigorously with tooling and manual keyboard checks, then report criterion-numbered findings with exact defects.",
+            ),
+            "adversarial" => (
+                "roles/qa-worker-adversarial",
+                "Attack the implementation: hunt edge cases, race conditions, malformed input, boundary values, and unhandled errors the happy-path QA workers miss. Report criterion-numbered defects with a concrete reproduction.",
             ),
             _ => (
                 "roles/qa-worker-api",
@@ -3526,6 +3995,10 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             "supports_chrome".to_string(),
             (specialization == "ui" && config.cli == "claude").to_string(),
         );
+        variables.insert(
+            "execution_workspace".to_string(),
+            execution_workspace.to_string(),
+        );
 
         auth.apply_prompt_variables(session_id, &mut variables);
 
@@ -3537,6 +4010,7 @@ Hard rule: The Evaluator is created PROGRAMMATICALLY by the backend at session l
             "ui" => "UI QA",
             "api" => "API QA",
             "a11y" => "A11Y QA",
+            "adversarial" => "Adversarial QA",
             _ => "QA Worker",
         }
     }
@@ -4018,214 +4492,162 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
     fn build_master_planner_prompt(
         session_id: &str,
         user_prompt: &str,
+        planner_config: &AgentConfig,
         workers: &[AgentConfig],
+        execution_policy: &HiveExecutionPolicy,
+        project_path: &Path,
+        planner_workspace_path: &Path,
     ) -> String {
-        // Build worker info section
-        let mut worker_table = String::new();
-        for (i, worker_config) in workers.iter().enumerate() {
-            let index = i + 1;
-            let role_label = worker_config
+        let role = ContractRole::MasterPlanner;
+        let policy = &execution_policy.queen_delegation;
+        let card = CliRegistry::infer_capabilities(&planner_config.cli);
+        let delegation_authorized = CliRegistry::native_delegation_authorized(&card, policy);
+        let role_kernel = render_role_kernel(role);
+        let capability_card = render_capability_card(
+            planner_config,
+            role,
+            &card,
+            policy,
+            &execution_policy.workspace_strategy,
+            delegation_authorized,
+        );
+        let delegation = render_delegation_guidance(role, policy, delegation_authorized);
+        let workspace = render_workspace_contract(role, &execution_policy.workspace_strategy);
+        let objective = if user_prompt.trim().is_empty() {
+            "No objective was supplied. Ask the operator for one, then stop until it is provided."
+        } else {
+            user_prompt.trim()
+        };
+        let plan_path =
+            Self::prompt_path(&Self::session_root_path(project_path, session_id).join("plan.md"));
+        let planner_workspace_path = Self::prompt_path(planner_workspace_path);
+        let deliverables = [
+            plan_path.as_str(),
+            "One build-ready execution contract organized by coherent workstreams",
+            "Evidence-backed ownership, dependency, validation, and stop-condition decisions",
+        ];
+        let validation = [
+            "Every acceptance criterion maps to at least one validation gate",
+            "Overlapping files and serialized hotspots have one explicit owner/order",
+            "The plan is implementable without inventing missing authority",
+        ];
+        let stop_conditions = [
+            "The objective or acceptance criteria remain materially ambiguous",
+            "Required repository or issue context is unavailable",
+            "A safe ownership boundary cannot be defined without operator input",
+        ];
+        let assignment = render_assignment_contract(&AssignmentSpec {
+            objective,
+            access: "Read-only repository investigation; write only the session plan artifact",
+            owned_scope: "Planning artifacts under the current session; no production-code edits or git mutations",
+            authoritative_input: "The operator objective, repository state, project DNA, learnings, and referenced issue/spec material",
+            deliverables: &deliverables,
+            validation: &validation,
+            stop_conditions: &stop_conditions,
+        });
+
+        let policy_label = match policy.mode {
+            crate::domain::NativeDelegationMode::Disabled => "disabled",
+            crate::domain::NativeDelegationMode::Auto => "auto",
+            crate::domain::NativeDelegationMode::Encouraged => "encouraged",
+        };
+        let mut principal_roster = String::new();
+        for (index, principal) in workers.iter().enumerate() {
+            let label = principal
                 .role
                 .as_ref()
-                .map(|r| r.label.clone())
-                .unwrap_or_else(|| format!("Worker {}", index));
-            let cli = &worker_config.cli;
-            worker_table.push_str(&format!(
-                "| Worker {} | {} | {} |\n",
-                index, role_label, cli
+                .map(|role| role.label.as_str())
+                .unwrap_or("Coding Principal");
+            let model = principal.model.as_deref().unwrap_or("harness default");
+            let flags =
+                serde_json::to_string(&principal.flags).unwrap_or_else(|_| "[]".to_string());
+            let principal_card = CliRegistry::infer_capabilities(&principal.cli);
+            let authorized = CliRegistry::native_delegation_authorized(
+                &principal_card,
+                &execution_policy.principal_delegation,
+            );
+            principal_roster.push_str(&format!(
+                "| Principal {} | {} | `{}` | `{}` | `{}` | {} ({}) |\n",
+                index + 1,
+                label,
+                principal.cli,
+                model,
+                flags,
+                match execution_policy.principal_delegation.mode {
+                    crate::domain::NativeDelegationMode::Disabled => "disabled",
+                    crate::domain::NativeDelegationMode::Auto => "auto",
+                    crate::domain::NativeDelegationMode::Encouraged => "encouraged",
+                },
+                if authorized {
+                    "authorized"
+                } else {
+                    "not authorized"
+                },
             ));
         }
-
-        let worker_count = workers.len();
-
-        // Determine phase 0 based on whether a task was provided
-        let phase0 = if user_prompt.trim().is_empty() {
-            String::from(
-                r#"## PHASE 0: Gather Task (FIRST STEP)
-
-**No task was provided.** You must first ask the user what they want to work on.
-
-Ask the user: "What would you like me to help you with today? You can:
-- Provide a GitHub issue number (e.g., #42 or just 42)
-- Describe a feature you want to implement
-- Describe a bug you want to fix
-- Describe code you want to refactor"
-
-**If user provides a GitHub Issue number:**
-1. Fetch issue details using: gh issue view <number> --json number,title,body,labels,state
-2. Extract requirements and acceptance criteria from the issue body
-
-**Once you have the task, proceed to PHASE 1.**
-
----
-
-"#,
-            )
-        } else if user_prompt.trim().starts_with('#') || user_prompt.trim().parse::<u32>().is_ok() {
-            // Looks like a GitHub issue number
-            let issue_num = user_prompt.trim().trim_start_matches('#');
-            format!(
-                r#"## PHASE 0: Fetch GitHub Issue
-
-The user wants to work on GitHub issue: **#{}**
-
-**Fetch the issue details now:**
-```bash
-gh issue view {} --json number,title,body,labels,state
-```
-
-Extract from the response:
-- Issue title and full description
-- Acceptance criteria (look for checkboxes in the body)
-- Labels (bug, feature, enhancement, etc.)
-
-**Once you have the full context, proceed to PHASE 1.**
-
----
-
-"#,
-                issue_num, issue_num
-            )
-        } else {
-            format!(
-                r#"## PHASE 0: Task Provided
-
-The user wants to work on:
-
-**{}**
-
-**Proceed directly to PHASE 1.**
-
----
-
-"#,
-                user_prompt
-            )
-        };
+        if principal_roster.is_empty() {
+            principal_roster.push_str("| (none configured) | - | - | - | - | - |\n");
+        }
 
         format!(
-            r#"# Master Planner - Multi-Agent Codebase Investigation
+            r#"# Master Planner - Hive Execution Contract
 
-You are the **Master Planner** orchestrating a multi-agent investigation to create a detailed implementation plan.
+{role_kernel}
 
-## Session Info
+{capability_card}
 
-- **Session ID**: {session_id}
-- **Plan Output**: `.hive-manager/{session_id}/plan.md`
+{delegation}
 
-## Project Knowledge Intake
+{workspace}
 
-Before investigating, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+{assignment}
 
-## Configured Workers
+## Session
 
-The user has configured **{worker_count} workers** for this session:
+- Session ID: `{session_id}`
+- Plan output: `{plan_path}`
+- Runtime CWD: `{planner_workspace_path}`
+- Queen delegation policy: {policy_label}
 
-| Worker | Role | CLI |
-|--------|------|-----|
-{worker_table}
+Before planning, inspect `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, the current repository state, and any referenced issue or specification. If the objective is missing, ask once and stop. If it is an issue reference, resolve its requirements before partitioning work.
 
-**IMPORTANT**: Your plan MUST create tasks for ALL {worker_count} configured workers!
+## Configured Managed Principals
 
-## Your Mission
+This roster is available implementation capacity, not a required task count. Design workstreams from the objective and coupling boundaries; do not manufacture one task per roster slot.
 
-1. **Gather Task**: Understand what the user wants (GitHub issue or custom task)
-2. **Spawn Scout Agents**: Launch parallel investigation agents using external CLIs
-3. **Synthesize Findings**: Merge and deduplicate file discoveries
-4. **Create Plan**: Write comprehensive plan.md with **{worker_count} tasks** (one per worker)
-5. **Wait for Approval**: User will review and may request refinements
+| Slot | Role | CLI | Model | Flags | Native delegation |
+|------|------|-----|-------|-------|-------------------|
+{principal_roster}
+## Planning Method
 
----
+1. Establish the objective, non-goals, acceptance criteria, and authoritative evidence.
+2. Investigate the repository directly. Use native read-only scouts only when the Capability Card says delegation is authorized; choose the number from genuinely independent questions and wait for every scout before synthesis. Never launch unmanaged CLI subprocesses.
+3. Partition by coherent workstream and file ownership, not by agent count. Identify shared files, migrations, schemas, generated artifacts, lockfiles, and git operations that must be serialized.
+4. Define dependency order, integration gates, validation commands, observable evidence, risks, and explicit stop/escalation conditions.
+5. Write exactly one plan to `{plan_path}` and stop. Do not implement, edit production files, create branches, commit, push, or launch managed principals.
 
-{phase0}## PHASE 1: Multi-Agent Investigation (MANDATORY)
+## Required Plan Shape
 
-You MUST spawn Task agents that call external CLI tools via Bash. This provides diverse model perspectives and comprehensive coverage.
+- Objective, constraints, non-goals, and acceptance criteria
+- Evidence and repository findings
+- Coherent workstreams with owned paths and authoritative inputs
+- Ownership matrix and serialized hotspots
+- Dependency and integration order
+- Validation gates with commands/evidence
+- Risks, unresolved decisions, and stop conditions
+- Recommended principal assignment as a suggestion, not a roster-count invariant
 
-**Launch ALL scouts in PARALLEL (single message, multiple Task calls):**
-
-### Scout 1 - Codex GPT-5.5 Low (Deep Analysis)
-
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Investigate codebase for: [TASK]. Find relevant files, architecture patterns, entry points.' Return file paths with relevance notes.")
-
-### Scout 2 - Codex GPT-5.5 Low (Pattern Recognition)
-
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Analyze codebase for: [TASK]. Focus on code patterns, affected components, dependencies.' Return file paths with observations.")
-
-### Scout 3 - Codex GPT-5.5 Medium (Quick Search)
-
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"medium\" 'Scout codebase for: [TASK]. Identify entry points, test files, implementation surface.' Return file paths with notes.")
-
-**CRITICAL RULES:**
-- Replace [TASK] with the actual task description from Phase 0
-- Launch ALL 3 scouts in PARALLEL using a SINGLE message
-- Wait for ALL scouts to complete before proceeding
-
----
-
-## PHASE 2: Synthesize Findings
-
-After all scouts return:
-1. Deduplicate files - merge overlapping discoveries
-2. Rank by consensus - files found by 2-3 scouts = higher priority
-3. Categorize: core files, supporting files, test files, config files
-4. Identify implementation approach and potential risks
-
----
-
-## PHASE 3: Write Plan
-
-Write your plan to `.hive-manager/{session_id}/plan.md` with this format:
-
-# [Plan Title]
-
-## Summary
-[1-2 sentence overview]
-
-## Investigation Results
-- Scouts Used: 3 (Codex GPT-5.5 low, low, medium)
-- Files Identified: [count]
-- Consensus Level: HIGH/MEDIUM/LOW
-
-## Tasks
-(Create exactly {worker_count} tasks - one for each configured worker!)
-- [ ] [HIGH] Task 1: [description] -> Worker 1
-- [ ] [MEDIUM] Task 2: [description] -> Worker 2
-... continue for all {worker_count} workers ...
-(use checkboxes, priority tags, and worker assignments)
-
-## Files to Modify
-| File | Priority | Changes Needed |
-|------|----------|----------------|
-
-## Dependencies
-[Task ordering]
-
-## Risks
-[Potential issues]
-
----
-
-## PHASE 4: Await User Feedback
-
-After writing plan.md, say: **"PLAN READY FOR REVIEW"**
-
-The user may approve or request refinements. Stay ready to update the plan.
-
----
-
-## Begin Now
-
-1. Complete PHASE 0 (gather task if needed)
-2. Launch ALL 3 scout agents in PARALLEL
-3. Synthesize findings
-4. Write plan to `.hive-manager/{session_id}/plan.md`
-5. Say "PLAN READY FOR REVIEW""#,
+End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation changes."#,
+            role_kernel = role_kernel,
+            capability_card = capability_card,
+            delegation = delegation,
+            workspace = workspace,
+            assignment = assignment,
             session_id = session_id,
-            phase0 = phase0,
-            worker_count = worker_count,
-            worker_table = worker_table.trim_end()
+            plan_path = plan_path,
+            planner_workspace_path = planner_workspace_path,
+            policy_label = policy_label,
+            principal_roster = principal_roster.trim_end(),
         )
     }
 
@@ -4566,7 +4988,10 @@ Write to `.hive-manager/{session_id}/plan.md`:
 ## Evaluator & QA Configuration
 
 An **Evaluator** agent will be spawned after workers complete. It reviews the milestone handoff
-and coordinates QA workers to validate the work.
+and coordinates QA workers to validate the work. The Evaluator also auto-adds an **Adversarial**
+QA agent (~1 per 2 coding workers) on top of the list below. A **Prince** peer is spawned
+alongside the Evaluator: it owns remediation of QA findings and self-certifies before the PR is
+pushed, so the QA verdict gates through Prince clearance.
 
 | QA Worker | Label | Specialization | CLI |
 |-----------|-------|----------------|-----|
@@ -4581,6 +5006,13 @@ After all worker tasks complete, the Evaluator will:
 {qa_tasks}### Evaluator Verdict:
 1. Collect QA worker results
 2. Submit verdict via HTTP endpoint: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/qa/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke test validated"}}'`
+
+### Prince Remediation (auto-spawned peer):
+The QA verdict transitions the session to **PrinceRemediation** (not QaPassed). The Prince peer
+reads the verdict from `.hive-manager/{session_id}/peer/qa-verdict.json`. For a clean smoke PASS there
+are no findings, so the Prince self-certifies immediately, clearing the gate to QaPassed:
+1. `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/prince/verdict" -H "Content-Type: application/json" -d '{{"verdict":"PASS","rationale":"smoke - no findings to remediate"}}'`
+The Queen waits for `.hive-manager/{session_id}/peer/prince-verdict.json` before completing.
 "#,
                 qa_table = qa_table.trim_end(),
                 qa_tasks = qa_tasks,
@@ -4594,8 +5026,10 @@ After all worker tasks complete, the Evaluator will:
             let qa_count = qa_workers.map(|q| q.len()).unwrap_or(0);
             format!(
                 "\n4. Evaluator spawns and reviews worker output\n\
-                 5. {} QA worker(s) exercise their specialization\n\
-                 6. Evaluator submits verdict via POST /api/sessions/{session_id}/qa/verdict",
+                 5. {} QA worker(s) plus an auto-added adversarial agent exercise their specialization\n\
+                 6. Evaluator submits verdict via POST /api/sessions/{session_id}/qa/verdict\n\
+                 7. Prince peer spawns, reads the verdict, and self-certifies via POST /api/sessions/{session_id}/prince/verdict\n\
+                 8. Session reaches QaPassed only after Prince clearance (PrinceRemediation -> QaPassed)",
                 qa_count
             )
         } else {
@@ -4998,7 +5432,7 @@ This tests that:
     }
 
     fn build_queen_master_prompt(
-        cli: &str,
+        queen_config: &AgentConfig,
         project_path: &Path,
         queen_workspace_path: &Path,
         session_id: &str,
@@ -5006,578 +5440,438 @@ This tests that:
         user_prompt: Option<&str>,
         has_plan: bool,
         has_evaluator: bool,
+        execution_policy: &HiveExecutionPolicy,
     ) -> String {
+        let role = ContractRole::Queen;
+        let policy = &execution_policy.queen_delegation;
+        let card = CliRegistry::infer_capabilities(&queen_config.cli);
+        let delegation_authorized = CliRegistry::native_delegation_authorized(&card, policy);
+        let role_kernel = render_role_kernel(role);
+        let capability_card = render_capability_card(
+            queen_config,
+            role,
+            &card,
+            policy,
+            &execution_policy.workspace_strategy,
+            delegation_authorized,
+        );
+        let delegation = render_delegation_guidance(role, policy, delegation_authorized);
+        let workspace_contract =
+            render_workspace_contract(role, &execution_policy.workspace_strategy);
+
         let session_root = Self::session_root_path(project_path, session_id);
-        let prompts_dir = Self::prompt_path(&session_root.join("prompts"));
-        let _tasks_dir = Self::prompt_path(&session_root.join("tasks"));
-        let tools_dir = Self::prompt_path(&session_root.join("tools"));
-        let conversations_dir = session_root.join("conversations");
-        let queen_conversation = Self::prompt_path(&conversations_dir.join("queen.md"));
-        let shared_conversation = Self::prompt_path(&conversations_dir.join("shared.md"));
-        let worker_conversation_glob = Self::prompt_path(&conversations_dir.join("worker-N.md"));
         let plan_path = Self::prompt_path(&session_root.join("plan.md"));
-        let lessons_dir = Self::prompt_path(&session_root.join("lessons"));
+        let tools_dir = Self::prompt_path(&session_root.join("tools"));
         let coordination_log_path = Self::prompt_path(&session_root.join("coordination.log"));
-        let worker_worktree_root = Self::prompt_path(
-            &project_path
-                .join(".hive-manager")
-                .join("worktrees")
-                .join(session_id),
-        );
-        let queen_scope_rules =
-            Self::worktree_boundary_rules(&Self::prompt_path(queen_workspace_path));
-        let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
-        let post_workers_protocol =
-            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
-        let final_integration_step = if has_evaluator {
-            "8. **Signal Evaluator** - Once all tasks are done, write milestone-ready (see above)"
-        } else {
-            ""
-        };
+        let queen_workspace = Self::prompt_path(queen_workspace_path);
+        let queen_conversation =
+            Self::prompt_path(&session_root.join("conversations").join("queen.md"));
+        let shared_conversation =
+            Self::prompt_path(&session_root.join("conversations").join("shared.md"));
 
-        let mut worker_list = String::new();
-        for (i, worker_config) in workers.iter().enumerate() {
-            let index = i + 1;
-            let worker_id = format!("{}-worker-{}", session_id, index);
-            let role_label = worker_config
-                .role
-                .as_ref()
-                .map(|r| format!("Worker {} ({})", index, r.label))
-                .unwrap_or_else(|| format!("Worker {}", index));
-            worker_list.push_str(&format!(
-                "| {} | {} | {} |\n",
-                worker_id, role_label, worker_config.cli
-            ));
-        }
+        let objective = user_prompt
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Execute the approved plan or coordinate the configured objective.");
+        let owned_scope = format!(
+            "Orchestration artifacts, integration, validation, and git state for the managed session rooted at {}",
+            queen_workspace
+        );
+        let deliverables = [
+            "Clear, non-overlapping principal assignments",
+            "One reconciled implementation with validation evidence",
+            "Completed QA and external-review gates when configured",
+        ];
+        let validation = [
+            "Every accepted workstream has evidence from its assigned principal",
+            "Shared files and git operations were serialized",
+            "The integrated result satisfies the plan and operator objective",
+        ];
+        let stop_conditions = [
+            "The plan requires authority the operator did not grant",
+            "A principal reports a blocker that changes scope or acceptance criteria",
+            "QA or Prince returns BLOCKED",
+        ];
+        let assignment = render_assignment_contract(&AssignmentSpec {
+            objective,
+            access: "Coordinate managed principals, inspect all session workspaces, maintain session control artifacts, and perform integration operations",
+            owned_scope: &owned_scope,
+            authoritative_input: "The operator objective, approved plan, repository state, principal evidence, QA verdicts, and review findings",
+            deliverables: &deliverables,
+            validation: &validation,
+            stop_conditions: &stop_conditions,
+        });
 
-        let worker_worktrees_dir = Self::prompt_path(
-            &project_path
-                .join(".hive-manager")
-                .join("worktrees")
-                .join(session_id),
-        );
-        let worker_task_file_example = Self::prompt_path(
-            &project_path
-                .join(".hive-manager")
-                .join("worktrees")
-                .join(session_id)
-                .join("worker-N")
-                .join(".hive-manager")
-                .join("tasks")
-                .join("worker-N-task.md"),
-        );
         let plan_section = if has_plan {
             format!(
-                r#"## Implementation Plan
-
-**IMPORTANT**: A plan has been generated for this session. Read it first:
-```
-{}
-```
-
-Follow the plan's task breakdown when assigning work to workers."#,
+                "## Approved Plan\n\nRead {} before assigning work. Preserve its acceptance criteria and dependency order; adjust principal count only when coupling or capacity warrants it.",
                 plan_path
             )
         } else {
-            String::new()
+            "## Planning Basis\n\nNo generated plan is present. Derive the smallest coherent workstream set from the operator objective and repository evidence.".to_string()
         };
 
-        let hardening = if CliRegistry::needs_role_hardening(cli) {
-            r#"
-WARNING: CRITICAL ROLE CONSTRAINTS
+        let principal_policy_label = match execution_policy.principal_delegation.mode {
+            crate::domain::NativeDelegationMode::Disabled => "disabled",
+            crate::domain::NativeDelegationMode::Auto => "auto",
+            crate::domain::NativeDelegationMode::Encouraged => "encouraged",
+        };
+        let mut principal_roster = String::new();
+        for (offset, principal) in workers.iter().enumerate() {
+            let index = offset + 1;
+            let principal_id = format!("{session_id}-worker-{index}");
+            let label = principal
+                .role
+                .as_ref()
+                .map(|worker_role| worker_role.label.as_str())
+                .unwrap_or("Coding Principal");
+            let model = principal.model.as_deref().unwrap_or("harness default");
+            let flags =
+                serde_json::to_string(&principal.flags).unwrap_or_else(|_| "[]".to_string());
+            let principal_card = CliRegistry::infer_capabilities(&principal.cli);
+            let support = match principal_card.native_delegation {
+                crate::domain::CapabilitySupport::Supported => "supported",
+                crate::domain::CapabilitySupport::Unsupported => "unsupported",
+                crate::domain::CapabilitySupport::Unknown => "unknown",
+            };
+            let authorized = CliRegistry::native_delegation_authorized(
+                &principal_card,
+                &execution_policy.principal_delegation,
+            );
+            let principal_workspace = match execution_policy.workspace_strategy {
+                WorkspaceStrategy::SharedCell => queen_workspace_path.to_path_buf(),
+                WorkspaceStrategy::IsolatedCell => project_path
+                    .join(".hive-manager")
+                    .join("worktrees")
+                    .join(session_id)
+                    .join(format!("worker-{index}")),
+                WorkspaceStrategy::None => project_path.to_path_buf(),
+            };
+            let principal_workspace = Self::prompt_path(&principal_workspace);
+            let task_file = Self::prompt_path(
+                &PathBuf::from(&principal_workspace)
+                    .join(".hive-manager")
+                    .join("tasks")
+                    .join(format!("worker-{index}-task.md")),
+            );
+            principal_roster.push_str(&format!(
+                "| {principal_id} | {label} | {cli} | {model} | {flags} | {support}; {principal_policy_label} ({authorization}) | {principal_workspace} | {task_file} |\n",
+                cli = principal.cli,
+                flags = flags,
+                authorization = if authorized { "authorized" } else { "not authorized" },
+            ));
+        }
+        if principal_roster.is_empty() {
+            principal_roster.push_str("| None configured | - | - | - | - | - | - | - |\n");
+        }
 
-You are the QUEEN - the top-level coordinator. You do NOT implement.
-
-### You ARE allowed to:
-- Read plan.md, coordination.log, worker status files
-- Write/Edit ONLY: Planner task files, coordination.log
-- Run git commands: commit, push, branch, PR creation
-- Spawn investigation agents for planning (not implementation)
-
-### You are PROHIBITED from:
-- Editing application source code (*.rs, *.ts, *.svelte, etc.)
-- Running implementation commands (cargo build, npm run, tests)
-- Fixing bugs or implementing features directly
-- Bypassing Planners to assign tasks directly to Workers
-
-If you find yourself about to edit code, STOP. Write a task file for a Planner instead.
-"#
-        } else {
-            ""
+        let topology_instructions = match execution_policy.workspace_strategy {
+            WorkspaceStrategy::SharedCell => format!(
+                "## Shared Cell Integration\n\nThe Queen and managed principals run in the same backend-created worktree at {queen_workspace}. Assign explicit, non-overlapping paths and serialize shared files. Principal edits are immediately visible. Principals do not commit. Review the combined diff, run integration validation, then commit from the current backend-created hive/{session_id}/primary branch. Do not create, rename, or switch branches."
+            ),
+            WorkspaceStrategy::IsolatedCell => format!(
+                "## Isolated Cell Integration\n\nThe Queen runs at {queen_workspace}. Each principal owns the workspace and task path in the roster and commits only its completed assignment on its backend-created hive/{session_id}/worker-N branch. Inspect and validate each commit, then integrate it into the current backend-created Queen branch in dependency order. Resolve conflicts centrally. Do not create, rename, or switch managed branches."
+            ),
+            WorkspaceStrategy::None => format!(
+                "## Current Checkout Coordination\n\nAgents run in the operator checkout rooted at {queen_workspace}. Preserve operator changes. Do not create, switch, commit, or push branches without explicit operator authorization."
+            ),
         };
 
-        let branch_protocol = r#"
-## Branch Protocol (MANDATORY)
-
-⚠️ BEFORE assigning ANY tasks to workers:
-
-1. **Check if this is a smoke test** - If yes, skip branch creation
-2. **If NOT a smoke test**:
-   - FIRST create a new feature branch: `git checkout -b feat/<descriptive-name>`
-   - Push the branch: `git push -u origin <branch-name>`
-   - THEN assign tasks to workers
-
-### Why This Matters
-- Workers will commit to this branch
-- Prevents accidental commits to main
-- Ensures clean PR workflow
-
-### Example
-```bash
-# Queen does this FIRST
-git checkout -b feat/add-authentication
-git push -u origin feat/add-authentication
-
-# THEN assigns tasks to workers
-```
-
-Do NOT assign worker tasks until the branch exists!
-"#;
+        let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
         let qa_milestone_handoff = if has_evaluator {
-            Self::build_qa_milestone_handoff(session_id, &session_root, "workers")
+            Self::build_qa_milestone_handoff(session_id, &session_root, "managed principals")
         } else {
             String::new()
         };
+        let post_workers_protocol =
+            Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
+        let queen_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            "queen",
+            "working",
+            "Coordinating managed principals",
+        );
 
         format!(
-            r#"# Queen Agent - Hive Manager Session
+            r#"# Queen - Hive Meta-Harness
 
-You are the **Queen** orchestrating a multi-agent Hive session. You have full Claude Code capabilities plus coordination tools.
-{hardening}
-{branch_protocol}
+{role_kernel}
+
+{capability_card}
+
+{delegation}
+
+{workspace_contract}
+
+{assignment}
+
+## Session
+
+- Session ID: {session_id}
+- Runtime CWD: {queen_workspace}
+- Harness: {cli}
+- Model: {model}
+- Session tools: {tools_dir}
+- Queen conversation: {queen_conversation}
+- Shared conversation: {shared_conversation}
+
 {required_protocol}
-## Session Info
-- **Session ID**: {session_id}
-- **Prompts Directory**: `{prompts_dir}`
-- **Worker Task Files**: each worker keeps `.hive-manager/tasks/worker-N-task.md` inside its own worktree under `{worker_worktrees_dir}`
-- **Tools Directory**: `{tools_dir}`
-- **Conversation Files**: `{queen_conversation}`, `{shared_conversation}`, `{worker_conversation_glob}`
-
-## Project Knowledge Intake
-
-Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
 
 {plan_section}
 
-## Your Workers
+## Managed Principal Roster
 
-| ID | Role | CLI |
-|----|------|-----|
-{worker_list}
+Managed principals are visible Hive agents with their own lifecycle and task contracts. Native children are private harness-managed lanes governed by the Capability Card; they are not substitutes for managed principals and must not create Hive Workers.
 
-## Your Tools
+| ID | Role | Harness | Model | Flags (JSON) | Native delegation | Workspace | Task file |
+|----|------|---------|-------|--------------|-------------------|-----------|-----------|
+{principal_roster}
 
-### Claude Code Tools (Native)
-You have full access to all Claude Code tools:
-- **Read/Write/Edit** - File operations
-- **Bash** - Run shell commands, git operations
-- **Glob/Grep** - Search files and content
-- **Task** - Spawn subagents for complex investigation (NOT for spawning workers)
-- **WebFetch/WebSearch** - Access web resources
+## Assignment and Coordination
 
-### Claude Code Commands
-You can use any /commands in `~/.claude/commands/`
+1. Read the plan, project DNA, learnings, and current repository state.
+2. Partition work by coherent ownership and dependencies, not by roster size.
+3. Use the existing roster or POST /api/sessions/{session_id}/workers when a new visible principal is genuinely needed. Preserve that principal's exact harness, model, and flags array from the roster; do not drop effort or reasoning settings. Never launch unmanaged external CLI subprocesses.
+4. Activate a principal by writing a precise objective, owned paths, authoritative inputs, deliverables, validation, and stop conditions to its task file, then set Status to ACTIVE.
+5. Monitor heartbeats and the Queen/shared conversations. Review every principal result and evidence before integration.
+6. Keep native Queen children read-only for planning, scouting, and review. Delegate implementation to managed principals.
+7. The Queen coordinates and integrates; do not become a coding principal.
 
-### Hive-Specific Tools
+Heartbeat while coordinating:
+{queen_heartbeat}
 
-Tool documentation is in `{tools_dir}`. Read these files for detailed usage:
+{topology_instructions}
 
-| Tool | File | Purpose |
-|------|------|---------|
-| Spawn Worker | `spawn-worker.md` | Spawn new workers via HTTP API (visible terminal windows) |
-| List Workers | `list-workers.md` | Get list of all workers and their status |
-| Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
-| List Learnings | `list-learnings.md` | Get all learnings for this session |
-| Delete Learning | `delete-learning.md` | Remove a learning by ID |
+## Learning Curation
 
-**Quick Reference - Spawn Worker:**
-```bash
-curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
-  -H "Content-Type: application/json" \
-  -d '{{"role_type": "backend", "cli": "{cli}", "name": "Worker 1 (Backend)", "description": "Implement backend changes"}}'
-```
-
-### Task Assignment
-To assign tasks to existing workers, update their task files:
-
-```
-Edit: {worker_task_file_example}
-Change Status: STANDBY -> ACTIVE
-Add task instructions
-```
-
-Workers poll their task files and will start when they see ACTIVE status.
-
-## Inter-Agent Communication
-
-Use these exact conversation and heartbeat endpoints:
-
-```bash
-# Check Queen inbox
-curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/queen?since=<last_check_ts>"
-
-# Message a worker
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/worker-N/append" \
-  -H "Content-Type: application/json" \
-  -d '{{"from":"queen","content":"Your message"}}'
-
-# Broadcast to all agents
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" \
-  -H "Content-Type: application/json" \
-  -d '{{"from":"queen","content":"Announcement"}}'
-
-# Heartbeat (every 60-90s)
-{queen_heartbeat_snippet}
-
-# Inspect active sessions and heartbeat state
-curl -s "http://localhost:18800/api/sessions/active"
-```
-
-Check your inbox between subtasks. Read `shared.md` for broadcasts before assigning new work.
-
-### File-Based Fallback
-
-If curl returns exit code 7 (connection refused) or any non-zero exit, write directly to the conversation files instead:
-
-```bash
-# Append to a worker's inbox (fallback)
-echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @queen\nYour message here\n" >> "{worker_conversation_glob}"
-
-# Append to shared channel (fallback)
-echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @queen\nYour message here\n" >> "{shared_conversation}"
-
-# Read queen inbox (fallback)
-cat "{queen_conversation}"
-
-# Read shared broadcasts (fallback)
-cat "{shared_conversation}"
-```
-
-You MUST call the curl API first. Only use file fallback if curl fails.
-
-## Learning Curation Protocol
-
-Workers record learnings during task completion. Your curation responsibilities:
-
-1. **Review learnings periodically**:
-   ```bash
-   curl "http://localhost:18800/api/sessions/{session_id}/learnings"
-   ```
-
-2. **Review current project DNA**:
-   ```bash
-   curl "http://localhost:18800/api/sessions/{session_id}/project-dna"
-   ```
-
-3. **Curate useful learnings** into the session-scoped `project-dna.md` via the API:
-   - Group by theme/topic
-   - Remove duplicates
-   - Improve clarity where needed
-   - Capture architectural decisions and project conventions
-
-### Session-Scoped Lessons Structure
-```
-{lessons_dir}/
-├── learnings.jsonl      # Raw learnings for this session (append-only)
-└── project-dna.md       # Curated patterns, conventions, insights
-```
-
-### Curation Process
-1. Review raw learnings via `GET /api/sessions/{session_id}/learnings`
-2. Review current project DNA via `GET /api/sessions/{session_id}/project-dna`
-3. Synthesize insights into `project-dna.md` sections:
-   - **Patterns That Work** - Successful approaches
-   - **Patterns That Failed** - What to avoid
-   - **Code Conventions** - Project-specific standards
-   - **Architecture Notes** - Key design decisions
-4. Delete outdated or duplicate learnings via `DELETE /api/sessions/{{session_id}}/learnings/{{learning_id}}`
-
-### When to Curate
-- After each major task phase completes
-- Before creating a PR
-- When learnings count exceeds 10
+Workers submit durable learnings through POST /api/sessions/{session_id}/learnings. Review GET /api/sessions/{session_id}/learnings and GET /api/sessions/{session_id}/project-dna after major phases and before the final PR. Curate durable conventions, decisions, failures, and architectural facts; remove duplicates and stale records.
 
 {qa_milestone_handoff}
 
-## Coordination Protocol
-
-1. **Read the plan** - Check `{plan_path}` if it exists
-2. **Spawn workers** - Use the spawn-worker tool to create workers as needed
-3. **Assign tasks** - Update worker task files with specific assignments
-4. **Monitor progress** - Watch for workers to mark tasks COMPLETED
-5. **Spawn next worker** - When a task completes, spawn the next worker if needed
-6. **Review & integrate** - Review worker output and coordinate integration
-
-## Worktree Awareness (READ THIS FIRST)
-
-You are running in your own worktree, separate from the workers.
-
-{queen_scope_rules}
-- `git status` / `git diff` in your CWD will NOT show worker changes.
-- `ls`, Read, and Glob in your CWD show your own worktree snapshot, not a worker's live edits.
-- Never assume "no diff = no work done." Workers commit into `hive/{session_id}/worker-N` branches inside their own worktree paths.
-
-### Worker progress cheat sheet
-
-Always target the worker's worktree path or branch explicitly:
-
-```bash
-WT="{worker_worktree_root}/worker-N"
-BR=hive/{session_id}/worker-N
-
-# Has the worker committed anything yet?
-git -C "$WT" log --oneline "$BR" ^<feature-branch>
-
-# What's changed (committed)?
-git -C "$WT" diff --stat <feature-branch>...$BR
-git -C "$WT" diff <feature-branch>...$BR -- <path>
-
-# What's in-flight (staged + unstaged + untracked)?
-git -C "$WT" status --short
-git -C "$WT" diff            # unstaged
-git -C "$WT" diff --cached   # staged
-
-# Read a file as the worker currently has it on disk:
-cat "$WT/<relative/path>"
-# Or as committed on their branch:
-git -C "$WT" show "$BR:<relative/path>"
-```
-
-If a worker's task file says COMPLETED but `git log` on their branch is empty, check `git status` in their worktree before treating it as a failure.
-
-### Monitoring cadence
-
-When polling for worker progress, iterate over every worker worktree instead of relying on your own CWD's `git status`:
-
-```bash
-for WT in "{worker_worktree_root}"/worker-*; do
-  curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/heartbeat" \
-    -H "Content-Type: application/json" \
-    -d '{{"agent_id":"queen","status":"working","summary":"Polling worker progress"}}'
-  BR="hive/{session_id}/$(basename "$WT")"
-  echo "=== $BR ==="
-  git -C "$WT" log --oneline "$BR" ^<feature-branch> 2>/dev/null | head -5
-  git -C "$WT" status --short
-done
-```
-
-## Worktree Integration Protocol
-
-Workers run in isolated git worktrees. Each worker has its own worktree + branch created by the backend at `{worker_worktree_root}/worker-N` on branch `hive/{session_id}/worker-N`. Integrate them back into the feature branch as follows:
-
-### Step 0 — Learning Consolidation (MANDATORY, before any cherry-pick)
-
-Worker worktrees are ephemeral. Learnings written directly to `.ai-docs/learnings.jsonl` there will be lost at cleanup, so consolidate into the main repo's `.ai-docs/learnings.jsonl` first:
-
-**a. Primary — flush the session-scoped store (deterministic):**
-```bash
-mkdir -p .ai-docs
-touch .ai-docs/learnings.jsonl
-
-curl -s "http://localhost:18800/api/sessions/{session_id}/learnings" \
-  | jq -c '.learnings[]? // .[]?' \
-  | while IFS= read -r line; do grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl; done
-```
-Deduplicate by exact JSONL line before appending.
-
-**b. Fallback sweep — scan worker worktrees for any direct file writes and pending fallback records:**
-```bash
-case "{session_id}" in
-  *..*|*/*|*\\*) echo "Invalid session id in learning ingest path: {session_id}" >&2; exit 1 ;;
-esac
-
-mkdir -p .ai-docs
-touch .ai-docs/learnings.jsonl
-
-ingest_pending_learnings() {{
-  pending="$1"
-  archive="$2"
-  [ -f "$pending" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$line" ] || continue
-    if ! printf '%s\n' "$line" | jq -e '(.date | type == "string" and length > 0) and (.session | type == "string" and length > 0) and (.task | type == "string" and length > 0) and (.insight | type == "string" and length > 0) and (.outcome == "success" or .outcome == "partial" or .outcome == "failed") and (.keywords | type == "array") and (.files_touched | type == "array") and all(.files_touched[]; type == "string" and length > 0 and (contains("..") | not) and (startswith("/") | not) and (contains("\\") | not) and (test("^[A-Za-z]:") | not))' >/dev/null; then
-      echo "Skipping invalid learning JSONL record: $line" >&2
-      continue
-    fi
-    grep -Fxq "$line" .ai-docs/learnings.jsonl || printf '%s\n' "$line" >> .ai-docs/learnings.jsonl
-    if ! curl -fsS -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
-      -H "Content-Type: application/json" \
-      --data-binary "$line"; then
-      echo "Learning POST failed; preserved via root JSONL fallback" >&2
-    fi
-  done < "$pending"
-  mv "$pending" "$archive"
-}}
-
-# Ingest any pending records that were written from the main checkout.
-ingest_pending_learnings \
-  ".hive-manager/{session_id}/learnings.pending.jsonl" \
-  ".hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
-
-for WT in "{worker_worktree_root}"/*; do
-  f="$WT/.ai-docs/learnings.jsonl"
-  if [ -f "$f" ]; then
-    # Append only lines not already present in root
-    comm -13 <(sort -u .ai-docs/learnings.jsonl) <(sort -u "$f") >> .ai-docs/learnings.jsonl
-  fi
-
-  ingest_pending_learnings \
-    "$WT/.hive-manager/{session_id}/learnings.pending.jsonl" \
-    "$WT/.hive-manager/{session_id}/learnings.pending.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
-done
-```
-
-**c. Stage the updated learnings file into your integration commit** so consolidation is visible in the PR.
-
-1. **LOCATE** each worker's worktree at `{worker_worktree_root}/worker-N` on branch `hive/{session_id}/worker-N`. Inspect changes via:
-   - `git -C <worktree> log <branch> ^<feature-branch>`
-   - `git -C <worktree> diff <feature-branch>...<branch>`
-
-2. **CHOOSE** integration method per worker:
-   - **Preferred — cherry-pick the full branch range**: `git rev-list --reverse <feature-branch>..<branch> | xargs -n1 git cherry-pick` — preserves the worker's full commit history.
-   - **Squash merge**: `git merge --squash <branch> && git commit -m '...'` — use when the worker made noisy WIP commits.
-   - **Patch apply**: only use this when the worker has no commits and has staged/tracked all files first; otherwise newly created untracked files will be missed.
-
-3. **ORDER integration** to minimize conflicts. Integrate disjoint-file tasks first. For tasks that touch overlapping files, integrate one, then rebase the next worker branch onto the updated tip before picking.
-
-4. **COMMIT CADENCE**: one separate commit per worker on the feature branch; push after each commit to give external reviewers (CodeRabbit/Gemini) incremental surface.
-
-5. **CLEANUP** after successful integration: `git worktree remove <path>` and `git branch -D hive/{session_id}/worker-N`. (Backend also cleans on session completion — safe to leave if unsure.)
-
-6. **CONFLICTS**: resolve in the main checkout, re-run the repository's relevant verification commands (from the plan, project DNA, and touched package/tooling) to confirm integrity, then commit the resolution.
-
-7. **Commit & push** - You handle final commits (workers don't push)
-{final_integration_step}
-
 {post_workers_protocol}
 
-Log each iteration to `{coordination_log_path}`:
-```
+Log every quality-reconciliation iteration to {coordination_log_path}:
 {queen_quality_log}
-```
 
-After your orchestration objective is complete, transition to `idle` heartbeat status and continue checking your conversation file on heartbeat cadence.
+## Operator Objective
 
-## Your Task
+{objective}
 
-{task}"#,
-            hardening = hardening,
-            branch_protocol = branch_protocol,
-            required_protocol = required_protocol,
+When the objective and every configured gate are complete, send an idle heartbeat and continue monitoring the Queen conversation."#,
+            role_kernel = role_kernel,
+            capability_card = capability_card,
+            delegation = delegation,
+            workspace_contract = workspace_contract,
+            assignment = assignment,
             session_id = session_id,
-            cli = cli,
-            prompts_dir = prompts_dir,
+            queen_workspace = queen_workspace,
+            cli = queen_config.cli,
+            model = queen_config.model.as_deref().unwrap_or("harness default"),
             tools_dir = tools_dir,
             queen_conversation = queen_conversation,
             shared_conversation = shared_conversation,
-            worker_conversation_glob = worker_conversation_glob,
-            plan_path = plan_path,
-            lessons_dir = lessons_dir,
-            coordination_log_path = coordination_log_path,
-            worker_worktree_root = worker_worktree_root,
-            queen_scope_rules = queen_scope_rules,
+            required_protocol = required_protocol,
             plan_section = plan_section,
-            worker_list = worker_list,
+            principal_roster = principal_roster.trim_end(),
+            queen_heartbeat = queen_heartbeat,
+            topology_instructions = topology_instructions,
             qa_milestone_handoff = qa_milestone_handoff,
             post_workers_protocol = post_workers_protocol,
+            coordination_log_path = coordination_log_path,
             queen_quality_log = Self::queen_quality_reconciliation_log_lines(has_evaluator),
-            queen_heartbeat_snippet = heartbeat_snippet(
-                "http://localhost:18800",
-                session_id,
-                "queen",
-                "working",
-                "Monitoring workers",
-            ),
-            final_integration_step = final_integration_step,
-            worker_worktrees_dir = worker_worktrees_dir,
-            worker_task_file_example = worker_task_file_example,
-            task = user_prompt.unwrap_or("Read the plan and begin coordinating workers.")
+            objective = objective,
         )
     }
-
     /// Build a worker's role prompt
     fn build_worker_prompt(
         index: u8,
         config: &AgentConfig,
         queen_id: &str,
         session_id: &str,
+        project_path: &Path,
+        workspace_path: &Path,
+        execution_policy: &HiveExecutionPolicy,
     ) -> String {
         let role_name = config
             .role
             .as_ref()
-            .map(|r| r.label.clone())
-            .unwrap_or_else(|| format!("Worker {}", index));
-        // Research workers are read-only investigators: no implementation authority,
-        // no commits, and NO project-local learnings POST (Research mode captures
-        // knowledge only via the Queen's wiki Draft->PR flow). Every write-capable
-        // surface (scope block, role framing, task file) must reflect that.
-        let is_research = config
+            .map(|worker_role| worker_role.label.clone())
+            .unwrap_or_else(|| format!("Coding Principal {index}"));
+        let role_type = config
             .role
             .as_ref()
-            .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
-            .unwrap_or(false);
+            .map(|worker_role| worker_role.role_type.to_ascii_lowercase())
+            .unwrap_or_else(|| "general".to_string());
+        let is_research = role_type == "researcher";
+        let contract_role = if is_research {
+            ContractRole::Researcher
+        } else {
+            ContractRole::Principal
+        };
+        let policy = &execution_policy.principal_delegation;
+        let card = CliRegistry::infer_capabilities(&config.cli);
+        let delegation_authorized = CliRegistry::native_delegation_authorized(&card, policy);
+        let role_kernel = render_role_kernel(contract_role);
+        let capability_card = render_capability_card(
+            config,
+            contract_role,
+            &card,
+            policy,
+            &execution_policy.workspace_strategy,
+            delegation_authorized,
+        );
+        let delegation = render_delegation_guidance(contract_role, policy, delegation_authorized);
+        let workspace_contract =
+            render_workspace_contract(contract_role, &execution_policy.workspace_strategy);
+
+        let session_root = Self::session_root_path(project_path, session_id);
+        let workspace_path = Self::prompt_path(workspace_path);
+        let task_file_path = if execution_policy.workspace_strategy == WorkspaceStrategy::None {
+            Self::session_task_file_path(project_path, session_id, index as usize)
+        } else {
+            PathBuf::from(&workspace_path)
+                .join(".hive-manager")
+                .join("tasks")
+                .join(format!("worker-{index}-task.md"))
+        };
+        let task_file = Self::prompt_path(&task_file_path);
+        let worker_conversation = Self::prompt_path(
+            &session_root
+                .join("conversations")
+                .join(format!("worker-{index}.md")),
+        );
+        let queen_conversation =
+            Self::prompt_path(&session_root.join("conversations").join("queen.md"));
+        let shared_conversation =
+            Self::prompt_path(&session_root.join("conversations").join("shared.md"));
+
+        let role_description = match role_type.as_str() {
+            "backend" => "Server-side logic, APIs, databases, and backend infrastructure.",
+            "frontend" => "UI components, state management, styling, and user experience.",
+            "coherence" => "Code consistency, API contracts, and cross-component integration.",
+            "simplify" => "Code simplification, refactoring, and reducing complexity.",
+            "reviewer" => "Deep code review across correctness, security, performance, architecture, and compatibility.",
+            "reviewer-quick" => "Fast review for obvious defects, regressions, and maintainability issues.",
+            "resolver" => "Resolve assigned review findings and document any intentionally skipped item with rationale.",
+            "tester" => "Run the assigned validation suite, repair in-scope failures, and report unresolved evidence.",
+            "code-quality" => "Resolve assigned external-review comments and verify the result.",
+            "reconciler" => "Reconcile evaluator and external-review findings into one prioritized, deduplicated result.",
+            "researcher" => "Investigate the assigned question read-only and return concise findings with evidence.",
+            _ => "Complete the coherent implementation workstream assigned by the Queen.",
+        };
+
         let scope_block = if is_research {
             Self::scope_block_read_only()
         } else {
             Self::scope_block(".")
         };
+        let objective = config
+            .initial_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Complete only the ACTIVE assignment in the authoritative task file.");
+        let access = if is_research {
+            "Read-only investigation; report through the session conversation and task file"
+        } else {
+            "Read the repository and modify only paths explicitly owned by the ACTIVE task contract"
+        };
+        let owned_scope = format!(
+            "{} Workspace: {}. The task file is authoritative for narrower path ownership.",
+            role_description, workspace_path
+        );
+        let authoritative_input = format!(
+            "The ACTIVE task at {}, the approved plan, repository state, project DNA, and Queen messages",
+            task_file
+        );
+        let principal_deliverables = [
+            "Implemented changes inside the assigned ownership boundary",
+            "Focused validation output and a concise completion report",
+            "One durable learning record",
+        ];
+        let research_deliverables = [
+            "Concise findings with file, source, or command evidence",
+            "A clear answer to the assigned research question",
+            "No project or git mutations",
+        ];
+        let principal_validation = [
+            "Run the focused tests or checks named by the task",
+            "Review the final diff for scope and unintended changes",
+            "Confirm the delivery commit when using an isolated cell",
+        ];
+        let research_validation = [
+            "Cite the evidence supporting each material conclusion",
+            "Separate observed facts from inference",
+            "Confirm that no project files or git state changed",
+        ];
+        let stop_conditions = [
+            "The assignment is ambiguous or conflicts with another owner's paths",
+            "Required inputs or permissions are unavailable",
+            "A safe fix requires expanding scope beyond the task contract",
+        ];
+        let assignment = render_assignment_contract(&AssignmentSpec {
+            objective,
+            access,
+            owned_scope: &owned_scope,
+            authoritative_input: &authoritative_input,
+            deliverables: if is_research {
+                &research_deliverables
+            } else {
+                &principal_deliverables
+            },
+            validation: if is_research {
+                &research_validation
+            } else {
+                &principal_validation
+            },
+            stop_conditions: &stop_conditions,
+        });
 
-        let role_description = config.role.as_ref()
-            .map(|r| match r.role_type.to_lowercase().as_str() {
-                "backend" => "Server-side logic, APIs, databases, and backend infrastructure.",
-                "frontend" => "UI components, state management, styling, and user experience.",
-                "coherence" => "Code consistency, API contracts, and cross-component integration.",
-                "simplify" => "Code simplification, refactoring, and reducing complexity.",
-                "reviewer" => "Deep code review: edge cases, security, performance, architecture, breaking changes.",
-                "reviewer-quick" => "Quick code review: obvious bugs, code style, simple improvements.",
-                "resolver" => "Address all reviewer findings: fix HIGH/MEDIUM issues, document skipped items with rationale.",
-                "tester" => "Run test suite, fix failures, document difficulties that couldn't be resolved.",
-                "code-quality" => "Resolve PR comments from external reviewers, ensure code meets quality standards.",
-                "reconciler" => "Deep-think reconciliation: collect Evaluator QA verdicts, CodeRabbit comments, and Gemini findings. Triage conflicts, deduplicate, and produce a unified fix list with priorities.",
-                "researcher" => "Focused research: gather, read, and synthesize sources; capture findings and citations for the Queen to consolidate.",
-                _ => "General development tasks as assigned.",
-            })
-            .unwrap_or("General development tasks as assigned.");
-
-        let task_file = format!(".hive-manager/tasks/worker-{}-task.md", index);
         let activation_wait_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
-            &format!("worker-{}", index),
+            &format!("worker-{index}"),
             "idle",
             "Waiting for task activation",
         );
         let polling_instructions = get_polling_instructions(
             &config.cli,
             &task_file,
-            config.role.as_ref().map(|role| role.role_type.as_str()),
+            config
+                .role
+                .as_ref()
+                .map(|worker_role| worker_role.role_type.as_str()),
             Some(&activation_wait_heartbeat),
+        );
+        let working_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &format!("worker-{index}"),
+            "working",
+            "Executing assigned workstream",
         );
 
         let role_section = if is_research {
-            "## Your Role: RESEARCHER\n\nYou investigate, read, and synthesize sources. You do NOT write production code, modify project files, or commit anything. Your deliverable is findings reported to the Queen."
+            "## Your Role: RESEARCHER (Read-Only)\n\nInvestigate and synthesize. Do not write production code, modify project files, or mutate git. Your deliverable is evidence-backed knowledge returned to the Queen."
         } else {
-            "## Your Role: EXECUTOR\n\nYou have full implementation authority within your specialization."
+            "## Your Role: EXECUTOR\n\nYou are a managed coding principal with implementation authority only inside the ACTIVE assignment contract."
         };
 
-        let important_rules = if is_research {
-            format!(
-                "1. **Stay in your lane** - Focus on your research assignment ({role_name})
-2. **Do not modify the project** - No code changes and no commits; report findings to the Queen
-3. **Update your task file** - Always update status when done or blocked
-4. **Ask for clarification** - If the assignment is unclear, note it in the task file",
-                role_name = role_name
-            )
+        let completion_rule = if is_research {
+            "Report findings, update the task file to COMPLETED, and send the Queen a concise evidence summary. Do not commit."
         } else {
-            format!(
-                "1. **Stay in your lane** - Focus on your specialization ({role_name})
-2. **Don't push to git** - Only the Queen commits and pushes
-3. **Update your task file** - Always update status when done or blocked
-4. **Ask for clarification** - If task is unclear, note it in the task file",
-                role_name = role_name
-            )
+            match execution_policy.workspace_strategy {
+                WorkspaceStrategy::SharedCell => {
+                    "Run focused validation and leave the reviewed changes uncommitted for the Queen. Update the task file to COMPLETED and report evidence; the Queen owns the shared git state."
+                }
+                WorkspaceStrategy::IsolatedCell => {
+                    "Run focused validation, commit only the completed assignment on the current backend-created cell branch, then update the task file to COMPLETED and report the commit SHA plus evidence. Do not push."
+                }
+                WorkspaceStrategy::None => {
+                    "Run focused validation, update the task file to COMPLETED, and report evidence. Do not mutate git without explicit operator authorization."
+                }
+            }
         };
 
         let learnings_section = if is_research {
@@ -5586,172 +5880,95 @@ After your orchestration objective is complete, transition to `idle` heartbeat s
             format!(
                 r#"## Learnings Protocol (MANDATORY)
 
-Before marking your task COMPLETED, submit what you learned **via the HTTP API first**:
+Before marking the task COMPLETED, POST one durable learning record to /api/sessions/{session_id}/learnings with session, task, outcome, keywords, insight, and files_touched. If the API is unavailable, append the same valid JSON object as one line to .hive-manager/{session_id}/learnings.pending.jsonl in this workspace. Do not write .ai-docs/learnings.jsonl directly. The session API is the topology-neutral durable path.
 
-```bash
-curl -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
-  -H "Content-Type: application/json" \
-  -d '{{
-    "session": "{session_id}",
-    "task": "Brief task description",
-    "outcome": "success|partial|failed",
-    "keywords": ["keyword1", "keyword2"],
-    "insight": "What you learned - be specific and actionable",
-    "files_touched": ["path/to/file.rs"]
-  }}'
-```
-
-Even if you learned nothing notable, submit with insight "No significant learnings for this task."
-
-### File-Based Fallback
-
-If curl returns exit code 7 (connection refused) or any non-zero exit, append the learning record to the session-scoped pending JSONL file instead:
-
-```bash
-mkdir -p ".hive-manager/{session_id}"
-jq -nc \
-  --arg date "$(date -u +%Y-%m-%d)" \
-  --arg session "{session_id}" \
-  --arg task "Brief task description" \
-  --arg outcome "success|partial|failed" \
-  --arg insight "What you learned - be specific and actionable" \
-  --argjson keywords '["keyword1","keyword2"]' \
-  --argjson files_touched '["path/to/file.rs"]' \
-  '{{date:$date,session:$session,task:$task,outcome:$outcome,keywords:$keywords,insight:$insight,files_touched:$files_touched}}' \
-  >> ".hive-manager/{session_id}/learnings.pending.jsonl"
-```
-
-⚠️ **DO NOT write to `.ai-docs/learnings.jsonl` directly.** That file lives in your isolated worktree; direct writes are discarded when the worktree is cleaned up. The HTTP API is the only durable path — it writes to the session-scoped store the Queen consolidates at integration time.
-
-"#,
-                session_id = session_id
+"#
             )
         };
-
-        let project_context_section = if is_research {
+        let project_context = if is_research {
             String::new()
         } else {
-            "## Project Context\n\nReview `.ai-docs/project-dna.md` for patterns and conventions learned from previous sessions.\n\n".to_string()
+            "## Project Context\n\nRead .ai-docs/project-dna.md before implementation and follow its current conventions.\n\n".to_string()
         };
 
         format!(
-            r#"# Worker {index} ({role_name}) - Hive Session
+            r#"# Managed Principal {index} - {role_name}
 
-You are a **Worker** in a multi-agent Hive session, coordinated by the Queen.
+{role_kernel}
+
+{capability_card}
+
+{delegation}
+
+{workspace_contract}
+
+{assignment}
 
 {role_section}
 
-## Your Specialization
+## Runtime
 
-{role_description}
+- Session ID: {session_id}
+- Principal ID: {session_id}-worker-{index}
+- Queen: {queen_id}
+- Harness: {cli}
+- Model: {model}
+- Runtime CWD: {workspace_path}
+- Authoritative task file: {task_file}
 
-## Your Tools
-
-You have full access to Claude Code tools:
-- **Read/Write/Edit** - File operations
-- **Bash** - Run shell commands
-- **Glob/Grep** - Search files and content
-- **Task** - Spawn subagents if needed
+Use only the native tools exposed by the configured harness. The Capability Card is authoritative for native delegation. Native children inherit this principal's assignment and workspace; they are not managed Hive Workers and must not widen ownership or perform git operations.
 
 {scope_block}
 
-## Task File (File-Based Coordination)
+## Task Lifecycle
 
-Your task assignments are in: `{task_file}`
+1. Read {task_file}.
+2. If Status is STANDBY, wait and re-check. Do not infer an assignment from this prompt.
+3. Begin only when Status is ACTIVE.
+4. Stay inside the objective and owned paths. Ask the Queen when ownership or acceptance criteria are unclear.
+5. If blocked, set Status to BLOCKED and report the exact blocker.
+6. On completion: {completion_rule}
 
-## Conversation Files (Session-Scoped)
+{polling_instructions}
 
-- Your inbox file: `.hive-manager/{session_id}/conversations/worker-{index}.md`
-- Queen channel: `.hive-manager/{session_id}/conversations/queen.md`
-- Shared broadcasts: `.hive-manager/{session_id}/conversations/shared.md`
+## Communication
 
-**Workflow:**
-1. Read your task file to check your current status
-2. If Status is `STANDBY` - wait and periodically re-check the file
-3. If Status is `ACTIVE` - execute the task described in the file
-4. When done, update the task file: change Status to `COMPLETED` and add your results
-5. If blocked, change Status to `BLOCKED` and describe the issue
+- Inbox: {worker_conversation}
+- Queen channel: {queen_conversation}
+- Shared channel: {shared_conversation}
+- Read the shared channel before starting a new subtask.
+- Send progress, blockers, and completion evidence to POST /api/sessions/{session_id}/conversations/queen/append.
+- If the API is unavailable, append the same message to {queen_conversation}.
 
-## Important Rules
+Heartbeat while active:
+{working_heartbeat}
 
-{important_rules}
-
-## Coordinator
-
-- **Queen**: {queen_id}
-
-## Inter-Agent Communication
-
-Use these exact conversation and heartbeat endpoints:
-
-```bash
-# Check your inbox
-curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/worker-{index}?since=<last_check_ts>"
-
-# Send update or question to Queen
-curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" \
-  -H "Content-Type: application/json" \
-  -d '{{"from":"worker-{index}","content":"Status update or blocker"}}'
-
-# Read shared broadcast stream
-curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared?since=<last_check_ts>"
-
-# Heartbeat (every 60-90s)
-{worker_heartbeat_snippet}
-
-# Inspect active sessions and heartbeat state
-curl -s "http://localhost:18800/api/sessions/active"
-```
-
-Check your conversation file between subtasks. Report progress to `queen.md` after milestones. Read `shared.md` for broadcasts.
-
-### File-Based Fallback
-
-If curl returns exit code 7 (connection refused) or any non-zero exit, write directly to the conversation files instead:
-
-```bash
-# Append to queen's inbox (fallback)
-echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @worker-{index}\nYour message here\n" >> ".hive-manager/{session_id}/conversations/queen.md"
-
-# Append to shared channel (fallback)
-echo -e "---\n[$(date -u +%Y-%m-%dT%H:%M:%SZ)] from @worker-{index}\nYour message here\n" >> ".hive-manager/{session_id}/conversations/shared.md"
-
-# Read your inbox (fallback)
-cat ".hive-manager/{session_id}/conversations/worker-{index}.md"
-
-# Read shared broadcasts (fallback)
-cat ".hive-manager/{session_id}/conversations/shared.md"
-```
-
-You MUST call the curl API first. Only use file fallback if curl fails.
-
-{learnings_section}{project_context_section}## Task Coordination
-Read {task_file}. Begin work only when Status is ACTIVE.
-Use the interactive interface to monitor your task file.
-
-After completing your task, transition to IDLE state. Continue checking your conversation file on heartbeat cadence.{polling_instructions}"#,
+{learnings_section}{project_context}After completion, send an idle heartbeat and continue monitoring the inbox. Do not take a new task until its task file status is ACTIVE."#,
             index = index,
             role_name = role_name,
+            role_kernel = role_kernel,
+            capability_card = capability_card,
+            delegation = delegation,
+            workspace_contract = workspace_contract,
+            assignment = assignment,
             role_section = role_section,
-            role_description = role_description,
-            important_rules = important_rules,
-            learnings_section = learnings_section,
-            project_context_section = project_context_section,
-            queen_id = queen_id,
             session_id = session_id,
-            scope_block = scope_block,
+            queen_id = queen_id,
+            cli = config.cli,
+            model = config.model.as_deref().unwrap_or("harness default"),
+            workspace_path = workspace_path,
             task_file = task_file,
-            worker_heartbeat_snippet = heartbeat_snippet(
-                "http://localhost:18800",
-                session_id,
-                &format!("worker-{index}"),
-                "working",
-                "Current task focus",
-            ),
-            polling_instructions = polling_instructions
+            scope_block = scope_block,
+            completion_rule = completion_rule,
+            polling_instructions = polling_instructions,
+            worker_conversation = worker_conversation,
+            queen_conversation = queen_conversation,
+            shared_conversation = shared_conversation,
+            working_heartbeat = working_heartbeat,
+            learnings_section = learnings_section,
+            project_context = project_context,
         )
     }
-
     /// Build a planner's prompt with HTTP API for spawning workers sequentially
     fn build_planner_prompt_with_http(
         project_path: &PathBuf,
@@ -6205,28 +6422,10 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         session_id: &str,
         default_cli: &str,
     ) -> Result<(), String> {
-        let worker_task_file_example = project_path
-            .join(".hive-manager")
-            .join("worktrees")
-            .join(session_id)
-            .join("worker-N")
-            .join(".hive-manager")
-            .join("tasks")
-            .join("worker-N-task.md")
-            .to_string_lossy()
-            .to_string();
+        let worker_task_file_example = ".hive-manager/tasks/worker-N-task.md".to_string();
         let qa_task_file_example =
             format!(".hive-manager/{}/tasks/qa-worker-N-task.md", session_id);
-        let worker_one_task_file_example = project_path
-            .join(".hive-manager")
-            .join("worktrees")
-            .join(session_id)
-            .join("worker-1")
-            .join(".hive-manager")
-            .join("tasks")
-            .join("worker-1-task.md")
-            .to_string_lossy()
-            .to_string();
+        let worker_one_task_file_example = ".hive-manager/tasks/worker-1-task.md".to_string();
 
         // Spawn Worker tool
         let spawn_worker_tool = format!(
@@ -6247,8 +6446,6 @@ Content-Type: application/json
 ```json
 {{
   "role_type": "backend",
-  "cli": "{default_cli}",
-  "model": "opus",
   "name": "Worker 2 (Frontend)",
   "description": "One-line task summary",
   "initial_task": "Optional task description"
@@ -6260,8 +6457,9 @@ Content-Type: application/json
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
-| cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
-| model | string | No | Model to staff this worker with (e.g. opus, sonnet, gemini-3-pro). Defaults to the session default. Use this to honor a roster's per-worker model. |
+| cli | string | No | CLI override: gemini, antigravity, codex, opencode, cursor, droid, qwen, or claude. Omit to inherit the session principal CLI (`{default_cli}`). |
+| model | string | No | Model override (for example gpt-5.6-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
+| flags | string[] | No | CLI flag override. Omit to inherit principal flags; send `[]` to clear them. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
 | description | string | No | One-line task summary used for deterministic labels |
 | label | string | No | Legacy label field; kept as a fallback input |
@@ -6271,20 +6469,20 @@ Content-Type: application/json
 ## Example Usage
 
 ```bash
-# Spawn a backend worker with {default_cli}
+# Spawn a backend principal with the session's CLI/model/flags defaults
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "backend", "cli": "{default_cli}"}}'
+  -d '{{"role_type": "backend"}}'
 
 # Spawn a frontend worker with an initial task
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "frontend", "cli": "{default_cli}", "name": "Worker 2 (Frontend)", "description": "Implement the login form UI", "initial_task": "Implement the login form UI"}}'
+  -d '{{"role_type": "frontend", "name": "Worker 2 (Frontend)", "description": "Implement the login form UI", "initial_task": "Implement the login form UI"}}'
 
 # Spawn a reviewer worker
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "reviewer", "cli": "{default_cli}", "name": "Worker 3 (Reviewer)", "description": "Review the current implementation"}}'
+  -d '{{"role_type": "reviewer", "name": "Worker 3 (Reviewer)", "description": "Review the current implementation"}}'
 ```
 
 ## Response
@@ -6302,7 +6500,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 ## Notes
 
 - Workers spawn in a new Windows Terminal tab (visible window)
-- Each worker's own task file lives at `.hive-manager/tasks/worker-N-task.md` inside that worker's worktree
+- Each worker's task file is `.hive-manager/tasks/worker-N-task.md` inside its assigned workspace, whether that workspace is the shared cell or an isolated cell
 - Workers poll their task files for ACTIVE status
 - Use this to spawn workers sequentially as tasks complete
 "#,
@@ -6601,7 +6799,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `gpt-5.5`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`). Ignored for `antigravity` — model lives in `~/.gemini/antigravity-cli/settings.json` |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-5.6-sol`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`). Ignored for `antigravity` — model lives in `~/.gemini/antigravity-cli/settings.json` |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -6746,11 +6944,23 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         status: Option<&str>,
         read_only: bool,
     ) -> Result<PathBuf, String> {
-        let tasks_dir = worktree_path.join(".hive-manager").join("tasks");
-        std::fs::create_dir_all(&tasks_dir)
+        let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
+        Self::write_task_file_at_path(&file_path, worker_index, initial_task, status, read_only)
+    }
+
+    fn write_task_file_at_path(
+        file_path: &Path,
+        worker_index: u8,
+        initial_task: Option<&str>,
+        status: Option<&str>,
+        read_only: bool,
+    ) -> Result<PathBuf, String> {
+        let tasks_dir = file_path
+            .parent()
+            .ok_or_else(|| format!("Task file has no parent directory: {}", file_path.display()))?;
+        std::fs::create_dir_all(tasks_dir)
             .map_err(|e| format!("Failed to create tasks directory: {}", e))?;
 
-        let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
         let scope_block = if read_only {
             Self::scope_block_read_only()
         } else {
@@ -6763,7 +6973,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         } else {
             "- **EXECUTOR**: You have full authority to implement and fix issues.
 - **SCOPE**: Stay within your assigned domain/specialization.
-- **GIT**: Do NOT push or commit. Provide your changes for the Queen to integrate."
+- **GIT**: Follow the launch prompt's Workspace Contract. Never push, create or switch branches, stash, or reset."
         };
         let status = status.unwrap_or("STANDBY");
 
@@ -6808,10 +7018,10 @@ Last updated: {timestamp}
             timestamp = timestamp
         );
 
-        std::fs::write(&file_path, content)
+        std::fs::write(file_path, content)
             .map_err(|e| format!("Failed to write task file: {}", e))?;
 
-        Ok(file_path)
+        Ok(file_path.to_path_buf())
     }
 
     fn write_qa_task_file(
@@ -6893,6 +7103,7 @@ Last updated: {timestamp}
         evaluator_config: Option<AgentConfig>,
         qa_workers: Option<Vec<QaWorkerConfig>>,
         smoke_test: bool,
+        execution_policy: HiveExecutionPolicy,
     ) -> Result<Session, String> {
         let session_id = Uuid::new_v4().to_string();
         let base_ref = resolve_fresh_base(&project_path);
@@ -6921,7 +7132,40 @@ Last updated: {timestamp}
             role: None,
             initial_prompt: task_description.clone(),
         };
-        let (cmd, args) = Self::build_solo_command(&solo_config, task_description.as_deref());
+        let (cmd, mut args) = Self::build_solo_command(
+            &solo_config,
+            if with_evaluator {
+                None
+            } else {
+                task_description.as_deref()
+            },
+        );
+        if with_evaluator {
+            let solo_prompt = Self::build_solo_evaluator_prompt(
+                &session_id,
+                &project_path,
+                &solo_cwd,
+                task_description.as_deref(),
+            );
+            let prompt_file = match Self::write_prompt_file(
+                &project_path,
+                &session_id,
+                "solo-prompt.md",
+                &solo_prompt,
+            ) {
+                Ok(path) => path,
+                Err(err) => {
+                    self.rollback_launch_allocations(
+                        &project_path,
+                        &session_id,
+                        &created_cells,
+                        &spawned_agent_ids,
+                    );
+                    return Err(err);
+                }
+            };
+            Self::add_prompt_to_args(&cmd, &mut args, &prompt_file.to_string_lossy());
+        }
         let solo_id = format!("{}-worker-1", session_id);
 
         {
@@ -6976,6 +7220,10 @@ Last updated: {timestamp}
             }],
             default_cli: cli,
             default_model: model,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy,
             qa_workers: qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -6985,6 +7233,20 @@ Last updated: {timestamp}
             no_git: false,
             resume_report: None,
         };
+
+        if let Err(err) = Self::write_tool_files(
+            &project_path,
+            &session_id,
+            Self::session_principal_cli(&session),
+        ) {
+            self.rollback_launch_allocations(
+                &project_path,
+                &session_id,
+                &created_cells,
+                &spawned_agent_ids,
+            );
+            return Err(err);
+        }
 
         {
             let mut sessions = self.sessions.write();
@@ -7046,6 +7308,11 @@ Last updated: {timestamp}
             .prompt
             .clone()
             .or_else(|| config.queen_config.initial_prompt.clone());
+        let mut execution_policy = config.execution_policy.clone();
+        execution_policy.launch_kind = HiveLaunchKind::Solo;
+        // Solo always owns a dedicated worker worktree. Persist the effective
+        // topology so Prince fixer integration cherry-picks into that worktree.
+        execution_policy.workspace_strategy = WorkspaceStrategy::IsolatedCell;
 
         self.launch_solo_internal(
             project_path.clone(),
@@ -7059,6 +7326,7 @@ Last updated: {timestamp}
             config.evaluator_config.clone(),
             config.qa_workers.clone(),
             config.smoke_test,
+            execution_policy,
         )
     }
 
@@ -7076,8 +7344,8 @@ Last updated: {timestamp}
     /// - `extra_queen_vars`: additional template variables merged into the
     ///   templated Queen prompt (e.g. `global_wiki_path`). Ignored when
     ///   `queen_template_override` is `None`.
-    /// - `use_worktrees`: when `true` (Hive/Solo), each cell gets an isolated git
-    ///   worktree + branch off a fresh base. When `false` (Research), no git is
+    /// - `use_worktrees`: when `true`, Hive uses the operator-selected shared or
+    ///   isolated managed-workspace topology. When `false` (Research), no git is
     ///   touched: every agent runs directly in `project_path`, so the launch
     ///   succeeds even on a non-git folder and never creates branches/worktrees.
     fn launch_hive_internal(
@@ -7094,17 +7362,25 @@ Last updated: {timestamp}
         let mut created_cells = Vec::new();
         let mut spawned_agent_ids = Vec::new();
 
+        let topology = SessionOrchestrator::plan_hive_launch(
+            &config.execution_policy,
+            config.workers.len(),
+            !use_worktrees,
+        )
+        .map_err(|error| error.to_string())?;
+
+        if topology.launch_kind == HiveLaunchKind::Solo
+            && (pre_spawn_workers || config.execution_policy.launch_kind == HiveLaunchKind::Solo)
+        {
+            return self.launch_solo(config);
+        }
+
         // If with_planning is true, spawn Master Planner first
         if config.with_planning {
             return self.launch_planning_phase(session_id, config);
         }
 
-        // Solo mode: skip orchestration and launch one agent directly. Only applies
-        // when pre-spawning the worker pool. Roster launches (Research) keep the Queen
-        // even though no workers come up at launch, so they never fall through to Solo.
-        if pre_spawn_workers && config.workers.is_empty() {
-            return self.launch_solo(config);
-        }
+        let shared_cell = use_worktrees && topology.uses_shared_cell();
 
         // Fetch latest from origin so all worktrees branch from the most
         // recent remote state, avoiding stale-base divergence. Skipped in
@@ -7118,27 +7394,34 @@ Last updated: {timestamp}
         // Create Queen agent
         let queen_id = format!("{}-queen", session_id);
         let (cmd, mut args) = Self::build_command(&config.queen_config);
-        let queen_branch = format!("hive/{}/queen", session_id);
+        let queen_branch = if shared_cell {
+            format!("hive/{}/primary", session_id)
+        } else {
+            format!("hive/{}/queen", session_id)
+        };
         let queen_cwd = if use_worktrees {
+            let queen_cell_id = if shared_cell { "primary" } else { "queen" };
             let (_, cwd) = create_session_worktree(
                 &session_id,
-                "queen",
+                queen_cell_id,
                 &queen_branch,
                 &base_ref,
                 &project_path,
             )?;
-            created_cells.push(("queen".to_string(), queen_branch.clone()));
+            created_cells.push((queen_cell_id.to_string(), queen_branch.clone()));
             cwd
         } else {
             // No-worktree mode: the Queen runs directly in the project directory.
             project_path.to_string_lossy().to_string()
         };
-        self.emit_workspace_created(
-            &session_id,
-            PRIMARY_CELL_ID,
-            &queen_branch,
-            Some(&queen_cwd),
-        );
+        if use_worktrees {
+            self.emit_workspace_created(
+                &session_id,
+                PRIMARY_CELL_ID,
+                &queen_branch,
+                Some(&queen_cwd),
+            );
+        }
 
         // Check if plan.md exists (from previous planning phase)
         let plan_path = project_path
@@ -7161,14 +7444,15 @@ Last updated: {timestamp}
             )
         } else {
             Self::build_queen_master_prompt(
-                &config.queen_config.cli,
+                &config.queen_config,
                 &project_path,
-                queen_cwd.as_ref(),
+                Path::new(&queen_cwd),
                 &session_id,
                 &config.workers,
                 config.prompt.as_deref(),
                 has_plan,
                 config.with_evaluator,
+                &config.execution_policy,
             )
         };
         let prompt_file = match Self::write_prompt_file(
@@ -7192,9 +7476,12 @@ Last updated: {timestamp}
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         // Write tool documentation files
-        if let Err(err) =
-            Self::write_tool_files(&project_path, &session_id, &config.queen_config.cli)
-        {
+        let principal_cli = config
+            .workers
+            .first()
+            .map(|principal| principal.cli.as_str())
+            .unwrap_or("codex");
+        if let Err(err) = Self::write_tool_files(&project_path, &session_id, principal_cli) {
             self.rollback_launch_allocations(
                 &project_path,
                 &session_id,
@@ -7264,39 +7551,54 @@ Last updated: {timestamp}
             let worker_config =
                 Self::apply_worker_identity(index, &worker_role, worker_config.clone());
             let (cmd, mut args) = Self::build_command(&worker_config);
-            let worker_branch = format!("hive/{}/worker-{}", session_id, index);
+            let worker_branch = if shared_cell {
+                queen_branch.clone()
+            } else {
+                format!("hive/{}/worker-{}", session_id, index)
+            };
             let worker_cell_id = format!("worker-{}", index);
             let worker_cwd = if use_worktrees {
-                let (_, cwd) = match create_session_worktree(
-                    &session_id,
-                    &worker_cell_id,
-                    &worker_branch,
-                    &base_ref,
-                    &project_path,
-                ) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        self.rollback_launch_allocations(
-                            &project_path,
-                            &session_id,
-                            &created_cells,
-                            &spawned_agent_ids,
-                        );
-                        return Err(err);
-                    }
-                };
-                created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
-                cwd
+                if shared_cell {
+                    queen_cwd.clone()
+                } else {
+                    let (_, cwd) = match create_session_worktree(
+                        &session_id,
+                        &worker_cell_id,
+                        &worker_branch,
+                        &base_ref,
+                        &project_path,
+                    ) {
+                        Ok(result) => result,
+                        Err(err) => {
+                            self.rollback_launch_allocations(
+                                &project_path,
+                                &session_id,
+                                &created_cells,
+                                &spawned_agent_ids,
+                            );
+                            return Err(err);
+                        }
+                    };
+                    created_cells.push((worker_cell_id.clone(), worker_branch.clone()));
+                    cwd
+                }
             } else {
                 // No-worktree mode: workers run directly in the project directory.
                 project_path.to_string_lossy().to_string()
             };
-            self.emit_workspace_created(
-                &session_id,
-                PRIMARY_CELL_ID,
-                &worker_branch,
-                Some(&worker_cwd),
-            );
+            let worker_base_commit_sha = if use_worktrees {
+                current_head(Path::new(&worker_cwd)).ok()
+            } else {
+                None
+            };
+            if use_worktrees && !shared_cell {
+                self.emit_workspace_created(
+                    &session_id,
+                    PRIMARY_CELL_ID,
+                    &worker_branch,
+                    Some(&worker_cwd),
+                );
+            }
 
             // Write task file for this worker (STANDBY or with initial task).
             // Researcher workers get a read-only task file (no implementation authority).
@@ -7321,8 +7623,15 @@ Last updated: {timestamp}
             }
 
             // Write worker prompt to file and pass to CLI
-            let worker_prompt =
-                Self::build_worker_prompt(index, &worker_config, &queen_id, &session_id);
+            let worker_prompt = Self::build_worker_prompt(
+                index,
+                &worker_config,
+                &queen_id,
+                &session_id,
+                &project_path,
+                Path::new(&worker_cwd),
+                &config.execution_policy,
+            );
             let filename = format!("worker-{}-prompt.md", index);
             let prompt_file = match Self::write_worker_prompt_file(
                 Path::new(&worker_cwd),
@@ -7387,10 +7696,12 @@ Last updated: {timestamp}
                 config: worker_config.clone(),
                 parent_id: Some(queen_id.clone()),
                 commit_sha: None,
-                base_commit_sha: None,
+                base_commit_sha: worker_base_commit_sha,
             });
         }
 
+        let (default_principal_cli, default_principal_model, default_principal_flags) =
+            Self::configured_principal_defaults(&config.workers);
         let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
@@ -7412,11 +7723,15 @@ Last updated: {timestamp}
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
+            default_principal_cli,
+            default_principal_model,
+            default_principal_flags,
+            execution_policy: config.execution_policy.clone(),
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
-            worktree_path: Some(queen_cwd.clone()),
+            worktree_path: use_worktrees.then_some(queen_cwd.clone()),
             worktree_branch: if use_worktrees {
                 Some(queen_branch.clone())
             } else {
@@ -7518,6 +7833,11 @@ Last updated: {timestamp}
             // Research smoke is driven entirely by the Queen prompt (see `smoke_directive`
             // below); it must NOT trigger the evaluator-based smoke path.
             smoke_test: false,
+            execution_policy: HiveExecutionPolicy {
+                launch_kind: HiveLaunchKind::Hive,
+                workspace_strategy: WorkspaceStrategy::None,
+                ..HiveExecutionPolicy::default()
+            },
         };
 
         // Resolve the global wiki path from AppConfig (falls back to the documented
@@ -7657,6 +7977,10 @@ phases and do EXACTLY this, then stop:
             agents: Vec::new(),
             default_cli: default_cli.clone(),
             default_model: config.default_model.clone(),
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -7906,6 +8230,10 @@ phases and do EXACTLY this, then stop:
             agents: Vec::new(),
             default_cli: default_cli.clone(),
             default_model: config.default_model.clone(),
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -8255,8 +8583,31 @@ phases and do EXACTLY this, then stop:
         config: HiveLaunchConfig,
     ) -> Result<Session, String> {
         let project_path = PathBuf::from(&config.project_path);
-        let cwd = config.project_path.as_str();
         let mut agents = Vec::new();
+        let topology = SessionOrchestrator::plan_hive_launch(
+            &config.execution_policy,
+            config.workers.len(),
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut created_cells = Vec::new();
+        let (workspace_cell, branch) = if topology.uses_shared_cell() {
+            ("primary", format!("hive/{}/primary", session_id))
+        } else {
+            ("queen", format!("hive/{}/queen", session_id))
+        };
+        let base_ref = resolve_fresh_base(&project_path);
+        let (_, cwd) = create_session_worktree(
+            &session_id,
+            workspace_cell,
+            &branch,
+            &base_ref,
+            &project_path,
+        )?;
+        created_cells.push((workspace_cell.to_string(), branch.clone()));
+        self.emit_workspace_created(&session_id, PRIMARY_CELL_ID, &branch, Some(&cwd));
+        let worktree_path = Some(cwd.clone());
+        let worktree_branch = Some(branch);
 
         // Build the appropriate prompt based on mode
         let planner_prompt = if config.smoke_test {
@@ -8268,10 +8619,36 @@ phases and do EXACTLY this, then stop:
                 config.qa_workers.as_deref(),
             )
         } else {
-            // Pass workers info to Master Planner so it knows how many tasks to create
             let prompt = config.prompt.as_deref().unwrap_or("");
-            Self::build_master_planner_prompt(&session_id, prompt, &config.workers)
+            Self::build_master_planner_prompt(
+                &session_id,
+                prompt,
+                &config.queen_config,
+                &config.workers,
+                &config.execution_policy,
+                &project_path,
+                Path::new(&cwd),
+            )
         };
+
+        // Persist continuation input before spawning the planner. A failure here
+        // must not leave a live PTY or an orphaned planning worktree.
+        let pending_config_path = project_path
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("pending-config.json");
+        let pending_result = (|| -> Result<(), String> {
+            std::fs::create_dir_all(pending_config_path.parent().unwrap())
+                .map_err(|e| format!("Failed to create session directory: {}", e))?;
+            let config_json = serde_json::to_string_pretty(&config)
+                .map_err(|e| format!("Failed to serialize config: {}", e))?;
+            std::fs::write(&pending_config_path, config_json)
+                .map_err(|e| format!("Failed to write pending config: {}", e))
+        })();
+        if let Err(error) = pending_result {
+            self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &[]);
+            return Err(error);
+        }
 
         {
             let pty_manager = self.pty_manager.read();
@@ -8281,12 +8658,24 @@ phases and do EXACTLY this, then stop:
             let (cmd, mut args) = Self::build_command(&config.queen_config); // Use queen config for planner
 
             // Write Master Planner prompt to file
-            let prompt_file = Self::write_prompt_file(
+            let prompt_file = match Self::write_prompt_file(
                 &project_path,
                 &session_id,
                 "master-planner-prompt.md",
                 &planner_prompt,
-            )?;
+            ) {
+                Ok(prompt_file) => prompt_file,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&pending_config_path);
+                    self.rollback_launch_allocations(
+                        &project_path,
+                        &session_id,
+                        &created_cells,
+                        &[],
+                    );
+                    return Err(error);
+                }
+            };
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -8298,11 +8687,20 @@ phases and do EXACTLY this, then stop:
                     AgentRole::MasterPlanner,
                     &cmd,
                     &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(cwd),
+                    Some(&cwd),
                     120,
                     30,
                 )
-                .map_err(|e| format!("Failed to spawn Master Planner: {}", e))?;
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&pending_config_path);
+                    self.rollback_launch_allocations(
+                        &project_path,
+                        &session_id,
+                        &created_cells,
+                        &[],
+                    );
+                    format!("Failed to spawn Master Planner: {}", e)
+                })?;
 
             agents.push(AgentInfo {
                 id: planner_id,
@@ -8315,18 +8713,8 @@ phases and do EXACTLY this, then stop:
             });
         }
 
-        // Store the pending config for later continuation
-        let pending_config_path = project_path
-            .join(".hive-manager")
-            .join(&session_id)
-            .join("pending-config.json");
-        std::fs::create_dir_all(pending_config_path.parent().unwrap())
-            .map_err(|e| format!("Failed to create session directory: {}", e))?;
-        let config_json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        std::fs::write(&pending_config_path, config_json)
-            .map_err(|e| format!("Failed to write pending config: {}", e))?;
-
+        let (default_principal_cli, default_principal_model, default_principal_flags) =
+            Self::configured_principal_defaults(&config.workers);
         let (max_qa_iterations, qa_timeout_secs, auth_strategy) = default_session_qa_settings();
         let session = Session {
             id: session_id.clone(),
@@ -8342,12 +8730,16 @@ phases and do EXACTLY this, then stop:
             agents,
             default_cli: config.queen_config.cli.clone(),
             default_model: config.queen_config.model.clone(),
+            default_principal_cli,
+            default_principal_model,
+            default_principal_flags,
+            execution_policy: config.execution_policy.clone(),
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
             auth_strategy,
-            worktree_path: None,
-            worktree_branch: None,
+            worktree_path,
+            worktree_branch,
             no_git: false,
             resume_report: None,
         };
@@ -8468,6 +8860,10 @@ phases and do EXACTLY this, then stop:
                 config.default_cli.trim().to_string()
             },
             default_model: config.default_model.clone(),
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -8593,6 +8989,10 @@ phases and do EXACTLY this, then stop:
                 config.default_cli.trim().to_string()
             },
             default_model: config.default_model.clone(),
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -8741,7 +9141,11 @@ phases and do EXACTLY this, then stop:
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
             // Write tool docs for Queen
-            Self::write_tool_files(&session.project_path, session_id, &queen_cfg.cli)?;
+            Self::write_tool_files(
+                &session.project_path,
+                session_id,
+                Self::session_principal_cli(&session),
+            )?;
 
             tracing::info!("Launching Fusion Queen: {} {:?} in {:?}", cmd, args, cwd);
 
@@ -9175,6 +9579,10 @@ phases and do EXACTLY this, then stop:
             agents,
             default_cli,
             default_model,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -9305,6 +9713,7 @@ phases and do EXACTLY this, then stop:
                 &worker_cell_name,
                 &task_file_path,
                 None,
+                true,
             );
             self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
             SessionError::ConfigError(format!(
@@ -9339,13 +9748,22 @@ phases and do EXACTLY this, then stop:
                 &worker_cell_name,
                 &task_file_path,
                 None,
+                true,
             );
             self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
             SessionError::ConfigError(err)
         })?;
 
         // 3. Write worker prompt to file
-        let worker_prompt = Self::build_worker_prompt(index, worker_config, queen_id, session_id);
+        let worker_prompt = Self::build_worker_prompt(
+            index,
+            worker_config,
+            queen_id,
+            session_id,
+            &session.project_path,
+            Path::new(&worker_cwd),
+            &session.execution_policy,
+        );
         let prompt_file = Self::write_worker_prompt_file(
             Path::new(&worker_cwd),
             index,
@@ -9359,6 +9777,7 @@ phases and do EXACTLY this, then stop:
                 &worker_cell_name,
                 &task_file_path,
                 None,
+                true,
             );
             self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
             SessionError::ConfigError(err)
@@ -9391,6 +9810,7 @@ phases and do EXACTLY this, then stop:
                     &worker_cell_name,
                     &task_file_path,
                     Some(&prompt_file),
+                    true,
                 );
                 self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
                 SessionError::SpawnError(format!("Failed to spawn Worker {}: {}", index, e))
@@ -9507,6 +9927,14 @@ phases and do EXACTLY this, then stop:
     }
 
     fn worker_completion_commit_sha(session: &Session, worker_id: u8) -> Option<String> {
+        // A shared-cell HEAD belongs to the cell and may move because of the Queen
+        // or another principal. Never attribute it to an individual worker.
+        if matches!(&session.session_type, SessionType::Hive { .. })
+            && session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell
+        {
+            return None;
+        }
+
         let worker_worktree = session
             .project_path
             .join(".hive-manager")
@@ -9578,6 +10006,7 @@ phases and do EXACTLY this, then stop:
         normalized_verdict: &str,
         evaluator_id: Option<&str>,
         commit_sha: Option<&str>,
+        route_to_prince: bool,
     ) -> (SessionState, Vec<(String, String, String)>) {
         if let Some(evaluator_id) = evaluator_id {
             if let Some(agent) = session
@@ -9587,6 +10016,17 @@ phases and do EXACTLY this, then stop:
             {
                 agent.commit_sha = commit_sha.map(str::to_string);
             }
+        }
+
+        // When a Prince peer is present, every Evaluator verdict (PASS or FAIL) hands
+        // off to Prince remediation before the Queen may push. The verdict label and
+        // findings live in qa-verdict.json for the Prince to read; the state machine
+        // only needs to know remediation is owed. Operator overrides (force-pass /
+        // force-fail) bypass this with route_to_prince = false.
+        if route_to_prince {
+            let changes =
+                self.set_session_state_with_events(session, SessionState::PrinceRemediation);
+            return (SessionState::PrinceRemediation, changes);
         }
 
         match normalized_verdict {
@@ -9654,11 +10094,16 @@ phases and do EXACTLY this, then stop:
             if now > session.last_activity_at {
                 session.last_activity_at = now;
             }
+            let has_prince = session
+                .agents
+                .iter()
+                .any(|agent| matches!(agent.role, AgentRole::Prince));
             let (new_state, changes) = self.apply_qa_verdict_to_session(
                 session,
                 normalized.as_str(),
                 Some(evaluator_id),
                 commit_sha,
+                has_prince,
             );
             (previous_session, session.clone(), changes, new_state)
         };
@@ -9676,10 +10121,176 @@ phases and do EXACTLY this, then stop:
 
         self.cancel_qa_timeout(session_id);
 
+        if matches!(&new_state, SessionState::PrinceRemediation) {
+            let prince_id = format!("{}-prince", session_id);
+            let prince_alive = self.pty_manager.read().is_alive(&prince_id);
+            if !prince_alive {
+                tracing::warn!(
+                    session_id = %session_id,
+                    prince_id = %prince_id,
+                    "Respawning Prince after QA verdict because PTY is not alive"
+                );
+                let prince_config = AgentConfig {
+                    cli: String::new(),
+                    model: None,
+                    flags: vec![],
+                    label: Some("Prince".to_string()),
+                    name: None,
+                    description: None,
+                    role: None,
+                    initial_prompt: None,
+                };
+                if let Err(err) = self.launch_prince(session_id, prince_config, false) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        prince_id = %prince_id,
+                        error = %err,
+                        "Failed to respawn Prince after QA verdict"
+                    );
+                }
+            }
+        }
+
         self.emit_session_update(session_id);
         self.emit_cell_status_changes(session_id, changes);
 
         Ok(new_state)
+    }
+
+    /// Mark QA inconclusive — the Evaluator reported BLOCKED, or the verdict timed
+    /// out with no usable response. Transitions QaInProgress -> QaInconclusive,
+    /// which blocks PR push / completion and surfaces to the operator. Writes a
+    /// BLOCKED verdict file so the Queen's poll loop terminates (instead of hanging)
+    /// and escalates rather than pushing. Operator unblocks via force-pass / force-fail.
+    pub fn mark_qa_inconclusive(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<SessionState, String> {
+        self.cancel_qa_timeout(session_id);
+
+        let (previous_session, updated_session, changes) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            if !matches!(session.state, SessionState::QaInProgress { .. }) {
+                return Err(format!(
+                    "Cannot mark QA inconclusive: session is in {:?} state, expected QaInProgress",
+                    session.state
+                ));
+            }
+            let previous_session = session.clone();
+            let changes = self.set_session_state_with_events(session, SessionState::QaInconclusive);
+            (previous_session, session.clone(), changes)
+        };
+
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id)
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    *session = previous_session;
+                }
+                return Err(err);
+            }
+        }
+
+        // Write a BLOCKED verdict so the Queen's poll loop terminates and escalates.
+        let verdict_content = serde_json::json!({
+            "kind": "qa-verdict",
+            "verdict": "BLOCKED",
+            "blocked_reason": "inconclusive",
+            "rationale": reason,
+        })
+        .to_string();
+        let state_manager = StateManager::new(
+            updated_session
+                .project_path
+                .join(".hive-manager")
+                .join(session_id),
+        );
+        if let Err(err) = state_manager.write_qa_verdict(
+            &format!("{}-evaluator", session_id),
+            &format!("{}-queen", session_id),
+            &verdict_content,
+            None,
+        ) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "Failed to persist BLOCKED verdict file while marking QA inconclusive"
+            );
+        }
+
+        self.emit_session_update(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit(
+                "qa-inconclusive",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "action": "blocked",
+                    "reason": reason,
+                }),
+            );
+        }
+
+        Ok(SessionState::QaInconclusive)
+    }
+
+    /// Record the Prince's remediation verdict. The Prince self-certifies after its
+    /// fix team resolves the QA findings: PASS/DONE clears the gate (PrinceRemediation
+    /// -> QaPassed, allowing the Queen to push), while BLOCKED escalates to the
+    /// operator (PrinceRemediation -> QaInconclusive). Requires PrinceRemediation so
+    /// a Prince can't jump the session straight to QaPassed before QA has run.
+    pub fn record_prince_verdict(
+        &self,
+        session_id: &str,
+        verdict: &str,
+    ) -> Result<SessionState, String> {
+        let normalized = verdict.trim().to_ascii_uppercase();
+        let target_state = match normalized.as_str() {
+            "PASS" | "DONE" | "RESOLVED" => SessionState::QaPassed,
+            "BLOCKED" | "FAIL" | "ESCALATE" => SessionState::QaInconclusive,
+            other => return Err(format!("Unsupported Prince verdict '{}'", other)),
+        };
+
+        let (previous_session, updated_session, changes) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            if !matches!(session.state, SessionState::PrinceRemediation) {
+                return Err(format!(
+                    "Cannot record Prince verdict: session is in {:?} state, expected PrinceRemediation",
+                    session.state
+                ));
+            }
+            let previous_session = session.clone();
+            let now = Utc::now();
+            if now > session.last_activity_at {
+                session.last_activity_at = now;
+            }
+            let changes = self.set_session_state_with_events(session, target_state.clone());
+            (previous_session, session.clone(), changes)
+        };
+
+        if let Some(storage) = self.storage.as_ref() {
+            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id)
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    *session = previous_session;
+                }
+                return Err(err);
+            }
+        }
+
+        self.emit_session_update(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+
+        Ok(target_state)
     }
 
     fn try_begin_evaluator_respawn(&self, session_id: &str) -> bool {
@@ -9752,7 +10363,12 @@ phases and do EXACTLY this, then stop:
             }
         }
 
-        if Self::require_commit_sha_gate_enabled() && worker_commit_sha.is_none() {
+        let shared_cell_principal = matches!(&session.session_type, SessionType::Hive { .. })
+            && session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell;
+        if Self::require_commit_sha_gate_enabled()
+            && !shared_cell_principal
+            && worker_commit_sha.is_none()
+        {
             tracing::warn!(
                 session_id = %session_id,
                 worker_id,
@@ -9806,6 +10422,21 @@ phases and do EXACTLY this, then stop:
             let session = sessions
                 .get(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+            if matches!(
+                &session.state,
+                SessionState::PrinceRemediation
+                    | SessionState::QaInconclusive
+                    | SessionState::QaPassed
+                    | SessionState::QaMaxRetriesExceeded
+            ) {
+                tracing::debug!(
+                    session_id = %session_id,
+                    state = ?session.state,
+                    "Ignoring duplicate milestone-ready signal for gated QA session"
+                );
+                return Ok(());
+            }
 
             let maybe_evaluator = session
                 .agents
@@ -9888,7 +10519,9 @@ phases and do EXACTLY this, then stop:
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            self.apply_qa_verdict_to_session(session, normalized.as_str(), None, None)
+            // Operator overrides (force-pass / force-fail) and the legacy timeout path
+            // are explicit decisions to resolve QA directly — they bypass the Prince.
+            self.apply_qa_verdict_to_session(session, normalized.as_str(), None, None, false)
         };
 
         self.emit_session_update(session_id);
@@ -9900,31 +10533,26 @@ phases and do EXACTLY this, then stop:
 
     #[allow(dead_code)]
     pub fn on_qa_timeout(&self, session_id: &str) -> Result<(), String> {
+        let timeout_secs = self
+            .get_session(session_id)
+            .map(|session| session.qa_timeout_secs)
+            .unwrap_or(DEFAULT_QA_TIMEOUT_SECS);
         tracing::warn!(
-            "QA timed out for session {}; defaulting to pass-with-warning after {} seconds",
+            "QA timed out for session {} after {} seconds; marking inconclusive (no auto-pass)",
             session_id,
-            self.get_session(session_id)
-                .map(|session| session.qa_timeout_secs)
-                .unwrap_or(DEFAULT_QA_TIMEOUT_SECS)
+            timeout_secs
         );
-        self.on_qa_verdict(session_id, "QA_VERDICT: PASS")?;
-
-        // Emit qa-timeout event
-        if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit(
-                "qa-timeout",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "action": "pass-with-warning"
-                }),
-            );
-        }
-
+        let reason = format!(
+            "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
+            timeout_secs
+        );
+        self.mark_qa_inconclusive(session_id, &reason)?;
         Ok(())
     }
 
-    /// Start a QA timeout timer. On expiry, auto-passes QA with a warning.
-    /// Cancel by calling `cancel_qa_timeout`.
+    /// Start a QA timeout timer. On expiry, marks QA inconclusive, writes a
+    /// BLOCKED verdict, and surfaces the session for operator action. Cancel by
+    /// calling `cancel_qa_timeout`.
     pub fn start_qa_timeout(&self, session_id: &str, timeout_secs: u64) {
         // Cancel any existing timer
         self.cancel_qa_timeout(session_id);
@@ -9949,20 +10577,23 @@ phases and do EXACTLY this, then stop:
 
             if is_qa {
                 tracing::warn!(
-                    "QA timeout fired for session {} after {}s — auto-passing",
+                    "QA timeout fired for session {} after {}s — marking QA inconclusive (no auto-pass)",
                     sid,
                     timeout_secs
                 );
 
-                // A timeout auto-pass should leave the session in QaPassed so the server can enforce
-                // the same quiescence gate as an explicit evaluator PASS.
+                // A timed-out QA must NOT silently ship. Transition to QaInconclusive,
+                // which blocks PR push / completion and surfaces to the operator. The
+                // operator unblocks with force-pass / force-fail.
                 let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
                         let previous_state = session.state.clone();
-                        let changes =
-                            cell_status_changes_for_transition(session, &SessionState::QaPassed);
-                        session.state = SessionState::QaPassed;
+                        let changes = cell_status_changes_for_transition(
+                            session,
+                            &SessionState::QaInconclusive,
+                        );
+                        session.state = SessionState::QaInconclusive;
                         Some((previous_state, changes, session.clone()))
                     } else {
                         None
@@ -9993,6 +10624,38 @@ phases and do EXACTLY this, then stop:
                         SessionController::fire_cell_status_changes(emitter, sid.clone(), changes);
                     }
 
+                    // Write a BLOCKED verdict file so the Queen's poll loop terminates
+                    // (instead of hanging forever) and she escalates rather than pushes.
+                    let reason = format!(
+                        "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
+                        timeout_secs
+                    );
+                    let verdict_content = serde_json::json!({
+                        "kind": "qa-verdict",
+                        "verdict": "BLOCKED",
+                        "blocked_reason": "timeout",
+                        "rationale": reason,
+                    })
+                    .to_string();
+                    let state_manager = StateManager::new(
+                        updated_session
+                            .project_path
+                            .join(".hive-manager")
+                            .join(&sid),
+                    );
+                    if let Err(err) = state_manager.write_qa_verdict(
+                        &format!("{}-evaluator", sid),
+                        &format!("{}-queen", sid),
+                        &verdict_content,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            "Failed to persist BLOCKED verdict file on QA timeout for {}: {}",
+                            sid,
+                            err
+                        );
+                    }
+
                     if let Some(ref app_handle) = app_handle {
                         let _ = app_handle.emit(
                             "session-update",
@@ -10001,10 +10664,11 @@ phases and do EXACTLY this, then stop:
                             },
                         );
                         let _ = app_handle.emit(
-                            "qa-timeout",
+                            "qa-inconclusive",
                             serde_json::json!({
                                 "session_id": sid,
-                                "action": "pass-with-warning"
+                                "action": "blocked-on-timeout",
+                                "reason": reason,
                             }),
                         );
                     }
@@ -10783,8 +11447,6 @@ phases and do EXACTLY this, then stop:
             _ => {} // Continue with Hive logic below
         }
 
-        let cwd = session.project_path.to_str().unwrap_or(".");
-
         // Load the pending config
         let pending_config_path = session
             .project_path
@@ -10795,6 +11457,47 @@ phases and do EXACTLY this, then stop:
             .map_err(|e| format!("Failed to read pending config: {}", e))?;
         let config: HiveLaunchConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse pending config: {}", e))?;
+        let mut continuation_created_cells = Vec::new();
+        let (cwd, worktree_branch) = match session.execution_policy.workspace_strategy {
+            WorkspaceStrategy::SharedCell => (
+                session.worktree_path.clone().ok_or_else(|| {
+                    format!(
+                        "Shared-cell session {} is missing its primary worktree path",
+                        session_id
+                    )
+                })?,
+                session
+                    .worktree_branch
+                    .clone()
+                    .unwrap_or_else(|| format!("hive/{}/primary", session_id)),
+            ),
+            WorkspaceStrategy::IsolatedCell => {
+                let branch = session
+                    .worktree_branch
+                    .clone()
+                    .unwrap_or_else(|| format!("hive/{}/queen", session_id));
+                if let Some(path) = session.worktree_path.clone() {
+                    (path, branch)
+                } else {
+                    // Compatibility for planning sessions persisted before isolated
+                    // Queen worktrees were allocated during the planning phase.
+                    let base_ref = resolve_fresh_base(&session.project_path);
+                    let (_, path) = create_session_worktree(
+                        session_id,
+                        "queen",
+                        &branch,
+                        &base_ref,
+                        &session.project_path,
+                    )?;
+                    continuation_created_cells.push(("queen".to_string(), branch.clone()));
+                    self.emit_workspace_created(session_id, PRIMARY_CELL_ID, &branch, Some(&path));
+                    (path, branch)
+                }
+            }
+            WorkspaceStrategy::None => {
+                return Err("Planning Hive sessions require a managed git workspace".to_string())
+            }
+        };
 
         // Clean up Master Planner PTY before spawning Queen (fixes terminal corruption)
         let planner_id = format!("{}-master-planner", session_id);
@@ -10814,81 +11517,117 @@ phases and do EXACTLY this, then stop:
 
         let mut new_agents = Vec::new();
 
+        // Create Queen agent
+        let queen_id = format!("{}-queen", session_id);
+        let (cmd, mut args) = Self::build_command(&config.queen_config);
+
+        // Plan should exist now
+        let has_plan = session
+            .project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("plan.md")
+            .exists();
+
+        // Write Queen prompt with plan reference
+        let master_prompt = Self::build_queen_master_prompt(
+            &config.queen_config,
+            &session.project_path,
+            Path::new(&cwd),
+            session_id,
+            &config.workers,
+            config.prompt.as_deref(),
+            has_plan,
+            config.with_evaluator,
+            &session.execution_policy,
+        );
+        let prompt_file = match Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            "queen-prompt.md",
+            &master_prompt,
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                self.rollback_launch_allocations(
+                    &session.project_path,
+                    session_id,
+                    &continuation_created_cells,
+                    &[],
+                );
+                return Err(error);
+            }
+        };
+        let prompt_path = prompt_file.to_string_lossy().to_string();
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
+
+        // Write tool documentation files
+        let principal_cli = config
+            .workers
+            .first()
+            .map(|principal| principal.cli.as_str())
+            .unwrap_or("codex");
+        if let Err(error) = Self::write_tool_files(&session.project_path, session_id, principal_cli)
         {
-            let pty_manager = self.pty_manager.read();
-
-            // Create Queen agent
-            let queen_id = format!("{}-queen", session_id);
-            let (cmd, mut args) = Self::build_command(&config.queen_config);
-
-            // Plan should exist now
-            let has_plan = session
-                .project_path
-                .join(".hive-manager")
-                .join(session_id)
-                .join("plan.md")
-                .exists();
-
-            // Write Queen prompt with plan reference
-            let master_prompt = Self::build_queen_master_prompt(
-                &config.queen_config.cli,
-                &session.project_path,
+            self.rollback_launch_allocations(
                 &session.project_path,
                 session_id,
-                &config.workers,
-                config.prompt.as_deref(),
-                has_plan,
-                config.with_evaluator,
+                &continuation_created_cells,
+                &[],
             );
-            let prompt_file = Self::write_prompt_file(
-                &session.project_path,
-                session_id,
-                "queen-prompt.md",
-                &master_prompt,
-            )?;
-            let prompt_path = prompt_file.to_string_lossy().to_string();
-            Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
-
-            // Write tool documentation files
-            Self::write_tool_files(&session.project_path, session_id, &config.queen_config.cli)?;
-
-            tracing::info!(
-                "Launching Queen agent (after planning): {} {:?} in {:?}",
-                cmd,
-                args,
-                cwd
-            );
-
-            pty_manager
-                .create_session(
-                    queen_id.clone(),
-                    AgentRole::Queen,
-                    &cmd,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    Some(cwd),
-                    120,
-                    30,
-                )
-                .map_err(|e| format!("Failed to spawn Queen: {}", e))?;
-
-            new_agents.push(AgentInfo {
-                id: queen_id.clone(),
-                role: AgentRole::Queen,
-                status: AgentStatus::Running,
-                config: config.queen_config.clone(),
-                parent_id: None,
-                commit_sha: None,
-                base_commit_sha: None,
-            });
-
-            // Queen will spawn workers via HTTP API after reading the plan
-            // No auto-spawning of workers - Queen controls the flow
+            return Err(error);
         }
+
+        tracing::info!(
+            "Launching Queen agent (after planning): {} {:?} in {:?}",
+            cmd,
+            args,
+            cwd
+        );
+
+        if let Err(error) = self.pty_manager.read().create_session(
+            queen_id.clone(),
+            AgentRole::Queen,
+            &cmd,
+            &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            Some(&cwd),
+            120,
+            30,
+        ) {
+            self.rollback_launch_allocations(
+                &session.project_path,
+                session_id,
+                &continuation_created_cells,
+                &[],
+            );
+            return Err(format!("Failed to spawn Queen: {}", error));
+        }
+
+        new_agents.push(AgentInfo {
+            id: queen_id.clone(),
+            role: AgentRole::Queen,
+            status: AgentStatus::Running,
+            config: config.queen_config.clone(),
+            parent_id: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        });
+
+        // Queen will spawn workers via HTTP API after reading the plan
+        // No auto-spawning of workers - Queen controls the flow
 
         // Update session with new agents - Queen will spawn workers
         let (updated_session, changes) = {
             let mut sessions = self.sessions.write();
             if let Some(s) = sessions.get_mut(session_id) {
+                s.worktree_path = Some(cwd.clone());
+                s.worktree_branch = Some(worktree_branch);
+                if s.default_principal_cli.is_none() {
+                    let (cli, model, flags) = Self::configured_principal_defaults(&config.workers);
+                    s.default_principal_cli = cli;
+                    s.default_principal_model = model;
+                    s.default_principal_flags = flags;
+                }
                 s.agents.extend(new_agents.clone());
                 self.emit_agent_batch_launched(s, &new_agents);
                 // Set state to Running - Queen will spawn workers via HTTP API
@@ -10911,7 +11650,6 @@ phases and do EXACTLY this, then stop:
         // Update storage
         self.update_session_storage(session_id);
         self.emit_cell_status_changes(session_id, changes);
-        self.ensure_task_watcher(session_id, &updated_session.project_path);
         self.ensure_task_watcher(session_id, &updated_session.project_path);
         self.spawn_launch_evaluator_agents(
             session_id,
@@ -11189,6 +11927,14 @@ phases and do EXACTLY this, then stop:
             AuthStrategy::from_persisted(&persisted.auth_strategy)
         };
 
+        let mut execution_policy = persisted.execution_policy.clone();
+        if persisted.no_git {
+            // Legacy Research snapshots predate execution_policy and therefore
+            // deserialize to IsolatedCell. No-git sessions always execute in the
+            // project checkout and use session-qualified task files.
+            execution_policy.workspace_strategy = WorkspaceStrategy::None;
+        }
+
         Ok(Session {
             id: persisted.id.clone(),
             name: persisted.name.clone(),
@@ -11201,6 +11947,10 @@ phases and do EXACTLY this, then stop:
             agents,
             default_cli: persisted.default_cli.clone(),
             default_model: persisted.default_model.clone(),
+            default_principal_cli: persisted.default_principal_cli.clone(),
+            default_principal_model: persisted.default_principal_model.clone(),
+            default_principal_flags: persisted.default_principal_flags.clone(),
+            execution_policy,
             qa_workers: persisted.qa_workers.clone(),
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
@@ -11498,6 +12248,10 @@ phases and do EXACTLY this, then stop:
             agents,
             default_cli,
             default_model,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
@@ -11570,6 +12324,22 @@ phases and do EXACTLY this, then stop:
         // itself after activation, based on milestone contract criteria
         let _evaluator = self.launch_evaluator(session_id, evaluator_config, smoke_test)?;
 
+        // The Prince is a peer to the Queen and Evaluator, auto-spawned alongside the
+        // Evaluator. It idles until the QA verdict lands, then resolves the findings
+        // with its own fix team and gates the Queen's PR push. Inherits the session
+        // default CLI (empty cli -> resolved in launch_prince).
+        let prince_config = AgentConfig {
+            cli: String::new(),
+            model: None,
+            flags: vec![],
+            label: Some("Prince".to_string()),
+            name: None,
+            description: None,
+            role: None,
+            initial_prompt: None,
+        };
+        let _prince = self.launch_prince(session_id, prince_config, smoke_test)?;
+
         Ok(())
     }
 
@@ -11588,6 +12358,37 @@ phases and do EXACTLY this, then stop:
         }
         .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
+        if !Self::session_allows_dynamic_principal(&session, &role, parent_id.as_deref()) {
+            return Err(format!(
+                "Cannot add a managed principal to {:?}; dynamic principals are supported only by Hive sessions",
+                session.session_type
+            ));
+        }
+        if session.no_git && !role.role_type.eq_ignore_ascii_case("researcher") {
+            return Err("Research sessions accept only read-only researcher workers".to_string());
+        }
+        if let Some(explicit_parent) = parent_id.as_deref() {
+            let parent = session
+                .agents
+                .iter()
+                .find(|agent| agent.id == explicit_parent)
+                .ok_or_else(|| {
+                    format!(
+                        "Parent agent {} does not belong to session {}",
+                        explicit_parent, session_id
+                    )
+                })?;
+            if !matches!(
+                parent.role,
+                AgentRole::Queen | AgentRole::Planner { .. } | AgentRole::Prince
+            ) {
+                return Err(format!(
+                    "Agent {} cannot parent a managed principal",
+                    explicit_parent
+                ));
+            }
+        }
+
         let can_add_worker = matches!(
             session.state,
             SessionState::Running
@@ -11598,6 +12399,7 @@ phases and do EXACTLY this, then stop:
                 | SessionState::QaPassed
                 | SessionState::QaFailed { .. }
                 | SessionState::QaMaxRetriesExceeded
+                | SessionState::PrinceRemediation
         );
         if !can_add_worker {
             return Err(format!(
@@ -11622,13 +12424,31 @@ phases and do EXACTLY this, then stop:
 
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
-        let worker_branch = format!("hive/{}/worker-{}", session_id, worker_index);
+        let uses_shared_workspace = !session.no_git
+            && matches!(&session.session_type, SessionType::Hive { .. })
+            && session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell;
+        let creates_worker_worktree = !session.no_git && !uses_shared_workspace;
+        let worker_branch = if uses_shared_workspace {
+            session
+                .worktree_branch
+                .clone()
+                .unwrap_or_else(|| format!("hive/{}/primary", session_id))
+        } else {
+            format!("hive/{}/worker-{}", session_id, worker_index)
+        };
         // Research (no-git) sessions never create worktrees or branches: the worker
         // runs directly in the project directory, mirroring the no-worktree launch path
         // in `launch_hive_internal`. This keeps the Queen's on-demand spawning working
         // on non-repo folders and honors the research "no git" contract.
         let worker_cwd = if session.no_git {
             session.project_path.to_string_lossy().to_string()
+        } else if uses_shared_workspace {
+            session.worktree_path.clone().ok_or_else(|| {
+                format!(
+                    "Shared-cell session {} is missing its primary worktree path",
+                    session_id
+                )
+            })?
         } else {
             // Late-spawned workers should branch from the most recent session-integrated commit when possible.
             let base_ref = Self::resolve_worker_base_ref(&session, "add_worker", worker_index);
@@ -11641,22 +12461,31 @@ phases and do EXACTLY this, then stop:
             )?;
             cwd
         };
-        self.emit_workspace_created(
-            session_id,
-            PRIMARY_CELL_ID,
-            &worker_branch,
-            Some(&worker_cwd),
-        );
+        if creates_worker_worktree {
+            self.emit_workspace_created(
+                session_id,
+                PRIMARY_CELL_ID,
+                &worker_branch,
+                Some(&worker_cwd),
+            );
+        }
 
         let worker_cell_name = format!("worker-{worker_index}");
+        let worker_base_commit_sha = if session.no_git {
+            None
+        } else {
+            current_head(Path::new(&worker_cwd)).ok()
+        };
         let task_file_path =
-            Self::task_file_path_for_worker(Path::new(&worker_cwd), worker_index as usize);
+            Self::task_file_path_for_session_worker(&session, worker_index as usize)?;
 
         // Write task file for this worker (STANDBY or with initial task)
-        let _task_file = match Self::write_task_file(
-            Path::new(&worker_cwd),
+        let task_status = config_with_role.initial_prompt.as_deref().map(|_| "ACTIVE");
+        let _task_file = match Self::write_task_file_at_path(
+            &task_file_path,
             worker_index,
             config_with_role.initial_prompt.as_deref(),
+            task_status,
             config_with_role
                 .role
                 .as_ref()
@@ -11671,6 +12500,7 @@ phases and do EXACTLY this, then stop:
                     &worker_cell_name,
                     &task_file_path,
                     None,
+                    creates_worker_worktree,
                 );
                 return Err(err);
             }
@@ -11682,6 +12512,9 @@ phases and do EXACTLY this, then stop:
             &config_with_role,
             &actual_parent_id,
             session_id,
+            &session.project_path,
+            Path::new(&worker_cwd),
+            &session.execution_policy,
         );
         let filename = format!("worker-{}-prompt.md", worker_index);
         let prompt_file = match Self::write_worker_prompt_file(
@@ -11698,6 +12531,7 @@ phases and do EXACTLY this, then stop:
                     &worker_cell_name,
                     &task_file_path,
                     None,
+                    creates_worker_worktree,
                 );
                 return Err(err);
             }
@@ -11737,6 +12571,7 @@ phases and do EXACTLY this, then stop:
                     &worker_cell_name,
                     &task_file_path,
                     Some(&prompt_file),
+                    creates_worker_worktree,
                 );
                 return Err(format!("Failed to spawn Worker {}: {}", worker_index, e));
             }
@@ -11752,7 +12587,7 @@ phases and do EXACTLY this, then stop:
             config: agent_config,
             parent_id: Some(actual_parent_id),
             commit_sha: None,
-            base_commit_sha: None,
+            base_commit_sha: worker_base_commit_sha,
         };
 
         // Update session
@@ -11760,6 +12595,15 @@ phases and do EXACTLY this, then stop:
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
                 session.agents.push(agent_info.clone());
+                let live_worker_count = session
+                    .agents
+                    .iter()
+                    .filter(|agent| matches!(agent.role, AgentRole::Worker { .. }))
+                    .count()
+                    .min(u8::MAX as usize) as u8;
+                if let SessionType::Hive { worker_count } = &mut session.session_type {
+                    *worker_count = (*worker_count).max(live_worker_count);
+                }
                 // Don't promote ephemeral worker worktrees to session-level metadata.
                 // Only persist long-lived primary worktrees here.
                 self.emit_agent_launched(session, &agent_info);
@@ -11832,10 +12676,25 @@ phases and do EXACTLY this, then stop:
             self.emit_cell_status_changes(session_id, changes);
         }
 
-        Self::write_tool_files(&session.project_path, session_id, &config.cli)?;
+        Self::write_tool_files(
+            &session.project_path,
+            session_id,
+            Self::session_principal_cli(&session),
+        )?;
 
-        let evaluator_prompt =
-            Self::build_evaluator_prompt(session_id, &config, &session.qa_workers, smoke_test);
+        let worker_count = match session.session_type {
+            SessionType::Hive { worker_count } => worker_count,
+            _ => 0,
+        };
+        let execution_workspace = Self::execution_workspace(&session);
+        let evaluator_prompt = Self::build_evaluator_prompt(
+            session_id,
+            &config,
+            &session.qa_workers,
+            worker_count,
+            &execution_workspace,
+            smoke_test,
+        );
         let prompt_file = Self::write_prompt_file(
             &session.project_path,
             session_id,
@@ -11919,6 +12778,123 @@ phases and do EXACTLY this, then stop:
         Ok(agent_info)
     }
 
+    /// Launch the Prince peer. Mirrors `launch_evaluator` but does NOT touch the
+    /// session state or arm the QA timeout: the Prince idles, polling for the QA
+    /// verdict, and only acts once findings exist. Inherits the session default CLI
+    /// so its fix team uses the single agent type the operator selected.
+    pub fn launch_prince(
+        &self,
+        session_id: &str,
+        mut config: AgentConfig,
+        smoke_test: bool,
+    ) -> Result<AgentInfo, String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        let prince_id = format!("{}-prince", session_id);
+        if let Some(existing) = session.agents.iter().find(|agent| agent.id == prince_id) {
+            let prince_alive = self.pty_manager.read().is_alive(&prince_id);
+            if prince_alive {
+                return Ok(existing.clone());
+            }
+            tracing::info!(
+                session_id = %session_id,
+                prince_id = %prince_id,
+                "Respawning stale prince after PTY exit"
+            );
+        }
+
+        let uses_session_default_cli = config.cli.trim().is_empty();
+        if uses_session_default_cli {
+            config.cli = session.default_cli.clone();
+        }
+        let uses_session_cli = uses_session_default_cli || config.cli.trim() == session.default_cli;
+        if config.model.is_none() {
+            config.model = if uses_session_cli {
+                session.default_model.clone()
+            } else {
+                CliRegistry::default_model(&config.cli)
+                    .map(ToString::to_string)
+                    .or_else(|| session.default_model.clone())
+            };
+        }
+        if config.label.is_none() {
+            config.label = Some("Prince".to_string());
+        }
+
+        let principal_defaults = self
+            .get_session_principal_defaults(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+        Self::write_tool_files(&session.project_path, session_id, &principal_defaults.cli)?;
+        let execution_workspace = Self::execution_workspace(&session);
+        let prince_prompt = Self::build_prince_prompt(
+            session_id,
+            &config,
+            &principal_defaults,
+            &execution_workspace,
+            session.execution_policy.workspace_strategy,
+            smoke_test,
+        );
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            "prince-prompt.md",
+            &prince_prompt,
+        )?;
+
+        let (cmd, mut args) = Self::build_command(&config);
+        Self::add_prompt_to_args(&cmd, &mut args, &prompt_file.to_string_lossy());
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(current) = sessions.get_mut(session_id) {
+                current.agents.retain(|agent| agent.id != prince_id);
+            }
+        }
+
+        let cwd = session.project_path.to_str().unwrap_or(".");
+        {
+            let pty_manager = self.pty_manager.read();
+            pty_manager
+                .create_session(
+                    prince_id.clone(),
+                    AgentRole::Prince,
+                    &cmd,
+                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    Some(cwd),
+                    120,
+                    30,
+                )
+                .map_err(|e| format!("Failed to spawn Prince: {}", e))?;
+        }
+
+        let agent_info = AgentInfo {
+            id: prince_id,
+            role: AgentRole::Prince,
+            status: AgentStatus::Running,
+            config,
+            parent_id: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        };
+
+        {
+            let mut sessions = self.sessions.write();
+            let current = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            current.agents.push(agent_info.clone());
+            self.emit_agent_launched(current, &agent_info);
+        }
+
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+        self.ensure_task_watcher(session_id, &session.project_path);
+
+        Ok(agent_info)
+    }
+
     #[allow(dead_code)]
     pub fn add_qa_worker(
         &self,
@@ -11980,6 +12956,7 @@ phases and do EXACTLY this, then stop:
             &specialization,
             &config,
             &session.auth_strategy,
+            &Self::execution_workspace(&session),
         );
         // QA workers spawned after evaluator launch run from the project root, not
         // isolated worker worktrees, so their prompts stay in the session prompt dir.
@@ -12089,8 +13066,6 @@ phases and do EXACTLY this, then stop:
         // Build command
         let (cmd, mut args) = Self::build_command(&config);
 
-        let default_cli = session.default_cli.as_str();
-
         // Get project path
         let cwd = session.project_path.to_str().unwrap_or(".");
 
@@ -12121,7 +13096,11 @@ phases and do EXACTLY this, then stop:
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         // Write tool files for the planner (spawn-worker.md)
-        Self::write_tool_files(&session.project_path, session_id, default_cli)?;
+        Self::write_tool_files(
+            &session.project_path,
+            session_id,
+            Self::session_principal_cli(&session),
+        )?;
 
         tracing::info!(
             "Adding Planner {} ({}) to session {}: {} {:?}",
@@ -12292,6 +13271,10 @@ phases and do EXACTLY this, then stop:
             state: state_str,
             default_cli: session.default_cli.clone(),
             default_model: session.default_model.clone(),
+            default_principal_cli: session.default_principal_cli.clone(),
+            default_principal_model: session.default_principal_model.clone(),
+            default_principal_flags: session.default_principal_flags.clone(),
+            execution_policy: session.execution_policy.clone(),
             qa_workers: session.qa_workers.clone(),
             max_qa_iterations: session.max_qa_iterations,
             qa_timeout_secs: session.qa_timeout_secs,
@@ -12501,6 +13484,8 @@ fn parse_agent_role(role: &str) -> Option<AgentRole> {
         Some(AgentRole::Queen)
     } else if role == "Evaluator" {
         Some(AgentRole::Evaluator)
+    } else if role == "Prince" {
+        Some(AgentRole::Prince)
     } else if role.starts_with("Planner(") {
         let index = role
             .trim_start_matches("Planner(")
@@ -12588,6 +13573,8 @@ fn parse_persisted_session_state(state: &str) -> SessionState {
         "QaPassed" => SessionState::QaPassed,
         "QaFailed" => SessionState::QaFailed { iteration: 1 },
         "QaMaxRetriesExceeded" => SessionState::QaMaxRetriesExceeded,
+        "PrinceRemediation" => SessionState::PrinceRemediation,
+        "QaInconclusive" => SessionState::QaInconclusive,
         "Running" => SessionState::Running,
         "Paused" => SessionState::Paused,
         "Closing" => SessionState::Closing,
@@ -12622,6 +13609,8 @@ fn serialize_session_state(state: &SessionState) -> String {
         SessionState::QaPassed => "QaPassed".to_string(),
         SessionState::QaFailed { iteration } => format!("QaFailed:{}", iteration),
         SessionState::QaMaxRetriesExceeded => "QaMaxRetriesExceeded".to_string(),
+        SessionState::PrinceRemediation => "PrinceRemediation".to_string(),
+        SessionState::QaInconclusive => "QaInconclusive".to_string(),
         SessionState::Running => "Running".to_string(),
         SessionState::Paused => "Paused".to_string(),
         SessionState::Completed => "Completed".to_string(),
@@ -12649,6 +13638,7 @@ fn serialize_persisted_agent_role(role: &AgentRole) -> String {
                 parent.as_deref().unwrap_or("None")
             )
         }
+        AgentRole::Prince => "Prince".to_string(),
     }
 }
 
@@ -12662,6 +13652,7 @@ fn serialize_agent_role(role: &AgentRole) -> &'static str {
         AgentRole::Judge { .. } => "judge",
         AgentRole::Evaluator => "evaluator",
         AgentRole::QaWorker { .. } => "qa-worker",
+        AgentRole::Prince => "prince",
     }
 }
 
@@ -12675,13 +13666,14 @@ fn format_agent_display(role: &AgentRole) -> String {
         AgentRole::Judge { session_id } => format!("Judge-{}", session_id),
         AgentRole::Evaluator => "Evaluator".to_string(),
         AgentRole::QaWorker { index, .. } => format!("QaWorker-{}", index),
+        AgentRole::Prince => "Prince".to_string(),
     }
 }
 
 fn include_in_worker_roster(role: &AgentRole) -> bool {
     !matches!(
         serialize_agent_role(role),
-        "queen" | "evaluator" | "qa-worker"
+        "queen" | "evaluator" | "qa-worker" | "prince"
     )
 }
 
@@ -12692,6 +13684,7 @@ mod tests {
         AgentInfo, AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController,
         SessionError, SessionState, SessionType,
     };
+    use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
@@ -12743,6 +13736,99 @@ mod tests {
         let _completed = SessionState::Completed;
         let _closed = SessionState::Closed;
         let _failed = SessionState::Failed("error".to_string());
+    }
+
+    #[test]
+    fn only_hive_and_legacy_swarm_accept_dynamic_managed_principals() {
+        assert!(SessionController::session_type_supports_dynamic_principals(
+            &SessionType::Hive { worker_count: 1 }
+        ));
+        assert!(SessionController::session_type_supports_dynamic_principals(
+            &SessionType::Swarm { planner_count: 1 }
+        ));
+        assert!(
+            !SessionController::session_type_supports_dynamic_principals(&SessionType::Solo {
+                cli: "codex".to_string(),
+                model: Some("gpt-5.6-sol".to_string()),
+            })
+        );
+        assert!(
+            !SessionController::session_type_supports_dynamic_principals(&SessionType::Fusion {
+                variants: vec![]
+            })
+        );
+        assert!(
+            !SessionController::session_type_supports_dynamic_principals(&SessionType::Debate {
+                variants: vec![]
+            })
+        );
+    }
+
+    #[test]
+    fn solo_allows_only_prince_owned_fixers_during_remediation() {
+        let mut session = waiting_worker_session("solo-fixer", Path::new("/repo"), 1);
+        session.session_type = SessionType::Solo {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.6-sol".to_string()),
+        };
+        let fixer = WorkerRole::new("prince-fixer", "Prince Fixer", "codex");
+        let prince_id = "solo-fixer-prince";
+
+        session.state = SessionState::Running;
+        assert!(!SessionController::session_allows_dynamic_principal(
+            &session,
+            &fixer,
+            Some(prince_id),
+        ));
+
+        session.state = SessionState::PrinceRemediation;
+        assert!(SessionController::session_allows_dynamic_principal(
+            &session,
+            &fixer,
+            Some(prince_id),
+        ));
+        assert!(!SessionController::session_allows_dynamic_principal(
+            &session,
+            &fixer,
+            Some("another-session-prince"),
+        ));
+    }
+
+    #[test]
+    fn fusion_and_debate_planning_continuations_reach_type_dispatch() {
+        let temp = tempfile::tempdir().expect("temp project");
+        let controller = test_controller();
+        let cases = [
+            (
+                "planning-fusion",
+                SessionType::Fusion {
+                    variants: vec!["Variant A".to_string()],
+                },
+                "Failed to read pending fusion config",
+            ),
+            (
+                "planning-debate",
+                SessionType::Debate {
+                    variants: vec!["Debater A".to_string()],
+                },
+                "Failed to read pending debate config",
+            ),
+        ];
+
+        for (session_id, session_type, expected_dispatch_error) in cases {
+            let mut session = waiting_worker_session(session_id, temp.path(), 1);
+            session.session_type = session_type;
+            session.state = SessionState::Planning;
+            controller.insert_test_session(session);
+
+            let error = controller
+                .continue_after_planning(session_id)
+                .expect_err("missing pending config should stop after type dispatch");
+            assert!(
+                error.contains(expected_dispatch_error),
+                "unexpected continuation error: {error}"
+            );
+        }
     }
 
     #[test]
@@ -12905,11 +13991,36 @@ mod tests {
             "a11y",
             &AgentConfig::default(),
             &AuthStrategy::default(),
+            "/repo/execution",
         );
 
         assert!(prompt.contains("Accessibility Tester"));
         assert!(prompt.contains("axe-core"));
+        assert!(prompt.contains("/repo/execution"));
         assert!(!prompt.contains("UI Tester"));
+    }
+
+    #[test]
+    fn evaluator_enabled_solo_prompt_emits_and_waits_for_verification_handoffs() {
+        let prompt = SessionController::build_solo_evaluator_prompt(
+            "solo-123",
+            Path::new("/repo"),
+            "/repo/.hive-manager/worktrees/solo-123/worker-1",
+            Some("Fix the bounded bug"),
+        );
+
+        assert!(prompt.contains("Fix the bounded bug"));
+        assert!(prompt.contains("milestone-ready.json"));
+        assert!(prompt.contains("qa-verdict.json"));
+        assert!(prompt.contains("prince-verdict.json"));
+        assert!(prompt.contains("commit the completed Solo implementation"));
+        assert!(prompt.contains("solo-123-worker-1"));
+        assert!(prompt.contains(SessionController::qa_blocked_verdict_grep_pattern()));
+        let blocked_guard = prompt.find("QA is BLOCKED").expect("BLOCKED guard");
+        let prince_wait = prompt
+            .find("while [ ! -f \"/repo/.hive-manager/solo-123/peer/prince-verdict.json\" ]")
+            .expect("Prince wait loop");
+        assert!(blocked_guard < prince_wait);
     }
 
     #[test]
@@ -12941,6 +14052,99 @@ mod tests {
                 "/repo/.hive-manager/worktrees/session-123/worker-4/.hive-manager/tasks/worker-4-task.md"
             )
         );
+    }
+
+    #[test]
+    fn session_worker_task_path_follows_shared_isolated_and_research_workspaces() {
+        let project = Path::new("/repo");
+        let mut session = waiting_worker_session("session-123", project, 1);
+
+        let isolated = SessionController::task_file_path_for_session_worker(&session, 2)
+            .expect("isolated task path");
+        assert_eq!(
+            isolated,
+            PathBuf::from(
+                "/repo/.hive-manager/worktrees/session-123/worker-2/.hive-manager/tasks/worker-2-task.md"
+            )
+        );
+
+        session.execution_policy.workspace_strategy = WorkspaceStrategy::SharedCell;
+        session.worktree_path =
+            Some("/repo/.hive-manager/worktrees/session-123/primary".to_string());
+        let shared = SessionController::task_file_path_for_session_worker(&session, 2)
+            .expect("shared task path");
+        assert_eq!(
+            shared,
+            PathBuf::from(
+                "/repo/.hive-manager/worktrees/session-123/primary/.hive-manager/tasks/worker-2-task.md"
+            )
+        );
+
+        session.no_git = true;
+        session.worktree_path = None;
+        let research = SessionController::task_file_path_for_session_worker(&session, 2)
+            .expect("research task path");
+        assert_eq!(
+            research,
+            PathBuf::from("/repo/.hive-manager/session-123/tasks/worker-2-task.md")
+        );
+    }
+
+    #[test]
+    fn legacy_no_git_restore_normalizes_research_workspace_and_prompt_path() {
+        let temp = tempfile::tempdir().expect("temp project");
+        let controller = test_controller();
+        let mut source = waiting_worker_session("legacy-research", temp.path(), 1);
+        source.no_git = true;
+        source.execution_policy = HiveExecutionPolicy::default();
+
+        let persisted = SessionController::session_to_persisted_snapshot(&source);
+        let mut legacy_json = serde_json::to_value(persisted).expect("persisted session JSON");
+        legacy_json
+            .as_object_mut()
+            .expect("persisted object")
+            .remove("execution_policy");
+        let legacy: crate::storage::PersistedSession =
+            serde_json::from_value(legacy_json).expect("legacy session");
+        assert_eq!(
+            legacy.execution_policy.workspace_strategy,
+            WorkspaceStrategy::IsolatedCell
+        );
+
+        let restored = controller
+            .session_from_persisted(&legacy)
+            .expect("restore legacy Research session");
+        assert_eq!(
+            restored.execution_policy.workspace_strategy,
+            WorkspaceStrategy::None
+        );
+
+        let task_path = SessionController::task_file_path_for_session_worker(&restored, 2)
+            .expect("Research task path");
+        let prompt = SessionController::build_worker_prompt(
+            2,
+            &AgentConfig {
+                role: Some(WorkerRole::new("researcher", "Researcher", "claude")),
+                ..AgentConfig::default()
+            },
+            "legacy-research-queen",
+            &restored.id,
+            &restored.project_path,
+            &restored.project_path,
+            &restored.execution_policy,
+        );
+        assert!(prompt.contains(&SessionController::prompt_path(&task_path)));
+    }
+
+    #[test]
+    fn coding_task_file_defers_to_workspace_contract_for_commit_authority() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let task = SessionController::write_task_file(temp.path(), 1, None, false)
+            .expect("write task file");
+        let body = std::fs::read_to_string(task).expect("read task file");
+
+        assert!(body.contains("Follow the launch prompt's Workspace Contract"));
+        assert!(!body.contains("Do NOT push or commit"));
     }
 
     #[test]
@@ -13040,6 +14244,173 @@ mod tests {
 
         assert!(content.contains("/api/sessions/session-123/qa-workers"));
         assert!(content.contains("\"specialization\": \"ui\""));
+
+        let worker_tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("spawn-worker.md");
+        let worker_content =
+            std::fs::read_to_string(worker_tool_path).expect("read worker tool doc");
+        assert!(worker_content.contains("gpt-5.6-sol for Codex or fable/opus for Claude"));
+        assert!(worker_content.contains("Omit to inherit the session principal CLI (`claude`)"));
+        assert!(worker_content.contains("| flags | string[] | No |"));
+        assert!(worker_content.contains("Omit to inherit principal flags; send `[]` to clear them"));
+        assert!(!worker_content.contains(r#"{\"role_type\": \"backend\", \"cli\""#));
+        assert!(worker_content.contains("inside its assigned workspace"));
+        assert!(!worker_content.contains("inside that worker's worktree"));
+    }
+
+    fn shared_meta_harness_policy() -> HiveExecutionPolicy {
+        HiveExecutionPolicy {
+            launch_kind: crate::domain::HiveLaunchKind::Hive,
+            workspace_strategy: crate::domain::WorkspaceStrategy::SharedCell,
+            queen_delegation: crate::domain::DelegationPolicy {
+                mode: crate::domain::NativeDelegationMode::Auto,
+                max_children: Some(3),
+                max_depth: Some(2),
+            },
+            principal_delegation: crate::domain::DelegationPolicy {
+                mode: crate::domain::NativeDelegationMode::Encouraged,
+                max_children: Some(4),
+                max_depth: Some(2),
+            },
+        }
+    }
+
+    fn codex_principal() -> AgentConfig {
+        AgentConfig {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.6-sol".to_string()),
+            flags: vec![
+                "--config".to_string(),
+                "model_reasoning_effort=\"high\"".to_string(),
+            ],
+            role: Some(WorkerRole::new("backend", "Backend Principal", "codex")),
+            ..AgentConfig::default()
+        }
+    }
+
+    #[test]
+    fn live_master_planner_uses_capability_policy_and_coherent_workstreams() {
+        let policy = shared_meta_harness_policy();
+        let planner = AgentConfig {
+            cli: "claude".to_string(),
+            model: Some("fable".to_string()),
+            ..AgentConfig::default()
+        };
+        let prompt = SessionController::build_master_planner_prompt(
+            "session-modern",
+            "Implement the operator objective",
+            &planner,
+            &[codex_principal()],
+            &policy,
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-modern/primary"),
+        );
+
+        assert!(prompt.contains("Harness: `claude`"));
+        assert!(prompt.contains("Model: `fable`"));
+        assert!(
+            prompt.contains("Runtime CWD: `/repo/.hive-manager/worktrees/session-modern/primary`")
+        );
+        assert!(prompt.contains("`codex` | `gpt-5.6-sol`"));
+        assert!(prompt.contains(r#"["--config","model_reasoning_effort=\"high\""]"#));
+        assert!(prompt.contains("not a required task count"));
+        assert!(prompt.contains(
+            "native read-only scouts only when the Capability Card says delegation is authorized"
+        ));
+        assert!(!prompt.contains("ALL 3"));
+        assert!(!prompt.contains("GPT-5.5"));
+        assert!(!prompt.contains("codex exec"));
+        assert!(!prompt.contains("one per worker"));
+    }
+
+    #[test]
+    fn live_shared_queen_prompt_reports_actual_roster_workspace_and_authority() {
+        let policy = shared_meta_harness_policy();
+        let queen = AgentConfig {
+            cli: "claude".to_string(),
+            model: Some("opus".to_string()),
+            ..AgentConfig::default()
+        };
+        let prompt = SessionController::build_queen_master_prompt(
+            &queen,
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-modern/primary"),
+            "session-modern",
+            &[codex_principal()],
+            Some("Implement the operator objective"),
+            true,
+            false,
+            &policy,
+        );
+
+        assert!(prompt.contains("Harness: `claude`"));
+        assert!(prompt.contains("Model: `opus`"));
+        assert!(
+            prompt.contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary")
+        );
+        assert!(prompt.contains("codex | gpt-5.6-sol"));
+        assert!(prompt.contains(r#"["--config","model_reasoning_effort=\"high\""]"#));
+        assert!(prompt.contains("supported; encouraged (authorized)"));
+        assert!(prompt.contains("do not drop effort or reasoning settings"));
+        assert!(prompt.contains("Shared Cell Integration"));
+        assert!(prompt.contains("Principals do not commit"));
+        assert!(prompt.contains("backend-created hive/session-modern/primary branch"));
+        assert!(prompt.contains("Managed principals are visible Hive agents"));
+        assert!(!prompt.contains("full Claude Code capabilities"));
+        assert!(!prompt.contains("Claude Code Tools"));
+        assert!(!prompt.contains("git checkout -b"));
+    }
+
+    #[test]
+    fn live_worker_prompt_uses_actual_codex_capabilities_and_topology_git_contract() {
+        let shared_policy = shared_meta_harness_policy();
+        let principal = codex_principal();
+        let shared_prompt = SessionController::build_worker_prompt(
+            1,
+            &principal,
+            "session-modern-queen",
+            "session-modern",
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-modern/primary"),
+            &shared_policy,
+        );
+
+        assert!(shared_prompt.contains("Harness: `codex`"));
+        assert!(shared_prompt.contains("Model: `gpt-5.6-sol`"));
+        assert!(
+            shared_prompt.contains(r#"Flags: `["--config","model_reasoning_effort=\"high\""]`"#)
+        );
+        assert!(shared_prompt.contains("Native delegation authorized: yes"));
+        assert!(shared_prompt
+            .contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary"));
+        assert!(shared_prompt.contains("leave the reviewed changes uncommitted for the Queen"));
+        assert!(shared_prompt.contains("Learnings Protocol (MANDATORY)"));
+        assert!(shared_prompt.contains("Begin only when Status is ACTIVE"));
+        assert!(shared_prompt.contains("Polling Protocol (MANDATORY)"));
+        assert!(shared_prompt.contains("while true; do"));
+        assert!(!shared_prompt.contains("full access to Claude Code tools"));
+
+        let isolated_policy = HiveExecutionPolicy {
+            launch_kind: crate::domain::HiveLaunchKind::Hive,
+            workspace_strategy: crate::domain::WorkspaceStrategy::IsolatedCell,
+            ..shared_policy
+        };
+        let isolated_prompt = SessionController::build_worker_prompt(
+            1,
+            &principal,
+            "session-modern-queen",
+            "session-modern",
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-modern/worker-1"),
+            &isolated_policy,
+        );
+        assert!(isolated_prompt.contains("Commit the completed assignment"));
+        assert!(isolated_prompt.contains("report the commit SHA plus evidence"));
+        assert!(isolated_prompt.contains("Do not create or switch branches"));
     }
 
     #[test]
@@ -13052,6 +14423,8 @@ mod tests {
                 ..AgentConfig::default()
             },
             &[],
+            0,
+            "/repo/execution",
             false,
         );
 
@@ -13066,6 +14439,7 @@ mod tests {
         assert!(prompt.contains(r#""specialization":"api""#));
         assert!(prompt.contains(r#""cli":"codex""#));
         assert!(prompt.contains(r#""model":"gpt-5.5""#));
+        assert!(prompt.contains("/repo/execution"));
         assert!(!prompt.contains(r#""cli": "claude""#));
     }
 
@@ -13085,6 +14459,8 @@ mod tests {
                 label: Some("Visual QA".to_string()),
                 flags: None,
             }],
+            0,
+            "/repo/execution",
             false,
         );
 
@@ -13109,8 +14485,9 @@ mod tests {
     #[test]
     fn research_worker_surfaces_are_read_only() {
         let session_id = "session-research-readonly";
-        let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
-        let _ = std::fs::create_dir_all(&worktree_path);
+        let temp = tempfile::tempdir().expect("temp project");
+        let worktree_path = temp.path().join("worker-1");
+        std::fs::create_dir_all(&worktree_path).expect("create worker directory");
 
         let cfg = AgentConfig {
             role: Some(WorkerRole::new("researcher", "Researcher", "claude")),
@@ -13118,9 +14495,25 @@ mod tests {
         };
 
         // Worker prompt: read-only framing, no EXECUTOR, no learnings POST.
-        let prompt = SessionController::build_worker_prompt(1, &cfg, "queen", session_id);
+        let research_policy = HiveExecutionPolicy {
+            workspace_strategy: crate::domain::WorkspaceStrategy::None,
+            ..HiveExecutionPolicy::default()
+        };
+        let prompt = SessionController::build_worker_prompt(
+            1,
+            &cfg,
+            "queen",
+            session_id,
+            temp.path(),
+            &worktree_path,
+            &research_policy,
+        );
         assert!(prompt.contains("RESEARCHER"));
         assert!(prompt.contains("Read-Only"));
+        let expected_task_path = SessionController::prompt_path(
+            &SessionController::session_task_file_path(temp.path(), session_id, 1),
+        );
+        assert!(prompt.contains(&expected_task_path));
         assert!(!prompt.contains("## Your Role: EXECUTOR"));
         assert!(!prompt.contains("Learnings Protocol (MANDATORY)"));
 
@@ -13136,20 +14529,13 @@ mod tests {
         let task = std::fs::read_to_string(&task_path).unwrap();
         assert!(task.contains("RESEARCHER (READ-ONLY)"));
         assert!(!task.contains("EXECUTOR"));
-
-        let _ = std::fs::remove_dir_all(format!(".hive-manager/worktrees/{session_id}"));
     }
 
     #[test]
     fn scope_block_is_identical_across_worker_and_task_surfaces() {
         let session_id = "session-scope-equality";
-        let worktree_path = PathBuf::from(format!(".hive-manager/worktrees/{session_id}/worker-1"));
-        let session_worktree_root = worktree_path
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("session worktree root");
-
-        let _ = std::fs::remove_dir_all(session_worktree_root);
+        let temp = tempfile::tempdir().expect("temp project");
+        let worktree_path = temp.path().join("worker-1");
         std::fs::create_dir_all(&worktree_path).expect("create worktree");
 
         let fusion_prompt = SessionController::build_fusion_worker_prompt(
@@ -13157,7 +14543,7 @@ mod tests {
             1,
             "Variant 1",
             "feat/test",
-            ".hive-manager/worktrees/session-scope-equality/worker-1",
+            worktree_path.to_str().expect("utf8 worktree path"),
             "Test task",
             "claude",
         );
@@ -13169,6 +14555,9 @@ mod tests {
             },
             "session-scope-equality-queen",
             session_id,
+            Path::new("."),
+            &worktree_path,
+            &HiveExecutionPolicy::default(),
         );
         let task_file_path = SessionController::write_task_file_with_status(
             &worktree_path,
@@ -13190,15 +14579,17 @@ mod tests {
             expected
         );
         assert_eq!(extract_markdown_section(&task_file, "## Scope"), expected);
-
-        std::fs::remove_dir_all(session_worktree_root).expect("remove test worktree");
     }
 
     #[test]
     fn required_protocol_block_is_identical_across_queens() {
         let session_root = SessionController::session_root_path(Path::new("/repo"), "session-123");
         let queen_master_prompt = SessionController::build_queen_master_prompt(
-            "claude",
+            &AgentConfig {
+                cli: "claude".to_string(),
+                model: Some("opus".to_string()),
+                ..AgentConfig::default()
+            },
             Path::new("/repo"),
             Path::new("/repo/.hive-manager/worktrees/session-123/queen"),
             "session-123",
@@ -13206,6 +14597,7 @@ mod tests {
             None,
             false,
             true,
+            &HiveExecutionPolicy::default(),
         );
         let fusion_queen_prompt = SessionController::build_fusion_queen_prompt(
             "claude",
@@ -13249,6 +14641,8 @@ mod tests {
                 ..AgentConfig::default()
             },
             &[],
+            0,
+            "/repo/execution",
             false,
         );
         let required_protocol = extract_markdown_section(&evaluator_prompt, "## Required Protocol");
@@ -13356,6 +14750,10 @@ mod tests {
             }],
             default_cli: "claude".to_string(),
             default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
@@ -13404,6 +14802,10 @@ mod tests {
             agents,
             default_cli: "claude".to_string(),
             default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
@@ -13499,6 +14901,263 @@ mod tests {
         assert!(controller.can_complete_session("fusion-ok").is_ok());
     }
 
+    fn qa_session_with(
+        id: &str,
+        state: SessionState,
+        project_path: PathBuf,
+        with_prince: bool,
+    ) -> Session {
+        let mut agents = vec![AgentInfo {
+            id: format!("{id}-evaluator"),
+            role: AgentRole::Evaluator,
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        }];
+        if with_prince {
+            agents.push(AgentInfo {
+                id: format!("{id}-prince"),
+                role: AgentRole::Prince,
+                status: AgentStatus::Running,
+                config: AgentConfig::default(),
+                parent_id: None,
+                commit_sha: None,
+                base_commit_sha: None,
+            });
+        }
+        Session {
+            id: id.to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Hive { worker_count: 2 },
+            project_path,
+            state,
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents,
+            default_cli: "claude".to_string(),
+            default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
+            no_git: false,
+            resume_report: None,
+        }
+    }
+
+    #[test]
+    fn qa_verdict_routes_to_prince_when_prince_present() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-route",
+            SessionState::QaInProgress { iteration: None },
+            PathBuf::from("."),
+            true,
+        ));
+        let new_state = controller
+            .record_http_qa_verdict("prince-route", "prince-route-evaluator", "PASS", None)
+            .expect("verdict recorded");
+        // With a Prince present, even a PASS hands off to remediation before push.
+        assert_eq!(new_state, SessionState::PrinceRemediation);
+    }
+
+    #[test]
+    fn qa_verdict_passes_directly_without_prince() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "no-prince",
+            SessionState::QaInProgress { iteration: None },
+            PathBuf::from("."),
+            false,
+        ));
+        let new_state = controller
+            .record_http_qa_verdict("no-prince", "no-prince-evaluator", "PASS", None)
+            .expect("verdict recorded");
+        assert_eq!(new_state, SessionState::QaPassed);
+    }
+
+    #[test]
+    fn prince_verdict_clears_remediation_to_qa_passed() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-clear",
+            SessionState::PrinceRemediation,
+            PathBuf::from("."),
+            true,
+        ));
+        let new_state = controller
+            .record_prince_verdict("prince-clear", "PASS")
+            .expect("prince verdict recorded");
+        assert_eq!(new_state, SessionState::QaPassed);
+    }
+
+    #[test]
+    fn prince_verdict_blocked_marks_inconclusive() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-blocked",
+            SessionState::PrinceRemediation,
+            PathBuf::from("."),
+            true,
+        ));
+        let new_state = controller
+            .record_prince_verdict("prince-blocked", "BLOCKED")
+            .expect("prince verdict recorded");
+        assert_eq!(new_state, SessionState::QaInconclusive);
+    }
+
+    #[test]
+    fn prince_verdict_rejected_outside_remediation() {
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "prince-bad-state",
+            SessionState::QaInProgress { iteration: None },
+            PathBuf::from("."),
+            true,
+        ));
+        assert!(controller
+            .record_prince_verdict("prince-bad-state", "PASS")
+            .is_err());
+    }
+
+    #[test]
+    fn qa_timeout_marks_inconclusive_blocks_completion_and_writes_verdict_file() {
+        let temp = tempfile::tempdir().expect("temp");
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "inconclusive",
+            SessionState::QaInProgress { iteration: None },
+            temp.path().to_path_buf(),
+            true,
+        ));
+        let new_state = controller
+            .mark_qa_inconclusive("inconclusive", "timed out")
+            .expect("marked inconclusive");
+        assert_eq!(new_state, SessionState::QaInconclusive);
+
+        // Inconclusive sessions must never auto-complete — push/complete stays blocked.
+        let session = controller.get_session("inconclusive").expect("session");
+        assert!(!SessionController::state_allows_completion(&session));
+
+        // A BLOCKED verdict file is written so the Queen's poll loop terminates instead
+        // of hanging forever.
+        let verdict_path = temp
+            .path()
+            .join(".hive-manager")
+            .join("inconclusive")
+            .join("peer")
+            .join("qa-verdict.json");
+        assert!(verdict_path.exists());
+        let body = std::fs::read_to_string(&verdict_path).expect("verdict body");
+        assert!(body.contains("BLOCKED"));
+        let blocked_pattern =
+            regex::Regex::new(SessionController::qa_blocked_verdict_grep_pattern())
+                .expect("valid grep-compatible BLOCKED pattern");
+        assert!(
+            blocked_pattern.is_match(&body),
+            "Solo's shell guard must match the actual PeerMessageRecord envelope"
+        );
+    }
+
+    #[test]
+    fn adversarial_worker_count_is_ceil_half_of_workers() {
+        assert_eq!(SessionController::adversarial_worker_count(0), 0);
+        assert_eq!(SessionController::adversarial_worker_count(1), 1);
+        assert_eq!(SessionController::adversarial_worker_count(2), 1);
+        assert_eq!(SessionController::adversarial_worker_count(3), 2);
+        assert_eq!(SessionController::adversarial_worker_count(4), 2);
+        assert_eq!(SessionController::adversarial_worker_count(5), 3);
+    }
+
+    #[test]
+    fn prince_remediation_and_inconclusive_block_completion() {
+        for state in [
+            SessionState::PrinceRemediation,
+            SessionState::QaInconclusive,
+        ] {
+            let session = qa_session_with("gate", state.clone(), PathBuf::from("."), true);
+            assert!(
+                !SessionController::state_allows_completion(&session),
+                "state {:?} must block completion",
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_workers_fill_configured_qa_to_target() {
+        // A manually configured adversarial lane counts toward the target but must
+        // not suppress the remaining automatic coverage.
+        let prompt = SessionController::build_evaluator_prompt(
+            "adv-config",
+            &AgentConfig {
+                cli: "claude".to_string(),
+                model: Some("opus".to_string()),
+                ..AgentConfig::default()
+            },
+            &[
+                QaWorkerConfig {
+                    specialization: "ui".to_string(),
+                    cli: "claude".to_string(),
+                    model: Some("opus".to_string()),
+                    label: Some("UI QA".to_string()),
+                    flags: None,
+                },
+                QaWorkerConfig {
+                    specialization: "adversarial".to_string(),
+                    cli: "claude".to_string(),
+                    model: Some("opus".to_string()),
+                    label: Some("Manual Adversarial QA".to_string()),
+                    flags: None,
+                },
+            ],
+            4, // ceil(4/2) = 2 adversarial agents expected
+            "/repo/execution",
+            false,
+        );
+        assert_eq!(
+            prompt.matches(r#""specialization":"adversarial""#).count(),
+            2,
+            "one configured plus one automatic lane should satisfy the target"
+        );
+    }
+
+    #[test]
+    fn milestone_ready_does_not_regress_gated_states() {
+        // Regression: a duplicate milestone-ready must not drag PrinceRemediation /
+        // QaInconclusive back to QaInProgress (which would re-arm the QA timeout).
+        for state in [
+            SessionState::PrinceRemediation,
+            SessionState::QaInconclusive,
+        ] {
+            let controller = test_controller();
+            controller.insert_test_session(qa_session_with(
+                "gated-milestone",
+                state.clone(),
+                PathBuf::from("."),
+                true,
+            ));
+            controller
+                .on_milestone_ready("gated-milestone")
+                .expect("milestone-ready handled");
+            let session = controller.get_session("gated-milestone").expect("session");
+            assert_eq!(
+                session.state, state,
+                "milestone-ready must not regress {:?}",
+                state
+            );
+        }
+    }
+
     #[test]
     fn worker_completion_commit_sha_is_none_when_branch_has_no_new_commit() {
         let session_id = "worker-commit-base";
@@ -13570,6 +15229,31 @@ mod tests {
 
         let refreshed = controller.get_session(session_id).unwrap();
         assert_eq!(refreshed.state, SessionState::WaitingForWorker(1));
+        assert_eq!(refreshed.agents[0].commit_sha, None);
+    }
+
+    #[tokio::test]
+    async fn on_worker_completed_skips_individual_commit_gate_for_shared_cell() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        let session_id = "worker-gate-shared";
+        let (temp_dir, _) = init_repo_with_worker_worktree(session_id, 1);
+        let mut session = waiting_worker_session(session_id, temp_dir.path(), 1);
+        session.execution_policy.workspace_strategy = crate::domain::WorkspaceStrategy::SharedCell;
+        session.worktree_path = Some(temp_dir.path().to_string_lossy().to_string());
+
+        let controller = test_controller();
+        controller.insert_test_session(session);
+
+        unsafe {
+            std::env::set_var("REQUIRE_COMMIT_SHA", "true");
+        }
+        let result = controller.on_worker_completed(session_id, 1).await;
+        unsafe {
+            std::env::remove_var("REQUIRE_COMMIT_SHA");
+        }
+
+        result.expect("shared-cell completion must not require an individual commit");
+        let refreshed = controller.get_session(session_id).unwrap();
         assert_eq!(refreshed.agents[0].commit_sha, None);
     }
 
@@ -13651,6 +15335,10 @@ mod tests {
             agents: vec![],
             default_cli: "claude".to_string(),
             default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
@@ -13665,5 +15353,174 @@ mod tests {
         let base_ref = SessionController::resolve_worker_base_ref(&session, "spawn_next_worker", 2);
 
         assert_eq!(base_ref, expected_head);
+    }
+
+    #[test]
+    fn shared_cell_agents_resolve_artifacts_from_primary_worktree() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let primary = temp_dir.path().join("primary");
+        let mut session = waiting_worker_session("shared-artifacts", temp_dir.path(), 1);
+        session.execution_policy.workspace_strategy = crate::domain::WorkspaceStrategy::SharedCell;
+        session.worktree_path = Some(primary.to_string_lossy().to_string());
+
+        let worker = session.agents.first().unwrap();
+        assert_eq!(
+            SessionController::agent_git_worktree_path_for_artifacts(&session, worker),
+            Some(primary.clone())
+        );
+
+        let mut queen = worker.clone();
+        queen.role = AgentRole::Queen;
+        assert_eq!(
+            SessionController::agent_git_worktree_path_for_artifacts(&session, &queen),
+            Some(primary)
+        );
+    }
+
+    #[test]
+    fn shared_worker_rollback_removes_files_but_preserves_primary_workspace() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let primary = temp_dir.path().join("primary");
+        std::fs::create_dir_all(&primary).unwrap();
+        let task = primary.join("worker-1-task.md");
+        let prompt = primary.join("worker-1-prompt.md");
+        std::fs::write(&task, "task").unwrap();
+        std::fs::write(&prompt, "prompt").unwrap();
+
+        SessionController::rollback_worker_launch_artifacts(
+            temp_dir.path(),
+            "shared-rollback",
+            "worker-1",
+            &task,
+            Some(&prompt),
+            false,
+        );
+
+        assert!(primary.exists());
+        assert!(!task.exists());
+        assert!(!prompt.exists());
+    }
+
+    #[test]
+    fn primary_cell_artifact_merge_is_cumulative_and_idempotent() {
+        let bundle = |name: &str| ArtifactBundle {
+            summary: Some(format!("summary {name}")),
+            changed_files: vec![format!("src/{name}.rs")],
+            commits: vec![format!("{name}123 {name}")],
+            branch: format!("hive/session/{name}"),
+            test_results: None,
+            diff_summary: Some(format!("diff {name}")),
+            unresolved_issues: vec![format!("issue {name}")],
+            confidence: Some(0.8),
+            recommended_next_step: None,
+        };
+
+        let merged =
+            SessionController::merge_primary_cell_artifact_bundles(bundle("a"), bundle("b"));
+        let merged = SessionController::merge_primary_cell_artifact_bundles(merged, bundle("b"));
+
+        assert_eq!(merged.changed_files, vec!["src/a.rs", "src/b.rs"]);
+        assert_eq!(merged.commits, vec!["a123 a", "b123 b"]);
+        assert_eq!(merged.summary.as_deref(), Some("summary a · summary b"));
+        assert_eq!(merged.diff_summary.as_deref(), Some("diff a\n---\ndiff b"));
+        assert_eq!(merged.unresolved_issues, vec!["issue a", "issue b"]);
+        assert_eq!(merged.branch, "hive/session/a | hive/session/b");
+    }
+
+    #[test]
+    fn command_builders_use_canonical_sol_and_preserve_custom_models() {
+        let (_, explicit_args) = SessionController::build_command(&AgentConfig {
+            cli: "codex".to_string(),
+            model: Some("operator-selected-model".to_string()),
+            ..AgentConfig::default()
+        });
+        assert!(explicit_args
+            .windows(2)
+            .any(|pair| { pair == ["-m".to_string(), "operator-selected-model".to_string()] }));
+        assert!(!explicit_args.iter().any(|arg| arg == "gpt-5.6-sol"));
+
+        let (_, default_args) = SessionController::build_command(&AgentConfig {
+            cli: "codex".to_string(),
+            model: None,
+            ..AgentConfig::default()
+        });
+        assert!(default_args
+            .windows(2)
+            .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+
+        let legacy_config = AgentConfig {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.6".to_string()),
+            ..AgentConfig::default()
+        };
+        for (_, args) in [
+            SessionController::build_command(&legacy_config),
+            SessionController::build_solo_command(&legacy_config, Some("Do the task")),
+        ] {
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+            assert!(!args.iter().any(|arg| arg == "gpt-5.6"));
+        }
+
+        let legacy_flag_config = AgentConfig {
+            cli: "codex".to_string(),
+            model: None,
+            flags: vec![
+                "--full-auto".to_string(),
+                "--model".to_string(),
+                "gpt-5.6".to_string(),
+            ],
+            ..AgentConfig::default()
+        };
+        for (_, args) in [
+            SessionController::build_command(&legacy_flag_config),
+            SessionController::build_solo_command(&legacy_flag_config, None),
+        ] {
+            assert_eq!(args.iter().filter(|arg| *arg == "-m").count(), 1);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+            assert!(args.iter().any(|arg| arg == "--full-auto"));
+            assert!(!args.iter().any(|arg| arg == "--model"));
+        }
+    }
+
+    #[test]
+    fn prince_uses_principal_defaults_and_topology_specific_integration() {
+        let prince = AgentConfig {
+            cli: "claude".to_string(),
+            model: Some("opus".to_string()),
+            ..AgentConfig::default()
+        };
+        let principal = codex_principal();
+        let workspace = "/repo/.hive-manager/worktrees/session/primary";
+
+        let shared = SessionController::build_prince_prompt(
+            "session",
+            &prince,
+            &principal,
+            workspace,
+            WorkspaceStrategy::SharedCell,
+            false,
+        );
+        assert!(shared.contains(r#""cli":"codex""#));
+        assert!(shared.contains(r#""parent_id":"session-prince""#));
+        assert!(shared.contains(r#""model": "gpt-5.6-sol""#));
+        assert!(shared.contains("model_reasoning_effort"));
+        assert!(shared.contains("do not merge or cherry-pick fixer branches"));
+        assert!(shared.contains(workspace));
+
+        let isolated = SessionController::build_prince_prompt(
+            "session",
+            &prince,
+            &principal,
+            workspace,
+            WorkspaceStrategy::IsolatedCell,
+            false,
+        );
+        assert!(isolated.contains("git -C"));
+        assert!(isolated.contains("cherry-pick <sha>"));
+        assert!(isolated.contains("hive/session/worker-N"));
     }
 }

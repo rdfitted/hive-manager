@@ -11,15 +11,15 @@ Target versions: **0.18 → 0.22**
 
 ## Phase 1 — Foundation Cleanup (v0.18)
 
-Goal: Real internal spine without changing external personality.
+Goal: A real internal spine for an operator-controlled meta-harness, with capability facts and delegation policy modeled separately.
 
 | # | Issue | Dependencies | Risk |
 |---|-------|-------------|------|
-| #41 | Domain layer — Session, Cell, Agent, Workspace types | None (foundation) | Low |
+| #41 | Domain layer — Session, Cell, Agent, Workspace, ExecutionPolicy, CapabilityCard types | None (foundation) | Low |
 | #42 | Runtime trait and process launching | #41 | Medium |
-| #43 | CLI adapter normalization | #41, #42 | Low |
+| #43 | CLI adapter normalization and conservative capability inference | #41, #42 | Low |
 | #44 | Structured event pipeline | #41 | Medium |
-| #45 | Split controller.rs into orchestration layer | #41, #42, #43, #44 | **High** |
+| #45 | Split controller.rs into orchestration layer; add Assignment Contract prompt boundaries | #41, #42, #43, #44 | **High** |
 | #46 | Extend HTTP API with cell/agent/event endpoints | #41, #44, #45 | Medium |
 
 ### Recommended order
@@ -42,7 +42,7 @@ Goal: Worktree ownership matches the architecture.
 | # | Issue | Dependencies | Risk |
 |---|-------|-------------|------|
 | #47 | WorkspaceManager with cell-based worktree rules | #41, #45 | Medium |
-| #48 | Cell-first frontend — stores, components, workspace visibility | #41, #46, #47 | Medium |
+| #48 | Cell-first frontend — stores, components, workspace and managed/native topology visibility | #41, #46, #47 | Medium |
 
 ### Recommended order
 ```
@@ -74,11 +74,11 @@ Goal: Fusion becomes a complete workflow.
 
 ## Phase 4 — Templates and Repeatability (v0.21)
 
-Goal: Strong workflows become reusable.
+Goal: Strong, operator-reviewable workflows become reusable.
 
 | # | Issue | Dependencies | Risk |
 |---|-------|-------------|------|
-| #52 | Session templates, role packs, launch presets | #48, #47, #43 | Low |
+| #52 | Session templates, role packs, launch presets, Master Planner Assignment Contracts | #48, #47, #43 | Low |
 
 ---
 

@@ -20,7 +20,7 @@ export interface Session {
     events: string[];
 }
 
-export type SessionMode = 'hive' | 'fusion' | 'research' | 'debate';
+export type SessionMode = 'hive' | 'fusion' | 'debate';
 
 export interface LaunchConfig {
     plan_source?: string;

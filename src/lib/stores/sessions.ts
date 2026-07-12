@@ -1,7 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { CellStatus } from '$lib/types/domain';
+import type { CellStatus, WorkspaceStrategy } from '$lib/types/domain';
 import { applicationState } from './applicationState';
 import { ui } from './ui';
 
@@ -48,12 +48,32 @@ export interface AgentInfo {
   parent_id: string | null;
 }
 
+export type DelegationMode = 'disabled' | 'auto' | 'encouraged';
+
+export interface DelegationPolicy {
+  mode: DelegationMode;
+  max_children?: number;
+  max_depth?: number;
+}
+
+export interface HiveExecutionPolicy {
+  launch_kind: 'auto' | 'hive' | 'solo';
+  workspace_strategy: WorkspaceStrategy;
+  queen_delegation: DelegationPolicy;
+  principal_delegation: DelegationPolicy;
+}
+
+export interface HiveLaunchPolicy extends Omit<HiveExecutionPolicy, 'workspace_strategy'> {
+  workspace_strategy: Extract<WorkspaceStrategy, 'shared_cell' | 'isolated_cell'>;
+}
+
 export interface HiveLaunchConfig {
   name?: string;
   color?: string;
   project_path: string;
   queen_config: AgentConfig;
   workers: AgentConfig[];
+  execution_policy: HiveLaunchPolicy;
   prompt?: string;
   with_planning?: boolean;
   with_evaluator?: boolean;
@@ -77,7 +97,7 @@ export interface ResearchLaunchConfig {
 }
 
 export interface QaWorkerConfig {
-  specialization: 'ui' | 'api' | 'a11y';
+  specialization: 'ui' | 'api' | 'a11y' | 'adversarial';
   cli: string;
   model?: string;
   flags: string[];
@@ -153,6 +173,7 @@ export interface SoloLaunchConfig {
   taskDescription?: string;
   cli: string;
   model?: string;
+  flags?: string[];
   with_evaluator?: boolean;
   evaluator_config?: AgentConfig;
   qa_workers?: QaWorkerConfig[];
@@ -168,6 +189,8 @@ export type SessionState =
   | 'QaPassed'
   | { QaFailed: { iteration: number } }
   | 'QaMaxRetriesExceeded'
+  | 'PrinceRemediation'
+  | 'QaInconclusive'
   | 'Paused'
   | 'Completed'
   | 'Closed'
@@ -203,11 +226,13 @@ export function sessionStateToCellStatus(state: SessionState | unknown): CellSta
     case 'Judging':
     case 'MergingWinner':
     case 'QaInProgress':
+    case 'PrinceRemediation':
     case 'Running':
       return 'running';
     case 'AwaitingVerdictSelection':
     case 'Paused':
     case 'QaPassed':
+    case 'QaInconclusive':
       return 'waiting_input';
     case 'Completed':
     case 'Closed':
@@ -239,6 +264,13 @@ export interface Session {
   /** RFC3339; omitted on older persisted sessions — UI falls back to `created_at`. */
   last_activity_at?: string;
   agents: AgentInfo[];
+  default_cli?: string;
+  default_model?: string | null;
+  default_principal_cli?: string | null;
+  default_principal_model?: string | null;
+  default_principal_flags?: string[];
+  execution_policy?: HiveExecutionPolicy;
+  no_git?: boolean;
   /** Git worktree path for the session primary workspace (Tauri Session), when set. */
   worktree_path?: string | null;
   worktree_branch?: string | null;
@@ -446,13 +478,23 @@ function createSessionsStore() {
       try {
         // Solo mode is implemented as a Hive session with 0 extra workers (just the Queen acting as the solo agent)
         const hiveConfig: HiveLaunchConfig = {
+          name: config.name,
+          color: config.color,
           project_path: config.projectPath,
           queen_config: {
             cli: config.cli,
             model: config.model,
-            flags: [],
+            flags: config.flags ?? [],
           },
-          workers: [], // Empty workers list triggers solo mode in backend
+          // Keep the empty legacy roster for older backends, but launch_kind is
+          // now the authoritative Solo discriminator.
+          workers: [],
+          execution_policy: {
+            launch_kind: 'solo',
+            workspace_strategy: 'shared_cell',
+            queen_delegation: { mode: 'disabled' },
+            principal_delegation: { mode: 'disabled' },
+          },
           prompt: config.taskDescription,
           with_planning: false,
           with_evaluator: config.with_evaluator,

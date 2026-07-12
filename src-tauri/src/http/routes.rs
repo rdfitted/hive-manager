@@ -112,6 +112,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{id}/qa/force-fail",
             post(evaluator::force_fail),
         )
+        // Prince remediation verdict (self-certified after the fix team resolves QA findings)
+        .route(
+            "/api/sessions/{id}/prince/verdict",
+            post(evaluator::post_prince_verdict),
+        )
         // Planner routes (Swarm mode)
         .route("/api/sessions/{id}/planners", get(planners::list_planners))
         .route("/api/sessions/{id}/planners", post(planners::add_planner))

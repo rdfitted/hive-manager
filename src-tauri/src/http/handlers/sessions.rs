@@ -61,6 +61,7 @@ fn evaluator_config_from_request(
     evaluator_cli: Option<String>,
     evaluator_model: Option<String>,
     default_cli: Option<&str>,
+    default_model: Option<&str>,
 ) -> Result<Option<AgentConfig>, ApiError> {
     if let Some(mut config) = evaluator_config {
         validate_cli(&config.cli)?;
@@ -88,7 +89,7 @@ fn evaluator_config_from_request(
         validate_cli(default_cli)?;
         return Ok(Some(AgentConfig {
             cli: default_cli.to_string(),
-            model: evaluator_model,
+            model: evaluator_model.or_else(|| default_model.map(str::to_string)),
             flags: vec![],
             label: Some("Evaluator".to_string()),
             name: None,
@@ -244,8 +245,15 @@ pub struct CreateSessionRequest {
     pub objective: Option<String>,
     pub default_cli: Option<String>,
     pub default_model: Option<String>,
+    #[serde(alias = "default_principal_cli")]
+    pub principal_cli: Option<String>,
+    #[serde(alias = "default_principal_model")]
+    pub principal_model: Option<String>,
+    #[serde(alias = "default_principal_flags")]
+    pub principal_flags: Option<Vec<String>>,
     pub worker_count: Option<u8>,
     pub workers: Option<Vec<AgentConfig>>,
+    pub execution_policy: Option<crate::domain::HiveExecutionPolicy>,
     pub variants: Option<Vec<LaunchFusionVariantRequest>>,
     pub debaters: Option<Vec<LaunchDebateDebaterRequest>>,
     pub rounds: Option<u8>,
@@ -335,14 +343,22 @@ pub async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<LaunchResponse>), ApiError> {
     let mode = req.mode.trim().to_ascii_lowercase();
-    let default_cli = req.default_cli.unwrap_or_else(|| "claude".to_string());
+    let has_shared_agent_override = req.default_cli.is_some() || req.default_model.is_some();
+    let default_cli = req
+        .default_cli
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
     validate_cli(&default_cli)?;
 
     match mode.as_str() {
         "hive" => {
+            let queen_model = req
+                .default_model
+                .clone()
+                .or_else(|| CliRegistry::default_model(&default_cli).map(str::to_string));
             let queen_config = AgentConfig {
                 cli: default_cli.clone(),
-                model: req.default_model.clone(),
+                model: queen_model.clone(),
                 flags: vec![],
                 label: Some("Queen".to_string()),
                 name: None,
@@ -351,11 +367,30 @@ pub async fn create_session(
                 initial_prompt: None,
             };
 
-            let worker_count = req.worker_count.unwrap_or(3);
+            let principal_cli_overridden = req.principal_cli.is_some();
+            let principal_cli = req.principal_cli.unwrap_or_else(|| {
+                if has_shared_agent_override {
+                    default_cli.clone()
+                } else {
+                    "codex".to_string()
+                }
+            });
+            validate_cli(&principal_cli)?;
+            let principal_model = req.principal_model.or_else(|| {
+                if has_shared_agent_override && !principal_cli_overridden {
+                    req.default_model
+                        .clone()
+                        .or_else(|| CliRegistry::default_model(&principal_cli).map(str::to_string))
+                } else {
+                    CliRegistry::default_model(&principal_cli).map(str::to_string)
+                }
+            });
+
+            let worker_count = req.worker_count.unwrap_or(1);
             let worker_config = AgentConfig {
-                cli: default_cli.clone(),
-                model: req.default_model,
-                flags: vec![],
+                cli: principal_cli,
+                model: principal_model,
+                flags: req.principal_flags.unwrap_or_default(),
                 label: None,
                 name: None,
                 description: None,
@@ -363,11 +398,6 @@ pub async fn create_session(
                 initial_prompt: None,
             };
             let workers = if let Some(workers) = req.workers {
-                if workers.is_empty() {
-                    return Err(ApiError::bad_request(
-                        "Hive launch requires at least one worker",
-                    ));
-                }
                 for worker in &workers {
                     validate_cli(&worker.cli)?;
                 }
@@ -383,6 +413,7 @@ pub async fn create_session(
                 req.with_evaluator
                     .unwrap_or(false)
                     .then_some(default_cli.as_str()),
+                queen_model.as_deref(),
             )?;
             let with_evaluator = req.with_evaluator.unwrap_or(false) || evaluator_config.is_some();
 
@@ -392,6 +423,7 @@ pub async fn create_session(
                 color: req.color,
                 queen_config,
                 workers,
+                execution_policy: req.execution_policy.unwrap_or_default(),
                 prompt: req.objective.filter(|value| !value.trim().is_empty()),
                 with_planning: req.with_planning.unwrap_or(false),
                 with_evaluator,
@@ -726,6 +758,7 @@ pub async fn launch_swarm(
         req.evaluator_cli,
         req.evaluator_model,
         None,
+        None,
     )?;
     let with_evaluator = evaluator_config.is_some();
 
@@ -786,6 +819,7 @@ pub async fn launch_solo(
         req.evaluator_cli,
         req.evaluator_model,
         None,
+        None,
     )?;
     let with_evaluator = evaluator_config.is_some();
 
@@ -795,6 +829,10 @@ pub async fn launch_solo(
         color: req.color,
         queen_config: agent_config,
         workers: vec![],
+        execution_policy: crate::domain::HiveExecutionPolicy {
+            launch_kind: crate::domain::HiveLaunchKind::Solo,
+            ..crate::domain::HiveExecutionPolicy::default()
+        },
         prompt: req.task_description.filter(|t| !t.trim().is_empty()),
         with_planning: false,
         with_evaluator,

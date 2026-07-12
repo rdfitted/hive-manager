@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
-  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type SwarmLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { invoke } from '@tauri-apps/api/core';
@@ -47,10 +47,8 @@
   }
 
   interface Props {
-    onLaunch: (projectPath: string, workerCount: number, command: string, prompt?: string) => Promise<void>;
-    onLaunchHiveV2?: (config: HiveLaunchConfig) => Promise<void>;
+    onLaunchHiveV2: (config: HiveLaunchConfig) => Promise<void>;
     onLaunchResearch?: (config: ResearchLaunchConfig) => Promise<void>;
-    onLaunchSwarm?: (config: SwarmLaunchConfig) => Promise<void>;
     onLaunchFusion?: (config: FusionLaunchConfig) => Promise<void>;
     onLaunchSolo?: (config: SoloLaunchConfig) => Promise<void>;
     onLaunchDebate?: (config: DebateLaunchConfig) => Promise<void>;
@@ -67,10 +65,11 @@
     state: string;
   }
 
-  let { onLaunch, onLaunchHiveV2, onLaunchResearch, onLaunchSwarm, onLaunchFusion, onLaunchSolo, onLaunchDebate, onOpenAddWorker }: Props = $props();
+  let { onLaunchHiveV2, onLaunchResearch, onLaunchFusion, onLaunchSolo, onLaunchDebate, onOpenAddWorker }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
+  let launchError = $state('');
   let persistedSessions = $state<SessionSummary[]>([]);
   let loadingPersisted = $state(false);
   let currentDirectory = $state<string | null>(null);
@@ -221,20 +220,12 @@
 
   async function handleLaunchHive(e: CustomEvent<HiveLaunchConfig>) {
     launching = true;
+    launchError = '';
     try {
-      if (onLaunchHiveV2) {
-        await onLaunchHiveV2(e.detail);
-      } else {
-        // Fallback to old launch method
-        await onLaunch(
-          e.detail.project_path,
-          e.detail.workers.length,
-          e.detail.queen_config.cli,
-          e.detail.prompt
-        );
-      }
+      await onLaunchHiveV2(e.detail);
       showLaunchDialog = false;
     } catch (err) {
+      launchError = String(err);
       console.error('Launch failed:', err);
     } finally {
       launching = false;
@@ -243,6 +234,7 @@
 
   async function handleLaunchResearch(e: CustomEvent<ResearchLaunchConfig>) {
     launching = true;
+    launchError = '';
     try {
       if (onLaunchResearch) {
         await onLaunchResearch(e.detail);
@@ -251,22 +243,7 @@
       }
       showLaunchDialog = false;
     } catch (err) {
-      console.error('Launch failed:', err);
-    } finally {
-      launching = false;
-    }
-  }
-
-  async function handleLaunchSwarm(e: CustomEvent<SwarmLaunchConfig>) {
-    launching = true;
-    try {
-      if (onLaunchSwarm) {
-        await onLaunchSwarm(e.detail);
-        showLaunchDialog = false;
-      } else {
-        console.error('Swarm launch not supported');
-      }
-    } catch (err) {
+      launchError = String(err);
       console.error('Launch failed:', err);
     } finally {
       launching = false;
@@ -275,14 +252,16 @@
 
   async function handleLaunchFusion(e: CustomEvent<FusionLaunchConfig>) {
     launching = true;
+    launchError = '';
     try {
       if (onLaunchFusion) {
         await onLaunchFusion(e.detail);
         showLaunchDialog = false;
       } else {
-        console.error('Fusion launch not supported');
+        throw new Error('Fusion launch not supported');
       }
     } catch (err) {
+      launchError = String(err);
       console.error('Launch failed:', err);
     } finally {
       launching = false;
@@ -291,6 +270,7 @@
 
   async function handleLaunchSolo(e: CustomEvent<SoloLaunchConfig>) {
     launching = true;
+    launchError = '';
     try {
       if (onLaunchSolo) {
         await onLaunchSolo(e.detail);
@@ -299,6 +279,7 @@
       }
       showLaunchDialog = false;
     } catch (err) {
+      launchError = String(err);
       console.error('Launch failed:', err);
     } finally {
       launching = false;
@@ -307,6 +288,7 @@
 
   async function handleLaunchDebate(e: CustomEvent<DebateLaunchConfig>) {
     launching = true;
+    launchError = '';
     try {
       if (onLaunchDebate) {
         await onLaunchDebate(e.detail);
@@ -315,6 +297,7 @@
       }
       showLaunchDialog = false;
     } catch (err) {
+      launchError = String(err);
       console.error('Launch failed:', err);
     } finally {
       launching = false;
@@ -600,7 +583,7 @@
   {/if}
 
   <div class="sidebar-footer">
-    <button class="launch-button" onclick={() => showLaunchDialog = true} title="New Session">
+    <button class="launch-button" onclick={() => { launchError = ''; showLaunchDialog = true; }} title="New Session">
       <span class="icon">+</span>
       {#if !collapsed}
         New Session
@@ -619,10 +602,11 @@
 
 <LaunchDialog
   show={showLaunchDialog}
-  on:close={() => showLaunchDialog = false}
+  {launching}
+  {launchError}
+  on:close={() => { showLaunchDialog = false; launchError = ''; }}
   on:launchHive={handleLaunchHive}
   on:launchResearch={handleLaunchResearch}
-  on:launchSwarm={handleLaunchSwarm}
   on:launchFusion={handleLaunchFusion}
   on:launchSolo={handleLaunchSolo}
   on:launchDebate={handleLaunchDebate}

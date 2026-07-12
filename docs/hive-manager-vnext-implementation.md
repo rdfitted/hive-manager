@@ -6,7 +6,7 @@ This document translates the vNext PRD into a practical implementation plan for 
 
 - Repo: `hive-manager/`
 - Tauri v2, Svelte 5 frontend, Rust backend
-- Current version: 0.17.1
+- Current version: 0.34.0
 - HTTP API on port 18800 (Axum) — **sole communication layer** for both frontend and agents
 
 This is not a greenfield redesign. It is an incremental refactor and extension plan.
@@ -22,10 +22,12 @@ Move from:
 
 To:
 - **Session / Cell / Agent** data model
+- an operator-controlled meta-harness with explicit launch topology
 - explicit lifecycle state machines
 - cell-level workspace ownership
 - structured events and artifacts
 - first-class Fusion + Resolver support
+- managed principals at the macro layer and bounded native children at the micro layer
 
 ---
 
@@ -38,7 +40,7 @@ struct Session {
     name: String,
     objective: String,
     project_path: PathBuf,
-    mode: SessionMode,        // Hive | Fusion
+    mode: SessionMode,        // Hive | Fusion | Debate
     status: SessionStatus,
     created_at: DateTime,
     updated_at: DateTime,
@@ -58,7 +60,7 @@ struct Cell {
     name: String,
     status: CellStatus,
     objective: String,
-    workspace: Workspace,
+    workspace: Workspace,     // current /cells projection is singular
     agents: Vec<AgentId>,
     artifacts: Option<ArtifactBundle>,
     events: Vec<EventId>,
@@ -71,7 +73,7 @@ struct Cell {
 struct Agent {
     id: String,
     cell_id: String,
-    role: AgentRole,          // Queen | Worker | Resolver | Reviewer | Tester
+    role: AgentRole,          // Queen | Principal | Resolver | Reviewer | Tester
     label: String,
     cli: String,
     model: Option<String>,
@@ -83,9 +85,20 @@ struct Agent {
 ```
 
 ### Workspace
+
+The shipped `Cell` projection still exposes one `workspace: Workspace`. The
+execution policy can create a shared primary worktree or isolated Queen and
+principal worktrees, but `/cells` does not yet project that full list after a
+reload. The richer target projection is:
+
 ```rust
-struct Workspace {
+struct WorkspacePlan {
     strategy: WorkspaceStrategy,  // SharedCell | IsolatedCell
+    workspaces: Vec<Workspace>,   // one shared, or one per managed principal
+}
+
+struct Workspace {
+    principal_id: Option<AgentId>, // None for the shared-cell workspace
     repo_path: PathBuf,
     base_branch: String,
     branch_name: String,
@@ -93,6 +106,51 @@ struct Workspace {
     is_dirty: bool,
 }
 ```
+
+The Cell conceptually owns that workspace plan. A shared workspace is the
+built-in recommendation, while `IsolatedCell` creates explicit per-principal
+assignments selected by the operator. Replacing the singular API field with
+`WorkspacePlan` is follow-up work, not behavior claimed by this release.
+
+### Execution policy and capability facts
+```rust
+enum HiveLaunchKind { Auto, Hive, Solo }
+enum NativeDelegationMode { Disabled, Auto, Encouraged }
+enum CapabilitySupport { Supported, Unsupported, Unknown }
+
+struct DelegationPolicy {
+    mode: NativeDelegationMode,
+    max_children: Option<u8>,
+    max_depth: Option<u8>,
+}
+
+struct HiveExecutionPolicy {
+    launch_kind: HiveLaunchKind,
+    workspace_strategy: WorkspaceStrategy,
+    queen_delegation: DelegationPolicy,
+    principal_delegation: DelegationPolicy,
+}
+
+struct CapabilityCard {
+    native_delegation: CapabilitySupport,
+}
+```
+
+`CapabilityCard` is factual and conservative within its declared source: today it reflects Hive Manager's CLI adapter profile, not a live binary/version/feature probe. Claude and Codex are adapter-declared supported, while unprofiled harnesses remain `Unknown`. Policy is authorization: `Disabled` always wins, `Auto` permits declared support, and `Encouraged` records explicit operator authorization without mutating the support fact. A known `Unsupported` capability remains off. `max_children` and `max_depth` are prompt-level guidance until a CLI adapter can map them to harness-enforced runtime controls; native harness limits remain authoritative.
+
+### Assignment contract
+```rust
+struct AssignmentContract {
+    objective: String,
+    acceptance_criteria: Vec<String>,
+    owned_paths: Vec<PathBuf>,
+    prohibited_actions: Vec<String>,
+    required_validation: Vec<String>,
+    delivery_format: String,
+}
+```
+
+Master Planner produces these contracts and stops before implementation. Manager-launched principals receive one contract each. Native children inherit their parent's contract and may narrow scope, but may not expand authority or path ownership.
 
 ### ArtifactBundle
 ```rust
@@ -164,6 +222,7 @@ domain/
   artifact.rs
   event.rs
   status.rs
+  execution.rs
 ```
 
 Separate business model from launch mechanics. Types are serializable and shared to frontend over HTTP.
@@ -183,9 +242,11 @@ orchestrator/
 
 Responsibilities:
 - building session plans
+- converting Master Planner output into reviewable Assignment Contracts
 - creating cells
 - assigning workspaces
 - deciding launch order
+- resolving operator policy against factual harness capabilities
 - transitioning states
 - collecting artifacts
 
@@ -237,7 +298,21 @@ pub trait CliAdapter {
 }
 ```
 
-Responsibilities: command generation, env injection, model arg mapping, status detection, prompt wrapping.
+Responsibilities: command generation, env injection, model arg mapping, status detection, prompt wrapping, and factual capability reporting. During the incremental migration, `CliRegistry` is the capability resolver; the adapter contract may own those facts once every launch path uses adapters.
+
+Canonical model IDs flow through configuration and launch specs. Use `gpt-5.6-sol` and `fable`; **GPT-5.6 Sol** and **Fable 5** are presentation names. Built-in recommendations use Opus for Queens and Codex `gpt-5.6-sol` for backend/frontend coding principals. Normalize the legacy Codex value `gpt-5.6` at the launch boundary so older persisted sessions and templates remain runnable. Older models remain selectable, and explicit operator configuration is authoritative.
+
+### Prompt and delegation contract
+
+Prompt construction has three layers:
+
+1. **Master Planner contract prompt:** inspect context, emit bounded Assignment Contracts, and stop before implementation.
+2. **Managed principal prompt:** include the Assignment Contract, Capability Card, resolved delegation policy, workspace, and reporting obligations.
+3. **Native child prompt:** inherit the principal's Assignment Contract and limits; it cannot broaden owned paths, authority, validation requirements, or delivery obligations.
+
+The UI and event stream identify manager-launched principals as the macro topology. Native children are micro topology internal to a capable harness. They do not silently become manager-owned cells. Configured child/depth values are repeated in their assignment contract as guidance and must not be presented as manager-enforced runtime caps.
+
+Implement prompt construction as a deterministic compiler, not scattered string mutation. Its inputs are the agent role, Assignment Contract, Capability Card, resolved `HiveExecutionPolicy`, workspace assignment, CLI behavior profile, and reporting endpoints. Its output must preserve the factual capability value, state whether native delegation is authorized, include child/depth limits, and repeat the non-expansion rule. Master Planner uses a separate contract-only target that cannot fall through to an implementation prompt.
 
 ### 5. Workspace manager
 
@@ -249,7 +324,8 @@ workspace/
 ```
 
 Rules:
-- Hive mode → one shared worktree for the HiveCell
+- Hive mode + `shared_cell` → one recommended collaborative worktree for the HiveCell
+- Hive mode + `isolated_cell` → one isolated worktree per manager-launched principal
 - Fusion mode → one worktree per candidate HiveCell
 - ResolverCell → no write workspace (recommendation-only by default)
 
@@ -404,6 +480,8 @@ JSON/JSONL first — easy to debug, inspect, and migrate while the model is evol
 ### Migration from existing data
 Old session data (`.hive-manager/` task files, existing JSONL) is **read-only** under the new model. No automatic migration. Previous sessions remain inspectable but do not conform to the new structure.
 
+Execution-policy and capability additions are additive within the current persisted schema. Apply `#[serde(default)]` to new policy fields so sessions created before this capability contract still load. The serde fallback preserves legacy behavior (`Auto` launch, `IsolatedCell` workspace, and `Auto` delegation) rather than fabricating explicit operator intent; the new-session UI may still recommend `SharedCell`. Existing Swarm sessions and programmatic Swarm callers remain compatible even though Swarm is absent from the primary launch flow.
+
 ---
 
 ## Phased Delivery
@@ -413,6 +491,8 @@ Old session data (`.hive-manager/` task files, existing JSONL) is **read-only** 
 **Tasks:**
 - Add Rust domain types in `domain/`
 - Add explicit state enums
+- Add execution policy, capability support, and serde defaults for legacy sessions
+- Resolve capability facts independently from operator delegation authorization
 - Wire structured session/cell/agent updates over HTTP
 - Keep current UI mostly working while consuming richer state
 
@@ -424,12 +504,12 @@ Old session data (`.hive-manager/` task files, existing JSONL) is **read-only** 
 
 **Tasks:**
 - Implement WorkspaceManager
-- Create shared worktree flow for Hive
+- Create shared-cell and isolated-per-principal flows for Hive
 - Create isolated candidate worktrees for Fusion
 - Expose branch/worktree in UI
 
 **Exit criteria:**
-- Hive sessions create one workspace per HiveCell
+- Hive sessions honor the operator-selected `shared_cell` or `isolated_cell` strategy
 - Fusion sessions create one workspace per candidate HiveCell
 
 ### Phase 3 (v0.20) — Artifact Bundles + Resolver
@@ -453,6 +533,8 @@ Old session data (`.hive-manager/` task files, existing JSONL) is **read-only** 
 - Role packs
 - Launch presets
 - Improved session builder
+- Topology preview distinguishing managed principals from possible native children
+- Master Planner Assignment Contract templates
 
 **Exit criteria:**
 - User can launch a useful session in under 30 seconds from a template
@@ -476,11 +558,15 @@ Old session data (`.hive-manager/` task files, existing JSONL) is **read-only** 
 - State transitions
 - Workspace creation rules
 - CLI adapter command generation
+- Capability inference for Claude, Codex, and unknown harnesses
+- Delegation-policy matrix: Disabled, Auto, Encouraged × Supported, Unsupported, Unknown
+- Legacy session deserialization with omitted execution-policy fields
+- Programmatic legacy Swarm launch compatibility
 - Event emission
 - Artifact normalization
 - Resolver input construction
 
-Note: `cargo test` has a known Windows DLL issue — use `cargo check --tests` for compilation validation.
+Run focused `cargo test` filters for changed modules first. Use `cargo check --tests` as a compilation fallback when a machine-specific Windows runtime dependency prevents test execution.
 
 ### Frontend tests
 - Session builder flows
@@ -492,26 +578,42 @@ Note: `cargo test` has a known Windows DLL issue — use `cargo check --tests` f
 ### Manual integration tests
 1. Launch single Hive
 2. Launch Fusion with 2 candidate Hives + Resolver
-3. Stop one failed candidate while others continue
-4. Detect waiting-for-input state and surface it clearly
-5. Persist and reload previous session with artifacts intact
+3. Launch Solo without creating a managed-principal topology
+4. Confirm Disabled blocks native delegation even on Claude/Codex
+5. Confirm Auto permits known-supported harnesses and leaves unknown harnesses off
+6. Confirm Encouraged authorizes unknown support without relabeling it Supported
+7. Stop one failed Fusion candidate while others continue
+8. Detect waiting-for-input state and surface it clearly
+9. Persist and reload a pre-policy session with artifacts intact
+10. Exercise a legacy Swarm launch through its programmatic surface, not the primary builder
 
 ---
 
 ## Implementation Risks
+
+### Known follow-up limitations
+
+- `/cells` still exposes a singular workspace and cannot enumerate every
+  isolated principal worktree after reload.
+- A worker-queue claim that succeeds immediately before process creation fails
+  can remain `Running` until stale-row reconciliation reclaims it.
+- The legacy sequential Swarm/SharedCell worker journal still uses its original
+  progression model; the new direct Hive path does not depend on that redesign.
 
 | Risk | Mitigation |
 |------|-----------|
 | Rewriting all UI at once | Land domain/state first, then reshape screens |
 | Resolver with weak inputs | Define artifact contract before building comparison UX |
 | Runtime abstraction too generic too early | Design cleanly, implement only local runtimes for now |
-| Swarm compatibility clutter | Keep backward compat if needed, don't let it dictate vNext design |
+| Capability mistaken for permission | Persist facts and operator policy separately; cover the full resolver matrix |
+| Native child scope expansion | Inherit the Assignment Contract, carry child/depth values as prompt guidance, and rely on the native harness for hard enforcement |
+| Swarm compatibility clutter | Keep programmatic backward compatibility; exclude it from the primary launch flow |
 
 ---
 
 ## Immediate Next Steps
 
-1. Add `domain/` module — Session/Cell/Agent/Status/Event types
+1. Add `domain/` module — Session/Cell/Agent/Status/Event/Execution types
 2. Add runtime trait, normalize existing CLI launchers behind it
 3. Implement WorkspaceManager with cell-based worktree rules
 4. Introduce event bus + structured event persistence
@@ -520,3 +622,4 @@ Note: `cargo test` has a known Windows DLL issue — use `cargo check --tests` f
 7. Build minimal cell-first session overview screen
 8. Add artifact bundle schema
 9. Implement first Resolver flow for Fusion sessions
+10. Add capability-aware Assignment Contract prompting for Queens and coding principals

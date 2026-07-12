@@ -328,6 +328,10 @@ pub async fn launch_solo(
         color: None,
         queen_config: agent_config,
         workers: vec![],
+        execution_policy: crate::domain::HiveExecutionPolicy {
+            launch_kind: crate::domain::HiveLaunchKind::Solo,
+            ..crate::domain::HiveExecutionPolicy::default()
+        },
         prompt: task_description.filter(|t| !t.trim().is_empty()),
         with_planning: false,
         with_evaluator,

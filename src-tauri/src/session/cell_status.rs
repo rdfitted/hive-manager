@@ -64,10 +64,12 @@ pub(crate) fn session_state_to_cell_status(state: &SessionState) -> CellStatus {
         | SessionState::Judging
         | SessionState::MergingWinner
         | SessionState::QaInProgress { .. }
+        | SessionState::PrinceRemediation
         | SessionState::Running => CellStatus::Running,
-        SessionState::AwaitingVerdictSelection | SessionState::Paused | SessionState::QaPassed => {
-            CellStatus::WaitingInput
-        }
+        SessionState::AwaitingVerdictSelection
+        | SessionState::Paused
+        | SessionState::QaPassed
+        | SessionState::QaInconclusive => CellStatus::WaitingInput,
         SessionState::Completed | SessionState::Closed => CellStatus::Completed,
         SessionState::QaFailed { .. }
         | SessionState::QaMaxRetriesExceeded
@@ -283,6 +285,10 @@ mod tests {
                 .collect(),
             default_cli: "claude".to_string(),
             default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: crate::domain::HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations: DEFAULT_MAX_QA_ITERATIONS,
             qa_timeout_secs: 300,

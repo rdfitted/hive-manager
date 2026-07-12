@@ -1,5 +1,6 @@
 use crate::coordination::InjectionManager;
 use crate::coordination::{PeerMessageRecord, StateManager};
+use crate::domain::WorkspaceStrategy;
 use crate::events::EventBus;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
@@ -214,6 +215,10 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus".to_string()),
+        default_principal_cli: None,
+        default_principal_model: None,
+        default_principal_flags: Vec::new(),
+        execution_policy: crate::domain::HiveExecutionPolicy::default(),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -255,6 +260,10 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
         agents,
         default_cli: "claude".to_string(),
         default_model: Some("opus".to_string()),
+        default_principal_cli: None,
+        default_principal_model: None,
+        default_principal_flags: Vec::new(),
+        execution_policy: crate::domain::HiveExecutionPolicy::default(),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -416,6 +425,10 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus".to_string()),
+        default_principal_cli: None,
+        default_principal_model: None,
+        default_principal_flags: Vec::new(),
+        execution_policy: crate::domain::HiveExecutionPolicy::default(),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -470,6 +483,10 @@ async fn test_patch_session_null_clears_field() {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus".to_string()),
+        default_principal_cli: None,
+        default_principal_model: None,
+        default_principal_flags: Vec::new(),
+        execution_policy: crate::domain::HiveExecutionPolicy::default(),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -630,6 +647,10 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         state: "Completed".to_string(),
         default_cli: "claude".to_string(),
         default_model: Some("opus".to_string()),
+        default_principal_cli: None,
+        default_principal_model: None,
+        default_principal_flags: Vec::new(),
+        execution_policy: crate::domain::HiveExecutionPolicy::default(),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -2939,6 +2960,10 @@ fn test_persisted_session_serializes_default_cli() {
         state: "Running".to_string(),
         default_cli: "antigravity".to_string(),
         default_model: None, // antigravity uses settings.json for model selection
+        default_principal_cli: None,
+        default_principal_model: None,
+        default_principal_flags: Vec::new(),
+        execution_policy: crate::domain::HiveExecutionPolicy::default(),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
@@ -3385,6 +3410,10 @@ async fn test_launch_solo_accepts_droid_model_config() {
             .expect("created solo session should be stored");
         assert_eq!(session.default_cli, "droid");
         assert_eq!(session.default_model.as_deref(), Some("glm-5.1"));
+        assert_eq!(
+            session.execution_policy.workspace_strategy,
+            crate::domain::WorkspaceStrategy::IsolatedCell
+        );
         match &session.session_type {
             SessionType::Solo { cli, model } => {
                 assert_eq!(cli, "droid");
@@ -4390,6 +4419,40 @@ async fn test_list_cells_returns_primary_cell_for_hive_session() {
 }
 
 #[tokio::test]
+async fn test_list_cells_marks_no_git_workspace_branch_unavailable() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = tempfile::tempdir().expect("temp project");
+    let mut session = make_test_session_with_agents(
+        "session-cells-research",
+        temp_dir.path().to_str().unwrap(),
+        &["session-cells-research-queen"],
+    );
+    session.no_git = true;
+    session.execution_policy.workspace_strategy = WorkspaceStrategy::None;
+    controller.read().insert_test_session(session);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/session-cells-research/cells")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cells: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let workspace = &cells[0]["workspace"];
+    assert_eq!(workspace["strategy"], "none");
+    assert_eq!(workspace["branch_name"], "unavailable");
+    assert!(workspace["worktree_path"].is_null());
+}
+
+#[tokio::test]
 async fn test_get_cell_rejects_invalid_cell_id() {
     let app = setup_test_app().await;
 
@@ -4556,6 +4619,10 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             state: "Completed".to_string(),
             default_cli: "claude".to_string(),
             default_model: Some("opus".to_string()),
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: crate::domain::HiveExecutionPolicy::default(),
             qa_workers: Vec::new(),
             max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
@@ -5538,6 +5605,10 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         agents: vec![],
         default_cli: "claude".to_string(),
         default_model: Some("opus".to_string()),
+        default_principal_cli: None,
+        default_principal_model: None,
+        default_principal_flags: Vec::new(),
+        execution_policy: crate::domain::HiveExecutionPolicy::default(),
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,

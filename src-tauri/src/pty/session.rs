@@ -15,6 +15,10 @@ pub enum AgentRole {
     Judge { session_id: String },
     Evaluator,
     QaWorker { index: u8, parent: Option<String> },
+    /// Remediation authority — a peer to the Queen and Evaluator. Receives the QA
+    /// team's findings and spawns its own fix team (regular `Worker`s parented to
+    /// the Prince) to resolve them before the Queen pushes the PR.
+    Prince,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -57,7 +61,7 @@ impl Default for WorkerRole {
 pub struct AgentConfig {
     #[serde(default = "default_cli")]
     pub cli: String,              // "claude", "gemini", "antigravity", "opencode", "codex"
-    pub model: Option<String>,    // "opus", "gemini-2.5-pro", "gpt-5.5", etc. Ignored for "antigravity" (settings.json owns it)
+    pub model: Option<String>,    // "opus", "gemini-2.5-pro", "gpt-5.6-sol", etc. Ignored for "antigravity" (settings.json owns it)
     #[serde(default)]
     pub flags: Vec<String>,       // Additional CLI flags
     pub label: Option<String>,    // Display name

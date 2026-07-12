@@ -8,16 +8,15 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::{validate_cli, validate_session_id};
+use crate::cli::CliRegistry;
 use crate::coordination::{StateManager, WorkerStateInfo};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
 use crate::session::SessionController;
-use super::{validate_session_id, validate_cli};
 
-fn deserialize_optional_trimmed_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
+fn deserialize_optional_trimmed_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -45,10 +44,12 @@ pub struct AddWorkerRequest {
     /// One-line task summary used for deterministic labels
     #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     pub description: Option<String>,
-    /// CLI to use: claude, gemini, antigravity, codex, cursor, droid, qwen, opencode. Defaults to "claude"
+    /// CLI to use. Defaults to the session's configured principal CLI.
     pub cli: Option<String>,
     /// Model to use (optional)
     pub model: Option<String>,
+    /// Additional CLI flags. Omit to inherit the session principal flags; use [] to clear them.
+    pub flags: Option<Vec<String>>,
     /// Initial task/prompt for the worker
     pub initial_task: Option<String>,
     /// Parent agent ID (defaults to Queen)
@@ -73,26 +74,57 @@ pub async fn add_worker(
 ) -> Result<(StatusCode, Json<AddWorkerResponse>), ApiError> {
     validate_session_id(&session_id)?;
 
-    let session_default_cli = {
+    let AddWorkerRequest {
+        role_type,
+        label,
+        name,
+        description,
+        cli: requested_cli,
+        model: requested_model,
+        flags: requested_flags,
+        initial_task,
+        parent_id,
+    } = req;
+
+    let principal_defaults = {
         let controller = state.session_controller.read();
-        controller.get_session_default_cli(&session_id)
-            .unwrap_or_else(|| "claude".to_string())
+        controller.get_session_principal_defaults(&session_id)
+    }
+    .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+
+    let inherits_principal_defaults = match requested_cli.as_deref() {
+        None => true,
+        Some(requested) => requested == principal_defaults.cli.as_str(),
     };
-    let cli = req.cli.unwrap_or(session_default_cli);
+    let cli = requested_cli.unwrap_or_else(|| principal_defaults.cli.clone());
     validate_cli(&cli)?;
+    let model = requested_model.or_else(|| {
+        if inherits_principal_defaults {
+            principal_defaults.model.clone()
+        } else {
+            CliRegistry::default_model(&cli).map(ToString::to_string)
+        }
+    });
+    let flags = requested_flags.unwrap_or_else(|| {
+        if inherits_principal_defaults {
+            principal_defaults.flags.clone()
+        } else {
+            Vec::new()
+        }
+    });
 
     // Build role
-    let role_label = req.label.unwrap_or_else(|| {
+    let role_label = label.unwrap_or_else(|| {
         // Capitalize first letter of role_type
-        let mut chars = req.role_type.chars();
+        let mut chars = role_type.chars();
         match chars.next() {
-            None => req.role_type.clone(),
+            None => role_type.clone(),
             Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         }
     });
 
     let role = WorkerRole {
-        role_type: req.role_type.clone(),
+        role_type: role_type.clone(),
         label: role_label.clone(),
         default_cli: cli.clone(),
         prompt_template: None,
@@ -101,13 +133,13 @@ pub async fn add_worker(
     // Build config
     let config = AgentConfig {
         cli: cli.clone(),
-        model: req.model,
-        flags: vec![],
+        model,
+        flags,
         label: Some(role_label.clone()),
-        name: req.name,
-        description: req.description,
+        name,
+        description,
         role: Some(role.clone()),
-        initial_prompt: req.initial_task.clone(),
+        initial_prompt: initial_task.clone(),
     };
 
     // #126: enqueue + atomically claim the worker BEFORE spawning. The queue table is the
@@ -131,11 +163,12 @@ pub async fn add_worker(
     let predicted_worker_id = format!("{}-worker-{}", session_id, predicted_index);
     let queue_id = predicted_worker_id.clone();
     let payload = json!({
-        "role_type": req.role_type,
+        "role_type": role_type,
         "cli": cli,
         "model": config.model,
-        "parent_id": req.parent_id,
-        "initial_task": req.initial_task,
+        "flags": config.flags,
+        "parent_id": parent_id,
+        "initial_task": initial_task,
     });
 
     state
@@ -144,7 +177,7 @@ pub async fn add_worker(
             &queue_id,
             &session_id,
             &predicted_worker_id,
-            &req.role_type,
+            &role_type,
             &cli,
             payload,
             None,
@@ -162,7 +195,10 @@ pub async fn add_worker(
         details.insert("worker_id".to_string(), json!(predicted_worker_id));
         details.insert("session_id".to_string(), json!(session_id));
         return Err(ApiError::conflict_with_details(
-            format!("Worker {} is already claimed and running", predicted_worker_id),
+            format!(
+                "Worker {} is already claimed and running",
+                predicted_worker_id
+            ),
             details,
         ));
     }
@@ -172,11 +208,12 @@ pub async fn add_worker(
         let controller = state.session_controller.write();
 
         let agent_info = controller
-            .add_worker(&session_id, config, role.clone(), req.parent_id)
+            .add_worker(&session_id, config, role.clone(), parent_id)
             .map_err(|e| ApiError::internal(e.to_string()))?;
 
         // Extract worker index from ID (format: session-id-worker-N)
-        let index = agent_info.id
+        let index = agent_info
+            .id
             .rsplit('-')
             .next()
             .and_then(|s| s.parse::<u8>().ok())
@@ -235,13 +272,10 @@ pub async fn add_worker(
         let session = controller
             .get_session(&session_id)
             .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
-        SessionController::absolute_task_file_path_for_worker(
-            &session.project_path,
-            &session_id,
-            worker_index as usize,
-        )
-        .to_string_lossy()
-        .to_string()
+        SessionController::task_file_path_for_session_worker(&session, worker_index as usize)
+            .map_err(ApiError::internal)?
+            .to_string_lossy()
+            .to_string()
     };
 
     Ok((
@@ -273,24 +307,24 @@ pub async fn list_workers(
         .agents
         .iter()
         .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
-        .map(|a| {
+        .map(|a| -> Result<Value, ApiError> {
             let index = a.id.rsplit('-').next().unwrap_or("0");
-            let task_file = SessionController::absolute_task_file_path_for_worker(
-                &session.project_path,
-                &session_id,
+            let task_file = SessionController::task_file_path_for_session_worker(
+                &session,
                 index.parse::<usize>().unwrap_or(0),
             )
+            .map_err(ApiError::internal)?
             .to_string_lossy()
             .to_string();
-            json!({
+            Ok(json!({
                 "id": a.id,
                 "role": a.config.role.as_ref().map(|r| &r.label).unwrap_or(&"Worker".to_string()),
                 "cli": a.config.cli,
                 "status": format!("{:?}", a.status),
                 "task_file": task_file
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     Ok(Json(json!({
         "session_id": session_id,

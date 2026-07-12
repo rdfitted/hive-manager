@@ -12,13 +12,23 @@
   let pulling = $state(false);
   let error = $state<string | null>(null);
 
-  // Get project path from active session
-  let projectPath = $derived($activeSession?.project_path);
+  // Managed sessions execute in their primary worktree, not the base checkout.
+  // Keep that branch read-only here so session controls cannot accidentally
+  // switch the worktree out from under running agents.
+  let managedWorkspace = $derived(Boolean($activeSession?.worktree_path));
+  let projectPath = $derived($activeSession?.worktree_path ?? $activeSession?.project_path);
+  let managedBranch = $derived($activeSession?.worktree_branch ?? 'Managed worktree');
 
   // Reload branches when project path changes
   $effect(() => {
     if (projectPath) {
-      loadBranches();
+      if (managedWorkspace) {
+        availableBranches.set([]);
+        currentBranch.set(managedBranch);
+        error = null;
+      } else {
+        loadBranches();
+      }
     } else {
       // Clear branches when no session
       availableBranches.set([]);
@@ -90,6 +100,8 @@
     <button class="action-btn refresh-btn" onclick={loadBranches} title="Retry">↻</button>
   {:else if !projectPath}
     <span class="loading">No session</span>
+  {:else if managedWorkspace}
+    <span class="managed-branch" title={projectPath}>{managedBranch}</span>
   {:else}
     <select id="branch-select" value={$currentBranch} onchange={handleBranchChange}>
       {#each $availableBranches as branch}
@@ -206,6 +218,14 @@
   .loading {
     font-size: 11px;
     color: var(--text-secondary);
+  }
+
+  .managed-branch {
+    font-size: 11px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .error {

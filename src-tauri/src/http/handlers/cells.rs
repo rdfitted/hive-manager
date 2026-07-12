@@ -64,12 +64,7 @@ fn build_primary_cell(session: &Session, storage: &SessionStorage) -> Cell {
             .name
             .clone()
             .unwrap_or_else(|| "Primary session cell".to_string()),
-        workspace: synthetic_workspace(
-            session,
-            WorkspaceStrategy::SharedCell,
-            CellType::Hive,
-            PRIMARY_CELL_ID,
-        ),
+        workspace: primary_workspace(session),
         agents: session
             .agents
             .iter()
@@ -170,6 +165,55 @@ fn synthetic_workspace(
         ),
         worktree_path: None,
         is_dirty: false,
+    }
+}
+
+fn primary_workspace(session: &Session) -> Workspace {
+    let strategy = if session.no_git {
+        WorkspaceStrategy::None
+    } else if matches!(&session.session_type, SessionType::Hive { .. }) {
+        session.execution_policy.workspace_strategy
+    } else {
+        WorkspaceStrategy::SharedCell
+    };
+
+    let worktree_path = if session.no_git {
+        None
+    } else {
+        session.worktree_path.as_ref().map(std::path::PathBuf::from)
+    };
+    let branch_name = if session.no_git {
+        "unavailable".to_string()
+    } else {
+        session
+            .worktree_branch
+            .clone()
+            .or_else(|| {
+                worktree_path
+                    .as_deref()
+                    .and_then(|path| git::current_branch(path).ok())
+            })
+            .unwrap_or_else(|| {
+                git::generate_branch_name(
+                    &session.id,
+                    PRIMARY_CELL_ID,
+                    session_mode(session),
+                    CellType::Hive,
+                )
+            })
+    };
+    let is_dirty = worktree_path
+        .as_deref()
+        .and_then(|path| git::is_dirty(path).ok())
+        .unwrap_or(false);
+
+    Workspace {
+        strategy,
+        repo_path: session.project_path.clone(),
+        base_branch: "unknown".to_string(),
+        branch_name,
+        worktree_path,
+        is_dirty,
     }
 }
 
