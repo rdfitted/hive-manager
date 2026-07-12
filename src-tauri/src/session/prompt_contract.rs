@@ -229,7 +229,7 @@ mod tests {
     fn codex_config() -> AgentConfig {
         AgentConfig {
             cli: "codex".to_string(),
-            model: Some("gpt-5.6".to_string()),
+            model: Some("gpt-5.6-sol".to_string()),
             ..AgentConfig::default()
         }
     }
@@ -252,7 +252,7 @@ mod tests {
         );
 
         assert!(card.contains("Harness: `codex`"));
-        assert!(card.contains("Model: `gpt-5.6`"));
+        assert!(card.contains("Model: `gpt-5.6-sol`"));
         assert!(card.contains("Flags: `[]`"));
         assert!(card.contains("adapter profile, not a runtime probe"));
         assert!(card.contains("Native delegation authorized: yes"));

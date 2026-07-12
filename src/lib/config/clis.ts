@@ -25,7 +25,7 @@ export const cliOptions: CliOption[] = [
   { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro (deprecates 2026-06-18 — use Antigravity for new work)', defaultModel: 'gemini-2.5-pro' },
   { value: 'antigravity', label: 'Antigravity CLI', description: 'Google Antigravity (agy) mixed-model option. Model + verbosity are set globally in ~/.gemini/antigravity-cli/settings.json.', defaultModel: '' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model', defaultModel: 'opencode/big-pickle' },
-  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.6 / Sol', defaultModel: 'gpt-5.6' },
+  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.6 Sol', defaultModel: 'gpt-5.6-sol' },
   { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2.5)', defaultModel: 'composer-2.5' },
   { value: 'droid', label: 'Droid', description: 'GLM 5.1 (Factory Droid CLI)', defaultModel: 'glm-5.1' },
   { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)', defaultModel: 'qwen3-coder' },
@@ -42,24 +42,29 @@ export interface RoleDefaults {
 
 export const defaultRoles: Record<string, RoleDefaults> = {
   queen: { cli: 'claude', model: 'opus' },
-  principal: { cli: 'codex', model: 'gpt-5.6' },
-  backend: { cli: 'codex', model: 'gpt-5.6' },
+  principal: { cli: 'codex', model: 'gpt-5.6-sol' },
+  backend: { cli: 'codex', model: 'gpt-5.6-sol' },
   // Coding roles intentionally share the Codex default.
-  frontend: { cli: 'codex', model: 'gpt-5.6' },
-  coherence: { cli: 'codex', model: 'gpt-5.6' },
-  simplify: { cli: 'codex', model: 'gpt-5.6' },
+  frontend: { cli: 'codex', model: 'gpt-5.6-sol' },
+  coherence: { cli: 'codex', model: 'gpt-5.6-sol' },
+  simplify: { cli: 'codex', model: 'gpt-5.6-sol' },
   // Review & QA roles
-  reviewer: { cli: 'codex', model: 'gpt-5.6' },
-  'reviewer-quick': { cli: 'codex', model: 'gpt-5.6' },
-  resolver: { cli: 'codex', model: 'gpt-5.6' },
-  tester: { cli: 'codex', model: 'gpt-5.6' },
-  'code-quality': { cli: 'codex', model: 'gpt-5.6' },
+  reviewer: { cli: 'codex', model: 'gpt-5.6-sol' },
+  'reviewer-quick': { cli: 'codex', model: 'gpt-5.6-sol' },
+  resolver: { cli: 'codex', model: 'gpt-5.6-sol' },
+  tester: { cli: 'codex', model: 'gpt-5.6-sol' },
+  'code-quality': { cli: 'codex', model: 'gpt-5.6-sol' },
   // Evaluator & QA roles - match backend storage/mod.rs default_roles
   evaluator: { cli: 'claude', model: 'opus' },
-  'qa-worker': { cli: 'codex', model: 'gpt-5.6' },
+  'qa-worker': { cli: 'codex', model: 'gpt-5.6-sol' },
   // General purpose
-  general: { cli: 'codex', model: 'gpt-5.6' },
+  general: { cli: 'codex', model: 'gpt-5.6-sol' },
 };
+
+/** Normalize model aliases that are not accepted by a CLI authentication path. */
+export function normalizeModelId(cli: string, model: string): string {
+  return cli === 'codex' && model === 'gpt-5.6' ? 'gpt-5.6-sol' : model;
+}
 
 /**
  * Get the default model for a CLI

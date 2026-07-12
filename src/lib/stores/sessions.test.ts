@@ -86,7 +86,7 @@ describe('sessions store', () => {
         color: '#7aa2f7',
         projectPath: '/test/path',
         cli: 'codex',
-        model: 'gpt-5.6',
+        model: 'gpt-5.6-sol',
         flags: ['--full-auto'],
         taskDescription: 'repair the regression',
       });
@@ -97,7 +97,7 @@ describe('sessions store', () => {
           color: '#7aa2f7',
           queen_config: expect.objectContaining({
             cli: 'codex',
-            model: 'gpt-5.6',
+            model: 'gpt-5.6-sol',
             flags: ['--full-auto'],
           }),
           execution_policy: expect.objectContaining({ launch_kind: 'solo' }),
@@ -111,7 +111,7 @@ describe('sessions store', () => {
       const config = {
         project_path: '/test/path',
         queen_config: { cli: 'claude', model: 'opus', flags: [] },
-        workers: [{ cli: 'codex', model: 'gpt-5.6', flags: [], label: 'Coding Principal 1' }],
+        workers: [{ cli: 'codex', model: 'gpt-5.6-sol', flags: [], label: 'Coding Principal 1' }],
         execution_policy: {
           launch_kind: 'hive' as const,
           workspace_strategy: 'isolated_cell' as const,

@@ -1,4 +1,4 @@
-import { defaultRoles, getDefaultModel } from '$lib/config/clis';
+import { defaultRoles, getDefaultModel, normalizeModelId } from '$lib/config/clis';
 import type {
   AgentConfig,
   DelegationMode,
@@ -79,7 +79,10 @@ export function createSessionPrincipalConfig(
   const configuredModel = explicitPrincipalCli
     ? session?.default_principal_model
     : session?.default_model;
-  const model = configuredModel?.trim() || getDefaultModel(cli) || undefined;
+  const configuredModelId = configuredModel?.trim() || getDefaultModel(cli) || undefined;
+  const model = configuredModelId
+    ? normalizeModelId(cli, configuredModelId)
+    : undefined;
 
   return {
     cli,

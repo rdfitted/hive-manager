@@ -1,6 +1,7 @@
 //! Codex CLI adapter implementation.
 
 use super::{AgentLaunchSpec, AgentSignal, BootstrapContext, CliAdapter, LaunchCommand};
+use crate::cli::CliRegistry;
 
 /// Codex CLI adapter.
 ///
@@ -17,17 +18,23 @@ impl CliAdapter for CodexAdapter {
 
     fn build_launch_command(&self, spec: &AgentLaunchSpec) -> LaunchCommand {
         let mut cmd = LaunchCommand::new("codex", spec.cwd.clone());
+        let (model, extra_flags) = CliRegistry::resolve_model_and_flags(
+            "codex",
+            spec.model.as_deref(),
+            None,
+            &spec.flags,
+        );
 
         // Add auto-approve flag (Codex uses a very long flag)
         cmd = cmd.arg("--dangerously-bypass-approvals-and-sandbox");
 
         // Add model if specified
-        if let Some(ref model) = spec.model {
+        if let Some(model) = model {
             cmd = cmd.arg("-m").arg(model);
         }
 
         // Add extra flags from spec
-        cmd = cmd.args(spec.flags.iter().cloned());
+        cmd = cmd.args(extra_flags);
 
         // Add environment variables
         cmd = cmd.envs(spec.env.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -149,6 +156,22 @@ mod tests {
         assert!(cmd.args.contains(&"-m".to_string()));
         assert!(cmd.args.contains(&"o4-mini".to_string()));
         assert!(cmd.args.contains(&"Fix the bug".to_string()));
+    }
+
+    #[test]
+    fn test_legacy_sol_alias_is_normalized() {
+        let adapter = CodexAdapter;
+        let mut spec = make_spec();
+        spec.model = None;
+        spec.flags = vec!["-m".to_string(), "gpt-5.6".to_string()];
+
+        let cmd = adapter.build_launch_command(&spec);
+        assert_eq!(cmd.args.iter().filter(|arg| *arg == "-m").count(), 1);
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+        assert!(!cmd.args.iter().any(|arg| arg == "gpt-5.6"));
     }
 
     #[test]

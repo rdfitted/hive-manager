@@ -45,6 +45,12 @@ impl CliRegistry {
             .clis
             .get(&agent_config.cli)
             .ok_or_else(|| RegistryError::UnknownCli(agent_config.cli.clone()))?;
+        let (model, extra_flags) = Self::resolve_model_and_flags(
+            &agent_config.cli,
+            agent_config.model.as_deref(),
+            Some(&cli.default_model),
+            &agent_config.flags,
+        );
 
         let mut args = Vec::new();
         let mut env = HashMap::new();
@@ -56,9 +62,10 @@ impl CliRegistry {
 
         // Add model flag
         if let Some(ref model_flag) = cli.model_flag {
-            let model = agent_config.model.as_ref().unwrap_or(&cli.default_model);
-            args.push(model_flag.clone());
-            args.push(model.clone());
+            if let Some(model) = model {
+                args.push(model_flag.clone());
+                args.push(model);
+            }
         }
 
         // Add environment variables from CLI config
@@ -67,7 +74,7 @@ impl CliRegistry {
         }
 
         // Add custom flags from agent config
-        args.extend(agent_config.flags.clone());
+        args.extend(extra_flags);
 
         Ok(BuiltCommand {
             command: cli.command.clone(),
@@ -123,12 +130,74 @@ impl CliRegistry {
             // antigravity (agy) has no model flag; settings.json owns the model.
             "antigravity" => None,
             "opencode" => Some("opencode/big-pickle"),
-            "codex" => Some("gpt-5.6"),
+            "codex" => Some("gpt-5.6-sol"),
             "cursor" => Some("composer-2.5"),
             "droid" => Some("glm-5.1"),
             "qwen" => Some("qwen3-coder"),
             _ => None,
         }
+    }
+
+    /// Normalize known legacy model aliases at the CLI launch boundary.
+    ///
+    /// Older Hive Manager builds persisted `gpt-5.6`, while Codex sessions
+    /// authenticated through a ChatGPT account require the concrete Sol catalog
+    /// ID. Keep arbitrary operator-selected model IDs untouched.
+    pub fn normalize_model<'a>(cli: &str, model: &'a str) -> &'a str {
+        match (cli, model) {
+            ("codex", "gpt-5.6") => "gpt-5.6-sol",
+            _ => model,
+        }
+    }
+
+    /// Resolve the effective model and remove duplicate Codex model flags.
+    ///
+    /// The typed `model` field is authoritative. For older/manual configs that
+    /// only supplied `-m` or `--model` in `flags`, preserve that choice while
+    /// emitting a single normalized model argument.
+    pub fn resolve_model_and_flags(
+        cli: &str,
+        configured_model: Option<&str>,
+        default_model: Option<&str>,
+        flags: &[String],
+    ) -> (Option<String>, Vec<String>) {
+        if cli != "codex" {
+            return (
+                configured_model.or(default_model).map(ToString::to_string),
+                flags.to_vec(),
+            );
+        }
+
+        let mut flag_model = None;
+        let mut extra_flags = Vec::with_capacity(flags.len());
+        let mut index = 0;
+        while index < flags.len() {
+            let flag = &flags[index];
+            if flag == "-m" || flag == "--model" {
+                if let Some(model) = flags.get(index + 1).filter(|model| !model.is_empty()) {
+                    flag_model = Some(model.as_str());
+                    index += 2;
+                    continue;
+                }
+            } else if let Some(model) = flag
+                .strip_prefix("--model=")
+                .or_else(|| flag.strip_prefix("-m="))
+                .filter(|model| !model.is_empty())
+            {
+                flag_model = Some(model);
+                index += 1;
+                continue;
+            }
+
+            extra_flags.push(flag.clone());
+            index += 1;
+        }
+
+        let model = configured_model
+            .or(flag_model)
+            .or(default_model)
+            .map(|model| Self::normalize_model(cli, model).to_string());
+        (model, extra_flags)
     }
 
     /// Infer runtime capability facts for a CLI harness.
@@ -294,7 +363,7 @@ mod tests {
                 command: "codex".to_string(),
                 auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
                 model_flag: Some("-m".to_string()),
-                default_model: "gpt-5.6".to_string(),
+                default_model: "gpt-5.6-sol".to_string(),
                 env: None,
             },
         );
@@ -449,7 +518,7 @@ mod tests {
             .args
             .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"gpt-5.6".to_string()));
+        assert!(built.args.contains(&"gpt-5.6-sol".to_string()));
     }
 
     #[test]
@@ -568,12 +637,60 @@ mod tests {
     fn test_default_model_lookup() {
         assert_eq!(CliRegistry::default_model("claude"), Some("opus"));
         assert_eq!(CliRegistry::default_model("gemini"), Some("gemini-2.5-pro"));
-        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.6"));
+        assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.6-sol"));
         assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
         assert_eq!(CliRegistry::default_model("cursor"), Some("composer-2.5"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
         // antigravity has no model flag — None signals the UI to hide the field.
         assert_eq!(CliRegistry::default_model("antigravity"), None);
+    }
+
+    #[test]
+    fn test_codex_legacy_sol_alias_is_normalized_at_launch() {
+        let registry = CliRegistry::new(test_config());
+        let config = AgentConfig {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.6".to_string()),
+            ..AgentConfig::default()
+        };
+
+        let built = registry.build_command(&config).unwrap();
+        assert!(built
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+        assert!(!built.args.iter().any(|arg| arg == "gpt-5.6"));
+    }
+
+    #[test]
+    fn test_model_normalization_preserves_operator_selected_models() {
+        assert_eq!(
+            CliRegistry::normalize_model("codex", "operator-selected-model"),
+            "operator-selected-model"
+        );
+        assert_eq!(CliRegistry::normalize_model("claude", "gpt-5.6"), "gpt-5.6");
+    }
+
+    #[test]
+    fn test_codex_model_flags_are_normalized_without_duplicates() {
+        let flags = vec![
+            "--full-auto".to_string(),
+            "-m".to_string(),
+            "gpt-5.6".to_string(),
+        ];
+        let (model, extra_flags) =
+            CliRegistry::resolve_model_and_flags("codex", None, Some("gpt-5.6-sol"), &flags);
+        assert_eq!(model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(extra_flags, vec!["--full-auto"]);
+
+        let (model, extra_flags) = CliRegistry::resolve_model_and_flags(
+            "codex",
+            Some("operator-selected-model"),
+            Some("gpt-5.6-sol"),
+            &["--model=gpt-5.6".to_string()],
+        );
+        assert_eq!(model.as_deref(), Some("operator-selected-model"));
+        assert!(extra_flags.is_empty());
     }
 
     #[test]

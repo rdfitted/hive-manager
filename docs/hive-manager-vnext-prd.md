@@ -165,7 +165,7 @@ Structured record of something meaningful that happened. Raw terminal output sti
 ## Mode Strategy
 
 ### Hive
-One collaborative cell with an operator-selected workspace strategy. `shared_cell` is recommended for close collaboration; `isolated_cell` is available when each managed principal needs a separate worktree. An Opus Queen coordinates the principals, and the built-in recommendation assigns Codex `gpt-5.6` to backend and frontend work. These are defaults, and explicit operator choices remain authoritative.
+One collaborative cell with an operator-selected workspace strategy. `shared_cell` is recommended for close collaboration; `isolated_cell` is available when each managed principal needs a separate worktree. An Opus Queen coordinates the principals, and the built-in recommendation assigns Codex `gpt-5.6-sol` to backend and frontend work. These are defaults, and explicit operator choices remain authoritative.
 
 **Success criteria:**
 - clear roster of agents
@@ -222,7 +222,7 @@ One API, one set of handlers, one test surface. External CLI processes cannot in
 Should ask: objective, repo/project, primary launch type (Hive, Fusion, or Solo), number of candidate Hives (if Fusion), CLI/model assignments per managed principal, workspace strategy, Queen/principal delegation policies, optional child/depth limits, and optional Resolver configuration. Topology preview must distinguish manager-launched principals from potential native children.
 
 ### Models and labels
-Use canonical model IDs in configuration and launch payloads. The current canonical IDs are `gpt-5.6` and `fable`; **Sol** and **Fable** are display labels only. A direct Hive recommends an Opus Queen plus one generic Codex `gpt-5.6` principal; specialized built-in templates can provide backend/frontend principals. Older models remain selectable, and an explicit operator selection always overrides a recommendation.
+Use canonical model IDs in configuration and launch payloads. The current canonical IDs are `gpt-5.6-sol` and `fable`; **GPT-5.6 Sol** and **Fable 5** are display names. A direct Hive recommends an Opus Queen plus one generic Codex `gpt-5.6-sol` principal; specialized built-in templates can provide backend/frontend principals. The legacy Codex value `gpt-5.6` is normalized only at launch for backward compatibility. Older models remain selectable, and an explicit operator selection always overrides a recommendation.
 
 ### Main session screen
 Should emphasize: Cells, statuses, worktrees/branches, summaries, artifacts, terminal drill-downs. Not just a wall of terminals.

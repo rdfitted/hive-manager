@@ -300,7 +300,7 @@ pub trait CliAdapter {
 
 Responsibilities: command generation, env injection, model arg mapping, status detection, prompt wrapping, and factual capability reporting. During the incremental migration, `CliRegistry` is the capability resolver; the adapter contract may own those facts once every launch path uses adapters.
 
-Canonical model IDs flow through configuration and launch specs. Use `gpt-5.6` and `fable`; **Sol** and **Fable** are presentation labels only. Built-in recommendations use Opus for Queens and Codex `gpt-5.6` for backend/frontend coding principals. Older models remain selectable, and explicit operator configuration is authoritative.
+Canonical model IDs flow through configuration and launch specs. Use `gpt-5.6-sol` and `fable`; **GPT-5.6 Sol** and **Fable 5** are presentation names. Built-in recommendations use Opus for Queens and Codex `gpt-5.6-sol` for backend/frontend coding principals. Normalize the legacy Codex value `gpt-5.6` at the launch boundary so older persisted sessions and templates remain runnable. Older models remain selectable, and explicit operator configuration is authoritative.
 
 ### Prompt and delegation contract
 

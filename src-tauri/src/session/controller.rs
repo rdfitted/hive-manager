@@ -2348,7 +2348,7 @@ impl SessionController {
 
         (
             Some("codex".to_string()),
-            Some("gpt-5.6".to_string()),
+            Some("gpt-5.6-sol".to_string()),
             Vec::new(),
         )
     }
@@ -2405,17 +2405,19 @@ impl SessionController {
     /// Returns (command, args) with CLI-specific flags already added
     fn build_command(config: &AgentConfig) -> (String, Vec<String>) {
         let mut args = Vec::new();
-        let effective_model = config
-            .model
-            .as_deref()
-            .or_else(|| CliRegistry::default_model(&config.cli));
+        let (effective_model, extra_flags) = CliRegistry::resolve_model_and_flags(
+            &config.cli,
+            config.model.as_deref(),
+            CliRegistry::default_model(&config.cli),
+            &config.flags,
+        );
 
         // Add CLI-specific flags
         match config.cli.as_str() {
             "claude" => {
                 // Claude CLI requires --dangerously-skip-permissions for automated use
                 args.push("--dangerously-skip-permissions".to_string());
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
                     args.push(model.to_string());
                 }
@@ -2423,7 +2425,7 @@ impl SessionController {
             "gemini" => {
                 // Gemini CLI uses -y for auto-approve and -m for model.
                 args.push("-y".to_string());
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
@@ -2438,14 +2440,14 @@ impl SessionController {
             "codex" => {
                 // Codex CLI uses --dangerously-bypass-approvals-and-sandbox
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
             }
             "opencode" => {
                 // OpenCode relies on OPENCODE_YOLO=true env var (set in batch file)
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
@@ -2466,14 +2468,14 @@ impl SessionController {
             "qwen" => {
                 // Qwen Code CLI - interactive mode with auto-approve
                 args.push("-y".to_string()); // YOLO mode for auto-approve
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
             }
             _ => {
                 // For other CLIs, just add model flag if specified
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
                     args.push(model.to_string());
                 }
@@ -2481,7 +2483,7 @@ impl SessionController {
         }
 
         // Add any extra flags from config
-        args.extend(config.flags.clone());
+        args.extend(extra_flags);
 
         // Determine the actual command to run
         let command = match config.cli.as_str() {
@@ -2573,23 +2575,25 @@ impl SessionController {
     /// When task is None, opens the CLI in interactive mode.
     fn build_solo_command(config: &AgentConfig, task: Option<&str>) -> (String, Vec<String>) {
         let mut args = Vec::new();
-        let effective_model = config
-            .model
-            .as_deref()
-            .or_else(|| CliRegistry::default_model(&config.cli));
+        let (effective_model, extra_flags) = CliRegistry::resolve_model_and_flags(
+            &config.cli,
+            config.model.as_deref(),
+            CliRegistry::default_model(&config.cli),
+            &config.flags,
+        );
 
         // Add CLI-specific auto-approve flags (matching build_command for hive/swarm modes)
         match config.cli.as_str() {
             "claude" => {
                 args.push("--dangerously-skip-permissions".to_string());
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
                     args.push(model.to_string());
                 }
             }
             "gemini" => {
                 args.push("-y".to_string());
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
@@ -2601,20 +2605,20 @@ impl SessionController {
             }
             "codex" => {
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
             }
             "qwen" => {
                 args.push("-y".to_string());
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
             }
             "opencode" => {
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("-m".to_string());
                     args.push(model.to_string());
                 }
@@ -2629,7 +2633,7 @@ impl SessionController {
                 // No auto-approve flag available
             }
             _ => {
-                if let Some(model) = effective_model {
+                if let Some(ref model) = effective_model {
                     args.push("--model".to_string());
                     args.push(model.to_string());
                 }
@@ -2641,7 +2645,7 @@ impl SessionController {
             Self::add_inline_task_to_args(&config.cli, &mut args, task);
         }
 
-        args.extend(config.flags.clone());
+        args.extend(extra_flags);
 
         let command = match config.cli.as_str() {
             "cursor" => "wsl".to_string(),
@@ -6454,7 +6458,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
 | cli | string | No | CLI override: gemini, antigravity, codex, opencode, cursor, droid, qwen, or claude. Omit to inherit the session principal CLI (`{default_cli}`). |
-| model | string | No | Model override (for example gpt-5.6 for Codex or fable/opus for Claude). Omit to inherit the principal model. |
+| model | string | No | Model override (for example gpt-5.6-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
 | flags | string[] | No | CLI flag override. Omit to inherit principal flags; send `[]` to clear them. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
 | description | string | No | One-line task summary used for deterministic labels |
@@ -6795,7 +6799,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), gemini, antigravity, codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-5.6`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`). Ignored for `antigravity` — model lives in `~/.gemini/antigravity-cli/settings.json` |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-5.6-sol`, `glm-5.1`, `qwen3-coder`, `gemini-2.5-pro`). Ignored for `antigravity` — model lives in `~/.gemini/antigravity-cli/settings.json` |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -13745,7 +13749,7 @@ mod tests {
         assert!(
             !SessionController::session_type_supports_dynamic_principals(&SessionType::Solo {
                 cli: "codex".to_string(),
-                model: Some("gpt-5.6".to_string()),
+                model: Some("gpt-5.6-sol".to_string()),
             })
         );
         assert!(
@@ -13765,7 +13769,7 @@ mod tests {
         let mut session = waiting_worker_session("solo-fixer", Path::new("/repo"), 1);
         session.session_type = SessionType::Solo {
             cli: "codex".to_string(),
-            model: Some("gpt-5.6".to_string()),
+            model: Some("gpt-5.6-sol".to_string()),
         };
         let fixer = WorkerRole::new("prince-fixer", "Prince Fixer", "codex");
         let prince_id = "solo-fixer-prince";
@@ -14249,7 +14253,7 @@ mod tests {
             .join("spawn-worker.md");
         let worker_content =
             std::fs::read_to_string(worker_tool_path).expect("read worker tool doc");
-        assert!(worker_content.contains("gpt-5.6 for Codex or fable/opus for Claude"));
+        assert!(worker_content.contains("gpt-5.6-sol for Codex or fable/opus for Claude"));
         assert!(worker_content.contains("Omit to inherit the session principal CLI (`claude`)"));
         assert!(worker_content.contains("| flags | string[] | No |"));
         assert!(worker_content.contains("Omit to inherit principal flags; send `[]` to clear them"));
@@ -14278,7 +14282,7 @@ mod tests {
     fn codex_principal() -> AgentConfig {
         AgentConfig {
             cli: "codex".to_string(),
-            model: Some("gpt-5.6".to_string()),
+            model: Some("gpt-5.6-sol".to_string()),
             flags: vec![
                 "--config".to_string(),
                 "model_reasoning_effort=\"high\"".to_string(),
@@ -14311,7 +14315,7 @@ mod tests {
         assert!(
             prompt.contains("Runtime CWD: `/repo/.hive-manager/worktrees/session-modern/primary`")
         );
-        assert!(prompt.contains("`codex` | `gpt-5.6`"));
+        assert!(prompt.contains("`codex` | `gpt-5.6-sol`"));
         assert!(prompt.contains(r#"["--config","model_reasoning_effort=\"high\""]"#));
         assert!(prompt.contains("not a required task count"));
         assert!(prompt.contains(
@@ -14348,7 +14352,7 @@ mod tests {
         assert!(
             prompt.contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary")
         );
-        assert!(prompt.contains("codex | gpt-5.6"));
+        assert!(prompt.contains("codex | gpt-5.6-sol"));
         assert!(prompt.contains(r#"["--config","model_reasoning_effort=\"high\""]"#));
         assert!(prompt.contains("supported; encouraged (authorized)"));
         assert!(prompt.contains("do not drop effort or reasoning settings"));
@@ -14376,7 +14380,7 @@ mod tests {
         );
 
         assert!(shared_prompt.contains("Harness: `codex`"));
-        assert!(shared_prompt.contains("Model: `gpt-5.6`"));
+        assert!(shared_prompt.contains("Model: `gpt-5.6-sol`"));
         assert!(
             shared_prompt.contains(r#"Flags: `["--config","model_reasoning_effort=\"high\""]`"#)
         );
@@ -15424,7 +15428,7 @@ mod tests {
     }
 
     #[test]
-    fn command_builder_uses_canonical_model_only_when_operator_model_is_absent() {
+    fn command_builders_use_canonical_sol_and_preserve_custom_models() {
         let (_, explicit_args) = SessionController::build_command(&AgentConfig {
             cli: "codex".to_string(),
             model: Some("operator-selected-model".to_string()),
@@ -15433,7 +15437,7 @@ mod tests {
         assert!(explicit_args
             .windows(2)
             .any(|pair| { pair == ["-m".to_string(), "operator-selected-model".to_string()] }));
-        assert!(!explicit_args.iter().any(|arg| arg == "gpt-5.6"));
+        assert!(!explicit_args.iter().any(|arg| arg == "gpt-5.6-sol"));
 
         let (_, default_args) = SessionController::build_command(&AgentConfig {
             cli: "codex".to_string(),
@@ -15442,7 +15446,44 @@ mod tests {
         });
         assert!(default_args
             .windows(2)
-            .any(|pair| pair == ["-m".to_string(), "gpt-5.6".to_string()]));
+            .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+
+        let legacy_config = AgentConfig {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.6".to_string()),
+            ..AgentConfig::default()
+        };
+        for (_, args) in [
+            SessionController::build_command(&legacy_config),
+            SessionController::build_solo_command(&legacy_config, Some("Do the task")),
+        ] {
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+            assert!(!args.iter().any(|arg| arg == "gpt-5.6"));
+        }
+
+        let legacy_flag_config = AgentConfig {
+            cli: "codex".to_string(),
+            model: None,
+            flags: vec![
+                "--full-auto".to_string(),
+                "--model".to_string(),
+                "gpt-5.6".to_string(),
+            ],
+            ..AgentConfig::default()
+        };
+        for (_, args) in [
+            SessionController::build_command(&legacy_flag_config),
+            SessionController::build_solo_command(&legacy_flag_config, None),
+        ] {
+            assert_eq!(args.iter().filter(|arg| *arg == "-m").count(), 1);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+            assert!(args.iter().any(|arg| arg == "--full-auto"));
+            assert!(!args.iter().any(|arg| arg == "--model"));
+        }
     }
 
     #[test]
@@ -15465,7 +15506,7 @@ mod tests {
         );
         assert!(shared.contains(r#""cli":"codex""#));
         assert!(shared.contains(r#""parent_id":"session-prince""#));
-        assert!(shared.contains(r#""model": "gpt-5.6""#));
+        assert!(shared.contains(r#""model": "gpt-5.6-sol""#));
         assert!(shared.contains("model_reasoning_effort"));
         assert!(shared.contains("do not merge or cherry-pick fixer branches"));
         assert!(shared.contains(workspace));

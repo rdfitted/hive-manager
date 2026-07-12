@@ -30,7 +30,7 @@ describe('default Hive launch contract', () => {
     expect(config.workers).toHaveLength(1);
     expect(config.workers[0]).toMatchObject({
       cli: 'codex',
-      model: 'gpt-5.6',
+      model: 'gpt-5.6-sol',
       label: 'Coding Principal 1',
     });
     expect(config.execution_policy).toEqual({
@@ -41,7 +41,7 @@ describe('default Hive launch contract', () => {
     });
   });
 
-  it('inherits durable principal defaults for workers added after launch', () => {
+  it('normalizes legacy Sol defaults for workers added after launch', () => {
     expect(createSessionPrincipalConfig({
       default_cli: 'claude',
       default_model: 'opus',
@@ -50,7 +50,7 @@ describe('default Hive launch contract', () => {
       default_principal_flags: ['-c', 'model_reasoning_effort="xhigh"'],
     })).toEqual({
       cli: 'codex',
-      model: 'gpt-5.6',
+      model: 'gpt-5.6-sol',
       flags: ['-c', 'model_reasoning_effort="xhigh"'],
     });
   });

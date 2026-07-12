@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { AgentConfig } from '$lib/stores/sessions';
-  import { cliOptions, getDefaultModel } from '$lib/config/clis';
+  import { cliOptions, getDefaultModel, normalizeModelId } from '$lib/config/clis';
 
   export let config: AgentConfig;
   export let showLabel: boolean = true;
@@ -30,11 +30,13 @@
   ];
 
   const codexPresets: PresetOption[] = [
-    { value: 'codex-gpt-5-6', label: 'GPT-5.6 / Sol' },
-    { value: 'codex-gpt-5-6-low', label: 'GPT-5.6 / Sol (Low effort)' },
-    { value: 'codex-gpt-5-6-medium', label: 'GPT-5.6 / Sol (Medium effort)' },
-    { value: 'codex-gpt-5-6-high', label: 'GPT-5.6 / Sol (High effort)' },
-    { value: 'codex-gpt-5-6-xhigh', label: 'GPT-5.6 / Sol (Extra high effort)' },
+    { value: 'codex-gpt-5-6-sol', label: 'GPT-5.6 Sol' },
+    { value: 'codex-gpt-5-6-sol-low', label: 'GPT-5.6 Sol (Low effort)' },
+    { value: 'codex-gpt-5-6-sol-medium', label: 'GPT-5.6 Sol (Medium effort)' },
+    { value: 'codex-gpt-5-6-sol-high', label: 'GPT-5.6 Sol (High effort)' },
+    { value: 'codex-gpt-5-6-sol-xhigh', label: 'GPT-5.6 Sol (Extra high effort)' },
+    { value: 'codex-gpt-5-6-sol-max', label: 'GPT-5.6 Sol (Max effort)' },
+    { value: 'codex-gpt-5-6-sol-ultra', label: 'GPT-5.6 Sol (Ultra effort)' },
     { value: 'codex-gpt-5-5-low', label: 'GPT-5.5 (Low effort)' },
     { value: 'codex-gpt-5-5-medium', label: 'GPT-5.5 (Medium effort)' },
     { value: 'codex-gpt-5-5-high', label: 'GPT-5.5 (High effort)' },
@@ -127,11 +129,13 @@
   function inferSelectedPreset(value: AgentConfig): string {
     const effort = configuredEffort(value);
     if (value.cli === 'codex' && value.model && effort) {
-      const candidate = `codex-${value.model.replaceAll('.', '-')}-${effort}`;
+      const model = normalizeModelId(value.cli, value.model);
+      const candidate = `codex-${model.replaceAll('.', '-')}-${effort}`;
       if (codexPresets.some((preset) => preset.value === candidate)) return candidate;
     }
     if (value.cli === 'codex' && value.model && !effort) {
-      const candidate = `codex-${value.model.replaceAll('.', '-')}`;
+      const model = normalizeModelId(value.cli, value.model);
+      const candidate = `codex-${model.replaceAll('.', '-')}`;
       if (codexPresets.some((preset) => preset.value === candidate)) return candidate;
     }
     if (value.cli === 'claude' && value.model === 'opus') {
@@ -149,13 +153,15 @@
   }
 
   $: selectedPreset = inferSelectedPreset(config);
-  $: effectiveModel = config.model || getDefaultModel(config.cli) || 'CLI default';
+  $: effectiveModel = config.model
+    ? normalizeModelId(config.cli, config.model)
+    : getDefaultModel(config.cli) || 'CLI default';
   $: effectiveEffort = configuredEffort(config);
 
   $: presetDescription = config.cli === 'claude'
     ? 'Claude effort presets add --settings {"effortLevel":"low|high|max"}'
     : config.cli === 'codex'
-      ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh"'
+      ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh|max|ultra"'
       : config.cli === 'gemini'
         ? 'Gemini model IDs for `gemini -m`'
         : config.cli === 'cursor'
@@ -306,24 +312,32 @@
       case 'fable':
         model = 'fable';
         break;
-      case 'codex-gpt-5-6-low':
-        model = 'gpt-5.6';
+      case 'codex-gpt-5-6-sol-low':
+        model = 'gpt-5.6-sol';
         flags.push('-c', 'model_reasoning_effort="low"');
         break;
-      case 'codex-gpt-5-6-medium':
-        model = 'gpt-5.6';
+      case 'codex-gpt-5-6-sol-medium':
+        model = 'gpt-5.6-sol';
         flags.push('-c', 'model_reasoning_effort="medium"');
         break;
-      case 'codex-gpt-5-6-high':
-        model = 'gpt-5.6';
+      case 'codex-gpt-5-6-sol-high':
+        model = 'gpt-5.6-sol';
         flags.push('-c', 'model_reasoning_effort="high"');
         break;
-      case 'codex-gpt-5-6-xhigh':
-        model = 'gpt-5.6';
+      case 'codex-gpt-5-6-sol-xhigh':
+        model = 'gpt-5.6-sol';
         flags.push('-c', 'model_reasoning_effort="xhigh"');
         break;
-      case 'codex-gpt-5-6':
-        model = 'gpt-5.6';
+      case 'codex-gpt-5-6-sol-max':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="max"');
+        break;
+      case 'codex-gpt-5-6-sol-ultra':
+        model = 'gpt-5.6-sol';
+        flags.push('-c', 'model_reasoning_effort="ultra"');
+        break;
+      case 'codex-gpt-5-6-sol':
+        model = 'gpt-5.6-sol';
         break;
       case 'codex-gpt-5-5-low':
         model = 'gpt-5.5';
