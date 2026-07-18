@@ -114,7 +114,8 @@ impl QueueManager {
     }
 
     /// Record a heartbeat against the queue row, advancing continuation / no-progress
-    /// counters. Returns `true` if a row was updated.
+    /// counters. A completed heartbeat atomically finalizes the row and emits the matching
+    /// lifecycle event. Returns `true` if a row was updated.
     pub async fn record_heartbeat(
         &self,
         session_id: &str,
@@ -122,7 +123,19 @@ impl QueueManager {
         status: &str,
     ) -> Result<bool, StorageError> {
         let now = Self::now_ms();
-        self.repo.record_heartbeat(session_id, worker_id, status, now)
+        let updated = self
+            .repo
+            .record_heartbeat(session_id, worker_id, status, now)?;
+        if updated && status == "completed" {
+            self.emit(
+                session_id,
+                worker_id,
+                EventType::WorkerFinalized,
+                Severity::Info,
+            )
+            .await;
+        }
+        Ok(updated)
     }
 
     /// Maintenance: flip stale `running` rows back to `queued`. Emits `WorkerReclaimed`

@@ -3279,6 +3279,13 @@ Last updated: {timestamp}
             "idle",
             "Waiting for task activation",
         );
+        let completed_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &agent_id,
+            "completed",
+            "Completed fusion variant",
+        );
         let polling_instructions =
             get_polling_instructions(cli, &task_file, None, Some(&heartbeat_command));
         let scope_block = Self::scope_block(".");
@@ -3296,7 +3303,6 @@ Branch: {branch}
 ## Rules
 - Commit all changes to your branch
 - Do NOT interact with other variants
-- When complete, update your task file status to COMPLETED
 
 ## Task Coordination
 Send a startup heartbeat before reading the task file:
@@ -3304,7 +3310,18 @@ Send a startup heartbeat before reading the task file:
 {startup_heartbeat}
 ```
 
-Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#,
+Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}
+
+## Completion Protocol (MANDATORY)
+
+1. Run the focused validation required for this variant and review the final diff.
+2. Commit only the completed variant work on the current backend-created Fusion branch. Do not push or switch branches.
+3. Update {task_file} to `Status: COMPLETED` and add the result summary.
+4. Send this completed heartbeat exactly as shown:
+   ```bash
+   {completed_heartbeat}
+   ```
+5. Report the commit SHA and validation evidence, then stop. Do not replace the completed status with an idle or working heartbeat unless a new ACTIVE assignment is issued."#,
             variant_name = variant_name,
             worktree_path = worktree_path,
             branch = branch,
@@ -3313,6 +3330,7 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}"#
             task_file = task_file,
             startup_heartbeat = startup_heartbeat,
             polling_instructions = polling_instructions,
+            completed_heartbeat = completed_heartbeat,
         )
     }
 
@@ -3639,7 +3657,7 @@ Last updated: {timestamp}
     /// they must not mutate the project or its git state. Used for BOTH the worker
     /// prompt and the task file so the two surfaces stay consistent.
     fn scope_block_read_only() -> String {
-        "## Scope (Read-Only)\n\nThis is a research role. You MUST NOT create, modify, move, or delete any files, and you MUST NOT run commands that mutate the project or its git state. Read freely and investigate, then report your findings to the Queen via the conversation API — your only deliverable is knowledge.".to_string()
+        "## Scope (Read-Only)\n\nThis is a research role. You MUST NOT create, modify, move, or delete project files, and you MUST NOT run commands that mutate the project or its git state. The only permitted filesystem write is updating the status/result fields in the exact Hive control-plane task file named by your prompt. Read freely and investigate, then report your findings to the Queen via the conversation API — your deliverable is knowledge.".to_string()
     }
 
     fn queen_quality_reconciliation_log_lines(has_evaluator: bool) -> &'static str {
@@ -3651,13 +3669,18 @@ Last updated: {timestamp}
     }
 
     fn queen_required_protocol(session_root: &Path, has_evaluator: bool) -> String {
+        let mark_worker_status_path =
+            Self::prompt_path(&session_root.join("tools").join("mark-worker-status.md"));
         if !has_evaluator {
-            return r#"## Required Protocol
+            return format!(
+                r#"## Required Protocol
 ```text
 1. You MUST follow every numbered protocol in this prompt exactly as written.
 2. You MUST use the inline bash polling commands shown in this prompt. You MUST NOT use `/loop`.
-```"#
-                .to_string();
+3. When you independently verify a managed principal, researcher, or Fusion variant is complete, you MUST immediately mark its exact agent ID `completed` using `{mark_worker_status_path}`. The UI completion checkoff and stall monitor depend on it.
+```"#,
+                mark_worker_status_path = mark_worker_status_path,
+            );
         }
 
         let milestone_ready_path =
@@ -3672,9 +3695,11 @@ Last updated: {timestamp}
 3. The Evaluator is created PROGRAMMATICALLY by the backend at session launch (`spawn_launch_evaluator_agents`). It already exists as `AgentRole::Evaluator`.
 4. You MUST NOT spawn an Evaluator yourself. DO NOT `curl POST /workers` with `role=evaluator`. DO NOT `curl POST /evaluators`.
 5. You MUST signal the existing Evaluator via `{milestone_ready_path}` and WAIT for `{qa_verdict_path}`.
+6. When you independently verify a managed principal, researcher, or Fusion variant is complete, you MUST immediately mark its exact agent ID `completed` using `{mark_worker_status_path}`. The UI completion checkoff and stall monitor depend on it.
 ```"#,
             milestone_ready_path = milestone_ready_path,
             qa_verdict_path = qa_verdict_path,
+            mark_worker_status_path = mark_worker_status_path,
         )
     }
 
@@ -4146,9 +4171,20 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
 
         let mut variables = HashMap::new();
         variables.insert("qa_worker_index".to_string(), index.to_string());
+        let qa_worker_agent_id = format!("{}-qa-worker-{}", session_id, index);
         variables.insert(
             "qa_worker_agent_id".to_string(),
-            format!("{}-qa-worker-{}", session_id, index),
+            qa_worker_agent_id.clone(),
+        );
+        variables.insert(
+            "qa_worker_completed_heartbeat".to_string(),
+            heartbeat_snippet(
+                "http://localhost:18800",
+                session_id,
+                &qa_worker_agent_id,
+                "completed",
+                "Completed QA assignment",
+            ),
         );
         variables.insert(
             "custom_instructions".to_string(),
@@ -4450,8 +4486,8 @@ Do not run the debate. Stop after writing the plan.
         let mut task_files = String::new();
         for v in variants {
             variant_info.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
-                v.index, v.name, v.branch, v.worktree_path
+                "| {} | {} | `{}` | {} | {} |\n",
+                v.index, v.name, v.agent_id, v.branch, v.worktree_path
             ));
             task_files.push_str(&format!(
                 "- Variant {} ({}): `{}`\n",
@@ -4531,8 +4567,8 @@ You are the **Queen** monitoring a Fusion session where {variant_count} variants
 
 ## Variants
 
-| # | Name | Branch | Worktree |
-|---|------|--------|----------|
+| # | Name | Agent ID | Branch | Worktree |
+|---|------|----------|--------|----------|
 {variant_info}
 
 ## Task Files to Monitor
@@ -4581,6 +4617,7 @@ Write status updates to `.hive-manager/{session_id}/coordination.log`:
 ## Learning Tools
 
 Read tool docs in `.hive-manager/{session_id}/tools/` for:
+- `mark-worker-status.md` — Mark each independently verified variant complete
 - `submit-learning.md` — Record observations
 - `list-learnings.md` — View existing learnings
 "#,
@@ -5295,14 +5332,14 @@ This tests that:
             smoke_worker_start_heartbeat = heartbeat_snippet(
                 "http://localhost:18800",
                 session_id,
-                "worker-1",
+                &format!("{session_id}-worker-1"),
                 "working",
                 "Starting smoke test",
             ),
             smoke_worker_completed_heartbeat = heartbeat_snippet(
                 "http://localhost:18800",
                 session_id,
-                "worker-1",
+                &format!("{session_id}-worker-1"),
                 "completed",
                 "Smoke test done",
             ),
@@ -5991,10 +6028,11 @@ When the objective and every configured gate are complete, send an idle heartbea
             stop_conditions: &stop_conditions,
         });
 
+        let agent_id = format!("{session_id}-worker-{index}");
         let activation_wait_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
-            &format!("worker-{index}"),
+            &agent_id,
             "idle",
             "Waiting for task activation",
         );
@@ -6010,9 +6048,16 @@ When the objective and every configured gate are complete, send an idle heartbea
         let working_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
-            &format!("worker-{index}"),
+            &agent_id,
             "working",
             "Executing assigned workstream",
+        );
+        let completed_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            &agent_id,
+            "completed",
+            "Completed assigned workstream",
         );
 
         let role_section = if is_research {
@@ -6021,20 +6066,55 @@ When the objective and every configured gate are complete, send an idle heartbea
             "## Your Role: EXECUTOR\n\nYou are a managed coding principal with implementation authority only inside the ACTIVE assignment contract."
         };
 
-        let completion_rule = if is_research {
-            "Report findings, update the task file to COMPLETED, and send the Queen a concise evidence summary. Do not commit."
+        let validation_and_handoff_rule = if is_research {
+            "Verify every material conclusion against cited evidence and confirm that the repository and git state remain unchanged. Do not commit."
         } else {
             match execution_policy.workspace_strategy {
                 WorkspaceStrategy::SharedCell => {
-                    "Run focused validation and leave the reviewed changes uncommitted for the Queen. Update the task file to COMPLETED and report evidence; the Queen owns the shared git state."
+                    "Run focused validation, review the owned diff, and leave the reviewed changes uncommitted for the Queen; the Queen owns the shared git state."
                 }
                 WorkspaceStrategy::IsolatedCell => {
-                    "Run focused validation, commit only the completed assignment on the current backend-created cell branch, then update the task file to COMPLETED and report the commit SHA plus evidence. Do not push."
+                    "Run focused validation and commit only the completed assignment on the current backend-created cell branch. Do not push or switch branches."
                 }
                 WorkspaceStrategy::None => {
-                    "Run focused validation, update the task file to COMPLETED, and report evidence. Do not mutate git without explicit operator authorization."
+                    "Run focused validation and review the owned changes. Do not mutate git without explicit operator authorization."
                 }
             }
+        };
+
+        let completion_protocol = if is_research {
+            format!(
+                r#"## Completion Protocol (MANDATORY)
+
+1. {validation_and_handoff_rule}
+2. Update the authoritative task file at {task_file} to `Status: COMPLETED` and add the evidence summary.
+3. Send this completed heartbeat exactly as shown:
+   ```bash
+   {completed_heartbeat}
+   ```
+4. Send the Queen a concise findings summary with citations, then stop. Do not replace the completed status with an idle or working heartbeat unless the Queen issues a new ACTIVE assignment.
+"#,
+                validation_and_handoff_rule = validation_and_handoff_rule,
+                task_file = task_file,
+                completed_heartbeat = completed_heartbeat,
+            )
+        } else {
+            format!(
+                r#"## Completion Protocol (MANDATORY)
+
+1. {validation_and_handoff_rule}
+2. Complete the Learnings Protocol below before changing the task status.
+3. Update the authoritative task file at {task_file} to `Status: COMPLETED` and add the result summary.
+4. Send this completed heartbeat exactly as shown:
+   ```bash
+   {completed_heartbeat}
+   ```
+5. Send the Queen the commit SHA when applicable plus focused validation evidence, then stop. Do not replace the completed status with an idle or working heartbeat unless the Queen issues a new ACTIVE assignment.
+"#,
+                validation_and_handoff_rule = validation_and_handoff_rule,
+                task_file = task_file,
+                completed_heartbeat = completed_heartbeat,
+            )
         };
 
         let learnings_section = if is_research {
@@ -6090,9 +6170,11 @@ Use only the native tools exposed by the configured harness. The Capability Card
 3. Begin only when Status is ACTIVE.
 4. Stay inside the objective and owned paths. Ask the Queen when ownership or acceptance criteria are unclear.
 5. If blocked, set Status to BLOCKED and report the exact blocker.
-6. On completion: {completion_rule}
+6. When work is complete, follow the mandatory Completion Protocol below exactly.
 
 {polling_instructions}
+
+{completion_protocol}
 
 ## Communication
 
@@ -6106,7 +6188,7 @@ Use only the native tools exposed by the configured harness. The Capability Card
 Heartbeat while active:
 {working_heartbeat}
 
-{learnings_section}{project_context}After completion, send an idle heartbeat and continue monitoring the inbox. Do not take a new task until its task file status is ACTIVE."#,
+{learnings_section}{project_context}After reporting completion, stop and continue monitoring the inbox without sending another heartbeat. Do not take a new task until its task file status is ACTIVE; once reactivated, send a working heartbeat."#,
             index = index,
             role_name = role_name,
             role_kernel = role_kernel,
@@ -6122,8 +6204,8 @@ Heartbeat while active:
             workspace_path = workspace_path,
             task_file = task_file,
             scope_block = scope_block,
-            completion_rule = completion_rule,
             polling_instructions = polling_instructions,
+            completion_protocol = completion_protocol,
             worker_conversation = worker_conversation,
             queen_conversation = queen_conversation,
             shared_conversation = shared_conversation,
@@ -6396,6 +6478,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 | List Planners | `list-planners.md` | Get list of all planners and their status |
 | Spawn Worker | `spawn-worker.md` | Reference only - Planners use this to spawn workers |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
+| Mark Worker Status | `mark-worker-status.md` | Mark each independently verified worker complete |
 | Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
 | List Learnings | `list-learnings.md` | Get all learnings for this session |
 | Delete Learning | `delete-learning.md` | Remove a learning by ID |
@@ -6585,10 +6668,11 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         session_id: &str,
         default_cli: &str,
     ) -> Result<(), String> {
-        let worker_task_file_example = ".hive-manager/tasks/worker-N-task.md".to_string();
+        let worker_task_file_example = "<absolute task path returned by the backend>".to_string();
         let qa_task_file_example =
             format!(".hive-manager/{}/tasks/qa-worker-N-task.md", session_id);
-        let worker_one_task_file_example = ".hive-manager/tasks/worker-1-task.md".to_string();
+        let worker_one_task_file_example =
+            "<absolute task path returned for worker 1>".to_string();
 
         // Spawn Worker tool
         let spawn_worker_tool = format!(
@@ -6663,8 +6747,12 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 ## Notes
 
 - Workers spawn in a new Windows Terminal tab (visible window)
-- Each worker's task file is `.hive-manager/tasks/worker-N-task.md` inside its assigned workspace, whether that workspace is the shared cell or an isolated cell
-- Workers poll their task files for ACTIVE status
+- Treat the absolute `task_file` returned by the API as authoritative; do not reconstruct it from the worker ID
+- Shared-cell Hive: the task file is under `.hive-manager/tasks/` in the shared primary workspace
+- Isolated-cell Hive: the task file is under `.hive-manager/tasks/` in that worker's isolated workspace
+- Research/no-worktree Hive: the task file is under `.hive-manager/{session_id}/tasks/` in the operator project
+- Workers poll the returned task file for ACTIVE status
+- Dynamic principals are supported by Hive/Research sessions. Fusion variants use their pre-created Fusion task files instead of this endpoint
 - Use this to spawn workers sequentially as tasks complete
 "#,
             session_id = session_id,
@@ -6793,6 +6881,62 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
             session_id,
             "list-workers.md",
             &list_workers_tool,
+        )?;
+
+        let completed_status_example = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            "<exact-agent-id>",
+            "completed",
+            "Queen verified completion: replace with concise gate evidence",
+        );
+        let mark_worker_status_tool = format!(
+            r#"# Mark Worker Status Tool
+
+Record an agent heartbeat/status after independently verifying its state. The Queen MUST use this tool after verifying a managed principal, researcher, or Fusion variant is complete because the UI completion checkoff and stall monitor read this status.
+
+## HTTP API
+
+**Endpoint:** `POST http://localhost:18800/api/sessions/{session_id}/heartbeat`
+
+**Headers:**
+```text
+Content-Type: application/json
+```
+
+## Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| agent_id | string | Yes | Exact full agent ID from the roster or worker API, such as `{session_id}-worker-2` or `{session_id}-fusion-1` |
+| status | string | Yes | `working`, `idle`, or `completed` |
+| summary | string | No | Concise evidence-backed status summary |
+
+## Mark a Verified Completion
+
+Replace `<exact-agent-id>` with the verified agent's exact full ID and replace the summary with the gates you checked, then run:
+
+```bash
+{completed_status_example}
+```
+
+For a Fusion variant or another agent type, keep the request identical and use the exact ID shown in the Queen roster.
+
+## Verification Rule
+
+- Verify the deliverable and required gates before sending `completed`; a task-file claim alone is not sufficient.
+- Use the exact full agent ID. A shortened ID such as `worker-N` will not drive that agent's UI status, and the `<exact-agent-id>` placeholder fails validation if left unchanged.
+- Send `completed` immediately after verification. A later `working` or `idle` heartbeat replaces it, so do not downgrade a completed agent unless it has received a new ACTIVE assignment.
+"#,
+            session_id = session_id,
+            completed_status_example = completed_status_example,
+        );
+
+        Self::write_tool_file(
+            project_path,
+            session_id,
+            "mark-worker-status.md",
+            &mark_worker_status_tool,
         )?;
 
         // Submit Learning tool
@@ -13847,8 +13991,8 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 mod tests {
     use super::{
         extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
-        AgentInfo, AuthStrategy, CompletionError, QaWorkerConfig, Session, SessionController,
-        SessionError, SessionState, SessionType,
+        AgentInfo, AuthStrategy, CompletionError, FusionVariantMetadata, QaWorkerConfig, Session,
+        SessionController, SessionError, SessionState, SessionType,
     };
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
@@ -13902,6 +14046,40 @@ mod tests {
         let _completed = SessionState::Completed;
         let _closed = SessionState::Closed;
         let _failed = SessionState::Failed("error".to_string());
+    }
+
+    #[test]
+    fn stall_sweep_excludes_completed_heartbeats() {
+        let controller = test_controller();
+        controller
+            .update_heartbeat("session-stall", "session-stall-worker-1", "working", None)
+            .expect("record working heartbeat");
+        controller
+            .update_heartbeat(
+                "session-stall",
+                "session-stall-worker-2",
+                "completed",
+                Some("Queen verified completion"),
+            )
+            .expect("record completed heartbeat");
+
+        let stale_at = Utc::now() - Duration::minutes(5);
+        let mut heartbeats = controller.agent_heartbeats.write();
+        for heartbeat in heartbeats
+            .get_mut("session-stall")
+            .expect("session heartbeat map")
+            .values_mut()
+        {
+            heartbeat.last_activity = stale_at;
+        }
+        drop(heartbeats);
+
+        let stalled = controller.get_stalled_agents(
+            "session-stall",
+            std::time::Duration::from_secs(30),
+        );
+        assert_eq!(stalled.len(), 1);
+        assert_eq!(stalled[0].0, "session-stall-worker-1");
     }
 
     #[test]
@@ -14164,6 +14342,41 @@ mod tests {
         assert!(prompt.contains("axe-core"));
         assert!(prompt.contains("/repo/execution"));
         assert!(!prompt.contains("UI Tester"));
+        assert!(prompt.contains("## Completion Protocol (MANDATORY)"));
+        assert!(
+            prompt.contains(".hive-manager/session-123/tasks/qa-worker-1-task.md")
+        );
+        assert!(prompt.contains(r#""agent_id":"session-123-qa-worker-1""#));
+        assert!(prompt.contains(r#""status":"completed""#));
+        assert!(!prompt.contains("{{qa_worker_completed_heartbeat}}"));
+    }
+
+    #[test]
+    fn every_qa_worker_prompt_has_a_ready_completed_heartbeat() {
+        for specialization in ["ui", "api", "a11y", "adversarial"] {
+            let prompt = SessionController::build_qa_worker_prompt(
+                "session-qa",
+                3,
+                specialization,
+                &AgentConfig::default(),
+                &AuthStrategy::default(),
+                "/repo/execution",
+            );
+
+            let completion = extract_markdown_section(
+                &prompt,
+                "## Completion Protocol (MANDATORY)",
+            );
+            assert!(
+                completion.contains(r#""agent_id":"session-qa-qa-worker-3""#),
+                "missing exact agent ID for {specialization}"
+            );
+            assert!(
+                completion.contains(r#""status":"completed""#),
+                "missing completed status for {specialization}"
+            );
+            assert!(completion.contains("curl -fsS -X POST"));
+        }
     }
 
     #[test]
@@ -14424,8 +14637,25 @@ mod tests {
         assert!(worker_content.contains("| flags | string[] | No |"));
         assert!(worker_content.contains("Omit to inherit principal flags; send `[]` to clear them"));
         assert!(!worker_content.contains(r#"{\"role_type\": \"backend\", \"cli\""#));
-        assert!(worker_content.contains("inside its assigned workspace"));
+        assert!(worker_content.contains("absolute `task_file` returned by the API"));
+        assert!(worker_content.contains("Shared-cell Hive"));
+        assert!(worker_content.contains("Isolated-cell Hive"));
+        assert!(worker_content.contains("Research/no-worktree Hive"));
         assert!(!worker_content.contains("inside that worker's worktree"));
+
+        let status_tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("mark-worker-status.md");
+        let status_content =
+            std::fs::read_to_string(status_tool_path).expect("read status tool doc");
+        assert!(status_content.contains("Queen MUST use this tool"));
+        assert!(status_content.contains(r#""agent_id":"<exact-agent-id>""#));
+        assert!(status_content.contains(r#""status":"completed""#));
+        assert!(status_content.contains("shortened ID such as `worker-N`"));
+        assert!(status_content.contains("placeholder fails validation"));
     }
 
     fn shared_meta_harness_policy() -> HiveExecutionPolicy {
@@ -14526,6 +14756,8 @@ mod tests {
         assert!(prompt.contains("Principals do not commit"));
         assert!(prompt.contains("backend-created hive/session-modern/primary branch"));
         assert!(prompt.contains("Managed principals are visible Hive agents"));
+        assert!(prompt.contains("mark-worker-status.md"));
+        assert!(prompt.contains("UI completion checkoff and stall monitor depend on it"));
         assert!(!prompt.contains("full Claude Code capabilities"));
         assert!(!prompt.contains("Claude Code Tools"));
         assert!(!prompt.contains("git checkout -b"));
@@ -14555,6 +14787,9 @@ mod tests {
             .contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary"));
         assert!(shared_prompt.contains("leave the reviewed changes uncommitted for the Queen"));
         assert!(shared_prompt.contains("Learnings Protocol (MANDATORY)"));
+        assert!(shared_prompt.contains("Completion Protocol (MANDATORY)"));
+        assert!(shared_prompt.contains(r#""agent_id":"session-modern-worker-1""#));
+        assert!(shared_prompt.contains(r#""status":"completed""#));
         assert!(shared_prompt.contains("Begin only when Status is ACTIVE"));
         assert!(shared_prompt.contains("Polling Protocol (MANDATORY)"));
         assert!(shared_prompt.contains("while true; do"));
@@ -14563,7 +14798,7 @@ mod tests {
         let isolated_policy = HiveExecutionPolicy {
             launch_kind: crate::domain::HiveLaunchKind::Hive,
             workspace_strategy: crate::domain::WorkspaceStrategy::IsolatedCell,
-            ..shared_policy
+            ..shared_policy.clone()
         };
         let isolated_prompt = SessionController::build_worker_prompt(
             1,
@@ -14575,8 +14810,28 @@ mod tests {
             &isolated_policy,
         );
         assert!(isolated_prompt.contains("Commit the completed assignment"));
-        assert!(isolated_prompt.contains("report the commit SHA plus evidence"));
+        assert!(isolated_prompt
+            .contains("commit SHA when applicable plus focused validation evidence"));
         assert!(isolated_prompt.contains("Do not create or switch branches"));
+
+        let no_workspace_policy = HiveExecutionPolicy {
+            workspace_strategy: WorkspaceStrategy::None,
+            ..shared_policy
+        };
+        let no_workspace_prompt = SessionController::build_worker_prompt(
+            1,
+            &principal,
+            "session-modern-queen",
+            "session-modern",
+            Path::new("/repo"),
+            Path::new("/repo"),
+            &no_workspace_policy,
+        );
+        assert!(no_workspace_prompt
+            .contains("/repo/.hive-manager/session-modern/tasks/worker-1-task.md"));
+        assert!(no_workspace_prompt.contains("Do not mutate git without explicit operator"));
+        assert!(no_workspace_prompt.contains("Completion Protocol (MANDATORY)"));
+        assert!(no_workspace_prompt.contains(r#""status":"completed""#));
     }
 
     #[test]
@@ -14682,6 +14937,12 @@ mod tests {
         assert!(prompt.contains(&expected_task_path));
         assert!(!prompt.contains("## Your Role: EXECUTOR"));
         assert!(!prompt.contains("Learnings Protocol (MANDATORY)"));
+        assert!(prompt.contains("Completion Protocol (MANDATORY)"));
+        assert!(prompt.contains(r#""agent_id":"session-research-readonly-worker-1""#));
+        assert!(prompt.contains(r#""status":"completed""#));
+        assert!(prompt.contains("repository and git state remain unchanged"));
+        assert!(prompt.contains("only permitted filesystem write"));
+        assert!(prompt.contains("exact Hive control-plane task file"));
 
         // Task file (read_only=true): read-only role constraints, no EXECUTOR.
         let task_path = SessionController::write_task_file_with_status(
@@ -14695,6 +14956,7 @@ mod tests {
         let task = std::fs::read_to_string(&task_path).unwrap();
         assert!(task.contains("RESEARCHER (READ-ONLY)"));
         assert!(!task.contains("EXECUTOR"));
+        assert!(task.contains("only permitted filesystem write"));
     }
 
     #[test]
@@ -14745,6 +15007,11 @@ mod tests {
             expected
         );
         assert_eq!(extract_markdown_section(&task_file, "## Scope"), expected);
+        let fusion_completion =
+            extract_markdown_section(&fusion_prompt, "## Completion Protocol (MANDATORY)");
+        assert!(fusion_completion.contains(r#""agent_id":"session-scope-equality-fusion-1""#));
+        assert!(fusion_completion.contains(r#""status":"completed""#));
+        assert!(fusion_completion.contains("curl -fsS -X POST"));
     }
 
     #[test]
@@ -14795,6 +15062,32 @@ mod tests {
             extract_markdown_section(&swarm_queen_prompt, "## Required Protocol")
                 .starts_with(&expected)
         );
+        assert!(expected.contains("mark-worker-status.md"));
+        assert!(expected.contains("UI completion checkoff and stall monitor depend on it"));
+    }
+
+    #[test]
+    fn fusion_queen_roster_exposes_exact_agent_ids() {
+        let variants = vec![FusionVariantMetadata {
+            index: 1,
+            name: "Safe Variant".to_string(),
+            slug: "safe-variant".to_string(),
+            branch: "fusion/session-123/variant-1".to_string(),
+            worktree_path: "/repo/.hive-manager/worktrees/session-123/fusion-1".to_string(),
+            task_file: "/repo/.hive-manager/session-123/tasks/fusion-1.md".to_string(),
+            agent_id: "session-123-fusion-1".to_string(),
+        }];
+        let prompt = SessionController::build_fusion_queen_prompt(
+            "claude",
+            Path::new("/repo"),
+            "session-123",
+            &variants,
+            "Test task",
+            false,
+        );
+
+        assert!(prompt.contains("| # | Name | Agent ID | Branch | Worktree |"));
+        assert!(prompt.contains("| 1 | Safe Variant | `session-123-fusion-1` |"));
     }
 
     #[test]

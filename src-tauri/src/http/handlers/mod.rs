@@ -9,6 +9,7 @@ pub mod events;
 pub mod health;
 pub mod heartbeats;
 pub mod inject;
+pub mod knowledge;
 pub mod learnings;
 pub mod planners;
 pub mod queue;
