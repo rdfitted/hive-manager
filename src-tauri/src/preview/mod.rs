@@ -700,6 +700,14 @@ struct PreviewRuntime {
 static PREVIEW_RUNTIME: OnceLock<Mutex<PreviewRuntime>> = OnceLock::new();
 #[cfg(not(test))]
 static RETILE_PENDING: AtomicBool = AtomicBool::new(false);
+/// Coalesces the PREVIEW's own move/resize storm, exactly as [`RETILE_PENDING`]
+/// coalesces the main window's.
+///
+/// Deliberately a second flag rather than sharing that one: the two storms are
+/// independent, and one flag would let a main-window drag suppress the preview's
+/// recording (and vice versa) for as long as it lasted.
+#[cfg(not(test))]
+static FLOATING_RECORD_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Serializes a whole dock/undock TRANSITION - the pre-dock reads, the geometry
 /// calls and the settlement - against another transition running concurrently.
@@ -1082,13 +1090,31 @@ fn undo_failed_dock(main: &WebviewWindow, preview: &WebviewWindow, staged: Stage
         );
     }
 
-    // Exclusive branches, exactly like the main window below. `preview_geometry`
-    // is a LIVE read taken before the tiling, so for a maximized preview it holds
-    // the MAXIMIZED rect: replaying it would leave the window unmaximized at
-    // maximized pixels, overhanging the work area by the invisible resize border
-    // and showing the maximize glyph where the operator left a restore glyph.
-    // Re-maximizing instead keeps the window's own restore-down rect intact.
+    // Exclusive branches, exactly like the main window below - but the maximized
+    // arm puts a rect back FIRST, and it is deliberately the OTHER rect.
+    // `preview_geometry` is a LIVE read taken before the tiling, so for a
+    // maximized preview it holds the MAXIMIZED rect: replaying that would leave
+    // the window unmaximized at maximized pixels, overhanging the work area by
+    // the invisible resize border and showing the maximize glyph where the
+    // operator left a restore glyph. `previous.floating` is the remembered
+    // RESTORED-DOWN geometry - the very rect `leave_docked_mode` replays - and it
+    // has to go back BEFORE the re-maximize: `tile_docked_windows` has already
+    // unmaximized this window and moved it into the docked column, so the column
+    // is now the window's OWN restore-down target. Re-maximizing without
+    // reinstating the rect leaves the operator's next restore click landing in
+    // the docked column instead of where they left the window.
     if staged.preview_was_maximized {
+        if let Some(geometry) = staged.previous.floating {
+            // Through the remembered-geometry helper, not bare `apply_geometry`:
+            // this is the same persisted field every other replay site routes
+            // through (`leave_docked_mode`, the reopen path,
+            // `restore_main_window_geometry`), and the helper declines a rect no
+            // connected monitor covers. A laptop undocked from an external
+            // display would otherwise be reinstated offscreen, and re-maximizing
+            // an offscreen window maximizes it onto a display the operator
+            // cannot see.
+            apply_remembered_geometry(preview, geometry);
+        }
         if let Err(error) = preview.maximize() {
             tracing::warn!("Failed to re-maximize the preview after a failed dock: {error}");
         }
@@ -1262,6 +1288,50 @@ fn follow_docked_preview(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Record where the operator left the FLOATING preview - run off the
+/// window-event callback, after the drag storm has settled.
+///
+/// Every check in here is re-derived at CALL time rather than captured when the
+/// event that scheduled this fired. That is the whole point of deferring: a dock
+/// or a maximize landing inside the coalescing window has to be seen by these
+/// checks, not by a snapshot taken before it happened.
+///
+/// Three of the four steps below are blocking round-trips to the event-loop
+/// thread, which is why the caller must never run this per event: a drag
+/// delivers `Moved` at frame rate, and paying four round-trips a frame is felt
+/// as a stuttering drag. For the same reason the runtime mutex is never held
+/// across them - that thread takes this very mutex in the handlers that post
+/// these events, so holding it across a getter deadlocks both windows.
+#[cfg(not(test))]
+fn record_floating_geometry(app: &AppHandle, app_state: &Arc<AppState>) {
+    let Some(window) = app.get_webview_window(PREVIEW_WINDOW_LABEL) else {
+        return;
+    };
+    // Cheapest bail first, and before any window getter: a docked preview
+    // records nothing. The write below re-checks under the lock, so a dock
+    // landing between the two reads still cannot slip a column into `floating`.
+    if runtime(app_state).lock().state.docked {
+        return;
+    }
+    // `floating` is the rect the preview is restored TO, so a maximized window
+    // must not write it. Recording the maximized rect there both destroys the
+    // pre-maximize rect the restore actually wants and turns every later replay
+    // into the unmaximized-at-maximized-pixels artefact of issue #163. Leaving
+    // the field alone keeps exactly the rect a restore-down would land on.
+    if window.is_maximized().unwrap_or(false) {
+        return;
+    }
+    let Some(geometry) = read_geometry(&window) else {
+        return;
+    };
+    // Held in memory and flushed on close/dock/undock rather than written on
+    // every frame of a drag.
+    let mut guard = runtime(app_state).lock();
+    if !guard.state.docked {
+        guard.state.floating = Some(geometry);
+    }
+}
+
 /// Wire the window listeners that keep the dock aligned and the persisted
 /// geometry current.
 ///
@@ -1324,39 +1394,53 @@ fn wire_window_events(app: &AppHandle, app_state: &Arc<AppState>, preview: &Webv
     let preview_state = Arc::clone(app_state);
     preview.on_window_event(move |event| match event {
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-            let Some(window) = preview_app.get_webview_window(PREVIEW_WINDOW_LABEL) else {
-                return;
-            };
-            // Cheapest bail first, and before any window getter: a docked
-            // preview records nothing, and the retile storm this arm sees while
-            // docked would otherwise pay for four blocking round-trips per
-            // event. The write below re-checks under the lock, so a dock landing
-            // between the two reads still cannot slip a column into `floating`.
+            // Cheapest bail first, and before anything is even scheduled: a
+            // docked preview records nothing, so the retile storm this arm sees
+            // while docked should not cost a spawned task per event either.
+            // `record_floating_geometry` re-checks, so a dock landing inside the
+            // debounce window is still caught.
             if runtime(&preview_state).lock().state.docked {
                 return;
             }
-            // `floating` is the rect the preview is restored TO, so a maximized
-            // window must not write it. Recording the maximized rect there both
-            // destroys the pre-maximize rect the restore actually wants and
-            // turns every later replay into the unmaximized-at-maximized-pixels
-            // artefact of issue #163. Leaving the field alone keeps exactly the
-            // rect a restore-down would land on.
+            // Coalesce the event storm a window drag produces, exactly as the
+            // main window's retile above does, and get off the window-event
+            // callback before touching window geometry. Recording per event cost
+            // four blocking round-trips to THIS thread per frame of a drag,
+            // which is felt as stutter; deferring also means the rect finally
+            // recorded is the one read after the operator let go, rather than
+            // the last of several hundred intermediate ones.
             //
-            // Read with the runtime mutex RELEASED, like every other window
-            // getter in this module: it posts a message to the event-loop thread
-            // and blocks on the reply, and that thread takes this same mutex.
-            if window.is_maximized().unwrap_or(false) {
+            // Nothing is captured for the deferred task to act on. It re-reads
+            // the dock bit, the maximize bit and the geometry when it runs, so a
+            // dock or a maximize landing inside the debounce window changes the
+            // outcome instead of being overwritten by a stale enqueue-time read.
+            //
+            // Neither teardown NOR the dock depends on this task to flush the
+            // final rect, so a pending pass being dropped by one of them costs
+            // nothing. `close_preview_window` takes its own live read before
+            // destroying the window, and `enter_docked_mode` takes one before
+            // tiling, which `commit_dock` then writes - both of them the rect
+            // the operator actually let go of. The one path with no read of its
+            // own is the titlebar X, which reaches only `WindowEvent::Destroyed`
+            // and by then has no window left to read: a drag released and X-ed
+            // inside RETILE_DEBOUNCE_MS keeps the previous pass's rect instead
+            // of the last few pixels. Left as-is deliberately - the flag is
+            // claimed on the FIRST event, so a sustained drag records about
+            // every RETILE_DEBOUNCE_MS and only the tail is ever at stake, and
+            // closing that tail would mean giving the X a geometry read that the
+            // window's destruction has already made impossible.
+            if FLOATING_RECORD_PENDING.swap(true, Ordering::SeqCst) {
                 return;
             }
-            let Some(geometry) = read_geometry(&window) else {
-                return;
-            };
-            // Held in memory and flushed on close/dock/undock rather than
-            // written on every frame of a drag.
-            let mut guard = runtime(&preview_state).lock();
-            if !guard.state.docked {
-                guard.state.floating = Some(geometry);
-            }
+            let record_app = preview_app.clone();
+            let record_state = Arc::clone(&preview_state);
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(RETILE_DEBOUNCE_MS)).await;
+                // Cleared BEFORE the record, so an event arriving while this
+                // runs schedules the next pass rather than being swallowed.
+                FLOATING_RECORD_PENDING.store(false, Ordering::SeqCst);
+                record_floating_geometry(&record_app, &record_state);
+            });
         }
         WindowEvent::Destroyed => {
             let docked = {
@@ -3252,6 +3336,77 @@ mod tests {
         );
     }
 
+    /// A failed dock must put the remembered rect back BEFORE it re-maximizes.
+    ///
+    /// The test above counts `preview.maximize()` SITES, so it stays green with
+    /// the rect application missing entirely - which is exactly the state this
+    /// path was in. `tile_docked_windows` unmaximizes the preview and moves it
+    /// into the docked column before the tiling errors, so by the time the undo
+    /// runs, that column IS the window's own restore-down target. Re-maximizing
+    /// on top of it hides the damage until the operator's next restore click,
+    /// which lands them in the column rather than where they left the window.
+    ///
+    /// The rect to reinstate is `previous.floating`, NOT `preview_geometry`:
+    /// the latter is the live pre-tiling read, so for a maximized preview it is
+    /// the maximized rect, and replaying THAT is issue #163 itself. The former is
+    /// the remembered restored-down geometry - the same rect `leave_docked_mode`
+    /// replays, which is what makes the two restore paths agree.
+    ///
+    /// `#[cfg(not(test))]` and needs live windows, so - same discipline as the
+    /// locks around it - pinned against the source text, comments stripped so
+    /// prose about the call cannot satisfy it.
+    #[test]
+    fn a_failed_dock_reinstates_the_remembered_rect_before_re_maximizing() {
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        let undo = without_comments(body_of(&source, "undo_failed_dock"));
+
+        let branch = undo
+            .find("if staged.preview_was_maximized")
+            .expect("the preview restore must still branch on the staged read");
+        // Only the maximized arm is under test; the `else if` below it already
+        // has its own rect application and its own lock.
+        let arm = &undo[branch..];
+
+        let remembered = arm.find("staged.previous.floating").expect(
+            "the maximized arm must reinstate the REMEMBERED restore-down rect: \
+             with no rect applied at all, the re-maximize inherits the docked \
+             column the tiler left as this window's last un-maximized size, and \
+             the operator's next restore click lands them in it",
+        );
+        // Specifically the REMEMBERED-geometry helper, not bare `apply_geometry`.
+        // `previous.floating` is persisted, so it can name a monitor that is no
+        // longer connected; the helper declines a rect no display covers, and
+        // every other replay site for this field routes through it. Bare
+        // `apply_geometry` here would reinstate an offscreen rect and then
+        // maximize onto a display the operator cannot see.
+        let applied = arm
+            .find("apply_remembered_geometry(preview, geometry)")
+            .expect(
+                "the maximized arm must APPLY the remembered rect through the \
+                 monitor-checked helper, not merely name it and not via bare \
+                 apply_geometry",
+            );
+        let maximize = arm
+            .find("preview.maximize()")
+            .expect("the maximized arm must still re-maximize the preview");
+
+        assert!(
+            remembered < maximize && applied < maximize,
+            "the rect must go back BEFORE the re-maximize, exactly as \
+             `leave_docked_mode` does it: applied afterwards it is overwritten \
+             by the maximize, which leaves the restore-down target pointing at \
+             the docked column - the asymmetry between the two restore paths \
+             that this pins shut"
+        );
+        assert!(
+            arm.contains("if let Some(geometry) = staged.previous.floating {"),
+            "the reinstatement must be gated on the remembered rect EXISTING: \
+             there is no floating rect to put back before the operator has ever \
+             moved the preview, and the assertions above match an ungated \
+             unwrap just as well"
+        );
+    }
+
     /// Every path that replays the remembered floating rect must replay the
     /// maximize bit with it - including the reopen, which the issue's acceptance
     /// criteria omit.
@@ -3346,8 +3501,71 @@ mod tests {
              above degrades into a silent no-op"
         );
 
-        // `floating` means the RESTORED-DOWN rect. The handler that maintains it
-        // is what makes that true.
+        // `floating` means the RESTORED-DOWN rect. The recorder that maintains
+        // it is what makes that true. It lives behind the Moved/Resized arm's
+        // debounce now (see `a_preview_drag_storm_pays_for_no_window_getters`),
+        // so the guard is pinned where the getters actually are.
+        let recorder = without_comments(body_of(runtime_source, "record_floating_geometry"));
+
+        let maximized = recorder.find("is_maximized()").expect(
+            "the preview's floating recorder must SKIP a maximized window: \
+             `floating` is the rect the preview is restored TO, so recording a \
+             maximized rect there destroys the pre-maximize rect the restore \
+             wants and makes every replay above a no-op-looking reinstatement of \
+             the maximized geometry",
+        );
+        let record = recorder
+            .find("state.floating = Some(geometry)")
+            .expect("the recorder must still record the floating rect");
+        assert!(
+            maximized < record,
+            "the maximized check must come BEFORE the record, or it guards \
+             nothing"
+        );
+        let guard = recorder
+            .find("guard = runtime(")
+            .expect("the recorder must take the runtime lock to record");
+        assert!(
+            maximized < guard,
+            "`is_maximized()` must be read with the runtime mutex RELEASED: it \
+             posts a message to the event-loop thread and blocks on the reply, \
+             and that thread takes this very mutex in the window handlers - \
+             taking it across the read deadlocks both windows permanently"
+        );
+        assert!(
+            recorder.contains("if window.is_maximized().unwrap_or(false) {"),
+            "the recorder's guard must SKIP the maximized window, not skip the \
+             restored-down one: `recorder.find(\"is_maximized()\")` above matches \
+             an inverted guard just as well, and an inverted guard records ONLY \
+             maximized rects into `floating` - issue #163 reinstated through the \
+             recorder instead of the restore"
+        );
+    }
+
+    /// The preview's `Moved`/`Resized` arm must not run a single window getter.
+    ///
+    /// It used to run four - `is_maximized`, then `outer_position`,
+    /// `outer_size` and `scale_factor` inside `read_geometry` - inline on the
+    /// window-event callback. Each is a blocking round-trip to the event-loop
+    /// thread, and a drag delivers this event at frame rate, so the operator
+    /// paid all four per frame and felt it as stutter. The `docked` bail helps
+    /// only while docked; the floating case, which is exactly when a drag storm
+    /// happens, paid in full.
+    ///
+    /// The fix is the coalescing idiom already in this file for the main
+    /// window's retile, so this pins the four properties that make it correct
+    /// rather than merely present: the arm is getter-free, the deferred task
+    /// waits, it clears its own flag, and the checks it runs are re-derived at
+    /// fire time instead of captured at enqueue time.
+    ///
+    /// `#[cfg(not(test))]` and driven by real window events, so - same
+    /// discipline as the locks around it - pinned against the source text.
+    #[test]
+    fn a_preview_drag_storm_pays_for_no_window_getters() {
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        let runtime_source = &source[..source
+            .find("mod tests {")
+            .expect("the test module must still terminate the runtime source")];
         let wiring = without_comments(body_of(runtime_source, "wire_window_events"));
         let preview_arm = wiring
             .find("preview.on_window_event")
@@ -3357,38 +3575,85 @@ mod tests {
             .find("WindowEvent::Destroyed")
             .expect("the preview handler must still have its Destroyed arm")];
 
-        let maximized = arm.find("is_maximized()").expect(
-            "the preview's Moved/Resized handler must SKIP a maximized window: \
-             `floating` is the rect the preview is restored TO, so recording a \
-             maximized rect there destroys the pre-maximize rect the restore \
-             wants and makes every replay above a no-op-looking reinstatement of \
-             the maximized geometry",
-        );
-        let record = arm
-            .find("state.floating = Some(geometry)")
-            .expect("the handler must still record the floating rect");
+        for getter in [
+            "is_maximized()",
+            "read_geometry(",
+            "outer_position()",
+            "outer_size()",
+            "scale_factor()",
+        ] {
+            assert!(
+                !arm.contains(getter),
+                "the Moved/Resized arm must not call `{getter}` inline: it is a \
+                 blocking round-trip to the event-loop thread this callback is \
+                 running ON, and a drag delivers this arm an event per frame"
+            );
+        }
+
+        // Pinned by SHAPE, not just presence. Inverting this guard to
+        // `if !FLOATING_RECORD_PENDING.swap(..)` is a one-character edit that
+        // flips the polarity: the first event would return without scheduling
+        // anything and latch the flag true forever, so the preview would never
+        // record its position again for the life of the process — and a
+        // presence-and-position check stays green through all of it. The
+        // maximized-check assertion above pins its literal for the same reason.
         assert!(
-            maximized < record,
-            "the maximized check must come BEFORE the record, or it guards \
-             nothing"
+            arm.contains("if FLOATING_RECORD_PENDING.swap(true, Ordering::SeqCst) {"),
+            "the coalescing guard must claim the flag and bail on the ALREADY-PENDING \
+             branch: an inverted guard latches the flag on the first event and \
+             silently stops recording forever"
         );
-        let guard = arm
-            .find("let mut guard = runtime(&preview_state).lock();")
-            .expect("the handler must take the runtime lock to record");
-        assert!(
-            maximized < guard,
-            "`is_maximized()` must be read with the runtime mutex RELEASED: it \
-             posts a message to the event-loop thread and blocks on the reply, \
-             and that thread takes this very mutex in these handlers - taking it \
-             across the read deadlocks both windows permanently"
+        let swap = arm
+            .find("FLOATING_RECORD_PENDING.swap(true, Ordering::SeqCst)")
+            .expect(
+                "the arm must coalesce the storm behind a pending flag, the same \
+                 way the main window's retile above does",
+            );
+        let sleep = arm
+            .find("tokio::time::sleep")
+            .expect("the deferred task must WAIT for the storm to settle");
+        let clear = arm
+            .find("FLOATING_RECORD_PENDING.store(false, Ordering::SeqCst)")
+            .expect(
+                "the deferred task must clear the pending flag, or the FIRST \
+                 drag latches it forever and the preview never records its \
+                 position again for the life of the process",
+            );
+        let record = arm.find("record_floating_geometry(").expect(
+            "the deferred task must still record the floating rect - a debounce \
+             that coalesces every event into nothing is not a debounce",
         );
+
         assert!(
-            arm.contains("if window.is_maximized().unwrap_or(false) {"),
-            "the Moved/Resized guard must SKIP the maximized window, not skip \
-             the restored-down one: `arm.find(\"is_maximized()\")` above matches \
-             an inverted guard just as well, and an inverted guard records ONLY \
-             maximized rects into `floating` - issue #163 reinstated through the \
-             recorder instead of the restore"
+            swap < sleep && sleep < clear && clear < record,
+            "the order is load-bearing: the flag is claimed before the wait (so \
+             the storm collapses to one task), the wait precedes the clear and \
+             the record (so the getters run ONCE, after the operator let go), \
+             and the clear precedes the record (so an event arriving mid-record \
+             schedules the next pass instead of being swallowed)"
+        );
+
+        // The whole reason the deferred work is a call and not an inline block:
+        // everything it decides on has to be re-read when it fires. A `docked`
+        // or `is_maximized` captured at enqueue time is a snapshot from before
+        // the debounce window, and a dock landing inside that window would then
+        // write its column into `floating`.
+        let recorder = without_comments(body_of(runtime_source, "record_floating_geometry"));
+        assert!(
+            recorder.contains("state.docked") && recorder.contains("is_maximized()"),
+            "the deferred recorder must re-check BOTH the dock bit and the \
+             maximize bit itself, at the time it runs"
+        );
+        let deferred_reads = arm
+            .find("record_floating_geometry(&record_app, &record_state)")
+            .expect(
+                "the deferred task must hand the recorder the handles and let it \
+                 do its own reads, not pass it a rect read on this callback",
+            );
+        assert!(
+            sleep < deferred_reads,
+            "the recorder's reads must happen AFTER the wait, or the debounce \
+             has only moved the per-event cost onto another thread"
         );
     }
 
