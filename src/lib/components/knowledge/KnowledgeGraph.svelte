@@ -12,6 +12,23 @@
     onSelect: (id: string, trigger?: Element) => void;
   }
 
+  interface DragSnapshot {
+    id: string;
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    fx: number | null;
+    fy: number | null;
+  }
+
+  const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+
+  function getReducedMotionQuery(): MediaQueryList | null {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return null;
+    return window.matchMedia(REDUCED_MOTION_QUERY);
+  }
+
   let { nodes, edges, selectedId, onSelect }: Props = $props();
   let host: HTMLDivElement;
   let svg: SVGSVGElement;
@@ -27,7 +44,9 @@
   let dragStartX = 0;
   let dragStartY = 0;
   let dragMoved = false;
-  let wasPinned = false;
+  let dragSnapshot: DragSnapshot | null = null;
+  let reducedMotionQuery = getReducedMotionQuery();
+  let reducedMotion = $state(reducedMotionQuery?.matches ?? false);
 
   let positionById = $derived.by(() => new Map(positions.map((node) => [node.id, node])));
   let pinnedCount = $derived(positions.filter((node) => node.fx !== null).length);
@@ -50,7 +69,7 @@
   }
 
   function animate() {
-    if (!simulation) {
+    if (!simulation || reducedMotion) {
       animationFrame = null;
       return;
     }
@@ -64,6 +83,11 @@
   }
 
   function scheduleAnimation() {
+    if (reducedMotion) {
+      stopAnimation();
+      if (simulation) positions = [...simulation.nodes];
+      return;
+    }
     if (animationFrame === null) animationFrame = requestAnimationFrame(animate);
   }
 
@@ -76,7 +100,7 @@
     stopAnimation();
     simulation = createForceSimulation(currentNodes, currentEdges, currentWidth, currentHeight);
     positions = [...simulation.nodes];
-    scheduleAnimation();
+    untrack(() => scheduleAnimation());
 
     return () => stopAnimation();
   });
@@ -88,7 +112,7 @@
 
     simulation.setBounds(currentWidth, currentHeight);
     positions = [...simulation.nodes];
-    scheduleAnimation();
+    untrack(() => scheduleAnimation());
   });
 
   onMount(() => {
@@ -103,7 +127,25 @@
     updateSize();
     const observer = new ResizeObserver(updateSize);
     observer.observe(host);
-    return () => observer.disconnect();
+
+    reducedMotionQuery ??= getReducedMotionQuery();
+    const updateMotionPreference = () => {
+      const nextReducedMotion = reducedMotionQuery?.matches ?? false;
+      if (nextReducedMotion === reducedMotion) return;
+      reducedMotion = nextReducedMotion;
+      if (reducedMotion) {
+        stopAnimation();
+        if (simulation) positions = [...simulation.nodes];
+      } else {
+        scheduleAnimation();
+      }
+    };
+    reducedMotionQuery?.addEventListener('change', updateMotionPreference);
+
+    return () => {
+      observer.disconnect();
+      reducedMotionQuery?.removeEventListener('change', updateMotionPreference);
+    };
   });
 
   function graphPoint(event: PointerEvent): { x: number; y: number } {
@@ -123,7 +165,15 @@
     dragStartX = event.clientX;
     dragStartY = event.clientY;
     dragMoved = false;
-    wasPinned = node.fx !== null;
+    dragSnapshot = {
+      id: node.id,
+      x: node.x,
+      y: node.y,
+      vx: node.vx,
+      vy: node.vy,
+      fx: node.fx,
+      fy: node.fy,
+    };
     simulation.setPinned(node.id, node.x, node.y);
     positions = [...simulation.nodes];
     scheduleAnimation();
@@ -140,20 +190,47 @@
     scheduleAnimation();
   }
 
+  function releasePointerCapture(pointerId: number) {
+    if (draggingElement?.hasPointerCapture(pointerId)) {
+      draggingElement.releasePointerCapture(pointerId);
+    }
+  }
+
   function finishPointer(event: PointerEvent) {
     if (!draggingId || !simulation) return;
     const selected = draggingId;
     const trigger = draggingElement;
-    if (!dragMoved && !wasPinned) simulation.unpin(selected);
+    const startedPinned = dragSnapshot !== null && dragSnapshot.fx !== null && dragSnapshot.fy !== null;
+    if (!dragMoved && !startedPinned) simulation.unpin(selected);
+    releasePointerCapture(event.pointerId);
     draggingId = null;
     draggingElement = null;
+    dragSnapshot = null;
     positions = [...simulation.nodes];
     scheduleAnimation();
     onSelect(selected, trigger ?? undefined);
-    const target = event.currentTarget;
-    if (target instanceof SVGSVGElement && target.hasPointerCapture(event.pointerId)) {
-      target.releasePointerCapture(event.pointerId);
+  }
+
+  function cancelPointer(event: PointerEvent) {
+    if (!draggingId || !simulation) return;
+    const snapshot = dragSnapshot;
+    if (snapshot?.id === draggingId) {
+      const node = simulation.nodes.find((entry) => entry.id === snapshot.id);
+      if (node) {
+        node.x = snapshot.x;
+        node.y = snapshot.y;
+        node.vx = snapshot.vx;
+        node.vy = snapshot.vy;
+        node.fx = snapshot.fx;
+        node.fy = snapshot.fy;
+      }
     }
+    releasePointerCapture(event.pointerId);
+    draggingId = null;
+    draggingElement = null;
+    dragSnapshot = null;
+    positions = [...simulation.nodes];
+    scheduleAnimation();
   }
 
   function unpinNode(id: string) {
@@ -194,7 +271,7 @@
     aria-label={`Interactive knowledge graph with ${nodes.length} pages and ${edges.length} relationships`}
     onpointermove={handlePointerMove}
     onpointerup={finishPointer}
-    onpointercancel={finishPointer}
+    onpointercancel={cancelPointer}
   >
     <defs>
       <pattern id="knowledge-grid" width="28" height="28" patternUnits="userSpaceOnUse">

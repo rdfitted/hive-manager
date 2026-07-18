@@ -59,6 +59,26 @@ describe('knowledge graph utilities', () => {
     expect(normalized.truncated).toBe(true);
   });
 
+  it('keeps the first valid node for each id and validates edges against unique nodes', () => {
+    const duplicateAlpha = {
+      ...graph.nodes[0],
+      title: 'Duplicate Alpha',
+      path: 'research/duplicate-alpha.md',
+    };
+    const normalized = normalizeKnowledgeGraph({
+      nodes: [graph.nodes[0], duplicateAlpha, graph.nodes[1]],
+      edges: [
+        graph.edges[0],
+        { source: 'alpha', target: 'missing', kind: 'related' },
+      ],
+    });
+
+    expect(normalized.nodes).toHaveLength(2);
+    expect(normalized.nodes[0]).toEqual(graph.nodes[0]);
+    expect(normalized.nodes.map((entry) => entry.id)).toEqual(['alpha', 'beta']);
+    expect(normalized.edges).toEqual([graph.edges[0]]);
+  });
+
   it('filters both endpoints together so the visible graph cannot contain dangling edges', () => {
     const filtered = filterKnowledgeGraph(graph, 'alpha', 'all');
     expect(filtered.nodes.map((entry) => entry.id)).toEqual(['alpha']);
@@ -81,4 +101,3 @@ describe('knowledge graph utilities', () => {
       .toBe('beta');
   });
 });
-

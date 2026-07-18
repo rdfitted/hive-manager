@@ -97,10 +97,16 @@ function normalizeEdge(value: unknown): KnowledgeEdge | null {
 export function normalizeKnowledgeGraph(value: unknown): KnowledgeGraph {
   if (!isRecord(value)) return { nodes: [], edges: [] };
 
-  const nodes = Array.isArray(value.nodes)
-    ? value.nodes.map(normalizeNode).filter((node): node is KnowledgeNode => node !== null)
-    : [];
-  const nodeIds = new Set(nodes.map((node) => node.id));
+  const nodes: KnowledgeNode[] = [];
+  const nodeIds = new Set<string>();
+  if (Array.isArray(value.nodes)) {
+    for (const valueNode of value.nodes) {
+      const normalizedNode = normalizeNode(valueNode);
+      if (normalizedNode === null || nodeIds.has(normalizedNode.id)) continue;
+      nodeIds.add(normalizedNode.id);
+      nodes.push(normalizedNode);
+    }
+  }
   const edges = Array.isArray(value.edges)
     ? value.edges
         .map(normalizeEdge)

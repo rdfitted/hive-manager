@@ -116,6 +116,7 @@ pub(crate) struct KnowledgePageResponse {
     pub truncated: bool,
 }
 
+/// Optional bounds and session context for a Knowledge Atlas graph request.
 #[derive(Debug, Default, Deserialize)]
 pub struct KnowledgeGraphQuery {
     #[serde(default, alias = "maxNodes")]
@@ -124,6 +125,7 @@ pub struct KnowledgeGraphQuery {
     pub session_id: Option<String>,
 }
 
+/// Stable page identifier and optional session context for a preview request.
 #[derive(Debug, Deserialize)]
 pub struct KnowledgePageQuery {
     pub id: String,
@@ -325,6 +327,7 @@ fn resolve_project_root_from_sessions<'a>(
         .ok_or_else(|| ApiError::not_found("Session not found"))
 }
 
+/// Build a bounded graph from the global wiki and the session project's allowlisted documents.
 pub(crate) fn scan_knowledge(
     wiki_root: &Path,
     project_root: Option<&Path>,
@@ -403,6 +406,7 @@ pub(crate) fn scan_knowledge(
     response
 }
 
+/// Resolve an allowlisted page ID and return its bounded Markdown preview.
 pub(crate) fn preview_knowledge_page(
     wiki_root: &Path,
     project_root: Option<&Path>,
@@ -555,6 +559,13 @@ fn enumerate_sources(wiki_root: &Path, project_root: Option<&Path>) -> SourceEnu
         }
     }
 
+    // Session-scoped project context is the most relevant part of the graph. Keep the exact
+    // project allowlist ahead of the global corpus so it cannot be displaced when the caller's
+    // node cap is smaller than (or already saturated by) the wiki.
+    enumeration
+        .sources
+        .sort_by_key(|source| source.folder != KnowledgeFolder::Project);
+
     enumeration
 }
 
@@ -659,10 +670,10 @@ fn has_markdown_extension(path: &Path) -> bool {
 }
 
 fn read_source(source: &SourceFile) -> SourceRead {
-    let Ok(metadata) = fs::symlink_metadata(&source.path) else {
+    let Ok(source_metadata) = fs::symlink_metadata(&source.path) else {
         return SourceRead::Unavailable;
     };
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
+    if !source_metadata.is_file() || source_metadata.file_type().is_symlink() {
         return SourceRead::Unavailable;
     }
     let Ok(canonical_path) = fs::canonicalize(&source.path) else {
@@ -671,16 +682,20 @@ fn read_source(source: &SourceFile) -> SourceRead {
     if !canonical_path.starts_with(&source.root) {
         return SourceRead::Unavailable;
     }
-
-    let Ok(mut file) = File::open(&canonical_path) else {
+    let Ok(target_metadata) = fs::symlink_metadata(&canonical_path) else {
         return SourceRead::Unavailable;
     };
-    let Ok(open_metadata) = file.metadata() else {
-        return SourceRead::Unavailable;
-    };
-    if !open_metadata.is_file() {
+    if !target_metadata.is_file()
+        || target_metadata.file_type().is_symlink()
+        || !validated_path_matches(&source_metadata, &target_metadata)
+    {
         return SourceRead::Unavailable;
     }
+
+    let Some((mut file, open_metadata)) = open_file_if_unchanged(&canonical_path, &target_metadata)
+    else {
+        return SourceRead::Unavailable;
+    };
     if open_metadata.len() > MAX_FILE_BYTES as u64 {
         return SourceRead::TooLarge;
     }
@@ -756,6 +771,115 @@ fn read_source(source: &SourceFile) -> SourceRead {
         body: body.to_string(),
         truncated: title_truncated || last_updated_truncated || edge_hints_truncated,
     })
+}
+
+/// Open `path` only when the resulting handle still identifies the file validated by the caller.
+/// Unix compares device/inode identity; Windows resolves the live handle's final path. Validating
+/// the handle, rather than re-checking the pathname, closes the replacement or symlink-swap window
+/// between canonicalization and `File::open`.
+fn open_file_if_unchanged(
+    path: &Path,
+    expected_metadata: &fs::Metadata,
+) -> Option<(File, fs::Metadata)> {
+    let file = File::open(path).ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    if !opened_metadata.is_file()
+        || !opened_file_matches(path, expected_metadata, &file, &opened_metadata)
+    {
+        return None;
+    }
+    Some((file, opened_metadata))
+}
+
+#[cfg(unix)]
+fn validated_path_matches(source: &fs::Metadata, target: &fs::Metadata) -> bool {
+    same_unix_file_identity(source, target)
+}
+
+#[cfg(windows)]
+fn validated_path_matches(_source: &fs::Metadata, _target: &fs::Metadata) -> bool {
+    // Windows verifies the final path of the opened handle below, which also detects a swapped
+    // parent-directory reparse point.
+    true
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validated_path_matches(_source: &fs::Metadata, _target: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn opened_file_matches(
+    _path: &Path,
+    expected: &fs::Metadata,
+    _file: &File,
+    opened: &fs::Metadata,
+) -> bool {
+    same_unix_file_identity(expected, opened)
+}
+
+#[cfg(unix)]
+fn same_unix_file_identity(expected: &fs::Metadata, opened: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    expected.dev() == opened.dev() && expected.ino() == opened.ino()
+}
+
+#[cfg(windows)]
+fn opened_file_matches(
+    path: &Path,
+    _expected: &fs::Metadata,
+    file: &File,
+    _opened: &fs::Metadata,
+) -> bool {
+    final_path_for_open_file(file).is_some_and(|opened_path| opened_path == path)
+}
+
+#[cfg(windows)]
+fn final_path_for_open_file(file: &File) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFinalPathNameByHandleW(
+            file: *mut std::ffi::c_void,
+            file_path: *mut u16,
+            file_path_len: u32,
+            flags: u32,
+        ) -> u32;
+    }
+
+    let handle = file.as_raw_handle();
+    // SAFETY: `handle` belongs to the live `File`; a null buffer with length zero only queries the
+    // required UTF-16 buffer length and does not transfer ownership.
+    let required = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, 0) };
+    if required == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; required as usize + 1];
+    // SAFETY: `buffer` is writable for the advertised length and the file handle remains live for
+    // the duration of the call.
+    let written = unsafe {
+        GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0)
+    };
+    if written == 0 || written as usize >= buffer.len() {
+        return None;
+    }
+    buffer.truncate(written as usize);
+    Some(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn opened_file_matches(
+    _path: &Path,
+    _expected: &fs::Metadata,
+    _file: &File,
+    _opened: &fs::Metadata,
+) -> bool {
+    // File identity APIs are platform-specific. Refuse to read rather than weakening the
+    // containment guarantee on an unsupported target.
+    false
 }
 
 fn node_id_for(source: &SourceFile) -> Option<String> {
@@ -1239,6 +1363,80 @@ mod tests {
                 .title,
             "Source #153"
         );
+    }
+
+    #[test]
+    fn project_nodes_are_reserved_ahead_of_a_saturated_global_corpus() {
+        let wiki = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        for index in 0..MAX_NODES {
+            write_page(
+                wiki.path(),
+                &format!("patterns/global-{index:03}.md"),
+                &format!("# Global {index}\n"),
+            );
+        }
+        write_page(
+            project.path(),
+            ".ai-docs/project-dna.md",
+            "# Project DNA\n",
+        );
+        write_page(
+            project.path(),
+            ".ai-docs/bug-patterns.md",
+            "# Bug Patterns\n",
+        );
+
+        let graph = scan_knowledge(wiki.path(), Some(project.path()), MAX_NODES);
+        let node_ids: Vec<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+
+        assert_eq!(graph.nodes.len(), MAX_NODES);
+        assert_eq!(
+            &node_ids[..PROJECT_FILES.len()],
+            &["project/project-dna", "project/bug-patterns"]
+        );
+        assert!(graph.truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_file_must_match_the_previously_validated_identity() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("page.md");
+        let original_path = root.path().join("original.md");
+        fs::write(&path, "# Expected\n").unwrap();
+        let expected_metadata = fs::symlink_metadata(&path).unwrap();
+
+        let (original_handle, _) = open_file_if_unchanged(&path, &expected_metadata).unwrap();
+        drop(original_handle);
+
+        // Keep the original file alive so its OS identity cannot be recycled, then replace its
+        // pathname exactly as a validation-to-open race would.
+        fs::rename(&path, &original_path).unwrap();
+        fs::write(&path, "# Replacement\n").unwrap();
+
+        assert!(open_file_if_unchanged(&path, &expected_metadata).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opened_handle_must_resolve_to_the_validated_windows_path() {
+        let root = TempDir::new().unwrap();
+        let expected_path = root.path().join("expected.md");
+        let other_path = root.path().join("other.md");
+        fs::write(&expected_path, "# Expected\n").unwrap();
+        fs::write(&other_path, "# Other\n").unwrap();
+        let expected_path = fs::canonicalize(expected_path).unwrap();
+        let expected_metadata = fs::symlink_metadata(&expected_path).unwrap();
+        let other_file = File::open(other_path).unwrap();
+        let other_metadata = other_file.metadata().unwrap();
+
+        assert!(!opened_file_matches(
+            &expected_path,
+            &expected_metadata,
+            &other_file,
+            &other_metadata,
+        ));
     }
 
     #[test]
