@@ -16,11 +16,37 @@ use axum::{
     http::{Request, StatusCode},
 };
 use parking_lot::RwLock;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+static KNOWLEDGE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct ScopedEnvironmentVariable {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvironmentVariable {
+    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvironmentVariable {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
 
 /// Helper to get the default max_qa_iterations for test fixtures
 fn test_default_max_qa_iterations() -> u8 {
@@ -1024,6 +1050,370 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
     assert_eq!(updated.color.as_deref(), Some("#7aa2f7"));
 
     let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
+}
+
+// --- Knowledge graph endpoint tests ---
+
+fn write_knowledge_fixture(root: &Path, relative: &str, contents: impl AsRef<[u8]>) {
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+#[tokio::test]
+async fn test_knowledge_endpoints_enforce_allowlist_edges_and_id_preview() {
+    let _environment_lock = KNOWLEDGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let wiki = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", wiki.path());
+
+    write_knowledge_fixture(
+        wiki.path(),
+        "patterns/source.md",
+        r#"---
+title: Public Source
+last_updated: 2026-07-18
+cross_refs:
+  - wiki/practices/cross.md
+  - clients/private-client.md
+---
+# Source body
+[[Wiki Target]]
+-> global: patterns/global.md
+-> related: [[Body Related]] (typed annotation)
+<- from: research/from.md
+"#,
+    );
+    write_knowledge_fixture(wiki.path(), "practices/cross.md", "# Cross\n");
+    write_knowledge_fixture(
+        wiki.path(),
+        "practices/wiki-target.md",
+        "---\ntitle: Wiki Target\n---\n# Wiki target\n",
+    );
+    write_knowledge_fixture(wiki.path(), "patterns/global.md", "# Global\n");
+    write_knowledge_fixture(
+        wiki.path(),
+        "practices/body-related.md",
+        "---\ntitle: Body Related\n---\n# Related\n",
+    );
+    write_knowledge_fixture(wiki.path(), "research/from.md", "# From\n");
+    write_knowledge_fixture(
+        wiki.path(),
+        "clients/private-client.md",
+        "---\ntitle: Private Client Dossier\n---\n# Never expose this\n",
+    );
+    write_knowledge_fixture(
+        wiki.path(),
+        "patterns/oversized.md",
+        vec![b'x'; 256 * 1024 + 1],
+    );
+    write_knowledge_fixture(
+        project.path(),
+        ".ai-docs/project-dna.md",
+        "---\ntitle: Project DNA\n---\n# Local knowledge\n",
+    );
+    write_knowledge_fixture(
+        project.path(),
+        ".ai-docs/architecture.md",
+        "# Not an allow-listed project file\n",
+    );
+
+    let (_storage_dir, app, controller, _storage) =
+        setup_isolated_test_app_with_controller().await;
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-knowledge",
+            project.path().to_str().unwrap(),
+            &["worker-1"],
+        ));
+
+    let graph_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph?session_id=session-knowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(graph_response.status(), StatusCode::OK);
+    let graph = read_json_body(graph_response).await;
+    let nodes = graph["nodes"].as_array().unwrap();
+    let node_ids: std::collections::HashSet<_> = nodes
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert!(node_ids.contains("patterns/source"));
+    assert!(node_ids.contains("project/project-dna"));
+    assert!(!node_ids.contains("project/architecture"));
+    assert!(!node_ids.contains("patterns/oversized"));
+    assert!(graph["truncated"].as_bool().unwrap());
+
+    let edges = graph["edges"].as_array().unwrap();
+    let edge_kinds: std::collections::HashSet<_> = edges
+        .iter()
+        .filter_map(|edge| edge["kind"].as_str())
+        .collect();
+    assert_eq!(
+        edge_kinds,
+        std::collections::HashSet::from([
+            "cross_ref",
+            "wikilink",
+            "global",
+            "related",
+            "from",
+        ])
+    );
+    assert!(edges.iter().all(|edge| {
+        edge["source"]
+            .as_str()
+            .is_some_and(|id| node_ids.contains(id))
+            && edge["target"]
+                .as_str()
+                .is_some_and(|id| node_ids.contains(id))
+    }));
+
+    let serialized_graph = serde_json::to_string(&graph).unwrap();
+    assert!(!serialized_graph.contains("Private Client Dossier"));
+    assert!(!serialized_graph.contains("clients/private-client"));
+    assert!(!serialized_graph.contains(wiki.path().to_string_lossy().as_ref()));
+    assert!(!serialized_graph.contains(project.path().to_string_lossy().as_ref()));
+
+    let preview_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/api/knowledge/page?id=patterns%2Fsource&session_id=session-knowledge",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_response.status(), StatusCode::OK);
+    let preview = read_json_body(preview_response).await;
+    assert_eq!(preview["id"], "patterns/source");
+    assert_eq!(preview["path"], "patterns/source.md");
+    assert!(preview["content"].as_str().unwrap().contains("# Source body"));
+    assert!(!preview["content"].as_str().unwrap().contains("title: Public Source"));
+    assert!(!serde_json::to_string(&preview)
+        .unwrap()
+        .contains(wiki.path().to_string_lossy().as_ref()));
+
+    for invalid_id in [
+        "patterns%2F..%2Fclients%2Fprivate-client",
+        "%2Fpatterns%2Fsource",
+        "clients%2Fprivate-client",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/knowledge/page?id={invalid_id}&session_id=session-knowledge"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let missing_response = app
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/api/knowledge/page?id=patterns%2Fmissing&session_id=session-knowledge",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_knowledge_project_pages_are_bound_to_the_requested_session() {
+    let _environment_lock = KNOWLEDGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let wiki = TempDir::new().unwrap();
+    let project_a = TempDir::new().unwrap();
+    let project_b = TempDir::new().unwrap();
+    let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", wiki.path());
+
+    write_knowledge_fixture(
+        project_a.path(),
+        ".ai-docs/project-dna.md",
+        "---\ntitle: Project Alpha\n---\n# Alpha-only knowledge\n",
+    );
+    write_knowledge_fixture(
+        project_b.path(),
+        ".ai-docs/project-dna.md",
+        "---\ntitle: Project Beta\n---\n# Beta-only knowledge\n",
+    );
+
+    let (_storage_dir, app, controller, _storage) =
+        setup_isolated_test_app_with_controller().await;
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-alpha",
+            project_a.path().to_str().unwrap(),
+            &["session-alpha-worker-1"],
+        ));
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-beta",
+            project_b.path().to_str().unwrap(),
+            &["session-beta-worker-1"],
+        ));
+
+    for (session_id, expected_title, expected_body, excluded_body) in [
+        (
+            "session-alpha",
+            "Project Alpha",
+            "Alpha-only knowledge",
+            "Beta-only knowledge",
+        ),
+        (
+            "session-beta",
+            "Project Beta",
+            "Beta-only knowledge",
+            "Alpha-only knowledge",
+        ),
+    ] {
+        let graph_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/knowledge/graph?session_id={session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(graph_response.status(), StatusCode::OK);
+        let graph = read_json_body(graph_response).await;
+        let project_node = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == "project/project-dna")
+            .expect("session-scoped project node");
+        assert_eq!(project_node["title"], expected_title);
+
+        let page_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/knowledge/page?id=project%2Fproject-dna&session_id={session_id}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page_response.status(), StatusCode::OK);
+        let page = read_json_body(page_response).await;
+        assert!(page["content"].as_str().unwrap().contains(expected_body));
+        assert!(!page["content"].as_str().unwrap().contains(excluded_body));
+    }
+
+    let global_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(global_response.status(), StatusCode::OK);
+    let global_graph = read_json_body(global_response).await;
+    assert!(global_graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|node| node["folder"] != "project"));
+
+    let unknown_session = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph?session_id=session-missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_session.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_knowledge_graph_enforces_hard_node_cap() {
+    let _environment_lock = KNOWLEDGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let wiki = TempDir::new().unwrap();
+    let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", wiki.path());
+
+    for index in 0..405 {
+        write_knowledge_fixture(
+            wiki.path(),
+            &format!("patterns/page-{index:03}.md"),
+            format!("# Page {index}\n"),
+        );
+    }
+
+    let app = setup_test_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let graph = read_json_body(response).await;
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 400);
+    assert!(graph["truncated"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn test_knowledge_graph_missing_root_returns_empty_graph() {
+    let _environment_lock = KNOWLEDGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let missing_parent = TempDir::new().unwrap();
+    let missing_root = missing_parent.path().join("does-not-exist");
+    let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", &missing_root);
+
+    let app = setup_test_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let graph = read_json_body(response).await;
+    assert!(graph["nodes"].as_array().unwrap().is_empty());
+    assert!(graph["edges"].as_array().unwrap().is_empty());
 }
 
 // --- Session-scoped learnings endpoint tests ---
@@ -5489,6 +5879,60 @@ async fn test_post_heartbeat_rejects_invalid_status() {
 }
 
 #[tokio::test]
+async fn test_completed_heartbeat_is_excluded_from_stall_sweep() {
+    let (app, controller) = setup_test_app_with_controller().await;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "hive-test-heartbeat-completed-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    controller
+        .read()
+        .insert_test_session(make_test_session_with_agents(
+            "session-hb-completed",
+            temp_dir.to_str().unwrap(),
+            &["worker-done", "worker-active"],
+        ));
+
+    for (agent_id, status) in [
+        ("worker-done", "completed"),
+        ("worker-active", "working"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-hb-completed/heartbeat")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "agent_id": agent_id, "status": status })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // Heartbeat timestamps have second precision in the stall sweep. Let both
+    // entries age past a zero-second threshold so status is the deciding factor.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    let stalled = controller
+        .read()
+        .get_stalled_agents("session-hb-completed", std::time::Duration::ZERO);
+    let stalled_ids: Vec<_> = stalled.into_iter().map(|(id, _)| id).collect();
+
+    assert_eq!(stalled_ids, vec!["worker-active"]);
+    assert!(!stalled_ids.iter().any(|id| id == "worker-done"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_get_active_sessions_returns_only_running() {
     let (app, controller) = setup_test_app_with_controller().await;
 
@@ -6848,6 +7292,37 @@ async fn test_heartbeat_advances_queue_counters() {
         row["no_progress_count"], 1,
         "second identical heartbeat is no-progress"
     );
+
+    let completed = serde_json::json!({
+        "agent_id": "session-queue-hb-worker-2",
+        "status": "completed",
+        "summary": "verified complete"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/session-queue-hb/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&completed).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let completed_snap = fetch_queue_snapshot(&app, "session-queue-hb").await;
+    assert_eq!(completed_snap["running"], 0);
+    assert_eq!(completed_snap["finalized"], 1);
+    let completed_row = completed_snap["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["worker_id"] == "session-queue-hb-worker-2")
+        .expect("completed queue row for worker-2");
+    assert_eq!(completed_row["status"], "finalized");
+    assert_eq!(completed_row["last_status"], "completed");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

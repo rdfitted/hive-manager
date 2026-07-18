@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
+  import { Brain, CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
   import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
@@ -84,6 +84,11 @@
 
   let collapsed = $derived($layout.leftCollapsed);
   let sidebarWidth = $derived(collapsed ? RAIL_WIDTH : $layout.leftWidth);
+  let knowledgeHref = $derived(
+    $activeSession
+      ? `/knowledge?session_id=${encodeURIComponent($activeSession.id)}`
+      : '/knowledge',
+  );
 
   onMount(async () => {
     // Get current working directory first
@@ -368,11 +373,12 @@
   <div class="sidebar-header" class:collapsed>
     <nav class="view-toggle" class:collapsed aria-label="View switcher">
       {#each [
-        { path: '/', icon: House, label: 'Sessions' },
-        { path: '/dashboard', icon: Kanban, label: 'Dashboard' }
-      ] as { path, icon: Icon, label } (path)}
+        { path: '/', href: '/', icon: House, label: 'Sessions' },
+        { path: '/dashboard', href: '/dashboard', icon: Kanban, label: 'Dashboard' },
+        { path: '/knowledge', href: knowledgeHref, icon: Brain, label: 'Knowledge' }
+      ] as { path, href, icon: Icon, label } (path)}
         <a
-          href={path}
+          {href}
           class="view-link"
           class:active={$page.url.pathname === path}
           aria-label={label}

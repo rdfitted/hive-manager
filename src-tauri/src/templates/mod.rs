@@ -721,6 +721,16 @@ You MUST use your native browser tools directly. Do NOT search the codebase for 
 - URL: {{auth_bypass_url}}
 - Token: {{auth_bypass_token}}
 
+## Completion Protocol (MANDATORY)
+
+1. Prepare the final criterion-numbered evidence described below.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+3. Send this completed heartbeat exactly as shown:
+   ```bash
+   {{qa_worker_completed_heartbeat}}
+   ```
+4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+
 ## Report Format
 
 ```text
@@ -783,6 +793,16 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
 - URL: {{auth_bypass_url}}
 - Token: {{auth_bypass_token}}
 
+## Completion Protocol (MANDATORY)
+
+1. Prepare the final criterion-numbered evidence described below.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+3. Send this completed heartbeat exactly as shown:
+   ```bash
+   {{qa_worker_completed_heartbeat}}
+   ```
+4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+
 ## Report Format
 
 ```text
@@ -844,6 +864,16 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
 
 - URL: {{auth_bypass_url}}
 - Token: {{auth_bypass_token}}
+
+## Completion Protocol (MANDATORY)
+
+1. Prepare the final criterion-numbered evidence described below.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+3. Send this completed heartbeat exactly as shown:
+   ```bash
+   {{qa_worker_completed_heartbeat}}
+   ```
+4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -912,6 +942,16 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
 
 - URL: {{auth_bypass_url}}
 - Token: {{auth_bypass_token}}
+
+## Completion Protocol (MANDATORY)
+
+1. Prepare the final criterion-numbered evidence described below.
+2. In `.hive-manager/{{session_id}}/tasks/qa-worker-{{qa_worker_index}}-task.md`, set `Status: COMPLETED` and add the evidence under a Result section.
+3. Send this completed heartbeat exactly as shown:
+   ```bash
+   {{qa_worker_completed_heartbeat}}
+   ```
+4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -1207,6 +1247,10 @@ You are the Queen agent orchestrating a Hive session with direct worker manageme
 2. **Monitor progress**: Check coordination.log for updates
 3. **Add workers**: Request additional workers if needed
 
+## Verified Completion Status (MANDATORY)
+
+When you independently verify a worker is complete, immediately use `.hive-manager/{{session_id}}/tools/mark-worker-status.md` to mark its exact full agent ID `completed`. The UI completion checkoff and stall monitor depend on it.
+
 ## Start Here
 
 Before assigning work, read project context via HTTP API:
@@ -1345,6 +1389,10 @@ Ground your research in existing institutional knowledge before delegating.
 4. **Poll & heartbeat** while researchers work — check the coordination log and worker conversations for progress.
 5. **Collect** each researcher's findings summary as they report in via the conversation API (researchers report findings to you directly — they do not write files into the project).
 
+### Verified Completion Status (MANDATORY)
+
+When you independently verify a researcher's findings are complete, immediately use `.hive-manager/{{session_id}}/tools/mark-worker-status.md` to mark its exact full agent ID `completed`. The UI completion checkoff and stall monitor depend on it.
+
 ### Inter-Agent Communication
 #### Check your inbox:
 curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
@@ -1414,6 +1462,10 @@ You are the Queen agent orchestrating a Fusion session with competing candidate 
 1. **Assign tasks**: Send messages to workers via the coordination system
 2. **Monitor progress**: Check coordination.log for updates
 3. **Add workers**: Request additional workers if needed
+
+## Verified Completion Status (MANDATORY)
+
+When you independently verify a Fusion variant is complete, immediately use `.hive-manager/{{session_id}}/tools/mark-worker-status.md` to mark its exact full agent ID `completed`. The UI completion checkoff and stall monitor depend on it.
 
 ## Start Here
 
@@ -1550,6 +1602,10 @@ You are the Queen agent orchestrating a Swarm session with hierarchical planning
 1. **Delegate to planners**: Assign high-level tasks to domain planners
 2. **Monitor progress**: Check coordination.log for updates from planners
 3. **Coordinate cross-domain**: Handle dependencies between planner domains
+
+## Verified Completion Status (MANDATORY)
+
+When you independently verify a planner or worker is complete, immediately use `.hive-manager/{{session_id}}/tools/mark-worker-status.md` to mark its exact full agent ID `completed`. The UI completion checkoff and stall monitor depend on it.
 
 ## Start Here
 
@@ -2123,6 +2179,29 @@ mod tests {
             DEFAULT_API_BASE_URL
         );
         assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
+    }
+
+    #[test]
+    fn builtin_queen_prompts_require_marking_verified_completions() {
+        for template_name in ["queen-hive", "queen-research", "queen-fusion", "queen-swarm"] {
+            let prompt = TemplateEngine::default()
+                .render_template(
+                    template_name,
+                    &PromptContext {
+                        session_id: "session-123".to_string(),
+                        project_path: ".".to_string(),
+                        task: None,
+                        variables: HashMap::new(),
+                    },
+                )
+                .expect("render Queen prompt");
+
+            assert!(prompt.contains("Completion Status (MANDATORY)"));
+            assert!(prompt.contains(
+                ".hive-manager/session-123/tools/mark-worker-status.md"
+            ));
+            assert!(prompt.contains("UI completion checkoff and stall monitor depend on it"));
+        }
     }
 
     #[test]

@@ -225,13 +225,15 @@ impl QueueRepo {
         })
     }
 
-    /// Record a heartbeat for a running row and advance the progress counters.
+    /// Record a heartbeat for a nonterminal row and advance the progress counters.
     ///
     /// State machine: if the incoming `status` equals the stored `last_status`, the worker
     /// made no progress → `no_progress_count += 1`. If it changed (or there was no prior
     /// status), it is a continuation → `continuation_count += 1`, `no_progress_count = 0`,
-    /// and `last_status` is updated. Always refreshes `heartbeat_at`. Returns `true` if a
-    /// row was updated.
+    /// and `last_status` is updated. A `completed` heartbeat atomically moves a queued or
+    /// running row to the existing terminal `finalized` state so stale-run maintenance cannot
+    /// reclaim verified work. Failed rows are never overwritten. Always refreshes
+    /// `heartbeat_at`. Returns `true` if a row was updated.
     pub fn record_heartbeat(
         &self,
         session_id: &str,
@@ -242,7 +244,10 @@ impl QueueRepo {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
-                 SET heartbeat_at = ?3,
+                 SET status = CASE
+                         WHEN ?4 = 'completed' AND status IN ('queued', 'running')
+                         THEN 'finalized' ELSE status END,
+                     heartbeat_at = ?3,
                      updated_at = ?3,
                      no_progress_count = CASE
                          WHEN last_status IS NOT NULL AND last_status = ?4
@@ -251,7 +256,8 @@ impl QueueRepo {
                          WHEN last_status IS NULL OR last_status <> ?4
                          THEN continuation_count + 1 ELSE continuation_count END,
                      last_status = ?4
-                 WHERE session_id = ?1 AND worker_id = ?2",
+                 WHERE session_id = ?1 AND worker_id = ?2
+                   AND status IN ('queued', 'running')",
                 params![session_id, worker_id, now_ms, status],
             )?;
             Ok(conn.changes() >= 1)
@@ -545,6 +551,37 @@ mod tests {
 
         // The reclaimed row is now claimable again.
         assert!(repo.try_claim("stale", 1000, 10000).unwrap());
+    }
+
+    #[test]
+    fn test_completed_heartbeat_finalizes_and_cannot_be_reclaimed() {
+        let repo = repo();
+        let mut row = sample_row("r1", "s1", "s1-worker-1");
+        row.status = QueueStatus::Running;
+        row.heartbeat_at = Some(100);
+        repo.enqueue(&row).unwrap();
+
+        assert!(repo
+            .record_heartbeat("s1", "s1-worker-1", "completed", 200)
+            .unwrap());
+
+        let completed = repo.get_row("r1").unwrap().unwrap();
+        assert_eq!(completed.status, QueueStatus::Finalized);
+        assert_eq!(completed.last_status.as_deref(), Some("completed"));
+        assert_eq!(completed.heartbeat_at, Some(200));
+        assert!(repo.reclaim_stuck(1_000, 2_000).unwrap().is_empty());
+        assert!(!repo.try_claim("r1", 1_000, 2_000).unwrap());
+
+        let mut failed = sample_row("failed", "s1", "s1-worker-2");
+        failed.status = QueueStatus::Failed;
+        repo.enqueue(&failed).unwrap();
+        assert!(!repo
+            .record_heartbeat("s1", "s1-worker-2", "completed", 300)
+            .unwrap());
+        assert_eq!(
+            repo.get_row("failed").unwrap().unwrap().status,
+            QueueStatus::Failed
+        );
     }
 
     #[test]

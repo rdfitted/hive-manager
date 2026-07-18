@@ -1,7 +1,7 @@
 use crate::http::handlers::{
     actions, agents, application_state, artifacts, cells, conversations, evaluator, events, health,
-    heartbeats, inject, learnings, planners, queue, resolver, session_files, sessions, templates,
-    workers,
+    heartbeats, inject, knowledge, learnings, planners, queue, resolver, session_files, sessions,
+    templates, workers,
 };
 use crate::http::state::AppState;
 use crate::cli::health as cli_health;
@@ -197,6 +197,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/learnings", get(learnings::list_learnings))
         .route("/api/learnings", post(learnings::submit_learning))
         .route("/api/project-dna", get(learnings::get_project_dna))
+        // Read-only institutional knowledge graph + id-based markdown preview.
+        .route("/api/knowledge/graph", get(knowledge::get_knowledge_graph))
+        .route("/api/knowledge/page", get(knowledge::get_knowledge_page))
         // Session-scoped learning routes (preferred - work with multiple projects)
         .route(
             "/api/sessions/{id}/learnings",
