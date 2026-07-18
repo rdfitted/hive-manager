@@ -638,6 +638,20 @@ static PREVIEW_RUNTIME: OnceLock<Mutex<PreviewRuntime>> = OnceLock::new();
 #[cfg(not(test))]
 static RETILE_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Serializes a whole dock/undock TRANSITION - the pre-dock reads, the geometry
+/// calls and the settlement - against another transition running concurrently.
+///
+/// Deliberately a second mutex rather than [`PREVIEW_RUNTIME`]. The runtime
+/// mutex is taken by the event-loop thread in the window-event handlers, and a
+/// transition blocks on replies from that same thread, so it cannot be held
+/// across the geometry work. This one is taken ONLY by the transition functions
+/// - never by the event loop, whose handlers hop off onto a spawned task before
+/// touching geometry - so holding it across those blocking reads is safe. It is
+/// also strictly OUTERMOST: acquired before the runtime mutex and never while
+/// holding it, so the two orders cannot invert.
+#[cfg(not(test))]
+static DOCK_TRANSITION: Mutex<()> = Mutex::new(());
+
 #[cfg(not(test))]
 fn runtime(app_state: &Arc<AppState>) -> &'static Mutex<PreviewRuntime> {
     PREVIEW_RUNTIME.get_or_init(|| {
@@ -803,6 +817,25 @@ fn apply_geometry(window: &WebviewWindow, geometry: WindowGeometry) -> Result<()
 /// monitor's work area.
 #[cfg(not(test))]
 fn enter_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), String> {
+    // Serialize the whole transition, held across the reads, the geometry calls
+    // and the settlement. Both callers are async commands on the tokio pool and
+    // nothing else serializes them; the state is only ever consistent between
+    // one attempt's staging and its own settlement.
+    //
+    // Without it two overlapping attempts both stage a snapshot debt while no
+    // layout is live yet: the loser's rollback persists the un-docked fields
+    // over the winner's commit and the physical undo un-tiles it, and a second
+    // attempt that succeeds records the already-tiled column as `main_restore`,
+    // stranding Hive Manager in the left-hand column on the next teardown.
+    //
+    // Serializing rather than rejecting is the point. A rejected second attempt
+    // returns Err to the reopen path, which reads any Err as "this display
+    // cannot host the split" and clears the operator's dock preference -
+    // reintroducing the clobber. Serializing instead degrades the loser into an
+    // ordinary redundant re-tile, which the staging and commit gates already
+    // handle.
+    let _transition = DOCK_TRANSITION.lock();
+
     let main = require_window(app, MAIN_WINDOW_LABEL)?;
     let preview = require_window(app, PREVIEW_WINDOW_LABEL)?;
 
@@ -1005,6 +1038,14 @@ fn undock_layout_after_teardown(
     app: &AppHandle,
     app_state: &Arc<AppState>,
 ) -> Result<(), String> {
+    // Same serializing lock as the dock, so a teardown cannot interleave with a
+    // dock that is mid-transition. Reachable concurrently with one: the titlebar
+    // X gets here through a task spawned off `WindowEvent::Destroyed`, which the
+    // frontend's dock-button busy flag does not cover. Never held by the event
+    // loop itself - that arm spawns before reaching this - and taken here before
+    // the runtime mutex, matching the dock's lock order.
+    let _transition = DOCK_TRANSITION.lock();
+
     if !runtime(app_state).lock().state.docked {
         return Ok(());
     }
@@ -1013,6 +1054,13 @@ fn undock_layout_after_teardown(
 
 #[cfg(not(test))]
 fn leave_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), String> {
+    // Serialized against the dock for the same reason as the teardown above: an
+    // undock that interleaves with a dock in flight consumes the restore
+    // snapshot the dock is still staging against. Taken before the runtime
+    // mutex; `restore_main_window_geometry` below takes only that one, so the
+    // order holds.
+    let _transition = DOCK_TRANSITION.lock();
+
     restore_main_window_geometry(app, app_state)?;
 
     let floating = {
@@ -2514,6 +2562,7 @@ mod tests {
         let guard = dock
             .find("runtime(app_state).lock()")
             .expect("enter_docked_mode must take the runtime lock to stage");
+        let mut first_read = usize::MAX;
         for read in [
             "read_geometry(&main)",
             "main.is_maximized()",
@@ -2529,7 +2578,32 @@ mod tests {
                  mutex in the preview's Moved/Resized/Destroyed handlers - \
                  holding it across the read deadlocks both windows permanently"
             );
+            first_read = first_read.min(at);
         }
+
+        // Mutual exclusion, and the direct consequence of the hoist above: with
+        // every read AND the tiling itself outside the runtime mutex, the state
+        // is consistent only between one attempt's staging and its own
+        // settlement. Two overlapping attempts therefore both stage a snapshot
+        // debt while no layout is live yet.
+        let transition = dock
+            .find("DOCK_TRANSITION.lock()")
+            .expect("enter_docked_mode must serialize the whole dock transition");
+        assert!(
+            transition < first_read,
+            "the transition lock must be taken BEFORE the pre-dock reads: taken \
+             any later, a second attempt reads its own `pre-dock` geometry off \
+             the columns the first one just tiled and commits them as the \
+             restore snapshot, so the next teardown puts Hive Manager back into \
+             the column it is already in - and that poisoned snapshot persists \
+             across restarts"
+        );
+        assert!(
+            transition < guard,
+            "the transition lock must be strictly OUTERMOST - taken before the \
+             runtime mutex and never while holding it - or the two lock orders \
+             invert"
+        );
 
         // The rollback must not swallow the cause the operator needs.
         assert!(
@@ -2541,6 +2615,85 @@ mod tests {
             "the physical undo is best effort: a secondary failure must be \
              logged, never propagated over the original tiling error"
         );
+    }
+
+    /// Regression lock for the concurrent-dock finding.
+    ///
+    /// `enter_docked_mode` has two callers - the `dock_preview_window` command
+    /// and `open_preview_window`'s re-dock off the surviving preference - and
+    /// both are `#[tauri::command] pub async fn`, so Tauri runs them on the
+    /// tokio pool. Nothing serialized them: the only statics in the module were
+    /// the runtime mutex and the retile flag, and the runtime mutex is
+    /// deliberately DROPPED across both the pre-dock reads and the tiling so the
+    /// blocking window getters cannot deadlock the event loop. That left the
+    /// entire transition running unlocked.
+    ///
+    /// Two overlapping attempts then both stage `snapshot_owed`, because both
+    /// stage while `layout_applied` is still false. If either tiling fails the
+    /// loser's `rollback_dock` persists `docked: false, layout_applied: false,
+    /// main_restore: None` over the winner's commit and `undo_failed_dock`
+    /// physically un-tiles the winner's layout; if both succeed, the second
+    /// attempt's reads land on the columns the first one just tiled and get
+    /// committed as `main_restore`. `snapshot_owed` cannot catch that - it is
+    /// computed for BOTH attempts before either settles - so the serial re-dock
+    /// lock above binds nothing here.
+    ///
+    /// The teardown paths take the same lock: the titlebar X reaches
+    /// `undock_layout_after_teardown` through a task spawned off `Destroyed`,
+    /// which the frontend's dock-button busy flag never covers.
+    ///
+    /// The whole path is `#[cfg(not(test))]` and needs a live `AppHandle`, so -
+    /// same discipline as the locks above - this is pinned against the source
+    /// text.
+    #[test]
+    fn every_dock_transition_path_takes_the_same_serializing_lock() {
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        // Every assertion below runs against the RUNTIME half of the file only.
+        // This test names the lock it is checking for, so matching the whole
+        // file would let it pass by finding its own assertion strings.
+        let runtime_source = &source[..source
+            .find("mod tests {")
+            .expect("the test module must still terminate the runtime source")];
+
+        assert!(
+            runtime_source.contains("static DOCK_TRANSITION: Mutex<()> = Mutex::new(());"),
+            "the dock transition lock must be its OWN static, separate from the \
+             runtime mutex: the runtime mutex is taken by the event-loop thread \
+             in the window-event handlers, and a transition blocks on replies \
+             from that thread, so reusing it for this would deadlock both \
+             windows permanently"
+        );
+
+        for name in [
+            "enter_docked_mode",
+            "leave_docked_mode",
+            "undock_layout_after_teardown",
+        ] {
+            let body = body_of(runtime_source, name);
+            let transition = body.find("DOCK_TRANSITION.lock()").unwrap_or_else(|| {
+                panic!(
+                    "{name} must serialize itself against the other dock \
+                     transitions: a dock, an undock and a teardown all rewrite \
+                     the same restore snapshot, and only one of them can own it"
+                )
+            });
+            assert!(
+                body.contains("let _transition = DOCK_TRANSITION.lock();"),
+                "{name} must bind the transition guard to a NAMED local: an \
+                 unnamed temporary guard drops at the statement semicolon, so \
+                 the lock would be released before the transition it is meant \
+                 to cover has run at all"
+            );
+            if let Some(runtime_lock) = body.find("runtime(app_state).lock()") {
+                assert!(
+                    transition < runtime_lock,
+                    "{name} must take the transition lock BEFORE the runtime \
+                     mutex - it is the outermost of the two everywhere, and one \
+                     path taking them the other way round is a lock-order \
+                     inversion"
+                );
+            }
+        }
     }
 
     // -- issue #157 §2: dock geometry ---------------------------------------

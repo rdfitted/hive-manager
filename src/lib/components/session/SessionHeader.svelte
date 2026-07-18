@@ -132,6 +132,15 @@
         const requestId = ++previewRequestId;
         const sessionId = previewSessionId;
         openingPreview = true;
+        // Also claim `previewBusy`, which is what disables the dock/pop-out
+        // cluster. `open_preview_window` can itself auto-dock, so an open and a
+        // dock are two dock transitions - and the cluster becomes clickable the
+        // moment the `preview-navigated` event fires during window construction,
+        // while this call is still ahead of its own dock. Gating open on
+        // `openingPreview` alone therefore left a window in which a stray click
+        // could start a second transition. The backend serializes them
+        // regardless (DOCK_TRANSITION); this just stops the UI offering it.
+        previewBusy = 'open';
         previewError = '';
         try {
             const status = await invoke<PreviewStatus>('open_preview_window', { url, sessionId });
@@ -147,6 +156,10 @@
             if (requestId === previewRequestId) {
                 openingPreview = false;
             }
+            // Ungated, matching `runPreviewAction`: the session-change block
+            // never resets `previewBusy`, so clearing it only for the current
+            // request would strand the controls disabled after a switch.
+            previewBusy = '';
         }
     }
 
