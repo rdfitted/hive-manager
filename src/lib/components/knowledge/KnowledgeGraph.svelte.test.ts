@@ -283,10 +283,14 @@ describe('KnowledgeGraph', () => {
     const pinOf = (name: RegExp) => {
       const mark = getByRole('button', { name }).querySelector('.pin-mark');
       expect(mark).not.toBeNull();
-      return {
-        cx: Number(mark!.getAttribute('cx')),
-        cy: Number(mark!.getAttribute('cy')),
-      };
+      // Assert presence before converting: `Number(null)` is 0, so a pin that
+      // lost its coordinates entirely would otherwise read as (0, 0) and slip
+      // past the geometry assertions below as though it were well-placed.
+      const rawCx = mark!.getAttribute('cx');
+      const rawCy = mark!.getAttribute('cy');
+      expect(rawCx).not.toBeNull();
+      expect(rawCy).not.toBeNull();
+      return { cx: Number(rawCx), cy: Number(rawCy) };
     };
 
     // A diamond's boundary is the L1 circle |x| + |y| = r, so the perpendicular
@@ -295,7 +299,16 @@ describe('KnowledgeGraph', () => {
     // 2px stroke leaves the visible gap, which must not be positive.
     const diamond = pinOf(/Acme Corp/);
     const diamondGap = (Math.abs(diamond.cx) + Math.abs(diamond.cy) - radius) / Math.SQRT2 - 3.5;
+    // Bounded on BOTH sides. `<= 0` alone is satisfied by a pin retracted to
+    // the centre, so it would not notice the anchor collapsing inward - it only
+    // rejects the original bug, which overshot to +0.39. The lower bound is one
+    // pin-plus-stroke width, so the mark must still overlap the rim rather than
+    // float somewhere in the node's interior.
     expect(diamondGap).toBeLessThanOrEqual(0);
+    expect(diamondGap).toBeGreaterThanOrEqual(-3.5);
+    // The anchor is diagonal, so the two axes must stay mirror images; a fix
+    // that moved only one of them would keep the L1 distance plausible.
+    expect(diamond.cx).toBeCloseTo(-diamond.cy, 10);
 
     // Circles are untouched by the shape-aware anchor: still the bounding-box
     // corner inset 1px, which sits inside the rim at every degree.

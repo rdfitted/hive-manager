@@ -278,9 +278,15 @@ describe('SessionHeader preview action freshness', () => {
     const { container, staleDock } = await dockFailureHarness();
 
     // The operator switches away while the dock request is still in flight.
+    // Wait on a signal that only session-b can produce: `.preview-toggle`
+    // already exists for session-a, so waiting for it can resolve before the
+    // switch has been processed at all, leaving the rejection below to race
+    // against a header still bound to session-a.
     storeMocks.setActiveSession?.(fakeSession('session-b'));
     await waitFor(() => {
-      expect(container.querySelector('.preview-toggle')).not.toBeNull();
+      expect(tauriMocks.invoke).toHaveBeenCalledWith('get_preview_status', {
+        sessionId: 'session-b',
+      });
     });
 
     staleDock.reject(new Error('dock failed for session-a'));
