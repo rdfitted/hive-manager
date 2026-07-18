@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { invoke, isTauri } from '@tauri-apps/api/core';
   import { apiUrl } from '$lib/config';
 
   export type CliLoginStatus = 'yes' | 'no' | 'unknown';
@@ -67,9 +68,16 @@
     if (cliHealthRequest) return cliHealthRequest;
 
     cliHealthRequest = (async () => {
-      const response = await fetch(apiUrl('/api/cli-health'));
-      if (!response.ok) throw new Error(`CLI health request failed (${response.status})`);
-      const health = normalizeCliHealth(await response.json());
+      let payload: unknown;
+      if (isTauri()) {
+        payload = await invoke<unknown>('get_cli_health');
+      } else {
+        const response = await fetch(apiUrl('/api/cli-health'));
+        if (!response.ok) throw new Error(`CLI health request failed (${response.status})`);
+        payload = await response.json();
+      }
+
+      const health = normalizeCliHealth(payload);
       if (Object.keys(health).length === 0) throw new Error('CLI health response was empty');
       cachedCliHealth = health;
       cachedCliHealthAt = Date.now();

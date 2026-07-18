@@ -165,6 +165,7 @@ function createSessionFilesStore() {
   const { subscribe, set, update } = writable<SessionFilesState>(initialState());
   let activeListRequest = 0;
   let activeContentRequest = 0;
+  let activePoll: { sessionId: string } | null = null;
 
   function getState(): SessionFilesState {
     let current = initialState();
@@ -176,6 +177,7 @@ function createSessionFilesStore() {
     if (getState().sessionId === sessionId) return;
     activeListRequest += 1;
     activeContentRequest += 1;
+    activePoll = null;
     set(initialState(sessionId));
   }
 
@@ -335,18 +337,26 @@ function createSessionFilesStore() {
     /** Refresh the snapshot and re-read selected content only when its metadata changed. */
     async pollFiles(): Promise<void> {
       const before = getState();
-      if (!before.sessionId || before.loading || before.refreshing) return;
-      const previousVersion = entryVersion(before.entries, before.selectedPath);
-      const loaded = await loadFiles(before.sessionId, { silent: true });
-      if (!loaded) return;
+      if (!before.sessionId || before.loading || before.refreshing || activePoll) return;
 
-      const after = getState();
-      if (
-        after.sessionId === before.sessionId &&
-        after.selectedPath &&
-        previousVersion !== entryVersion(after.entries, after.selectedPath)
-      ) {
-        await loadContent(after.sessionId, after.selectedPath, { silent: true });
+      const poll = { sessionId: before.sessionId };
+      activePoll = poll;
+      try {
+        const previousVersion = entryVersion(before.entries, before.selectedPath);
+        const loaded = await loadFiles(before.sessionId, { silent: true });
+        if (!loaded) return;
+
+        const after = getState();
+        if (
+          after.sessionId === before.sessionId &&
+          after.selectedPath === before.selectedPath &&
+          after.selectedPath !== null &&
+          previousVersion !== entryVersion(after.entries, after.selectedPath)
+        ) {
+          await loadContent(after.sessionId, after.selectedPath, { silent: true });
+        }
+      } finally {
+        if (activePoll === poll) activePoll = null;
       }
     },
 

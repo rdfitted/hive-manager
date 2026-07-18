@@ -8,20 +8,25 @@
     type SessionFileEntry,
   } from '$lib/stores/sessionFiles';
 
+  const FILE_WINDOW_SIZE = 200;
+
   let collapsedDirectories = $state(new Set<string>());
+  let windowStart = $state(0);
   let observedSessionId: string | null = null;
 
-  const sortedEntries = $derived(
-    [...$sessionFilesStore.entries].sort((left, right) =>
-      normalizePath(left.path).localeCompare(normalizePath(right.path), undefined, {
-        numeric: true,
-        sensitivity: 'base',
-      }),
-    ),
-  );
   const visibleEntries = $derived(
-    sortedEntries.filter((entry) => isVisible(entry.path, collapsedDirectories)),
+    $sessionFilesStore.entries.filter((entry) => isVisible(entry.path, collapsedDirectories)),
   );
+  const maxWindowStart = $derived(
+    visibleEntries.length === 0
+      ? 0
+      : Math.floor((visibleEntries.length - 1) / FILE_WINDOW_SIZE) * FILE_WINDOW_SIZE,
+  );
+  const effectiveWindowStart = $derived(Math.min(windowStart, maxWindowStart));
+  const windowEntries = $derived(
+    visibleEntries.slice(effectiveWindowStart, effectiveWindowStart + FILE_WINDOW_SIZE),
+  );
+  const windowEnd = $derived(effectiveWindowStart + windowEntries.length);
   const selectedEntry = $derived(
     $sessionFilesStore.selectedPath
       ? $sessionFilesStore.entries.find(
@@ -36,8 +41,13 @@
 
     observedSessionId = sessionId;
     collapsedDirectories = new Set();
+    windowStart = 0;
     sessionFilesStore.setSessionId(sessionId);
     if (sessionId) void sessionFilesStore.loadFiles(sessionId);
+  });
+
+  $effect(() => {
+    if (windowStart > maxWindowStart) windowStart = maxWindowStart;
   });
 
   onMount(() => {
@@ -80,6 +90,15 @@
     if (next.has(normalized)) next.delete(normalized);
     else next.add(normalized);
     collapsedDirectories = next;
+    windowStart = 0;
+  }
+
+  function showPreviousWindow(): void {
+    windowStart = Math.max(0, effectiveWindowStart - FILE_WINDOW_SIZE);
+  }
+
+  function showNextWindow(): void {
+    windowStart = Math.min(maxWindowStart, effectiveWindowStart + FILE_WINDOW_SIZE);
   }
 
   function handleEntryClick(entry: SessionFileEntry): void {
@@ -159,8 +178,8 @@
           <small>This list refreshes automatically.</small>
         </div>
       {:else}
-        <div class="file-list" role="tree" aria-label="Files">
-          {#each visibleEntries as entry (entry.path)}
+        <div id="session-files-tree" class="file-list" role="tree" aria-label="Files">
+          {#each windowEntries as entry (entry.path)}
             {@const selected = !entry.is_dir && $sessionFilesStore.selectedPath === entry.path}
             <button
               type="button"
@@ -198,6 +217,29 @@
             </button>
           {/each}
         </div>
+        {#if visibleEntries.length > FILE_WINDOW_SIZE}
+          <div class="file-window-controls" role="group" aria-label="File list navigation">
+            <button
+              type="button"
+              aria-controls="session-files-tree"
+              onclick={showPreviousWindow}
+              disabled={effectiveWindowStart === 0}
+            >
+              Previous files
+            </button>
+            <span class="file-window-status" aria-live="polite">
+              Showing {effectiveWindowStart + 1}–{windowEnd} of {visibleEntries.length}
+            </span>
+            <button
+              type="button"
+              aria-controls="session-files-tree"
+              onclick={showNextWindow}
+              disabled={windowEnd >= visibleEntries.length}
+            >
+              Next files
+            </button>
+          </div>
+        {/if}
       {/if}
     </section>
 
@@ -360,6 +402,44 @@
     padding: 4px 0;
   }
 
+  .file-window-controls {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-width: max-content;
+    padding: 6px 8px;
+    gap: 8px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border-structural);
+  }
+
+  .file-window-controls button {
+    padding: 4px 8px;
+    color: var(--text-secondary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .file-window-controls button:hover:not(:disabled) {
+    color: var(--accent-cyan);
+  }
+
+  .file-window-controls button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .file-window-status {
+    color: var(--text-muted);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
   .file-row {
     display: flex;
     align-items: center;
@@ -391,6 +471,7 @@
 
   .file-row:focus-visible,
   .refresh-button:focus-visible,
+  .file-window-controls button:focus-visible,
   .inline-error button:focus-visible,
   .error-state button:focus-visible {
     outline: 1px solid var(--accent-cyan);

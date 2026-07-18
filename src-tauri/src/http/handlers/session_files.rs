@@ -172,22 +172,90 @@ fn collect_session_files(
     directory: &FsPath,
     files: &mut Vec<SessionFileEntry>,
 ) -> Result<(), StorageError> {
-    let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    collect_session_files_with_metadata(root, directory, files, &read_session_file_metadata)
+}
+
+fn read_session_file_metadata(path: &FsPath) -> std::io::Result<fs::Metadata> {
+    fs::metadata(path)
+}
+
+fn collect_session_files_with_metadata<M>(
+    root: &FsPath,
+    directory: &FsPath,
+    files: &mut Vec<SessionFileEntry>,
+    read_metadata: &M,
+) -> Result<(), StorageError>
+where
+    M: Fn(&FsPath) -> std::io::Result<fs::Metadata>,
+{
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(error) => tracing::debug!(
+                error = %error,
+                "Skipping session file entry that could not be enumerated"
+            ),
+        }
+    }
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
         let lexical_path = entry.path();
-        let relative_path = lexical_path.strip_prefix(root).map_err(|_| {
-            StorageError::InvalidPath(format!(
-                "failed to make {} relative to {}",
-                lexical_path.display(),
-                root.display()
-            ))
-        })?;
-        let canonical_path = canonicalize_within(root, relative_path)?;
-        let entry_type = entry.file_type()?;
-        let metadata = fs::metadata(&canonical_path)?;
+        let relative_path = match lexical_path.strip_prefix(root) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "Skipping session file entry outside the listing root"
+                );
+                continue;
+            }
+        };
+        let canonical_path = match canonicalize_within(root, relative_path) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "Skipping session file entry that could not be safely resolved"
+                );
+                continue;
+            }
+        };
+        let entry_type = match entry.file_type() {
+            Ok(entry_type) => entry_type,
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "Skipping session file entry whose type could not be read"
+                );
+                continue;
+            }
+        };
+        let metadata = match read_metadata(&canonical_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "Skipping session file entry whose metadata could not be read"
+                );
+                continue;
+            }
+        };
         let is_dir = metadata.is_dir();
+
+        if is_dir && !entry_type.is_symlink() {
+            if let Err(error) =
+                collect_session_files_with_metadata(root, &lexical_path, files, read_metadata)
+            {
+                tracing::debug!(
+                    error = %error,
+                    "Skipping session file subtree that could not be enumerated"
+                );
+                continue;
+            }
+        }
+
         files.push(SessionFileEntry {
             path: normalize_relative_path(relative_path),
             name: entry.file_name().to_string_lossy().into_owned(),
@@ -198,10 +266,6 @@ fn collect_session_files(
                 .ok()
                 .map(|timestamp| DateTime::<Utc>::from(timestamp).to_rfc3339()),
         });
-
-        if is_dir && !entry_type.is_symlink() {
-            collect_session_files(root, &lexical_path, files)?;
-        }
     }
 
     Ok(())
@@ -224,5 +288,44 @@ fn map_io_error(error: std::io::Error, path: &str) -> ApiError {
         ApiError::not_found(format!("Session file not found: {path}"))
     } else {
         ApiError::internal(format!("Failed to access session file {path}: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listing_skips_one_metadata_failure_without_losing_valid_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        let good_path = root.path().join("good.txt");
+        let blocked_path = root.path().join("blocked.txt");
+        fs::write(&good_path, "safe\n").unwrap();
+        fs::write(&blocked_path, "blocked\n").unwrap();
+        let blocked_path = fs::canonicalize(blocked_path).unwrap();
+
+        let mut files = Vec::new();
+        collect_session_files_with_metadata(
+            root.path(),
+            root.path(),
+            &mut files,
+            &|path| {
+                if path == blocked_path {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected metadata failure",
+                    ))
+                } else {
+                    fs::metadata(path)
+                }
+            },
+        )
+        .unwrap();
+
+        let paths = files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["good.txt"]);
     }
 }

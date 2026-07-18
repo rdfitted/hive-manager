@@ -6,8 +6,10 @@
   import { apiUrl } from '$lib/config';
   import { cliOptions } from '$lib/config/clis';
   import {
+    cliHealthLabel,
+    cliHealthMessage,
+    cliHealthTone,
     fetchCliHealth,
-    type CliHealthEntry,
     type CliHealthMap,
   } from './AgentConfigEditor.svelte';
   import QaFeedbackPanel from './QaFeedbackPanel.svelte';
@@ -42,44 +44,6 @@
     } finally {
       cliHealthLoading = false;
     }
-  }
-
-  function cliHealthTone(health: CliHealthEntry | undefined): 'healthy' | 'warning' | 'error' | 'pending' {
-    if (!health) return cliHealthError ? 'warning' : 'pending';
-    if (!health.resolved) return health.staleHint ? 'warning' : 'error';
-    if (health.loggedIn === 'no') return 'error';
-    if (health.loggedIn === 'unknown') return 'warning';
-    return 'healthy';
-  }
-
-  function cliHealthLabel(health: CliHealthEntry | undefined): string {
-    if (!health) {
-      if (cliHealthLoading) return 'Checking…';
-      if (cliHealthError) return 'Unavailable';
-      return 'Not checked';
-    }
-    if (!health.resolved) return health.staleHint ? 'Not on current PATH' : 'Not installed';
-    if (health.loggedIn === 'no') return 'Login required';
-    if (health.loggedIn === 'unknown') return 'Auth unknown';
-    return 'Ready';
-  }
-
-  function cliHealthMessage(health: CliHealthEntry | undefined): string {
-    if (!health) {
-      if (cliHealthLoading) return 'Checking launch and authentication status.';
-      if (cliHealthError) return cliHealthError;
-      return 'CLI health has not been checked yet.';
-    }
-    if (!health.resolved && health.staleHint) {
-      const detail = health.detail ? `${health.detail} ` : 'Missing from the current PATH. ';
-      return `${detail}Restarting Hive Manager after updating PATH may help.`;
-    }
-    if (!health.resolved) return health.detail || 'Executable is not installed or cannot be launched.';
-    if (health.loggedIn === 'no') return health.detail || 'Installed, but authentication is required.';
-    if (health.loggedIn === 'unknown') {
-      return health.detail || 'Installed; authentication cannot be verified automatically.';
-    }
-    return health.detail || 'Installed and authenticated.';
   }
 
   onMount(() => {
@@ -257,7 +221,12 @@
       <div class="panel-content">
         <section class="section">
           <div class="cli-health-heading">
-            <button class="section-header" onclick={() => cliHealthCollapsed = !cliHealthCollapsed}>
+            <button
+              class="section-header"
+              aria-expanded={!cliHealthCollapsed}
+              aria-controls="cli-health-list"
+              onclick={() => cliHealthCollapsed = !cliHealthCollapsed}
+            >
               <span class="chevron" class:collapsed={cliHealthCollapsed}>
                 {#if cliHealthCollapsed}
                   <CaretRight size={12} weight="light" />
@@ -277,23 +246,25 @@
             </button>
           </div>
           {#if !cliHealthCollapsed}
-            <div class="cli-health-list" aria-live="polite">
+            <div id="cli-health-list" class="cli-health-list" aria-live="polite">
               {#each cliOptions as cli}
                 {@const health = cliHealth[cli.value]}
                 <div class="cli-health-item">
                   <div class="cli-health-row">
                     <span class="cli-health-name">{cli.label}</span>
                     <span
-                      class="cli-health-badge {cliHealthTone(health)}"
+                      class="cli-health-badge {cliHealthTone(health, cliHealthError)}"
                       title={health?.binPath
-                        ? `${cliHealthMessage(health)} Executable: ${health.binPath}`
-                        : cliHealthMessage(health)}
+                        ? `${cliHealthMessage(health, cliHealthLoading, cliHealthError)} Executable: ${health.binPath}`
+                        : cliHealthMessage(health, cliHealthLoading, cliHealthError)}
                     >
                       <span class="cli-health-dot" aria-hidden="true"></span>
-                      {cliHealthLabel(health)}
+                      {cliHealthLabel(health, cliHealthLoading, cliHealthError)}
                     </span>
                   </div>
-                  <span class="cli-health-detail {cliHealthTone(health)}">{cliHealthMessage(health)}</span>
+                  <span class="cli-health-detail {cliHealthTone(health, cliHealthError)}">
+                    {cliHealthMessage(health, cliHealthLoading, cliHealthError)}
+                  </span>
                   {#if health?.binPath}
                     <span class="cli-health-path" title={health.binPath}>{health.binPath}</span>
                   {/if}

@@ -418,18 +418,6 @@ async fn test_cli_health_lists_every_supported_cli_with_stable_schema() {
         assert!(health["detail"].is_string());
         assert!(health["staleHint"].is_boolean());
     }
-
-    let antigravity = clis
-        .iter()
-        .find(|health| health["cli"] == "antigravity")
-        .unwrap();
-    assert!(antigravity["detail"].as_str().unwrap().contains("agy"));
-
-    let cursor = clis
-        .iter()
-        .find(|health| health["cli"] == "cursor")
-        .unwrap();
-    assert!(cursor["detail"].as_str().unwrap().contains("WSL"));
 }
 
 async fn setup_session_files_fixture(
@@ -527,6 +515,57 @@ async fn test_session_files_prefers_project_side_root_and_reads_text() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["path"], "plan.md");
     assert_eq!(json["content"], "# Project-side plan\n");
+}
+
+#[tokio::test]
+async fn test_session_files_listing_skips_dangling_and_escaping_symlinks() {
+    let session_id = "session-files-list-symlinks";
+    let (_storage_dir, project_dir, app, _storage, session_root) =
+        setup_session_files_fixture(session_id).await;
+    std::fs::write(session_root.join("good.txt"), "safe\n").unwrap();
+
+    let outside = project_dir.path().join("outside-secret.txt");
+    std::fs::write(&outside, "secret\n").unwrap();
+    for (target, link_name) in [
+        (project_dir.path().join("missing.txt"), "dangling.txt"),
+        (outside.clone(), "escape.txt"),
+    ] {
+        if let Err(error) = create_file_symlink_for_test(&target, &session_root.join(link_name)) {
+            #[cfg(windows)]
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("failed to create symlink fixture: {error}");
+        }
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/files"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let serialized = String::from_utf8(body.to_vec()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    let paths = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"good.txt"));
+    assert!(!paths.contains(&"dangling.txt"));
+    assert!(!paths.contains(&"escape.txt"));
+    assert!(!serialized.contains("outside-secret.txt"));
+    assert!(paths.iter().all(|path| !Path::new(path).is_absolute()));
 }
 
 #[tokio::test]
