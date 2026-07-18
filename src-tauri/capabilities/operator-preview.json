@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "operator-preview",
+  "description": "Untrusted remote preview content. This capability intentionally grants no Tauri permissions.",
+  "local": false,
+  "windows": ["operator-preview"],
+  "permissions": []
+}

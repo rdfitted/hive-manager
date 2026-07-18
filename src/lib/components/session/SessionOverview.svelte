@@ -5,41 +5,22 @@
     import { agents } from '../../stores/agents';
     import { events } from '../../stores/events';
     import { conversationStore } from '../../stores/conversations';
-    import { activeSession, activeAgents, type AgentInfo } from '../../stores/sessions';
+    import { activeSession, activeAgents } from '../../stores/sessions';
     import SessionHeader from './SessionHeader.svelte';
-    import Terminal from '../Terminal.svelte';
+    import TerminalGrid from '../TerminalGrid.svelte';
     import TimelineView from '../timeline/TimelineView.svelte';
     import ReplayView from '../replay/ReplayView.svelte';
     import ReplayControls from '../replay/ReplayControls.svelte';
     import ArtifactBrowser from '../artifacts/ArtifactBrowser.svelte';
-    import { Hourglass, Check, Circle } from 'phosphor-svelte';
 
     type SessionView = 'terminal' | 'observability' | 'artifacts';
     let activeView: SessionView = $state('terminal');
     const sessionId = $derived($activeSession?.id);
     const terminalAgentId = $derived($ui.selectedAgentId || $ui.focusedAgentId);
 
-    function getAgentRoleName(agent: AgentInfo): string {
-        if (agent.config?.label) {
-            return agent.config.label;
-        }
-
-        if (agent.role === 'Queen' || agent.role === 'Evaluator') {
-            return agent.role;
-        }
-
-        if (typeof agent.role === 'object') {
-            if ('Planner' in agent.role) return `Planner ${agent.role.Planner.index}`;
-            if ('Worker' in agent.role) return `Worker ${agent.role.Worker.index}`;
-            if ('QaWorker' in agent.role) return `QA Worker ${agent.role.QaWorker.index}`;
-            if ('Fusion' in agent.role) return agent.role.Fusion.variant;
-        }
-
-        return 'Agent';
-    }
-
-    function isWaitingForInput(agent: AgentInfo): boolean {
-        return typeof agent.status === 'object' && 'WaitingForInput' in agent.status;
+    function selectTerminalAgent(id: string) {
+        ui.setFocusedAgent(id);
+        ui.setSelectedAgent(id);
     }
 
     const sessionNotFound = $derived($cells.sessionNotFound);
@@ -139,44 +120,11 @@
                 </div>
                 <div class="terminal-wrapper">
                     <div class="terminal-panel" class:hidden={activeView !== 'terminal'}>
-                        {#each $activeAgents as agent (agent.id)}
-                            {@const isVisible = agent.id === terminalAgentId}
-                            <div class="agent-terminal-view" class:hidden={!isVisible}>
-                                <div
-                                    class="terminal-header"
-                                    style:border-top={$activeSession?.color ? `3px solid ${$activeSession.color}` : 'none'}
-                                >
-                                    <span class="terminal-title">{getAgentRoleName(agent)}</span>
-                                    <div class="terminal-meta">
-                                        <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
-                                        <span class="terminal-status" 
-                                            class:running={agent.status === 'Running'} 
-                                            class:waiting={isWaitingForInput(agent)} 
-                                            class:completed={agent.status === 'Completed'}
-                                        >
-                                            {#if agent.status === 'Running'}
-                                                █
-                                            {:else if isWaitingForInput(agent)}
-                                                <Hourglass size={10} weight="light" />
-                                            {:else if agent.status === 'Completed'}
-                                                <Check size={10} weight="light" />
-                                            {:else}
-                                                <Circle size={10} weight="light" />
-                                            {/if}
-                                        </span>
-
-                                    </div>
-                                </div>
-                                <div class="terminal-container">
-                                    <Terminal agentId={agent.id} isFocused={isVisible} />
-                                </div>
-                            </div>
-                        {/each}
-                        {#if $activeAgents.length === 0}
-                            <div class="no-agent-selected">
-                                No agents in this session
-                            </div>
-                        {/if}
+                        <TerminalGrid
+                            agents={$activeAgents}
+                            focusedAgentId={terminalAgentId}
+                            onSelect={selectTerminalAgent}
+                        />
                     </div>
                     {#if activeView === 'observability'}
                         <div class="observability-container">
@@ -293,71 +241,6 @@
 
     .terminal-panel {
         height: 100%;
-    }
-
-    .agent-terminal-view {
-        display: flex;
-        flex-direction: column;
-        height: 100%;
-    }
-
-    .agent-terminal-view.hidden {
-        display: none;
-    }
-
-    .terminal-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 6px 12px;
-        background: var(--color-bg);
-        border-bottom: 1px solid var(--color-border);
-    }
-
-    .terminal-title {
-        font-size: 11px;
-        font-weight: 600;
-        color: var(--color-text);
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-
-    .terminal-meta {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-
-    .cli-badge {
-        font-size: 9px;
-        padding: 1px 5px;
-        background: var(--color-border);
-        border-radius: 3px;
-        color: var(--color-text-muted);
-        text-transform: lowercase;
-    }
-
-    .terminal-status {
-        font-size: 10px;
-    }
-
-    .terminal-status.running { color: var(--color-running); }
-    .terminal-status.waiting { color: var(--color-warning); }
-    .terminal-status.completed { color: var(--color-success); }
-
-    .terminal-container {
-        flex: 1;
-        min-height: 0;
-        background: var(--bg-void);
-    }
-
-    .no-agent-selected {
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: var(--color-text-muted);
-        font-size: 13px;
     }
 
     .terminal-panel.hidden {

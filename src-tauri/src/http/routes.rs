@@ -1,23 +1,57 @@
 use crate::http::handlers::{
     actions, agents, application_state, artifacts, cells, conversations, evaluator, events, health,
-    heartbeats, inject, learnings, planners, queue, resolver, sessions, templates, workers,
+    heartbeats, inject, learnings, planners, queue, resolver, session_files, sessions, templates,
+    workers,
 };
 use crate::http::state::AppState;
+use crate::cli::health as cli_health;
 use axum::{
+    body::Body,
+    http::{header::ORIGIN, HeaderValue, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+
+const ALLOWED_BROWSER_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost:1420",
+];
+
+fn is_allowed_browser_origin(origin: &HeaderValue) -> bool {
+    ALLOWED_BROWSER_ORIGINS
+        .iter()
+        .any(|allowed| origin.as_bytes() == allowed.as_bytes())
+}
+
+async fn reject_disallowed_browser_origin(request: Request<Body>, next: Next) -> Response {
+    if request
+        .headers()
+        .get(ORIGIN)
+        .is_some_and(|origin| !is_allowed_browser_origin(origin))
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    next.run(request).await
+}
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            is_allowed_browser_origin(origin)
+        }))
         .allow_methods(Any)
         .allow_headers(Any);
 
     Router::new()
         .route("/health", get(health::health_check))
+        .route("/api/cli-health", get(cli_health::get_cli_health_http))
         // Unified action registry surface (the future agent/MCP entrypoint).
         // GET lists every action + schema; POST dispatches any action (caller=Http).
         .route("/api/actions", get(actions::list_actions))
@@ -81,6 +115,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))
         .route("/api/sessions/{id}/workers", post(workers::add_worker))
+        // Read-only session artifact browser
+        .route(
+            "/api/sessions/{id}/files",
+            get(session_files::list_session_files),
+        )
+        .route(
+            "/api/sessions/{id}/files/content",
+            get(session_files::read_session_file),
+        )
         // Durable run-queue snapshot (#126)
         .route("/api/sessions/{id}/queue", get(queue::get_queue))
         // Evaluator routes
@@ -214,5 +257,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(inject::evaluator_inject),
         )
         .layer(cors)
+        .layer(middleware::from_fn(reject_disallowed_browser_origin))
         .with_state(state)
 }

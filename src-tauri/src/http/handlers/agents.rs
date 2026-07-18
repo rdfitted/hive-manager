@@ -151,6 +151,9 @@ fn map_agent_role(role: &PtyAgentRole) -> AgentRole {
         }
         PtyAgentRole::Evaluator | PtyAgentRole::QaWorker { .. } => AgentRole::Tester,
         PtyAgentRole::Prince => AgentRole::Reviewer,
+        // Scratch shells never enter `Session::agents`; retain a total mapper in case
+        // malformed persisted data reaches this boundary.
+        PtyAgentRole::ScratchShell => AgentRole::Worker,
     }
 }
 

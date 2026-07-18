@@ -1,16 +1,18 @@
 <script lang="ts">
-  import { CaretLeft, CaretRight, ChartBar, ChatCenteredText, ClockCounterClockwise, ListBullets, NotePencil } from 'phosphor-svelte';
+  import { CaretLeft, CaretRight, ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, ListBullets, NotePencil } from 'phosphor-svelte';
   import { layout, RAIL_WIDTH, type RightPanelTab } from '$lib/stores/layout';
   import StatusPanel from './StatusPanel.svelte';
   import PlanView from './PlanView.svelte';
   import CoordinationPanel from './CoordinationPanel.svelte';
   import ConversationViewer from './ConversationViewer.svelte';
   import TimelineView from './timeline/TimelineView.svelte';
+  import SessionFilesView from './SessionFilesView.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
 
   const TABS: Array<{ id: RightPanelTab; label: string; icon: typeof ChartBar }> = [
     { id: 'status', label: 'Status', icon: ChartBar },
     { id: 'plan', label: 'Plan', icon: NotePencil },
+    { id: 'files', label: 'Files', icon: FileText },
     { id: 'logs', label: 'Logs', icon: ListBullets },
     { id: 'chat', label: 'Chat', icon: ChatCenteredText },
     { id: 'timeline', label: 'Timeline', icon: ClockCounterClockwise },
@@ -95,6 +97,8 @@
         <CoordinationPanel />
       {:else if activeTab === 'timeline'}
         <TimelineView />
+      {:else if activeTab === 'files'}
+        <SessionFilesView />
       {:else}
         <ConversationViewer />
       {/if}

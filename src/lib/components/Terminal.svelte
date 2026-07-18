@@ -35,10 +35,22 @@
   interface Props {
     agentId: string;
     isFocused?: boolean;
+    isVisible?: boolean;
+    isAgent?: boolean;
+    layoutRevision?: string | null;
+    onReady?: () => void;
     onStatusChange?: (status: string) => void;
   }
 
-  let { agentId, isFocused = false, onStatusChange }: Props = $props();
+  let {
+    agentId,
+    isFocused = false,
+    isVisible = true,
+    isAgent = true,
+    layoutRevision = null,
+    onReady,
+    onStatusChange,
+  }: Props = $props();
 
   let terminalContainer: HTMLDivElement;
   let term: XTerm | null = null;
@@ -52,6 +64,8 @@
   let lastDims = { cols: 0, rows: 0 };
   let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
   let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
+  let layoutRefitFrame: number | null = null;
+  let destroyed = false;
   let wasHidden = false; // Track if terminal was ever hidden to conditionally re-fit
 
   // Context menu state
@@ -74,8 +88,8 @@
   const FONT_SIZE_DEFAULT = 14;
 
   // Track agent status from store
-  let agent = $derived($activeAgents.find(a => a.id === agentId));
-  let isWaiting = $derived(agent?.status && typeof agent.status === 'object' && 'WaitingForInput' in agent.status);
+  let agent = $derived(isAgent ? $activeAgents.find(a => a.id === agentId) : undefined);
+  let isWaiting = $derived(isAgent && agent?.status && typeof agent.status === 'object' && 'WaitingForInput' in agent.status);
 
   $effect(() => {
     const currentAgentId = agentId;
@@ -87,36 +101,33 @@
   });
 
   $effect(() => {
-    if (isFocused && term) {
-      term.focus();
-      // Re-fit terminal after becoming visible to restore correct dimensions.
-      // Only needed if terminal was previously hidden (visibility: hidden corrupted dimensions).
-      // Use requestAnimationFrame to ensure DOM has updated before fitting.
-      if (wasHidden && fitAddon) {
-        requestAnimationFrame(() => {
-          if (term && fitAddon) {
-            try {
-              fitAddon.fit();
-              const dims = fitAddon.proposeDimensions();
-              if (dims && dims.cols > 0 && dims.rows > 0) {
-                if (dims.cols !== lastDims.cols || dims.rows !== lastDims.rows) {
-                  lastDims = { cols: dims.cols, rows: dims.rows };
-                  invoke('resize_pty', { id: agentId, cols: dims.cols, rows: dims.rows }).catch(console.error);
-                }
-              }
-            } catch (e) {
-              console.error('Failed to fit terminal on focus restore:', e);
-            }
-            term.scrollToBottom();
-            wasHidden = false;
-          }
-        });
-      }
-    } else if (!isFocused) {
-      // Mark terminal as potentially hidden when it loses focus
-      // (it may have visibility: hidden applied by parent)
+    // Read both values so a maximize/restore transition re-runs this effect even when
+    // the promoted terminal remains focused throughout the layout change.
+    const visible = isVisible;
+    void layoutRevision;
+
+    if (!visible) {
       wasHidden = true;
+      return;
     }
+
+    if (isFocused) {
+      term?.focus();
+    }
+
+    if (!term || !fitAddon) return;
+
+    // Wait until the parent has applied its maximize/restore classes before measuring.
+    // handleResize keeps the existing 0x0 guard, so a still-hidden pane is never fitted.
+    if (layoutRefitFrame !== null) cancelAnimationFrame(layoutRefitFrame);
+    layoutRefitFrame = requestAnimationFrame(() => {
+      layoutRefitFrame = requestAnimationFrame(() => {
+        layoutRefitFrame = null;
+        handleResize();
+        if (wasHidden) term?.scrollToBottom();
+        wasHidden = false;
+      });
+    });
   });
 
   // Tokyo Night theme colors
@@ -267,6 +278,7 @@
   function handleResize(forceFit = false) {
     if (fitAddon && term) {
       if (!forceFit) {
+        if (!isVisible) return;
         const rect = terminalContainer.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) {
           // Terminal is hidden, skip fit to prevent corruption
@@ -472,7 +484,7 @@
     // Add global paste listener for tools like Wispr Flow
     document.addEventListener('paste', handleGlobalPaste);
 
-    unlistenDragDrop = await getCurrentWindow().onDragDropEvent(async (event) => {
+    const dragDropUnlisten = await getCurrentWindow().onDragDropEvent(async (event) => {
       switch (event.payload.type) {
         case 'enter':
         case 'over':
@@ -491,6 +503,11 @@
           break;
       }
     });
+    if (destroyed) {
+      dragDropUnlisten();
+      return;
+    }
+    unlistenDragDrop = dragDropUnlisten;
 
     // Create terminal instance
     term = new XTerm({
@@ -543,8 +560,7 @@
     // Fit to container
     fitAddon.fit();
 
-    // Focus terminal immediately
-    term.focus();
+    if (isFocused) term.focus();
 
     // Custom key handler for special keys
     term.attachCustomKeyEventHandler((event) => {
@@ -646,19 +662,33 @@
     // Listen for PTY output. Uses writeSafely() so a WebGL renderer failure
     // doesn't blank the pane. Uses a shared streaming decoder so multi-byte
     // UTF-8 sequences split across chunks decode correctly.
-    unlistenOutput = await listen<{ id: string; data: number[] }>('pty-output', (event) => {
+    const outputUnlisten = await listen<{ id: string; data: number[] }>('pty-output', (event) => {
       if (event.payload.id === agentId && term) {
         const text = ptyDecoder.decode(new Uint8Array(event.payload.data), { stream: true });
         writeSafely(text);
       }
     });
+    if (destroyed) {
+      outputUnlisten();
+      return;
+    }
+    unlistenOutput = outputUnlisten;
 
     // Listen for status changes
-    unlistenStatus = await listen<{ id: string; status: string }>('pty-status', (event) => {
+    const statusUnlisten = await listen<{ id: string; status: string }>('pty-status', (event) => {
       if (event.payload.id === agentId && onStatusChange) {
         onStatusChange(event.payload.status);
       }
     });
+    if (destroyed) {
+      statusUnlisten();
+      return;
+    }
+    unlistenStatus = statusUnlisten;
+
+    // Scratch shells are created only after this signal so their initial prompt cannot
+    // race the output/status listeners above.
+    onReady?.();
 
     resizeObserver = new ResizeObserver(() => {
       if (resizeTimeout) clearTimeout(resizeTimeout);
@@ -674,9 +704,11 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     terminalSelectionReaders.delete(agentId);
     if (resizeTimeout) clearTimeout(resizeTimeout);
     if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
+    if (layoutRefitFrame !== null) cancelAnimationFrame(layoutRefitFrame);
     document.removeEventListener('click', handleGlobalClick);
     document.removeEventListener('paste', handleGlobalPaste);
     if (unlistenOutput) unlistenOutput();

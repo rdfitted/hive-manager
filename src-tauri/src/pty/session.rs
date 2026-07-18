@@ -19,6 +19,8 @@ pub enum AgentRole {
     /// team's findings and spawns its own fix team (regular `Worker`s parented to
     /// the Prince) to resolve them before the Queen pushes the PR.
     Prince,
+    /// Operator-owned shell that is scoped to a session but is not a managed agent.
+    ScratchShell,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -3,7 +3,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -101,6 +101,36 @@ pub enum StorageError {
     InvalidPath(String),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+}
+
+/// Resolve an existing relative path beneath `root`, rejecting lexical traversal and
+/// symlinks that canonicalize outside the root. This is the shared read-path guard for
+/// session artifact browsing.
+pub fn canonicalize_within(root: &Path, relative_path: &Path) -> Result<PathBuf, StorageError> {
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(StorageError::InvalidPath(format!(
+            "path must stay relative to the session directory: {}",
+            relative_path.display()
+        )));
+    }
+
+    let canonical_root = fs::canonicalize(root)?;
+    let canonical_path = fs::canonicalize(canonical_root.join(relative_path))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(StorageError::InvalidPath(format!(
+            "path escapes the session directory: {}",
+            relative_path.display()
+        )));
+    }
+
+    Ok(canonical_path)
 }
 
 /// Summary of a session for listing

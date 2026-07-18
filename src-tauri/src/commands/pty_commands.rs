@@ -39,6 +39,9 @@ pub async fn create_pty(
     cwd: Option<String>,
     cols: u16,
     rows: u16,
+    role: Option<String>,
+    shell: Option<String>,
+    session_id: Option<String>,
 ) -> Result<String, String> {
     dispatch_pty(
         &registry,
@@ -51,6 +54,9 @@ pub async fn create_pty(
             "cwd": cwd,
             "cols": cols,
             "rows": rows,
+            "role": role,
+            "shell": shell,
+            "session_id": session_id,
         }),
     )
     .await

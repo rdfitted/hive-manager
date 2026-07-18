@@ -8,7 +8,10 @@
     type AgentConfig,
   } from '$lib/stores/sessions';
   import { createSessionPrincipalConfig } from './hiveLaunch';
-  import AgentConfigEditor from './AgentConfigEditor.svelte';
+  import AgentConfigEditor, {
+    fetchCliHealth,
+    type CliHealthMap,
+  } from './AgentConfigEditor.svelte';
   import Composer from './composer/Composer.svelte';
 
   export let open = false;
@@ -46,10 +49,31 @@
   let selectedParent: string | null = null;
   let loading = false;
   let error: string | null = null;
+  let cliHealth: CliHealthMap = {};
+  let cliHealthLoading = false;
+  let cliHealthError: string | null = null;
+  let healthLoadedForOpen = false;
+
+  async function loadCliHealth() {
+    cliHealthLoading = true;
+    cliHealthError = null;
+    try {
+      cliHealth = await fetchCliHealth();
+    } catch (err) {
+      cliHealthError = err instanceof Error ? err.message : String(err);
+    } finally {
+      cliHealthLoading = false;
+    }
+  }
 
   // Re-open with the active session's durable principal defaults. Once open,
   // the editor owns the values so an operator override is never reset.
   $: if (!open) initializedSessionId = null;
+  $: if (!open) healthLoadedForOpen = false;
+  $: if (open && !healthLoadedForOpen) {
+    healthLoadedForOpen = true;
+    void loadCliHealth();
+  }
   $: if (open && $activeSession?.id && initializedSessionId !== $activeSession.id) {
     workerConfig = createSessionPrincipalConfig($activeSession);
     selectedParent = null;
@@ -196,6 +220,9 @@
             bind:config={workerConfig}
             showLabel={false}
             idPrefix="add-worker-principal"
+            {cliHealth}
+            {cliHealthLoading}
+            {cliHealthError}
           />
         </div>
 

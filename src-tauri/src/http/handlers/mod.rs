@@ -13,6 +13,7 @@ pub mod learnings;
 pub mod planners;
 pub mod queue;
 pub mod resolver;
+pub mod session_files;
 pub mod sessions;
 pub mod templates;
 pub mod workers;

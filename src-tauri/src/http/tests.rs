@@ -322,6 +322,346 @@ async fn test_health_check() {
 }
 
 #[tokio::test]
+async fn test_cors_allows_app_and_non_browser_origins_but_rejects_other_pages() {
+    let app = setup_test_app().await;
+
+    let no_origin_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_origin_response.status(), StatusCode::OK);
+
+    let allowed_origin_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("origin", "tauri://localhost")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed_origin_response.status(), StatusCode::OK);
+    assert_eq!(
+        allowed_origin_response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("tauri://localhost")
+    );
+
+    let dev_origin_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("origin", "http://localhost:1420")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dev_origin_response.status(), StatusCode::OK);
+
+    let disallowed_origin_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header("origin", "https://untrusted.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disallowed_origin_response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_cli_health_lists_every_supported_cli_with_stable_schema() {
+    let response = setup_test_app()
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/api/cli-health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let clis = json["clis"].as_array().expect("clis should be an array");
+    assert_eq!(clis.len(), crate::adapters::VALID_CLIS.len());
+
+    for expected_cli in crate::adapters::VALID_CLIS {
+        let health = clis
+            .iter()
+            .find(|health| health["cli"] == *expected_cli)
+            .unwrap_or_else(|| panic!("missing CLI health entry for {expected_cli}"));
+        assert!(health["resolved"].is_boolean());
+        assert!(health["binPath"].is_null() || health["binPath"].is_string());
+        assert!(matches!(
+            health["loggedIn"].as_str(),
+            Some("yes" | "no" | "unknown")
+        ));
+        assert!(health["detail"].is_string());
+        assert!(health["staleHint"].is_boolean());
+    }
+}
+
+async fn setup_session_files_fixture(
+    session_id: &str,
+) -> (
+    TempDir,
+    TempDir,
+    axum::Router,
+    Arc<SessionStorage>,
+    PathBuf,
+) {
+    let (storage_dir, app, controller, storage) =
+        setup_isolated_test_app_with_controller().await;
+    let project_dir = TempDir::new().unwrap();
+    let session_root = project_dir
+        .path()
+        .join(".hive-manager")
+        .join(session_id);
+    std::fs::create_dir_all(&session_root).unwrap();
+    controller.read().insert_test_session(make_test_session(
+        session_id,
+        project_dir.path().to_string_lossy().as_ref(),
+    ));
+    (storage_dir, project_dir, app, storage, session_root)
+}
+
+#[cfg(unix)]
+fn create_file_symlink_for_test(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink_for_test(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[tokio::test]
+async fn test_session_files_prefers_project_side_root_and_reads_text() {
+    let session_id = "session-files-happy";
+    let (_storage_dir, _project_dir, app, storage, session_root) =
+        setup_session_files_fixture(session_id).await;
+    std::fs::create_dir_all(session_root.join("tasks")).unwrap();
+    std::fs::write(session_root.join("plan.md"), "# Project-side plan\n").unwrap();
+    std::fs::write(
+        session_root.join("tasks").join("worker-1-task.md"),
+        "## Status: ACTIVE\n",
+    )
+    .unwrap();
+
+    let fallback = storage.session_dir(session_id);
+    std::fs::create_dir_all(&fallback).unwrap();
+    std::fs::write(fallback.join("fallback-only.md"), "wrong root\n").unwrap();
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/files"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let paths = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"plan.md"));
+    assert!(paths.contains(&"tasks"));
+    assert!(paths.contains(&"tasks/worker-1-task.md"));
+    assert!(!paths.contains(&"fallback-only.md"));
+
+    let content_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{session_id}/files/content?path=plan.md"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(content_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(content_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["path"], "plan.md");
+    assert_eq!(json["content"], "# Project-side plan\n");
+}
+
+#[tokio::test]
+async fn test_session_files_listing_skips_dangling_and_escaping_symlinks() {
+    let session_id = "session-files-list-symlinks";
+    let (_storage_dir, project_dir, app, _storage, session_root) =
+        setup_session_files_fixture(session_id).await;
+    std::fs::write(session_root.join("good.txt"), "safe\n").unwrap();
+
+    let outside = project_dir.path().join("outside-secret.txt");
+    std::fs::write(&outside, "secret\n").unwrap();
+    for (target, link_name) in [
+        (project_dir.path().join("missing.txt"), "dangling.txt"),
+        (outside.clone(), "escape.txt"),
+    ] {
+        if let Err(error) = create_file_symlink_for_test(&target, &session_root.join(link_name)) {
+            #[cfg(windows)]
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("failed to create symlink fixture: {error}");
+        }
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{session_id}/files"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let serialized = String::from_utf8(body.to_vec()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    let paths = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"good.txt"));
+    assert!(!paths.contains(&"dangling.txt"));
+    assert!(!paths.contains(&"escape.txt"));
+    assert!(!serialized.contains("outside-secret.txt"));
+    assert!(paths.iter().all(|path| !Path::new(path).is_absolute()));
+}
+
+#[tokio::test]
+async fn test_session_files_rejects_path_traversal() {
+    let session_id = "session-files-traversal";
+    let (_storage_dir, project_dir, app, _storage, _session_root) =
+        setup_session_files_fixture(session_id).await;
+    std::fs::write(project_dir.path().join("outside.txt"), "secret\n").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{session_id}/files/content?path=..%2F..%2Foutside.txt"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_session_files_rejects_symlink_escape() {
+    let session_id = "session-files-symlink";
+    let (_storage_dir, project_dir, app, _storage, session_root) =
+        setup_session_files_fixture(session_id).await;
+    let outside = project_dir.path().join("outside.txt");
+    std::fs::write(&outside, "secret\n").unwrap();
+    let link = session_root.join("escape.txt");
+    if let Err(error) = create_file_symlink_for_test(&outside, &link) {
+        #[cfg(windows)]
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            return;
+        }
+        panic!("failed to create symlink fixture: {error}");
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{session_id}/files/content?path=escape.txt"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_session_files_rejects_files_over_size_cap() {
+    let session_id = "session-files-large";
+    let (_storage_dir, _project_dir, app, _storage, session_root) =
+        setup_session_files_fixture(session_id).await;
+    std::fs::write(session_root.join("large.txt"), vec![b'a'; 500 * 1024 + 1]).unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{session_id}/files/content?path=large.txt"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn test_session_files_rejects_binary_content() {
+    let session_id = "session-files-binary";
+    let (_storage_dir, _project_dir, app, _storage, session_root) =
+        setup_session_files_fixture(session_id).await;
+    std::fs::write(session_root.join("binary.dat"), b"header\0payload").unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{session_id}/files/content?path=binary.dat"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
 async fn test_list_sessions_empty() {
     let app = setup_test_app().await;
 

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use super::context::{ActionContext, Caller};
 use super::error::{ActionError, ActionStatus};
+use super::pty::resolve_create_role_for_test;
 use super::registry::{build_registry, Action, ActionRegistry};
 use crate::coordination::InjectionManager;
 use crate::events::EventBus;
@@ -109,6 +110,140 @@ fn test_registry_lists_all_actions() {
     ] {
         assert!(names.contains(&expected), "missing git action {expected}");
     }
+
+    // Scratch terminals deliberately reuse the existing PTY action surface so they do
+    // not require another Tauri command or ACL permission.
+    for expected in ["pty.create", "pty.kill", "pty.list"] {
+        assert!(names.contains(&expected), "missing PTY action {expected}");
+    }
+}
+
+#[test]
+fn test_pty_create_schema_exposes_scratch_role_and_ownership_metadata() {
+    let registry = build_registry();
+    let (_, schema) = registry
+        .list()
+        .into_iter()
+        .find(|(name, _)| *name == "pty.create")
+        .expect("pty.create action should be registered");
+    let serialized = serde_json::to_string(&schema).expect("pty.create schema should serialize");
+
+    for expected in ["role", "scratch_shell", "shell", "session_id"] {
+        assert!(
+            serialized.contains(expected),
+            "pty.create schema should contain {expected}: {serialized}"
+        );
+    }
+}
+
+#[test]
+fn test_pty_create_role_defaults_to_worker_and_resolves_scratch_shell() {
+    let (default_role, default_owner) = resolve_create_role_for_test(json!({
+        "id": "existing-agent",
+        "command": "codex",
+        "args": [],
+        "cwd": null,
+        "cols": 120,
+        "rows": 30
+    }))
+    .expect("legacy PTY input should retain the worker default");
+    assert!(matches!(
+        default_role,
+        crate::pty::AgentRole::Worker {
+            index: 0,
+            parent: None
+        }
+    ));
+    assert_eq!(default_owner, None);
+
+    let (scratch_role, scratch_owner) = resolve_create_role_for_test(json!({
+        "id": "scratch:session-a:test",
+        "command": "cmd.exe",
+        "args": [],
+        "cwd": ".",
+        "cols": 120,
+        "rows": 30,
+        "role": "scratch_shell",
+        "shell": "cmd",
+        "session_id": "session-a"
+    }))
+    .expect("scratch metadata should resolve to the neutral role");
+    assert!(matches!(scratch_role, crate::pty::AgentRole::ScratchShell));
+    assert_eq!(scratch_owner.as_deref(), Some("session-a"));
+
+    let ambiguous_id = resolve_create_role_for_test(json!({
+        "id": "scratch:session-a:part:two",
+        "command": "cmd.exe",
+        "args": [],
+        "cwd": ".",
+        "cols": 120,
+        "rows": 30,
+        "role": "scratch_shell",
+        "shell": "cmd",
+        "session_id": "session-a"
+    }))
+    .expect_err("scratch unique ids containing colons must be rejected");
+    assert_eq!(ambiguous_id.status, ActionStatus::BadRequest);
+}
+
+#[tokio::test]
+async fn test_pty_kill_unregisters_scratch_ownership_without_spawning() {
+    let registry = build_registry();
+    let state = test_state();
+    let session_id = "session-a";
+    let pty_id = "scratch:session-a:test";
+    state
+        .session_controller
+        .read()
+        .insert_scratch_pty_ownership_for_test(session_id, pty_id);
+
+    registry
+        .dispatch(
+            "pty.kill",
+            &ActionContext::new(Caller::Frontend, state.clone()),
+            json!({ "id": pty_id }),
+        )
+        .await
+        .expect("killing an already-ended scratch PTY should still clear ownership");
+
+    assert!(
+        !state
+            .session_controller
+            .read()
+            .owns_scratch_pty_for_test(session_id, pty_id),
+        "pty.kill must unregister scratch ownership"
+    );
+}
+
+#[tokio::test]
+async fn test_scratch_pty_rejects_unknown_session_before_process_spawn() {
+    let registry = build_registry();
+    let ctx = ActionContext::new(Caller::Frontend, test_state());
+    let result = registry
+        .dispatch(
+            "pty.create",
+            &ctx,
+            json!({
+                "id": "scratch:missing-session:test",
+                "command": "powershell.exe",
+                "args": ["-NoLogo"],
+                "cwd": ".",
+                "cols": 120,
+                "rows": 30,
+                "role": "scratch_shell",
+                "shell": "powershell",
+                "session_id": "missing-session"
+            }),
+        )
+        .await;
+
+    let err = result.expect_err("unknown scratch owner should be rejected before spawning");
+    assert_eq!(err.status, ActionStatus::BadRequest);
+    assert!(
+        err.message.contains("Session missing-session not found"),
+        "unexpected message: {}",
+        err.message
+    );
 }
 
 #[test]

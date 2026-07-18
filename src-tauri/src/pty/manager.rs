@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 
 use super::session::{AgentRole, AgentStatus, PtyError, PtySession, read_from_reader};
@@ -22,6 +22,9 @@ pub struct PtyStatusChange {
 
 pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, Arc<PtySession>>>>,
+    /// Serialize create/kill so a same-id kill cannot pass between process spawn and
+    /// insertion, and a duplicate create cannot replace a still-live process handle.
+    lifecycle: Mutex<()>,
     app_handle: Option<AppHandle>,
 }
 
@@ -33,6 +36,7 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle: Mutex::new(()),
             app_handle: None,
         }
     }
@@ -51,6 +55,27 @@ impl PtyManager {
         cols: u16,
         rows: u16,
     ) -> Result<String, PtyError> {
+        let _lifecycle_guard = self.lifecycle.lock();
+        let existing = { self.sessions.read().get(&id).cloned() };
+        if let Some(existing) = existing {
+            if existing.is_alive() {
+                return Err(PtyError::CreateError(format!(
+                    "PTY session already exists: {id}"
+                )));
+            }
+
+            // Evaluator/prince respawns intentionally reuse their stable ID after exit.
+            // Reap that dead handle, while still rejecting a live same-ID replacement.
+            let _ = existing.kill();
+            let mut sessions = self.sessions.write();
+            if sessions
+                .get(&id)
+                .is_some_and(|current| Arc::ptr_eq(current, &existing))
+            {
+                sessions.remove(&id);
+            }
+        }
+
         let session = Arc::new(PtySession::new(id.clone(), role, command, args, cwd, cols, rows)?);
 
         // Insert session BEFORE spawning reader thread (fixes race condition)
@@ -152,9 +177,27 @@ impl PtyManager {
     }
 
     pub fn kill(&self, id: &str) -> Result<(), PtyError> {
-        let sessions = self.sessions.read();
-        if let Some(session) = sessions.get(id) {
-            session.kill()?;
+        let _lifecycle_guard = self.lifecycle.lock();
+        let session = self.sessions.read().get(id).cloned();
+        if let Some(session) = session {
+            if let Err(error) = session.kill() {
+                // Some PTY backends report an error when killing a process that already
+                // exited. Drop that dead handle, but retain genuinely live failures so a
+                // later cleanup attempt can retry them.
+                if session.is_alive() {
+                    return Err(error);
+                }
+            }
+
+            // Remove only the exact session we killed. This avoids retaining its process
+            // handle without deleting a same-id replacement created concurrently.
+            let mut sessions = self.sessions.write();
+            if sessions
+                .get(id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                sessions.remove(id);
+            }
         }
         Ok(())
     }
@@ -176,6 +219,7 @@ impl PtyManager {
         let sessions = self.sessions.read();
         sessions
             .iter()
+            .filter(|(_, session)| !matches!(&session.role, AgentRole::ScratchShell))
             .map(|(id, session)| (id.clone(), session.role.clone(), session.status.read().clone()))
             .collect()
     }

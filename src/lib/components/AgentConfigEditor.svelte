@@ -1,3 +1,155 @@
+<script module lang="ts">
+  import { invoke, isTauri } from '@tauri-apps/api/core';
+  import { apiUrl } from '$lib/config';
+
+  export type CliLoginStatus = 'yes' | 'no' | 'unknown';
+
+  export interface CliHealthEntry {
+    cli: string;
+    resolved: boolean;
+    binPath: string | null;
+    loggedIn: CliLoginStatus;
+    detail: string;
+    staleHint: boolean;
+  }
+
+  export type CliHealthMap = Record<string, CliHealthEntry>;
+  export type CliHealthTone = 'healthy' | 'warning' | 'error' | 'pending';
+
+  const CLI_HEALTH_CACHE_MS = 30_000;
+  let cachedCliHealth: CliHealthMap | null = null;
+  let cachedCliHealthAt = 0;
+  let cliHealthRequest: Promise<CliHealthMap> | null = null;
+
+  export function normalizeCliHealth(payload: unknown): CliHealthMap {
+    if (typeof payload !== 'object' || payload === null) return {};
+    const rawClis = (payload as { clis?: unknown }).clis;
+    const entries: Array<[string | undefined, unknown]> = Array.isArray(rawClis)
+      ? rawClis.map((entry): [string | undefined, unknown] => [undefined, entry])
+      : typeof rawClis === 'object' && rawClis !== null
+        ? Object.entries(rawClis as Record<string, unknown>)
+        : [];
+    const normalized: CliHealthMap = {};
+
+    for (const [key, value] of entries) {
+      if (typeof value !== 'object' || value === null) continue;
+      const candidate = value as Record<string, unknown>;
+      const cli = typeof candidate.cli === 'string'
+        ? candidate.cli
+        : typeof candidate.name === 'string'
+          ? candidate.name
+          : key;
+      if (!cli || typeof candidate.resolved !== 'boolean') continue;
+      const loggedIn: CliLoginStatus = candidate.loggedIn === 'yes' || candidate.loggedIn === 'no'
+        ? candidate.loggedIn
+        : 'unknown';
+
+      normalized[cli] = {
+        cli,
+        resolved: candidate.resolved,
+        binPath: typeof candidate.binPath === 'string' ? candidate.binPath : null,
+        loggedIn,
+        detail: typeof candidate.detail === 'string' ? candidate.detail : '',
+        staleHint: candidate.staleHint === true,
+      };
+    }
+
+    return normalized;
+  }
+
+  export async function fetchCliHealth(force = false): Promise<CliHealthMap> {
+    if (
+      !force &&
+      cachedCliHealth &&
+      Date.now() - cachedCliHealthAt < CLI_HEALTH_CACHE_MS
+    ) {
+      return cachedCliHealth;
+    }
+    if (cliHealthRequest) return cliHealthRequest;
+
+    cliHealthRequest = (async () => {
+      let payload: unknown;
+      if (isTauri()) {
+        payload = await invoke<unknown>('get_cli_health');
+      } else {
+        const response = await fetch(apiUrl('/api/cli-health'));
+        if (!response.ok) throw new Error(`CLI health request failed (${response.status})`);
+        payload = await response.json();
+      }
+
+      const health = normalizeCliHealth(payload);
+      if (Object.keys(health).length === 0) throw new Error('CLI health response was empty');
+      cachedCliHealth = health;
+      cachedCliHealthAt = Date.now();
+      return health;
+    })();
+
+    try {
+      return await cliHealthRequest;
+    } finally {
+      cliHealthRequest = null;
+    }
+  }
+
+  export function cliHealthTone(
+    health: CliHealthEntry | undefined,
+    error: string | null = null,
+  ): CliHealthTone {
+    if (!health) return error ? 'warning' : 'pending';
+    if (!health.resolved) return health.staleHint ? 'warning' : 'error';
+    if (health.loggedIn === 'no') return 'error';
+    if (health.loggedIn === 'unknown') return 'warning';
+    return 'healthy';
+  }
+
+  export function cliHealthLabel(
+    health: CliHealthEntry | undefined,
+    loading = false,
+    error: string | null = null,
+  ): string {
+    if (!health) {
+      if (loading) return 'Checking…';
+      if (error) return 'Health unavailable';
+      return 'Not checked';
+    }
+    if (!health.resolved) return health.staleHint ? 'Not on current PATH' : 'Not installed';
+    if (health.loggedIn === 'no') return 'Login required';
+    if (health.loggedIn === 'unknown') return 'Auth unknown';
+    return 'Ready';
+  }
+
+  export function cliHealthMessage(
+    health: CliHealthEntry | undefined,
+    loading = false,
+    error: string | null = null,
+  ): string {
+    if (!health) {
+      if (loading) return 'Checking whether this CLI can launch on this machine.';
+      if (error) return error;
+      return 'CLI health has not been checked yet.';
+    }
+    if (!health.resolved && health.staleHint) {
+      const detail = health.detail ? `${health.detail} ` : 'The executable is missing from the current PATH. ';
+      return `${detail}Restarting Hive Manager after updating PATH may help.`;
+    }
+    if (!health.resolved) return health.detail || 'The executable is not installed or cannot be launched.';
+    if (health.loggedIn === 'no') return health.detail || 'The CLI is installed but needs authentication.';
+    if (health.loggedIn === 'unknown') {
+      return health.detail || 'The CLI is installed, but authentication cannot be verified automatically.';
+    }
+    return health.detail || 'The CLI is installed and authenticated.';
+  }
+
+  export function cliHealthTitle(
+    health: CliHealthEntry | undefined,
+    loading = false,
+    error: string | null = null,
+  ): string {
+    const message = cliHealthMessage(health, loading, error);
+    return health?.binPath ? `${message} Executable: ${health.binPath}` : message;
+  }
+</script>
+
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { AgentConfig } from '$lib/stores/sessions';
@@ -6,6 +158,9 @@
   export let config: AgentConfig;
   export let showLabel: boolean = true;
   export let idPrefix: string;
+  export let cliHealth: CliHealthMap = {};
+  export let cliHealthLoading: boolean = false;
+  export let cliHealthError: string | null = null;
 
   const dispatch = createEventDispatcher<{ change: AgentConfig }>();
 
@@ -157,6 +312,7 @@
     ? normalizeModelId(config.cli, config.model)
     : getDefaultModel(config.cli) || 'CLI default';
   $: effectiveEffort = configuredEffort(config);
+  $: selectedCliHealth = cliHealth[config.cli];
 
   $: presetDescription = config.cli === 'claude'
     ? 'Claude effort presets add --settings {"effortLevel":"low|high|max"}'
@@ -446,7 +602,17 @@
   {/if}
 
   <div class="field">
-    <label for={`${idPrefix}-cli`}>CLI</label>
+    <div class="cli-label-row">
+      <label for={`${idPrefix}-cli`}>CLI</label>
+      <span
+        class="cli-health-badge {cliHealthTone(selectedCliHealth, cliHealthError)}"
+        title={cliHealthTitle(selectedCliHealth, cliHealthLoading, cliHealthError)}
+        aria-label={`CLI health: ${cliHealthLabel(selectedCliHealth, cliHealthLoading, cliHealthError)}`}
+      >
+        <span class="health-dot" aria-hidden="true"></span>
+        {cliHealthLabel(selectedCliHealth, cliHealthLoading, cliHealthError)}
+      </span>
+    </div>
     <select
       id={`${idPrefix}-cli`}
       value={config.cli}
@@ -462,6 +628,9 @@
     </select>
     <span class="cli-description" id={`${idPrefix}-cli-description`}>
       {cliOptions.find(c => c.value === config.cli)?.description || ''}
+    </span>
+    <span class="cli-health-message {cliHealthTone(selectedCliHealth, cliHealthError)}">
+      {cliHealthMessage(selectedCliHealth, cliHealthLoading, cliHealthError)}
     </span>
   </div>
 
@@ -510,6 +679,60 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .cli-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .cli-health-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 70%;
+    padding: 2px 7px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  .health-dot {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .cli-health-badge.healthy,
+  .cli-health-message.healthy {
+    color: var(--status-success);
+  }
+
+  .cli-health-badge.warning,
+  .cli-health-message.warning {
+    color: var(--status-warning);
+  }
+
+  .cli-health-badge.error,
+  .cli-health-message.error {
+    color: var(--status-error);
+  }
+
+  .cli-health-badge.pending,
+  .cli-health-message.pending {
+    color: var(--text-disabled);
+  }
+
+  .cli-health-message {
+    font-size: 10px;
+    line-height: 1.35;
   }
 
   label,
