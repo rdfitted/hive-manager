@@ -9,6 +9,7 @@ pub mod domain;
 pub mod events;
 mod http;
 pub mod orchestrator;
+mod preview;
 mod pty;
 pub mod runtime;
 mod session;
@@ -606,7 +607,10 @@ pub fn run() {
             get_current_directory,
             get_app_config,
             update_app_config,
+            cli::health::get_cli_health,
             get_session_plan,
+            // Preview commands
+            preview::open_preview_window,
             // Git commands
             list_branches,
             get_current_branch,

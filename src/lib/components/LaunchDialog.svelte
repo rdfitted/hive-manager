@@ -1,7 +1,10 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
-  import AgentConfigEditor from './AgentConfigEditor.svelte';
+  import AgentConfigEditor, {
+    fetchCliHealth,
+    type CliHealthMap,
+  } from './AgentConfigEditor.svelte';
   import {
     automaticAdversarialLaneCount,
     buildHiveLaunchConfig,
@@ -34,6 +37,22 @@
 
   type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'research' | 'debate';
   type LaunchWorkerConfig = CodingPrincipalFormConfig;
+  let cliHealth: CliHealthMap = {};
+  let cliHealthLoading = false;
+  let cliHealthError: string | null = null;
+  let healthLoadedForOpen = false;
+
+  async function loadCliHealth() {
+    cliHealthLoading = true;
+    cliHealthError = null;
+    try {
+      cliHealth = await fetchCliHealth();
+    } catch (err) {
+      cliHealthError = err instanceof Error ? err.message : String(err);
+    } finally {
+      cliHealthLoading = false;
+    }
+  }
 
   // ... (predefinedRoles same)
   // CLI defaults match backend default_roles in storage/mod.rs
@@ -579,6 +598,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   // Reset state when closed
+  $: if (!show) healthLoadedForOpen = false;
+  $: if (show && !healthLoadedForOpen) {
+    healthLoadedForOpen = true;
+    void loadCliHealth();
+  }
   $: if (!show) {
     error = '';
   }
@@ -717,7 +741,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               <h3>Queen</h3>
               <p>Sets direction, coordinates the visible principals, and owns the final integration.</p>
             </div>
-            <AgentConfigEditor bind:config={queenConfig} showLabel={true} idPrefix="launch-queen" />
+            <AgentConfigEditor
+              bind:config={queenConfig}
+              showLabel={true}
+              idPrefix="launch-queen"
+              {cliHealth}
+              {cliHealthLoading}
+              {cliHealthError}
+            />
           </div>
         {/if}
 
@@ -806,7 +837,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                       {predefinedRoles.find((role) => role.type === principal.selectedRole)?.description || ''}
                     </span>
                   </div>
-                  <AgentConfigEditor bind:config={principal} showLabel={true} idPrefix={`launch-principal-${i}`} />
+                  <AgentConfigEditor
+                    bind:config={principal}
+                    showLabel={true}
+                    idPrefix={`launch-principal-${i}`}
+                    {cliHealth}
+                    {cliHealthLoading}
+                    {cliHealthError}
+                  />
                 </div>
               {/each}
             </div>
@@ -866,7 +904,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               {#if (mode === 'hive' && withEvaluator) || (mode === 'solo' && withSoloEvaluator)}
                 <div class="evaluator-config subsection">
                   <h4>Evaluator Configuration</h4>
-                  <AgentConfigEditor bind:config={evaluatorConfig} showLabel={true} idPrefix="launch-evaluator" />
+                  <AgentConfigEditor
+                    bind:config={evaluatorConfig}
+                    showLabel={true}
+                    idPrefix="launch-evaluator"
+                    {cliHealth}
+                    {cliHealthLoading}
+                    {cliHealthError}
+                  />
                 </div>
 
                 <div class="qa-workers-config subsection">
@@ -895,7 +940,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                             <option value="adversarial">Adversarial</option>
                           </select>
                         </div>
-                        <AgentConfigEditor bind:config={worker} showLabel={false} idPrefix={`launch-qa-${i}`} />
+                        <AgentConfigEditor
+                          bind:config={worker}
+                          showLabel={false}
+                          idPrefix={`launch-qa-${i}`}
+                          {cliHealth}
+                          {cliHealthLoading}
+                          {cliHealthError}
+                        />
                       </div>
                     {/each}
                   </div>
@@ -928,7 +980,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                       Remove
                     </button>
                   </div>
-                  <AgentConfigEditor bind:config={worker} showLabel={true} idPrefix={`launch-researcher-${i}`} />
+                  <AgentConfigEditor
+                    bind:config={worker}
+                    showLabel={true}
+                    idPrefix={`launch-researcher-${i}`}
+                    {cliHealth}
+                    {cliHealthLoading}
+                    {cliHealthError}
+                  />
                 </div>
               {/each}
             </div>
@@ -964,6 +1023,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                       config={variantAgentConfigs[i]}
                       showLabel={false}
                       idPrefix={`launch-fusion-${i}`}
+                      {cliHealth}
+                      {cliHealthLoading}
+                      {cliHealthError}
                       on:change={(e) => handleVariantConfigChange(i, e.detail)}
                     />
                   </div>
@@ -979,6 +1041,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   config={judgeAgentConfig}
                   showLabel={false}
                   idPrefix="launch-fusion-judge"
+                  {cliHealth}
+                  {cliHealthLoading}
+                  {cliHealthError}
                   on:change={(e) => handleJudgeConfigChange(e.detail)}
                 />
               </div>
@@ -1036,6 +1101,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                       config={debaterAgentConfigs[i]}
                       showLabel={false}
                       idPrefix={`launch-debater-${i}`}
+                      {cliHealth}
+                      {cliHealthLoading}
+                      {cliHealthError}
                       on:change={(e) => handleDebaterConfigChange(i, e.detail)}
                     />
                   </div>
@@ -1051,6 +1119,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   config={debateJudgeAgentConfig}
                   showLabel={false}
                   idPrefix="launch-debate-judge"
+                  {cliHealth}
+                  {cliHealthLoading}
+                  {cliHealthError}
                   on:change={(e) => handleDebateJudgeConfigChange(e.detail)}
                 />
               </div>
@@ -1061,7 +1132,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <h3>Solo Configuration</h3>
             <p class="section-description">Run a single agent for a specific task without any orchestration overhead.</p>
 
-            <AgentConfigEditor bind:config={soloConfig} showLabel={false} idPrefix="launch-solo" />
+            <AgentConfigEditor
+              bind:config={soloConfig}
+              showLabel={false}
+              idPrefix="launch-solo"
+              {cliHealth}
+              {cliHealthLoading}
+              {cliHealthError}
+            />
 
             <div class="form-group">
               <label for="solo-task">Task Description</label>

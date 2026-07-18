@@ -14,6 +14,35 @@ use super::{ActionContext, Caller};
 
 const MAX_PASTE_SIZE: usize = 5 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CreatePtyRole {
+    ScratchShell,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ScratchShell {
+    Powershell,
+    Cmd,
+}
+
+impl ScratchShell {
+    fn command(self) -> &'static str {
+        match self {
+            Self::Powershell => "powershell.exe",
+            Self::Cmd => "cmd.exe",
+        }
+    }
+
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Powershell => &["-NoLogo"],
+            Self::Cmd => &[],
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CreatePtyInput {
     id: String,
@@ -22,6 +51,9 @@ struct CreatePtyInput {
     cwd: Option<String>,
     cols: u16,
     rows: u16,
+    role: Option<CreatePtyRole>,
+    shell: Option<ScratchShell>,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -78,6 +110,71 @@ fn require_frontend(ctx: &ActionContext) -> Result<(), ActionError> {
     }
 }
 
+fn resolve_create_role(
+    input: &CreatePtyInput,
+) -> Result<(AgentRole, Option<String>), ActionError> {
+    match input.role {
+        None => {
+            if input.shell.is_some() || input.session_id.is_some() {
+                return Err(ActionError::bad_request(
+                    "shell and session_id require role=scratch_shell",
+                ));
+            }
+
+            Ok((
+                AgentRole::Worker {
+                    index: 0,
+                    parent: None,
+                },
+                None,
+            ))
+        }
+        Some(CreatePtyRole::ScratchShell) => {
+            let session_id = input
+                .session_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    ActionError::bad_request("session_id is required for a scratch PTY")
+                })?;
+            let shell = input.shell.ok_or_else(|| {
+                ActionError::bad_request("shell is required for a scratch PTY")
+            })?;
+            let id_prefix = format!("scratch:{session_id}:");
+            let unique_id = input.id.strip_prefix(&id_prefix).unwrap_or_default();
+
+            if session_id.contains(':') || unique_id.is_empty() || unique_id.contains(':') {
+                return Err(ActionError::bad_request(format!(
+                    "scratch PTY id must use the namespace {id_prefix}<unique-id-without-colons>"
+                )));
+            }
+            if !input.command.eq_ignore_ascii_case(shell.command())
+                || !input
+                    .args
+                    .iter()
+                    .map(String::as_str)
+                    .eq(shell.args().iter().copied())
+            {
+                return Err(ActionError::bad_request(format!(
+                    "scratch shell metadata does not match {} {:?}",
+                    shell.command(),
+                    shell.args()
+                )));
+            }
+
+            Ok((AgentRole::ScratchShell, Some(session_id.to_string())))
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn resolve_create_role_for_test(
+    input: Value,
+) -> Result<(AgentRole, Option<String>), ActionError> {
+    let parsed: CreatePtyInput = deserialize_input(input)?;
+    resolve_create_role(&parsed)
+}
+
 struct CreatePty;
 
 #[async_trait]
@@ -90,26 +187,53 @@ impl Action for CreatePty {
         schemars::schema_for!(CreatePtyInput)
     }
 
+    fn validate_input(&self, input: &Value) -> Result<(), ActionError> {
+        let parsed: CreatePtyInput = deserialize_input(input.clone())?;
+        resolve_create_role(&parsed)?;
+        Ok(())
+    }
+
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
         require_frontend(ctx)?;
         let parsed: CreatePtyInput = deserialize_input(input)?;
+        let (role, scratch_session_id) = resolve_create_role(&parsed)?;
+        let session_controller = ctx.state.session_controller.read();
+        let lifecycle_lock = scratch_session_id
+            .as_deref()
+            .map(|session_id| session_controller.session_lifecycle_lock(session_id));
+        let _lifecycle_guard = lifecycle_lock.as_ref().map(|lock| lock.lock());
+        let scratch_creation_guard = scratch_session_id
+            .as_deref()
+            .map(|session_id| {
+                session_controller.reserve_scratch_pty(session_id, parsed.id.clone())
+            })
+            .transpose()
+            .map_err(ActionError::bad_request)?;
+
         let args_refs: Vec<&str> = parsed.args.iter().map(String::as_str).collect();
-        let pty_manager = ctx.state.pty_manager.read();
-        let id = pty_manager
-            .create_session(
-                parsed.id,
-                AgentRole::Worker {
-                    index: 0,
-                    parent: None,
-                },
+        let create_result = {
+            let pty_manager = ctx.state.pty_manager.read();
+            pty_manager.create_session(
+                parsed.id.clone(),
+                role,
                 &parsed.command,
                 &args_refs,
                 parsed.cwd.as_deref(),
                 parsed.cols,
                 parsed.rows,
             )
-            .map_err(|e| ActionError::internal(e.to_string()))?;
-        Ok(Value::String(id))
+        };
+
+        if let Err(error) = create_result {
+            if scratch_creation_guard.is_some() {
+                session_controller.unregister_scratch_pty(&parsed.id);
+            }
+            return Err(ActionError::internal(error.to_string()));
+        }
+
+        // Drop the barrier only after both the process and its ownership record exist.
+        drop(scratch_creation_guard);
+        Ok(Value::String(parsed.id))
     }
 }
 
@@ -251,10 +375,15 @@ impl Action for KillPty {
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
         require_frontend(ctx)?;
         let parsed: PtyIdInput = deserialize_input(input)?;
-        let pty_manager = ctx.state.pty_manager.read();
-        pty_manager
+        let session_controller = ctx.state.session_controller.read();
+        let lifecycle_lock = session_controller.scratch_pty_lifecycle_lock(&parsed.id);
+        let _lifecycle_guard = lifecycle_lock.as_ref().map(|lock| lock.lock());
+        ctx.state
+            .pty_manager
+            .read()
             .kill(&parsed.id)
             .map_err(|e| ActionError::internal(e.to_string()))?;
+        session_controller.unregister_scratch_pty(&parsed.id);
         Ok(Value::Null)
     }
 }

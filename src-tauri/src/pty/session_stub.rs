@@ -18,6 +18,7 @@ pub enum AgentRole {
     Evaluator,
     QaWorker { index: u8, parent: Option<String> },
     Prince,
+    ScratchShell,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

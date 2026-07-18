@@ -1,6 +1,16 @@
 <script lang="ts">
-    import { GitBranch } from 'phosphor-svelte';
+    import { invoke } from '@tauri-apps/api/core';
+    import { tick } from 'svelte';
+    import { Browser, GitBranch } from 'phosphor-svelte';
     import { activeSession, serdeEnumVariantName } from '../../stores/sessions';
+
+    let previewExpanded = false;
+    let previewUrl = '';
+    let previewError = '';
+    let openingPreview = false;
+    let previewInput: HTMLInputElement;
+    let previewSessionId: string | null = null;
+    let previewRequestId = 0;
 
     $: session = $activeSession;
     $: mode = session ? serdeEnumVariantName(session.session_type)?.toLowerCase() ?? 'session' : 'session';
@@ -19,6 +29,47 @@
     $: worktreeTooltip = [wtBranch && `Branch: ${wtBranch}`, wtPath && `Path: ${wtPath}`].filter(Boolean).join('\n');
     $: worktreeChipLabel = wtBranch || (wtPath ? truncatePath(wtPath) : '');
     $: showWorktreeChip = Boolean(wtBranch || wtPath);
+
+    $: if ((session?.id ?? null) !== previewSessionId) {
+        previewRequestId += 1;
+        previewSessionId = session?.id ?? null;
+        previewExpanded = false;
+        previewUrl = '';
+        previewError = '';
+        openingPreview = false;
+    }
+
+    async function expandPreview() {
+        previewExpanded = true;
+        previewError = '';
+        await tick();
+        previewInput?.focus();
+    }
+
+    async function openPreview(event: SubmitEvent) {
+        event.preventDefault();
+        const url = previewUrl.trim();
+        if (!url || openingPreview) return;
+
+        const requestId = ++previewRequestId;
+        openingPreview = true;
+        previewError = '';
+        try {
+            await invoke('open_preview_window', { url });
+        } catch (error) {
+            if (requestId === previewRequestId) {
+                previewError = String(error);
+            }
+        } finally {
+            if (requestId === previewRequestId) {
+                openingPreview = false;
+            }
+        }
+    }
+
+    function clearPreviewError() {
+        previewError = '';
+    }
 </script>
 
 <div class="session-header">
@@ -37,8 +88,50 @@
             </div>
             <p class="objective">Session ID: {session.id}</p>
         </div>
-        
+
         <div class="stats">
+            <div class="preview-control">
+                {#if previewExpanded}
+                    <form class="preview-form" onsubmit={openPreview}>
+                        <label class="sr-only" for="session-preview-url">Preview URL</label>
+                        <input
+                            id="session-preview-url"
+                            bind:this={previewInput}
+                            bind:value={previewUrl}
+                            type="url"
+                            inputmode="url"
+                            autocomplete="url"
+                            placeholder="http://localhost:5173 or PR URL"
+                            oninput={clearPreviewError}
+                            aria-invalid={previewError ? 'true' : undefined}
+                            aria-describedby={previewError ? 'session-preview-error' : undefined}
+                        />
+                        <button
+                            class="preview-open"
+                            type="submit"
+                            disabled={openingPreview || !previewUrl.trim()}
+                        >
+                            <Browser size={15} weight="light" aria-hidden="true" />
+                            {openingPreview ? 'Opening…' : 'Open'}
+                        </button>
+                    </form>
+                    {#if previewError}
+                        <span id="session-preview-error" class="preview-error" role="alert">{previewError}</span>
+                    {/if}
+                {:else}
+                    <button
+                        class="preview-toggle"
+                        type="button"
+                        onclick={expandPreview}
+                        aria-expanded="false"
+                        aria-label="Enter a URL to open in the isolated preview window"
+                        title="Preview a dev server or pull request URL"
+                    >
+                        <Browser size={16} weight="light" aria-hidden="true" />
+                        Preview
+                    </button>
+                {/if}
+            </div>
             <div class="stat">
                 <span class="label">Project</span>
                 <span class="value">{session.project_path.split(/[\\\/]/).pop()}</span>
@@ -149,7 +242,94 @@
 
     .stats {
         display: flex;
+        align-items: flex-start;
         gap: 20px;
+    }
+
+    .preview-control {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 4px;
+    }
+
+    .preview-form {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .preview-form input {
+        width: clamp(190px, 22vw, 320px);
+        height: 30px;
+        padding: 0 9px;
+        border: 1px solid var(--border-structural);
+        border-radius: var(--radius-sm);
+        background: var(--bg-elevated);
+        color: var(--text-primary);
+        font-family: var(--font-mono);
+        font-size: 11px;
+    }
+
+    .preview-form input::placeholder {
+        color: var(--text-disabled);
+    }
+
+    .preview-form input:focus-visible {
+        border-color: var(--accent-cyan);
+        outline: 1px solid var(--accent-cyan);
+        outline-offset: 1px;
+    }
+
+    .preview-toggle,
+    .preview-open {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        height: 30px;
+        padding: 0 10px;
+        border: 1px solid var(--border-structural);
+        border-radius: var(--radius-sm);
+        background: var(--bg-elevated);
+        color: var(--text-secondary);
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .preview-toggle:hover,
+    .preview-toggle:focus-visible,
+    .preview-open:hover:not(:disabled),
+    .preview-open:focus-visible {
+        border-color: var(--accent-cyan);
+        color: var(--accent-cyan);
+        outline: none;
+    }
+
+    .preview-open:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+    }
+
+    .preview-error {
+        max-width: 320px;
+        color: var(--status-error);
+        font-size: 10px;
+        line-height: 1.3;
+        text-align: right;
+    }
+
+    .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
     }
 
     .stat {
@@ -177,5 +357,17 @@
         color: var(--text-disabled);
         font-style: italic;
         padding: 8px 0;
+    }
+
+    @media (max-width: 1050px) {
+        .session-header {
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .stats {
+            width: 100%;
+            justify-content: flex-end;
+        }
     }
 </style>

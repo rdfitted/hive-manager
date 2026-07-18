@@ -1,6 +1,6 @@
 use crate::tauri_shim::{AppHandle, Emitter};
 use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -667,6 +667,14 @@ pub struct SessionController {
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
     /// session_id -> agent_id -> heartbeat info
     agent_heartbeats: Arc<RwLock<HashMap<String, HashMap<String, AgentHeartbeatInfo>>>>,
+    /// Session-owned operator shells. These PTYs are deliberately separate from
+    /// `Session::agents` so they never enter worker queues, artifacts, or agent trees.
+    scratch_ptys: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    /// A short-lived creation barrier while stop/close snapshots and kills scratch PTYs.
+    scratch_pty_cleanup_sessions: Arc<RwLock<HashSet<String>>>,
+    /// Serialize scratch create/kill and stop/close for the same session so ownership,
+    /// process lifecycle, cleanup barriers, and state transitions cannot interleave.
+    session_lifecycle_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// QA timeout cancel handles: session_id -> abort handle
     qa_timeout_handles: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     evaluator_respawns_inflight: Mutex<HashSet<String>>,
@@ -825,6 +833,9 @@ impl SessionController {
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
+            scratch_ptys: Arc::new(RwLock::new(HashMap::new())),
+            scratch_pty_cleanup_sessions: Arc::new(RwLock::new(HashSet::new())),
+            session_lifecycle_locks: Mutex::new(HashMap::new()),
             qa_timeout_handles: Mutex::new(HashMap::new()),
             evaluator_respawns_inflight: Mutex::new(HashSet::new()),
             run_journal: None,
@@ -1940,16 +1951,155 @@ impl SessionController {
         sessions.insert(session.id.clone(), session);
     }
 
+    #[cfg(test)]
+    pub(crate) fn register_scratch_pty(
+        &self,
+        session_id: &str,
+        pty_id: String,
+    ) -> Result<(), String> {
+        let _creation_guard = self.reserve_scratch_pty(session_id, pty_id)?;
+        Ok(())
+    }
+
+    pub(crate) fn reserve_scratch_pty(
+        &self,
+        session_id: &str,
+        pty_id: String,
+    ) -> Result<RwLockReadGuard<'_, HashSet<String>>, String> {
+        // The caller holds this read guard until process creation completes. Cleanup takes
+        // the write side, so it cannot snapshot between ownership publication and spawn.
+        let cleanup_sessions = self.scratch_pty_cleanup_sessions.read();
+        let sessions = self.sessions.read();
+        Self::validate_scratch_pty_session_locked(session_id, &cleanup_sessions, &sessions)?;
+
+        let expected_prefix = format!("scratch:{session_id}:");
+        let unique_id = pty_id.strip_prefix(&expected_prefix).unwrap_or_default();
+        if session_id.contains(':') || unique_id.is_empty() || unique_id.contains(':') {
+            return Err(format!(
+                "Scratch PTY id must use the namespace {expected_prefix}<unique-id-without-colons>"
+            ));
+        }
+
+        let inserted = self
+            .scratch_ptys
+            .write()
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(pty_id.clone());
+        if !inserted {
+            return Err(format!("Scratch PTY {pty_id} is already registered"));
+        }
+        Ok(cleanup_sessions)
+    }
+
+    fn validate_scratch_pty_session_locked(
+        session_id: &str,
+        cleanup_sessions: &HashSet<String>,
+        sessions: &HashMap<String, Session>,
+    ) -> Result<(), String> {
+        if cleanup_sessions.contains(session_id) {
+            return Err(format!(
+                "Session {session_id} is stopping; scratch PTYs cannot be created"
+            ));
+        }
+
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| format!("Session {session_id} not found for scratch PTY"))?;
+        if is_terminal_session_state(&session.state)
+            || matches!(session.state, SessionState::Closing)
+        {
+            return Err(format!(
+                "Session {session_id} is not running; scratch PTYs cannot be created"
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn unregister_scratch_pty(&self, pty_id: &str) {
+        self.scratch_ptys.write().retain(|_, owned_ptys| {
+            owned_ptys.remove(pty_id);
+            !owned_ptys.is_empty()
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_scratch_pty_ownership_for_test(
+        &self,
+        session_id: &str,
+        pty_id: &str,
+    ) {
+        self.scratch_ptys
+            .write()
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(pty_id.to_string());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owns_scratch_pty_for_test(&self, session_id: &str, pty_id: &str) -> bool {
+        self.scratch_ptys
+            .read()
+            .get(session_id)
+            .is_some_and(|owned_ptys| owned_ptys.contains(pty_id))
+    }
+
+    fn begin_scratch_pty_cleanup(&self, session_id: &str) -> Vec<String> {
+        self.scratch_pty_cleanup_sessions
+            .write()
+            .insert(session_id.to_string());
+        self.scratch_ptys
+            .read()
+            .get(session_id)
+            .map(|owned_ptys| owned_ptys.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn finish_scratch_pty_cleanup(&self, session_id: &str) {
+        self.scratch_pty_cleanup_sessions
+            .write()
+            .remove(session_id);
+    }
+
+    pub(crate) fn scratch_pty_lifecycle_lock(
+        &self,
+        pty_id: &str,
+    ) -> Option<Arc<Mutex<()>>> {
+        let remainder = pty_id.strip_prefix("scratch:")?;
+        let (session_id, unique_id) = remainder.rsplit_once(':')?;
+        if session_id.is_empty() || unique_id.is_empty() {
+            return None;
+        }
+        Some(self.session_lifecycle_lock(session_id))
+    }
+
+    pub(crate) fn session_lifecycle_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
+        self.session_lifecycle_locks
+            .lock()
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     pub fn stop_session(&self, id: &str) -> Result<(), String> {
+        let lifecycle_lock = self.session_lifecycle_lock(id);
+        let _lifecycle_guard = lifecycle_lock.lock();
         let session = {
             let sessions = self.sessions.read();
             sessions.get(id).cloned()
         };
 
         if let Some(session) = session {
+            let scratch_pty_ids = self.begin_scratch_pty_cleanup(id);
             let pty_manager = self.pty_manager.read();
             for agent in &session.agents {
                 let _ = pty_manager.kill(&agent.id);
+            }
+            for pty_id in &scratch_pty_ids {
+                if pty_manager.kill(pty_id).is_ok() {
+                    self.unregister_scratch_pty(pty_id);
+                }
             }
 
             let previous_state = {
@@ -1971,10 +2121,12 @@ impl SessionController {
                         session.state = previous_session_state;
                         session.auth_strategy = previous_auth_strategy;
                     }
+                    self.finish_scratch_pty_cleanup(id);
                     return Err(err);
                 }
             }
 
+            self.finish_scratch_pty_cleanup(id);
             Ok(())
         } else {
             Err(format!("Session not found: {}", id))
@@ -2027,6 +2179,8 @@ impl SessionController {
     }
 
     pub fn close_session(&self, id: &str) -> Result<(), String> {
+        let lifecycle_lock = self.session_lifecycle_lock(id);
+        let _lifecycle_guard = lifecycle_lock.lock();
         let (agent_ids, cleanup_session): (Vec<String>, Session) = {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(id) {
@@ -2041,12 +2195,20 @@ impl SessionController {
             }
         };
 
+        let scratch_pty_ids = self.begin_scratch_pty_cleanup(id);
+
         let kill_errors: Vec<String> = {
             let pty_manager = self.pty_manager.read();
             let mut errors = Vec::new();
-            for agent_id in &agent_ids {
-                if let Err(e) = pty_manager.kill(agent_id) {
-                    errors.push(format!("{}: {}", agent_id, e));
+            for pty_id in &agent_ids {
+                if let Err(e) = pty_manager.kill(pty_id) {
+                    errors.push(format!("{}: {}", pty_id, e));
+                }
+            }
+            for pty_id in &scratch_pty_ids {
+                match pty_manager.kill(pty_id) {
+                    Ok(()) => self.unregister_scratch_pty(pty_id),
+                    Err(e) => errors.push(format!("{}: {}", pty_id, e)),
                 }
             }
             errors
@@ -2096,6 +2258,7 @@ impl SessionController {
             self.emit_cell_status_changes(id, changes);
         }
         self.emit_session_update(id);
+        self.finish_scratch_pty_cleanup(id);
         if !kill_errors.is_empty() {
             tracing::warn!(
                 "Session {} closed with PTY kill errors: {}",
@@ -13639,6 +13802,7 @@ fn serialize_persisted_agent_role(role: &AgentRole) -> String {
             )
         }
         AgentRole::Prince => "Prince".to_string(),
+        AgentRole::ScratchShell => "ScratchShell".to_string(),
     }
 }
 
@@ -13653,6 +13817,7 @@ fn serialize_agent_role(role: &AgentRole) -> &'static str {
         AgentRole::Evaluator => "evaluator",
         AgentRole::QaWorker { .. } => "qa-worker",
         AgentRole::Prince => "prince",
+        AgentRole::ScratchShell => "scratch-shell",
     }
 }
 
@@ -13667,13 +13832,14 @@ fn format_agent_display(role: &AgentRole) -> String {
         AgentRole::Evaluator => "Evaluator".to_string(),
         AgentRole::QaWorker { index, .. } => format!("QaWorker-{}", index),
         AgentRole::Prince => "Prince".to_string(),
+        AgentRole::ScratchShell => "ScratchShell".to_string(),
     }
 }
 
 fn include_in_worker_roster(role: &AgentRole) -> bool {
     !matches!(
         serialize_agent_role(role),
-        "queen" | "evaluator" | "qa-worker" | "prince"
+        "queen" | "evaluator" | "qa-worker" | "prince" | "scratch-shell"
     )
 }
 
@@ -14815,6 +14981,100 @@ mod tests {
             no_git: false,
             resume_report: None,
         }
+    }
+
+    #[test]
+    fn session_stop_and_close_drain_owned_scratch_ptys_without_agent_entries() {
+        for (session_id, close) in [("scratch-stop", false), ("scratch-close", true)] {
+            let temp_dir = tempfile::tempdir().expect("temp project dir");
+            let controller = test_controller();
+            let mut session = test_completion_session(
+                session_id,
+                SessionState::Running,
+                Utc::now(),
+                false,
+            );
+            session.project_path = temp_dir.path().to_path_buf();
+            controller.insert_test_session(session);
+
+            let pty_id = format!("scratch:{session_id}:test");
+            controller
+                .register_scratch_pty(session_id, pty_id.clone())
+                .expect("scratch PTY should be owned by its session");
+            assert!(
+                controller
+                    .scratch_ptys
+                    .read()
+                    .get(session_id)
+                    .is_some_and(|ids| ids.contains(&pty_id))
+            );
+
+            if close {
+                controller
+                    .close_session(session_id)
+                    .expect("closing should clean scratch PTYs");
+            } else {
+                controller
+                    .stop_session(session_id)
+                    .expect("stopping should clean scratch PTYs");
+            }
+
+            assert!(
+                !controller.scratch_ptys.read().contains_key(session_id),
+                "scratch ownership should be drained for {session_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn scratch_registration_rejects_terminal_and_cleanup_sessions() {
+        for (session_id, state) in [
+            ("scratch-completed", SessionState::Completed),
+            ("scratch-closing", SessionState::Closing),
+        ] {
+            let controller = test_controller();
+            controller.insert_test_session(test_completion_session(
+                session_id,
+                state,
+                Utc::now(),
+                false,
+            ));
+
+            let error = controller
+                .register_scratch_pty(session_id, format!("scratch:{session_id}:test"))
+                .expect_err("terminal sessions must reject new scratch PTYs");
+            assert!(error.contains("not running"), "unexpected error: {error}");
+        }
+
+        let controller = test_controller();
+        let session_id = "scratch-cleanup";
+        controller.insert_test_session(test_completion_session(
+            session_id,
+            SessionState::Running,
+            Utc::now(),
+            false,
+        ));
+        let duplicate_id = format!("scratch:{session_id}:duplicate");
+        controller
+            .register_scratch_pty(session_id, duplicate_id.clone())
+            .expect("first scratch registration should succeed");
+        let duplicate_error = controller
+            .register_scratch_pty(session_id, duplicate_id.clone())
+            .expect_err("duplicate scratch registration must be rejected");
+        assert!(
+            duplicate_error.contains("already registered"),
+            "unexpected error: {duplicate_error}"
+        );
+        controller.unregister_scratch_pty(&duplicate_id);
+        controller
+            .scratch_pty_cleanup_sessions
+            .write()
+            .insert(session_id.to_string());
+
+        let error = controller
+            .register_scratch_pty(session_id, format!("scratch:{session_id}:test"))
+            .expect_err("cleanup barrier must reject a concurrent scratch registration");
+        assert!(error.contains("is stopping"), "unexpected error: {error}");
     }
 
     #[test]

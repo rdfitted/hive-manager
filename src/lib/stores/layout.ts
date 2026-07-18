@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type RightPanelTab = 'status' | 'plan' | 'logs' | 'chat' | 'timeline';
+export type RightPanelTab = 'status' | 'plan' | 'logs' | 'chat' | 'timeline' | 'files';
 
 export interface LayoutState {
   leftCollapsed: boolean;
@@ -11,6 +11,7 @@ export interface LayoutState {
   sessionsCollapsed: boolean;
   recentCollapsed: boolean;
   agentsCollapsed: boolean;
+  maximizedTerminalId: string | null;
 }
 
 const STORAGE_KEY = 'hive-manager-layout';
@@ -30,6 +31,7 @@ const defaultLayout: LayoutState = {
   sessionsCollapsed: false,
   recentCollapsed: true,
   agentsCollapsed: false,
+  maximizedTerminalId: null,
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -47,6 +49,8 @@ function loadInitial(): LayoutState {
       ...parsed,
       leftWidth: clamp(parsed.leftWidth ?? defaultLayout.leftWidth, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX),
       rightWidth: clamp(parsed.rightWidth ?? defaultLayout.rightWidth, RIGHT_WIDTH_MIN, RIGHT_WIDTH_MAX),
+      // Maximizing is intentionally transient: reopening the app always restores the grid.
+      maximizedTerminalId: null,
     };
   } catch {
     return defaultLayout;
@@ -89,6 +93,15 @@ function createLayoutStore() {
     },
     toggleSection(key: 'sessionsCollapsed' | 'recentCollapsed' | 'agentsCollapsed') {
       updateAndPersist((s) => ({ ...s, [key]: !s[key] }));
+    },
+    setMaximizedTerminalId(id: string | null) {
+      updateAndPersist((s) => ({ ...s, maximizedTerminalId: id }));
+    },
+    toggleMaximizedTerminal(id: string) {
+      updateAndPersist((s) => ({
+        ...s,
+        maximizedTerminalId: s.maximizedTerminalId === id ? null : id,
+      }));
     },
   };
 }

@@ -1,8 +1,15 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { CaretDown, CaretRight, Warning } from 'phosphor-svelte';
   import { activeSession, activeAgents, sessions, serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
   import { ui } from '$lib/stores/ui';
   import { apiUrl } from '$lib/config';
+  import { cliOptions } from '$lib/config/clis';
+  import {
+    fetchCliHealth,
+    type CliHealthEntry,
+    type CliHealthMap,
+  } from './AgentConfigEditor.svelte';
   import QaFeedbackPanel from './QaFeedbackPanel.svelte';
   import { invoke } from '@tauri-apps/api/core';
 
@@ -12,6 +19,10 @@
   let closing = $state(false);
   let showForceFailConfirm = $state(false);
   let forceFailing = $state(false);
+  let cliHealthCollapsed = $state(false);
+  let cliHealth = $state<CliHealthMap>({});
+  let cliHealthLoading = $state(false);
+  let cliHealthError = $state<string | null>(null);
 
   // Milestone tracking
   let completedMilestones = $state(0);
@@ -20,6 +31,60 @@
   type SessionPlan = {
     tasks?: Array<{ status?: string }>;
   };
+
+  async function loadCliHealth(force = false) {
+    cliHealthLoading = true;
+    cliHealthError = null;
+    try {
+      cliHealth = await fetchCliHealth(force);
+    } catch (err) {
+      cliHealthError = err instanceof Error ? err.message : String(err);
+    } finally {
+      cliHealthLoading = false;
+    }
+  }
+
+  function cliHealthTone(health: CliHealthEntry | undefined): 'healthy' | 'warning' | 'error' | 'pending' {
+    if (!health) return cliHealthError ? 'warning' : 'pending';
+    if (!health.resolved) return health.staleHint ? 'warning' : 'error';
+    if (health.loggedIn === 'no') return 'error';
+    if (health.loggedIn === 'unknown') return 'warning';
+    return 'healthy';
+  }
+
+  function cliHealthLabel(health: CliHealthEntry | undefined): string {
+    if (!health) {
+      if (cliHealthLoading) return 'Checking…';
+      if (cliHealthError) return 'Unavailable';
+      return 'Not checked';
+    }
+    if (!health.resolved) return health.staleHint ? 'Not on current PATH' : 'Not installed';
+    if (health.loggedIn === 'no') return 'Login required';
+    if (health.loggedIn === 'unknown') return 'Auth unknown';
+    return 'Ready';
+  }
+
+  function cliHealthMessage(health: CliHealthEntry | undefined): string {
+    if (!health) {
+      if (cliHealthLoading) return 'Checking launch and authentication status.';
+      if (cliHealthError) return cliHealthError;
+      return 'CLI health has not been checked yet.';
+    }
+    if (!health.resolved && health.staleHint) {
+      const detail = health.detail ? `${health.detail} ` : 'Missing from the current PATH. ';
+      return `${detail}Restarting Hive Manager after updating PATH may help.`;
+    }
+    if (!health.resolved) return health.detail || 'Executable is not installed or cannot be launched.';
+    if (health.loggedIn === 'no') return health.detail || 'Installed, but authentication is required.';
+    if (health.loggedIn === 'unknown') {
+      return health.detail || 'Installed; authentication cannot be verified automatically.';
+    }
+    return health.detail || 'Installed and authenticated.';
+  }
+
+  onMount(() => {
+    void loadCliHealth();
+  });
 
   $effect(() => {
     if ($activeSession?.id) {
@@ -189,13 +254,61 @@
 </script>
 
 <div class="status-content">
-    {#if !$activeSession}
-      <div class="empty-state">
-        <p>No session selected</p>
-        <p class="hint">Launch a new session to get started</p>
-      </div>
-    {:else}
       <div class="panel-content">
+        <section class="section">
+          <div class="cli-health-heading">
+            <button class="section-header" onclick={() => cliHealthCollapsed = !cliHealthCollapsed}>
+              <span class="chevron" class:collapsed={cliHealthCollapsed}>
+                {#if cliHealthCollapsed}
+                  <CaretRight size={12} weight="light" />
+                {:else}
+                  <CaretDown size={12} weight="light" />
+                {/if}
+              </span>
+              <h3>CLI Health</h3>
+            </button>
+            <button
+              class="cli-health-refresh"
+              onclick={() => void loadCliHealth(true)}
+              disabled={cliHealthLoading}
+              title="Refresh CLI launch and authentication checks"
+            >
+              {cliHealthLoading ? 'Checking…' : 'Refresh'}
+            </button>
+          </div>
+          {#if !cliHealthCollapsed}
+            <div class="cli-health-list" aria-live="polite">
+              {#each cliOptions as cli}
+                {@const health = cliHealth[cli.value]}
+                <div class="cli-health-item">
+                  <div class="cli-health-row">
+                    <span class="cli-health-name">{cli.label}</span>
+                    <span
+                      class="cli-health-badge {cliHealthTone(health)}"
+                      title={health?.binPath
+                        ? `${cliHealthMessage(health)} Executable: ${health.binPath}`
+                        : cliHealthMessage(health)}
+                    >
+                      <span class="cli-health-dot" aria-hidden="true"></span>
+                      {cliHealthLabel(health)}
+                    </span>
+                  </div>
+                  <span class="cli-health-detail {cliHealthTone(health)}">{cliHealthMessage(health)}</span>
+                  {#if health?.binPath}
+                    <span class="cli-health-path" title={health.binPath}>{health.binPath}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </section>
+
+        {#if !$activeSession}
+          <div class="empty-state">
+            <p>No session selected</p>
+            <p class="hint">Launch a new session to get started</p>
+          </div>
+        {:else}
         {#if isQaPhase($activeSession.state)}
           <section class="section">
             <QaFeedbackPanel />
@@ -301,8 +414,10 @@
             </button>
           </section>
         {/if}
+        {/if}
       </div>
 
+      {#if $activeSession}
       <!-- Close confirmation dialog -->
       {#if showCloseConfirm}
         <div
@@ -427,6 +542,123 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+  }
+
+  .cli-health-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .cli-health-heading .section-header {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+  }
+
+  .cli-health-refresh {
+    padding: 3px 7px;
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .cli-health-refresh:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--accent-cyan);
+  }
+
+  .cli-health-refresh:disabled {
+    opacity: 0.6;
+    cursor: wait;
+  }
+
+  .cli-health-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .cli-health-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 7px 8px;
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+  }
+
+  .cli-health-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .cli-health-name {
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .cli-health-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+
+  .cli-health-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .cli-health-badge.healthy,
+  .cli-health-detail.healthy {
+    color: var(--status-success);
+  }
+
+  .cli-health-badge.warning,
+  .cli-health-detail.warning {
+    color: var(--status-warning);
+  }
+
+  .cli-health-badge.error,
+  .cli-health-detail.error {
+    color: var(--status-error);
+  }
+
+  .cli-health-badge.pending,
+  .cli-health-detail.pending {
+    color: var(--text-disabled);
+  }
+
+  .cli-health-detail,
+  .cli-health-path {
+    overflow: hidden;
+    font-size: 9px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .cli-health-path {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    opacity: 0.75;
   }
 
   .chevron {
