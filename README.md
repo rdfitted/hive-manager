@@ -2,7 +2,7 @@
 
 A local, operator-controlled meta-harness for AI coding sessions. Launch, supervise, and compare coordinated CLI agents (Claude, Codex, Gemini, Antigravity, and others) without handing topology decisions to an opaque control plane.
 
-![Hive Manager](https://img.shields.io/badge/version-0.34.0-blue)
+![Hive Manager](https://img.shields.io/badge/version-0.35.1-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
