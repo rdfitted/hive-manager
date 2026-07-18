@@ -1,5 +1,6 @@
 #[cfg(not(test))]
 mod commands;
+#[cfg(test)] mod acl_parity;
 pub mod actions;
 pub mod adapters;
 pub mod artifacts;
@@ -611,6 +612,11 @@ pub fn run() {
             get_session_plan,
             // Preview commands
             preview::open_preview_window,
+            preview::close_preview_window,
+            preview::dock_preview_window,
+            preview::undock_preview_window,
+            preview::reload_preview_window,
+            preview::get_preview_status,
             // Git commands
             list_branches,
             get_current_branch,

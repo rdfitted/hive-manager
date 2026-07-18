@@ -54,4 +54,9 @@ commands.allow = [
     "get_run_journal",
     "list_session_files",
     "open_preview_window",
+    "close_preview_window",
+    "dock_preview_window",
+    "undock_preview_window",
+    "reload_preview_window",
+    "get_preview_status",
 ]

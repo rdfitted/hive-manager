@@ -1,11 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FOLDER_COLORS,
+  RELATIONSHIP_FOLDERS,
   compareKnowledgeNodes,
   filterKnowledgeGraph,
+  folderColor,
+  folderKindLabel,
+  isRelationshipFolder,
   normalizeKnowledgeGraph,
   nodeDegree,
 } from './graphUtils';
 import type { KnowledgeGraph, KnowledgeNode } from './types';
+
+const EXPECTED_FOLDERS = [
+  'patterns',
+  'practices',
+  'research',
+  'project',
+  'clients',
+  'partners',
+  'vendors',
+  'operations',
+] as const;
+
+const UNKNOWN_FOLDER_COLOR = folderColor('folder-with-no-mapping');
 
 function node(
   id: string,
@@ -87,6 +105,51 @@ describe('knowledge graph utilities', () => {
     const folderFiltered = filterKnowledgeGraph(graph, '', 'patterns');
     expect(folderFiltered.nodes.map((entry) => entry.id)).toEqual(['alpha']);
     expect(folderFiltered.edges).toEqual([]);
+  });
+
+  it('carries the truncation flag through filtering so the cap notice cannot be filtered away', () => {
+    const truncatedGraph: KnowledgeGraph = { ...graph, truncated: true };
+
+    expect(filterKnowledgeGraph(truncatedGraph, '', 'all').truncated).toBe(true);
+    expect(filterKnowledgeGraph(truncatedGraph, 'alpha', 'patterns').truncated).toBe(true);
+    // A query that matches nothing must still report the corpus as truncated.
+    expect(filterKnowledgeGraph(truncatedGraph, 'no-such-page', 'all')).toMatchObject({
+      nodes: [],
+      edges: [],
+      truncated: true,
+    });
+    expect(filterKnowledgeGraph({ ...graph, truncated: false }, '', 'all').truncated).toBe(false);
+    expect(filterKnowledgeGraph(graph, '', 'all').truncated).toBeUndefined();
+  });
+
+  it('resolves a distinct color for every supported folder', () => {
+    expect(Object.keys(FOLDER_COLORS).sort()).toEqual([...EXPECTED_FOLDERS].sort());
+
+    for (const name of EXPECTED_FOLDERS) {
+      expect(folderColor(name)).toBe(FOLDER_COLORS[name]);
+      expect(folderColor(name)).not.toBe(UNKNOWN_FOLDER_COLOR);
+    }
+
+    expect(folderColor('clients')).not.toBe(UNKNOWN_FOLDER_COLOR);
+    expect(folderColor('Clients')).toBe(folderColor('clients'));
+    // Every folder must be its own hue — no two share a swatch.
+    expect(new Set(Object.values(FOLDER_COLORS)).size).toBe(EXPECTED_FOLDERS.length);
+  });
+
+  it('classifies relationship folders apart from operational ones with a text equivalent', () => {
+    expect([...RELATIONSHIP_FOLDERS].sort()).toEqual(['clients', 'partners', 'vendors']);
+    expect(RELATIONSHIP_FOLDERS.has('operations')).toBe(false);
+
+    for (const name of ['clients', 'partners', 'vendors']) {
+      expect(isRelationshipFolder(name)).toBe(true);
+      expect(folderKindLabel(name)).toBe('relationship entity');
+    }
+    for (const name of ['patterns', 'practices', 'research', 'project', 'operations']) {
+      expect(isRelationshipFolder(name)).toBe(false);
+      expect(folderKindLabel(name)).toBe('operational knowledge');
+    }
+
+    expect(isRelationshipFolder(' Clients ')).toBe(true);
   });
 
   it('sorts all table columns and computes total degree', () => {

@@ -174,6 +174,27 @@ async fn setup_isolated_test_app_with_controller() -> (
     (storage_dir, app, controller, storage)
 }
 
+/// Setup an isolated test app whose persisted `config.json` already carries operator settings.
+///
+/// `AppState.config` is a snapshot taken once, when the router is constructed, so a test that needs
+/// the HTTP handlers to *observe* a config value must write that value before construction —
+/// saving it afterwards has no effect on the running app. The shared setup helpers are deliberately
+/// left alone (many tests depend on their default config); this variant seeds the storage base dir
+/// first and then delegates to the existing `setup_test_app_with_controller_at` seam.
+async fn setup_isolated_test_app_with_config(
+    seed_config: impl FnOnce(&mut crate::storage::AppConfig),
+) -> (TempDir, axum::Router) {
+    let storage_dir = TempDir::new().unwrap();
+    let seed_storage = SessionStorage::new_with_base(storage_dir.path().to_path_buf()).unwrap();
+    let mut config = seed_storage.load_config().unwrap();
+    seed_config(&mut config);
+    seed_storage.save_config(&config).unwrap();
+
+    let (app, _controller, _storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    (storage_dir, app)
+}
+
 /// Setup test app and return both the router and session controller for inserting test sessions
 async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionController>>) {
     let storage = Arc::new(SessionStorage::new().unwrap());
@@ -1077,7 +1098,7 @@ title: Public Source
 last_updated: 2026-07-18
 cross_refs:
   - wiki/practices/cross.md
-  - clients/private-client.md
+  - agents/private-dossier.md
 ---
 # Source body
 [[Wiki Target]]
@@ -1099,10 +1120,12 @@ cross_refs:
         "---\ntitle: Body Related\n---\n# Related\n",
     );
     write_knowledge_fixture(wiki.path(), "research/from.md", "# From\n");
+    // `clients/` is allow-listed as of #158, so the non-allow-listed folder in this fixture must
+    // be `agents/` — otherwise these exclusion assertions would pass vacuously.
     write_knowledge_fixture(
         wiki.path(),
-        "clients/private-client.md",
-        "---\ntitle: Private Client Dossier\n---\n# Never expose this\n",
+        "agents/private-dossier.md",
+        "---\ntitle: Private Recruiting Dossier\n---\n# Never expose this\n",
     );
     write_knowledge_fixture(
         wiki.path(),
@@ -1178,8 +1201,8 @@ cross_refs:
     }));
 
     let serialized_graph = serde_json::to_string(&graph).unwrap();
-    assert!(!serialized_graph.contains("Private Client Dossier"));
-    assert!(!serialized_graph.contains("clients/private-client"));
+    assert!(!serialized_graph.contains("Private Recruiting Dossier"));
+    assert!(!serialized_graph.contains("agents/private-dossier"));
     assert!(!serialized_graph.contains(wiki.path().to_string_lossy().as_ref()));
     assert!(!serialized_graph.contains(project.path().to_string_lossy().as_ref()));
 
@@ -1206,9 +1229,10 @@ cross_refs:
         .contains(wiki.path().to_string_lossy().as_ref()));
 
     for invalid_id in [
-        "patterns%2F..%2Fclients%2Fprivate-client",
+        "patterns%2F..%2Fagents%2Fprivate-dossier",
         "%2Fpatterns%2Fsource",
-        "clients%2Fprivate-client",
+        "agents%2Fprivate-dossier",
+        "clients%2F..%2Fagents%2Fprivate-dossier",
     ] {
         let response = app
             .clone()
@@ -1237,6 +1261,313 @@ cross_refs:
         .await
         .unwrap();
     assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+}
+
+/// Issue #158: relationship/entity folders are first-class Atlas citizens, including the nested
+/// `clients/<slug>/dashboard.md` shape. That shape does not exist in the live corpus yet, so it
+/// only exists here as a synthetic fixture — this test is what keeps it working.
+#[tokio::test]
+async fn test_knowledge_entity_folders_scan_nested_pages_and_cross_link_graph_halves() {
+    let _environment_lock = KNOWLEDGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let wiki = TempDir::new().unwrap();
+    let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", wiki.path());
+
+    write_knowledge_fixture(
+        wiki.path(),
+        "clients/acme/dashboard.md",
+        "---\ntitle: Acme Dashboard\nlast_updated: 2026-07-18\n---\n# Acme\n\
+         [[Beta Partner]]\n[[vendors/gamma]]\n",
+    );
+    write_knowledge_fixture(
+        wiki.path(),
+        "partners/beta.md",
+        "---\ntitle: Beta Partner\n---\n# Beta\n",
+    );
+    write_knowledge_fixture(
+        wiki.path(),
+        "vendors/gamma.md",
+        "---\ntitle: Gamma Vendor\n---\n# Gamma\n",
+    );
+    write_knowledge_fixture(
+        wiki.path(),
+        "operations/runbook.md",
+        "---\ntitle: Runbook\n---\n# Runbook\n<- from: ../clients/acme/dashboard.md\n",
+    );
+    // The operational half of the graph reaching across into the entity half.
+    write_knowledge_fixture(
+        wiki.path(),
+        "patterns/engagement.md",
+        "---\ntitle: Engagement Pattern\ncross_refs:\n  - clients/acme/dashboard.md\n---\n\
+         # Engagement\n[[partners/beta]]\n",
+    );
+    // Still never scanned.
+    write_knowledge_fixture(
+        wiki.path(),
+        "agents/recruiting/candidate.md",
+        "---\ntitle: Candidate Dossier\n---\n# Personal contact details\n",
+    );
+
+    let (_storage_dir, app, _controller, _storage) =
+        setup_isolated_test_app_with_controller().await;
+
+    let graph_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(graph_response.status(), StatusCode::OK);
+    let graph = read_json_body(graph_response).await;
+    let nodes = graph["nodes"].as_array().unwrap();
+    let node_ids: std::collections::HashSet<_> = nodes
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+
+    for expected in [
+        "clients/acme/dashboard",
+        "partners/beta",
+        "vendors/gamma",
+        "operations/runbook",
+        "patterns/engagement",
+    ] {
+        assert!(node_ids.contains(expected), "missing node {expected}");
+    }
+    assert!(!node_ids.iter().any(|id| id.starts_with("agents/")));
+    assert!(!graph["truncated"].as_bool().unwrap());
+
+    let dashboard = nodes
+        .iter()
+        .find(|node| node["id"] == "clients/acme/dashboard")
+        .expect("nested client dashboard node");
+    assert_eq!(dashboard["title"], "Acme Dashboard");
+    assert_eq!(dashboard["folder"], "clients");
+    assert_eq!(dashboard["path"], "clients/acme/dashboard.md");
+    assert_eq!(dashboard["last_updated"], "2026-07-18");
+    // Two inbound (patterns cross_ref, operations from) and two outbound (partner, vendor).
+    assert_eq!(dashboard["in_degree"], 2);
+    assert_eq!(dashboard["out_degree"], 2);
+
+    let edges = graph["edges"].as_array().unwrap();
+    let has_edge = |source: &str, target: &str, kind: &str| {
+        edges.iter().any(|edge| {
+            edge["source"] == source && edge["target"] == target && edge["kind"] == kind
+        })
+    };
+    // Entity <-> entity, resolved by title and by explicit nested path.
+    assert!(has_edge(
+        "clients/acme/dashboard",
+        "partners/beta",
+        "wikilink"
+    ));
+    assert!(has_edge(
+        "clients/acme/dashboard",
+        "vendors/gamma",
+        "wikilink"
+    ));
+    // Operational -> entity: the cross-half edges that join the two halves of the graph.
+    assert!(has_edge(
+        "patterns/engagement",
+        "clients/acme/dashboard",
+        "cross_ref"
+    ));
+    assert!(has_edge("patterns/engagement", "partners/beta", "wikilink"));
+    // A parent-relative hint into an entity root now resolves (it did not before #158).
+    assert!(has_edge(
+        "operations/runbook",
+        "clients/acme/dashboard",
+        "from"
+    ));
+    assert!(edges.iter().all(|edge| {
+        edge["source"]
+            .as_str()
+            .is_some_and(|id| node_ids.contains(id))
+            && edge["target"]
+                .as_str()
+                .is_some_and(|id| node_ids.contains(id))
+    }));
+
+    let page_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/page?id=clients%2Facme%2Fdashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page_response.status(), StatusCode::OK);
+    let page = read_json_body(page_response).await;
+    assert_eq!(page["id"], "clients/acme/dashboard");
+    assert_eq!(page["path"], "clients/acme/dashboard.md");
+    assert_eq!(page["folder"], "clients");
+    assert!(page["content"].as_str().unwrap().contains("# Acme"));
+    assert!(!page["content"].as_str().unwrap().contains("title: Acme"));
+
+    // The never-allow-listed folder stays unreachable through the preview path too.
+    let agents_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/page?id=agents%2Frecruiting%2Fcandidate")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(agents_response.status(), StatusCode::BAD_REQUEST);
+
+    // No absolute filesystem path may appear in any response body. Compare against both the raw
+    // path and its JSON-escaped form -- on Windows the raw backslashes are re-escaped on the wire,
+    // so a raw-only check would miss a real leak.
+    let wiki_display = wiki.path().to_string_lossy().to_string();
+    let wiki_json_escaped = serde_json::to_string(&wiki_display)
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+    for body in [
+        serde_json::to_string(&graph).unwrap(),
+        serde_json::to_string(&page).unwrap(),
+    ] {
+        assert!(!body.contains(&wiki_display), "leaked wiki path: {body}");
+        assert!(
+            !body.contains(&wiki_json_escaped),
+            "leaked escaped wiki path: {body}"
+        );
+        assert!(!body.contains("Candidate Dossier"));
+    }
+}
+
+/// The operator-narrowing *wiring*, end to end: `knowledge_wiki_folders` in the persisted config
+/// must actually reach `scan_knowledge` / `preview_knowledge_page` via the HTTP handlers.
+///
+/// Every other narrowing test calls the pure `resolve_wiki_folders_from` directly and hands its
+/// result straight to the scanner, which bypasses `resolve_wiki_folders(state)` — the sole call
+/// site that reads config. Gutting that function to `WIKI_FOLDERS.to_vec()` left the whole suite
+/// green while silently defeating the narrowing an operator configured for privacy, so an operator
+/// who set `["patterns"]` to keep client/partner/vendor pages out of the Atlas would still get all
+/// seven folders scanned and rendered. This test is the one that goes red.
+#[tokio::test]
+async fn test_knowledge_operator_folder_narrowing_reaches_graph_and_page_endpoints() {
+    let _environment_lock = KNOWLEDGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let wiki = TempDir::new().unwrap();
+    let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", wiki.path());
+
+    write_knowledge_fixture(
+        wiki.path(),
+        "patterns/kept.md",
+        "---\ntitle: Kept Pattern\n---\n# Kept pattern body\n",
+    );
+    // Both excluded folders are *allow-listed* in the compiled-in `WIKI_FOLDERS`. That is the point:
+    // their absence below can only come from operator config, so the assertions cannot pass
+    // vacuously the way they would against a never-allow-listed folder like `agents/`.
+    write_knowledge_fixture(
+        wiki.path(),
+        "clients/acme/dashboard.md",
+        "---\ntitle: Acme Client Dashboard\n---\n# Confidential client engagement\n",
+    );
+    write_knowledge_fixture(
+        wiki.path(),
+        "vendors/gamma.md",
+        "---\ntitle: Gamma Vendor\n---\n# Vendor contract terms\n",
+    );
+
+    let (_storage_dir, app) = setup_isolated_test_app_with_config(|config| {
+        config.knowledge_wiki_folders = Some(vec!["patterns".to_string()]);
+    })
+    .await;
+
+    let graph_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(graph_response.status(), StatusCode::OK);
+    let graph = read_json_body(graph_response).await;
+    let node_ids: std::collections::HashSet<_> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+
+    assert!(
+        node_ids.contains("patterns/kept"),
+        "the configured folder must still be scanned, got {node_ids:?}"
+    );
+    for excluded in ["clients/acme/dashboard", "vendors/gamma"] {
+        assert!(
+            !node_ids.contains(excluded),
+            "config narrowing did not reach the graph endpoint; {excluded} was scanned anyway \
+             (nodes: {node_ids:?})"
+        );
+    }
+
+    // The narrowed-out page must not be previewable either. It 404s rather than 400s because ID
+    // validation stays on the compiled-in superset by design, so the status code does not leak
+    // which folders the operator switched off.
+    let excluded_page_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/page?id=clients%2Facme%2Fdashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(excluded_page_response.status(), StatusCode::NOT_FOUND);
+    let excluded_body = axum::body::to_bytes(excluded_page_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let excluded_body = String::from_utf8_lossy(&excluded_body);
+    assert!(
+        !excluded_body.contains("Confidential client engagement"),
+        "narrowed-out page leaked its content: {excluded_body}"
+    );
+
+    // Control: the configured folder is still fully readable, so the assertions above are about
+    // narrowing rather than a wholesale broken scan.
+    let kept_page_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/page?id=patterns%2Fkept")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept_page_response.status(), StatusCode::OK);
+    let kept_page = read_json_body(kept_page_response).await;
+    assert_eq!(kept_page["id"], "patterns/kept");
+    assert!(kept_page["content"]
+        .as_str()
+        .unwrap()
+        .contains("# Kept pattern body"));
+
+    // Nothing from the narrowed-out folders may appear anywhere in the graph payload either.
+    let graph_body = serde_json::to_string(&graph).unwrap();
+    for leaked in ["Acme Client Dashboard", "Gamma Vendor", "clients/", "vendors/"] {
+        assert!(
+            !graph_body.contains(leaked),
+            "narrowed-out folder leaked {leaked} into the graph: {graph_body}"
+        );
+    }
 }
 
 #[tokio::test]

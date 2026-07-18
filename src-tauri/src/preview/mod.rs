@@ -3,32 +3,289 @@ use tauri::Url;
 #[cfg(not(test))]
 use crate::http::state::AppState;
 #[cfg(not(test))]
-use std::sync::Arc;
+use parking_lot::Mutex;
+#[cfg(not(test))]
+use serde::{Deserialize, Serialize};
+#[cfg(not(test))]
+use std::collections::BTreeMap;
+#[cfg(not(test))]
+use std::path::PathBuf;
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(test))]
+use std::sync::{Arc, OnceLock};
 #[cfg(not(test))]
 use tauri::{
-    webview::NewWindowResponse, AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    webview::NewWindowResponse, AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition,
+    PhysicalSize, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
 #[cfg(not(test))]
 pub const PREVIEW_WINDOW_LABEL: &str = "operator-preview";
+#[cfg(not(test))]
+const MAIN_WINDOW_LABEL: &str = "main";
 const LOCAL_API_PORT: u16 = 18_800;
 const MAIN_DEV_SERVER_PORT: u16 = 1_420;
 
-/// Parse and validate an operator-supplied preview URL before it reaches a webview.
+// ---------------------------------------------------------------------------
+// URL entry (issue #157 §1)
+// ---------------------------------------------------------------------------
+
+/// True when a scheme candidate is spelled like a HOSTNAME rather than a scheme.
+///
+/// This is the tie-breaker for the one genuinely ambiguous input shape,
+/// `word:digits` - which is both a legal RFC 3986 `scheme:opaque` (`tel:12345`)
+/// and the `host:port` an operator types (`localhost:5173`).
+fn looks_like_hostname(candidate: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+
+    // RFC 3986 permits `+` in a scheme (`svn+ssh:`); a hostname never contains
+    // one, so its presence settles the ambiguity in favour of "scheme".
+    if !candidate
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+    {
+        return false;
+    }
+
+    // A dot makes it a multi-label name (`example.com`, `foo.localhost`, the
+    // FQDN-absolute `localhost.`). Single-label names are ambiguous with real
+    // schemes - `tel`, `mailto`, `vscode`, `steam` are all bare words - so only
+    // the well-known local one is accepted. This deliberately gives up on
+    // single-label intranet hosts (`myserver:8080`); typing the scheme is the
+    // documented workaround, and it is the only rule that also rejects
+    // `tel:12345`.
+    //
+    // IP literals need no case of their own here: `has_explicit_scheme` has
+    // already classified anything not starting with an ASCII letter as
+    // scheme-less, which covers IPv4 (`127.0.0.1:3000`, leading digit) and
+    // bracketed IPv6 (`[::1]:8080`, leading `[`).
+    candidate.contains('.') || candidate.eq_ignore_ascii_case("localhost")
+}
+
+/// Returns true when `input` already carries an explicit `scheme:` prefix.
+///
+/// This is a deliberate LEXICAL scan, not a parse. Neither parse success nor
+/// parse failure can classify scheme-less operator input, because it fails in
+/// two opposite ways:
+///   * `Url::parse("localhost:5173")` SUCCEEDS with the bogus scheme `localhost`
+///     and only dies later at the scheme allowlist.
+///   * `Url::parse("127.0.0.1:5173")` FAILS outright.
+/// Only a lexical scan puts both on the same path.
+///
+/// # Security
+///
+/// This must NOT key off `://`. Requiring the double slash classified every
+/// opaque and single-slash scheme as scheme-less, so `normalize_preview_input`
+/// prepended `https://` and the result sailed through the scheme allowlist as
+/// "https" - while the untrusted navigation gate then let wry navigate to the
+/// ORIGINAL string. `vscode:/x`, `steam:/run/1`, `ms-settings:/`, `tel:12345`,
+/// `javascript:0` and `ms-msdt:/id ...` all reached OS protocol handlers that
+/// way, and `http:/localhost:18800` flipped the reserved-API-port guard from
+/// reject to accept (WHATWG accepts any number of slashes after a special
+/// scheme, so the guard saw host `http`, port 443, path `/localhost:18800`).
+///
+/// Accepting any `scheme:` is equally wrong - it re-breaks `localhost:5173`,
+/// which is the entire point of forgiving entry. So a valid scheme prefix wins
+/// UNLESS the input is unambiguously `host:port`:
+///   (a) the body up to the first `/ ? # \` is non-empty and all ASCII digits, and
+///   (b) the scheme candidate is spelled like a hostname ([`looks_like_hostname`]).
+/// `explicit_scheme_detection_requires_a_host_port_shape` regression-locks the
+/// full trace table.
+fn has_explicit_scheme(input: &str) -> bool {
+    let Some(colon) = input.find(':') else {
+        return false;
+    };
+
+    let scheme = &input[..colon];
+
+    // A ':' that appears after a path separator is not a scheme delimiter
+    // (`example.com/a:b`).
+    if scheme.contains(['/', '?', '#', '\\']) {
+        return false;
+    }
+
+    // RFC 3986 scheme grammar: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+    if !scheme
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+    {
+        return false;
+    }
+    if !scheme
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    {
+        return false;
+    }
+
+    // A real scheme. Only the `host:port` shape outranks it.
+    let body = &input[colon + 1..];
+    let port_end = body.find(['/', '?', '#', '\\']).unwrap_or(body.len());
+    let port = &body[..port_end];
+
+    let looks_like_host_port = !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && looks_like_hostname(scheme);
+
+    !looks_like_host_port
+}
+
+/// Extracts the host from scheme-less operator input, purely to choose between
+/// `http` and `https`.
+///
+/// The result is NEVER reassembled back into a URL. See
+/// [`normalize_preview_input`] for why that distinction is load-bearing.
+fn schemeless_host(input: &str) -> &str {
+    let rest = input.strip_prefix("//").unwrap_or(input);
+    let authority_end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+
+    // Any userinfo is stripped so classification looks at the real host; the
+    // credentials themselves are rejected later by `validate_preview_url`.
+    let authority = match authority.rfind('@') {
+        Some(at) => &authority[at + 1..],
+        None => authority,
+    };
+
+    // IPv6 literals are bracketed, and the colons inside them are not port
+    // delimiters.
+    if let Some(after_bracket) = authority.strip_prefix('[') {
+        return match after_bracket.find(']') {
+            Some(end) => &after_bracket[..end],
+            None => after_bracket,
+        };
+    }
+
+    match authority.rfind(':') {
+        // An EMPTY port segment is vacuously all-digits, and stripping it is
+        // what makes `//localhost:/dashboard` classify as localhost-ish. Keeping
+        // the trailing colon yielded the host `localhost:`, which
+        // `is_localhostish_host` trims `.`/`[`/`]` from but not `:` - so the
+        // operator's plain-HTTP dev server was scheme-selected as `https` and
+        // failed the TLS handshake.
+        Some(colon) if authority[colon + 1..].bytes().all(|b| b.is_ascii_digit()) => {
+            &authority[..colon]
+        }
+        _ => authority,
+    }
+}
+
+/// Hosts that should default to `http://` rather than `https://`, because a
+/// local dev server almost never has a certificate.
+fn is_localhostish_host(host: &str) -> bool {
+    // A trailing dot is the FQDN-absolute spelling of the same name.
+    let host = host
+        .trim_end_matches('.')
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+
+    host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+/// Make forgiving operator input parseable: `localhost:5173` becomes
+/// `http://localhost:5173`, `github.com/owner/repo` becomes
+/// `https://github.com/owner/repo`. Input that already has a scheme is returned
+/// unchanged (trimmed).
+///
+/// # Security
+///
+/// When a scheme is missing this performs a PURE STRING PREPEND onto the
+/// trimmed raw input. It must never decompose the input into host + path and
+/// reassemble it. A reassembling normalizer turns `localhost:18800` into
+/// `http://localhost/18800`, which relocates the reserved Hive API port into
+/// the PATH: the parsed port becomes 80/443, the reserved-port check passes,
+/// and the local API is opened as untrusted preview content.
+/// `normalization_never_relocates_the_port` regression-locks this.
+pub(crate) fn normalize_preview_input(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || has_explicit_scheme(trimmed) {
+        return trimmed.to_string();
+    }
+
+    let host = schemeless_host(trimmed);
+    if host.is_empty() {
+        // Path-only input (`/relative/path`, `?q=1`) has no authority to attach a
+        // scheme to. It is returned unchanged so `Url::parse` rejects it. Prepending
+        // anyway would produce `https:///relative/path`, and the WHATWG
+        // "special authority ignore slashes" rule collapses the extra slash and
+        // promotes `relative` to the HOST - silently inventing an origin the
+        // operator never typed.
+        return trimmed.to_string();
+    }
+
+    let scheme = if is_localhostish_host(host) {
+        "http"
+    } else {
+        "https"
+    };
+
+    format!("{scheme}://{trimmed}")
+}
+
+/// Validate an operator-TYPED preview URL: normalize the forgiving entry forms
+/// first, then apply the real rules.
+///
+/// # Security
+///
+/// This is the ONLY entry point permitted to normalize, and the ONLY caller is
+/// the `open_preview_window` command. Normalization is an operator-input
+/// affordance for humans who type `localhost:5173`; it is pure downside anywhere
+/// else. A URL arriving from a live page is already absolute, so prepending a
+/// scheme to it can only ever LAUNDER a scheme the allowlist would otherwise
+/// reject. Keeping the navigation gate on [`validate_preview_url`] - which never
+/// normalizes - retires that whole class of bypass rather than patching its
+/// instances. `the_navigation_gate_never_normalizes` regression-locks it.
+pub(crate) fn validate_operator_preview_input(
+    input: &str,
+    configured_api_port: u16,
+) -> Result<Url, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "Enter a preview URL. The scheme is optional: localhost:5173, \
+             github.com/owner/repo, or https://example.com"
+                .to_string(),
+        );
+    }
+
+    validate_preview_url(&normalize_preview_input(trimmed), configured_api_port)
+}
+
+/// Parse and validate a preview URL before it reaches a webview. The single
+/// source of truth for what preview content is allowed to be.
 ///
 /// Preview content is deliberately limited to ordinary web origins. The local Hive
 /// API is excluded because loading it as the top-level origin would bypass browser
 /// CORS protections for subsequent same-origin requests.
+///
+/// Takes the input EXACTLY as given - see
+/// [`validate_operator_preview_input`] for why normalization is quarantined to
+/// the operator path.
 pub(crate) fn validate_preview_url(input: &str, configured_api_port: u16) -> Result<Url, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err("Enter an http:// or https:// preview URL".to_string());
+        return Err(
+            "Enter a preview URL. The scheme is optional: localhost:5173, \
+             github.com/owner/repo, or https://example.com"
+                .to_string(),
+        );
     }
 
-    let url = Url::parse(trimmed).map_err(|_| "Enter a valid absolute preview URL".to_string())?;
+    let url = Url::parse(trimmed).map_err(|_| {
+        "Enter a valid preview URL, such as localhost:5173, 127.0.0.1:3000/x, \
+         or github.com/owner/repo"
+            .to_string()
+    })?;
 
     if !matches!(url.scheme(), "http" | "https") {
-        return Err("Preview URLs must use http:// or https://".to_string());
+        return Err(
+            "Preview URLs must be http or https. Try localhost:5173 or example.com/path"
+                .to_string(),
+        );
     }
 
     url.host_str()
@@ -61,14 +318,721 @@ fn is_trusted_main_window_origin(url: &Url) -> bool {
         return false;
     };
 
+    // The url crate PRESERVES a trailing FQDN dot, so `tauri.localhost.`,
+    // `localhost.:1420` and even `tauri.localhost..` reach the very same origin
+    // as the bare spellings while comparing unequal to them. Every trailing dot
+    // is folded, matching what `is_localhostish_host` already does.
+    let host = host.trim_end_matches('.');
+
     host.eq_ignore_ascii_case("tauri.localhost")
         || (host.eq_ignore_ascii_case("localhost")
             && url.port_or_known_default() == Some(MAIN_DEV_SERVER_PORT))
 }
 
+/// wry's `on_navigation` gate for UNTRUSTED remote preview content.
+///
+/// # Security
+///
+/// A `true` here lets wry navigate to the ORIGINAL url, so this must call
+/// [`validate_preview_url`] and never
+/// [`validate_operator_preview_input`]. Normalizing a navigation URL cannot
+/// help - it is already absolute - and can only launder a rejected scheme into
+/// an accepted one.
 fn preview_navigation_allowed(url: &Url, configured_api_port: u16) -> bool {
     validate_preview_url(url.as_str(), configured_api_port).is_ok()
 }
+
+// ---------------------------------------------------------------------------
+// Dock geometry (issue #157 §2)
+// ---------------------------------------------------------------------------
+
+/// Mirrors `main.minWidth` in tauri.conf.json. Docking must never ask the main
+/// window for a width the OS will refuse, because the refusal shows up as the
+/// two windows silently overlapping - the exact failure tiling exists to avoid.
+const MAIN_MIN_LOGICAL_WIDTH: f64 = 800.0;
+/// Narrowest useful docked preview column. Also the minimum size temporarily
+/// applied to the preview window while docked: its configured 640 logical
+/// minimum would fight the split on a 1080p display at 150% scale, which only
+/// has 1280 logical px of work area.
+const DOCKED_PREVIEW_MIN_LOGICAL_WIDTH: f64 = 420.0;
+#[cfg(not(test))]
+const DOCKED_PREVIEW_MIN_LOGICAL_HEIGHT: f64 = 360.0;
+/// Mirrors `operator-preview.minWidth` / `minHeight` in tauri.conf.json, so the
+/// constraint relaxed for docking is put back verbatim on undock.
+#[cfg(not(test))]
+const FLOATING_PREVIEW_MIN_LOGICAL_WIDTH: f64 = 640.0;
+#[cfg(not(test))]
+const FLOATING_PREVIEW_MIN_LOGICAL_HEIGHT: f64 = 480.0;
+/// Share of the monitor work area handed to the docked preview.
+const DOCKED_PREVIEW_WIDTH_FRACTION: f64 = 0.40;
+
+/// Split a monitor work area into two flush, non-overlapping columns:
+/// `(main_width, preview_width)` in physical pixels.
+///
+/// The preview width is subtracted from the total rather than computed
+/// independently, so the two columns provably sum to the work area exactly -
+/// no rounding gap, no rounding overlap.
+///
+/// Returns `Err` when the display simply cannot host both windows at their
+/// minimum widths. Refusing is deliberate: a "best effort" split that overlaps
+/// puts a native WebView2 HWND on top of the main window's HTML, and no CSS
+/// `z-index` in the app can ever paint over it.
+fn dock_split(work_area_width: u32, scale_factor: f64) -> Result<(u32, u32), String> {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+
+    let total = f64::from(work_area_width);
+    // Rounded UP so the integer columns below can never land a pixel under the
+    // minimum the OS will actually honour.
+    let main_min = (MAIN_MIN_LOGICAL_WIDTH * scale).ceil() as u32;
+    let preview_min = (DOCKED_PREVIEW_MIN_LOGICAL_WIDTH * scale).ceil() as u32;
+
+    if work_area_width < main_min.saturating_add(preview_min) {
+        return Err(format!(
+            "This display is too narrow to dock the preview beside Hive Manager. \
+             Docking needs about {needed} logical px of work area and this monitor has {have}. \
+             Pop the preview out instead.",
+            needed = (MAIN_MIN_LOGICAL_WIDTH + DOCKED_PREVIEW_MIN_LOGICAL_WIDTH).round() as i64,
+            have = (total / scale).round() as i64,
+        ));
+    }
+
+    // Clamped in integer pixels, then subtracted from the total. Both columns
+    // therefore respect their minimum AND sum to the work area exactly - no
+    // rounding gap, and more importantly no rounding overlap.
+    let preview_width = ((total * DOCKED_PREVIEW_WIDTH_FRACTION).round() as u32)
+        .clamp(preview_min, work_area_width - main_min);
+    let main_width = work_area_width - preview_width;
+
+    Ok((main_width, preview_width))
+}
+
+/// True when `(x, y)` - a window's top-left corner - falls inside one of the
+/// supplied monitor work areas, given as `(x, y, width, height)`.
+///
+/// Guards restoring a remembered position onto a monitor that no longer exists.
+/// A laptop undocked from an external display would otherwise reopen the preview
+/// at coordinates no screen covers, and the operator sees nothing at all.
+fn position_is_on_a_monitor(x: i32, y: i32, work_areas: &[(i32, i32, u32, u32)]) -> bool {
+    work_areas.iter().any(|&(monitor_x, monitor_y, width, height)| {
+        x >= monitor_x
+            && y >= monitor_y
+            && x < monitor_x.saturating_add(width as i32)
+            && y < monitor_y.saturating_add(height as i32)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Preview window runtime (issue #157 §2)
+// ---------------------------------------------------------------------------
+
+/// Emitted to the main window on every allowed preview navigation, so the
+/// address bar can show where in-page navigation actually went.
+#[cfg(not(test))]
+const PREVIEW_NAVIGATED_EVENT: &str = "preview-navigated";
+/// Emitted whenever the preview opens, closes, docks or undocks.
+#[cfg(not(test))]
+const PREVIEW_STATUS_EVENT: &str = "preview-status";
+#[cfg(not(test))]
+const PREVIEW_STATE_FILE: &str = "preview-window-state.json";
+/// Coalescing window for the resize/move storm produced by a window drag.
+#[cfg(not(test))]
+const RETILE_DEBOUNCE_MS: u64 = 60;
+
+/// A window rectangle as persisted between runs.
+///
+/// The position is PHYSICAL (absolute desktop coordinates, so it identifies the
+/// monitor) while the size is LOGICAL (DPI-independent, so restoring onto a
+/// differently scaled monitor preserves apparent size instead of halving or
+/// doubling it).
+#[cfg(not(test))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct WindowGeometry {
+    x: i32,
+    y: i32,
+    width: f64,
+    height: f64,
+}
+
+#[cfg(not(test))]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct PersistedPreviewState {
+    #[serde(default)]
+    docked: bool,
+    #[serde(default)]
+    floating: Option<WindowGeometry>,
+    #[serde(default)]
+    main_restore: Option<WindowGeometry>,
+    #[serde(default)]
+    main_was_maximized: bool,
+    #[serde(default)]
+    session_urls: BTreeMap<String, String>,
+}
+
+#[cfg(not(test))]
+struct PreviewRuntime {
+    path: PathBuf,
+    state: PersistedPreviewState,
+    current_url: Option<String>,
+    events_wired: bool,
+}
+
+#[cfg(not(test))]
+static PREVIEW_RUNTIME: OnceLock<Mutex<PreviewRuntime>> = OnceLock::new();
+#[cfg(not(test))]
+static RETILE_PENDING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(not(test))]
+fn runtime(app_state: &Arc<AppState>) -> &'static Mutex<PreviewRuntime> {
+    PREVIEW_RUNTIME.get_or_init(|| {
+        let path = app_state.storage.base_dir().join(PREVIEW_STATE_FILE);
+        let state = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<PersistedPreviewState>(&raw).ok())
+            .unwrap_or_default();
+        Mutex::new(PreviewRuntime {
+            path,
+            state,
+            current_url: None,
+            events_wired: false,
+        })
+    })
+}
+
+/// Best-effort persistence. A failure here costs the operator a remembered
+/// window position, so it is logged rather than surfaced as a command error.
+#[cfg(not(test))]
+fn persist(runtime: &PreviewRuntime) {
+    let Ok(serialized) = serde_json::to_string_pretty(&runtime.state) else {
+        return;
+    };
+    let temp = runtime.path.with_extension("json.tmp");
+    if let Err(error) = std::fs::write(&temp, serialized) {
+        tracing::warn!("Failed to stage preview window state: {error}");
+        return;
+    }
+    if let Err(error) = std::fs::rename(&temp, &runtime.path) {
+        tracing::warn!("Failed to persist preview window state: {error}");
+        let _ = std::fs::remove_file(&temp);
+    }
+}
+
+/// What the main window needs to render the preview affordance.
+#[cfg(not(test))]
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewStatus {
+    /// The preview window currently exists.
+    open: bool,
+    /// The preview is tiled beside the main window.
+    docked: bool,
+    /// The URL the preview is showing right now.
+    url: Option<String>,
+    /// The last preview URL used for the session the caller asked about.
+    session_url: Option<String>,
+}
+
+#[cfg(not(test))]
+fn status_for(
+    app: &AppHandle,
+    runtime: &PreviewRuntime,
+    session_id: Option<&str>,
+) -> PreviewStatus {
+    let window = app.get_webview_window(PREVIEW_WINDOW_LABEL);
+    let open = window.is_some();
+
+    PreviewStatus {
+        open,
+        docked: open && runtime.state.docked,
+        url: if open {
+            runtime
+                .current_url
+                .clone()
+                .or_else(|| window.and_then(|w| w.url().ok()).map(|u| u.to_string()))
+        } else {
+            None
+        },
+        session_url: session_id.and_then(|id| runtime.state.session_urls.get(id).cloned()),
+    }
+}
+
+#[cfg(not(test))]
+fn emit_status(app: &AppHandle, status: &PreviewStatus) {
+    let _ = app.emit_to(MAIN_WINDOW_LABEL, PREVIEW_STATUS_EVENT, status);
+}
+
+#[cfg(not(test))]
+fn publish_status(
+    app: &AppHandle,
+    app_state: &Arc<AppState>,
+    session_id: Option<&str>,
+) -> PreviewStatus {
+    let status = {
+        let guard = runtime(app_state).lock();
+        status_for(app, &guard, session_id)
+    };
+    emit_status(app, &status);
+    status
+}
+
+#[cfg(not(test))]
+fn require_window(app: &AppHandle, label: &str) -> Result<WebviewWindow, String> {
+    app.get_webview_window(label)
+        .ok_or_else(|| format!("The {label} window is not open"))
+}
+
+#[cfg(not(test))]
+fn read_geometry(window: &WebviewWindow) -> Option<WindowGeometry> {
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    let scale = window.scale_factor().ok()?;
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    Some(WindowGeometry {
+        x: position.x,
+        y: position.y,
+        width: f64::from(size.width) / scale,
+        height: f64::from(size.height) / scale,
+    })
+}
+
+/// Apply a geometry that was remembered from an earlier run, but only if some
+/// monitor still covers its top-left corner. Otherwise the window keeps whatever
+/// position the OS gave it, which is at least visible.
+#[cfg(not(test))]
+fn apply_remembered_geometry(window: &WebviewWindow, geometry: WindowGeometry) {
+    let work_areas: Vec<(i32, i32, u32, u32)> = window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|monitor| {
+            let area = monitor.work_area();
+            (
+                area.position.x,
+                area.position.y,
+                area.size.width,
+                area.size.height,
+            )
+        })
+        .collect();
+
+    if !position_is_on_a_monitor(geometry.x, geometry.y, &work_areas) {
+        tracing::info!(
+            "Ignoring remembered window position ({}, {}): no connected monitor covers it",
+            geometry.x,
+            geometry.y
+        );
+        return;
+    }
+
+    if let Err(error) = apply_geometry(window, geometry) {
+        tracing::warn!("Failed to restore remembered window geometry: {error}");
+    }
+}
+
+#[cfg(not(test))]
+fn apply_geometry(window: &WebviewWindow, geometry: WindowGeometry) -> Result<(), String> {
+    // Position first: the logical size is resolved against the scale factor of
+    // whichever monitor the window is on, so it must land on the target monitor
+    // before the size is applied.
+    window
+        .set_position(PhysicalPosition::new(geometry.x, geometry.y))
+        .map_err(|error| format!("Failed to position window: {error}"))?;
+    window
+        .set_size(LogicalSize::new(geometry.width, geometry.height))
+        .map_err(|error| format!("Failed to resize window: {error}"))
+}
+
+/// Tile the main window and the preview side by side across the current
+/// monitor's work area.
+#[cfg(not(test))]
+fn enter_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), String> {
+    let main = require_window(app, MAIN_WINDOW_LABEL)?;
+    let preview = require_window(app, PREVIEW_WINDOW_LABEL)?;
+
+    let monitor = main
+        .current_monitor()
+        .map_err(|error| format!("Failed to read the current monitor: {error}"))?
+        .or(main
+            .primary_monitor()
+            .map_err(|error| format!("Failed to read the primary monitor: {error}"))?)
+        .ok_or_else(|| "Could not determine which monitor Hive Manager is on".to_string())?;
+
+    let scale = monitor.scale_factor();
+    let work_area = *monitor.work_area();
+
+    // Computed before anything is mutated: a display that cannot host the split
+    // must leave both windows exactly where they were.
+    let (main_width, preview_width) = dock_split(work_area.size.width, scale)?;
+
+    {
+        let mut guard = runtime(app_state).lock();
+        if !guard.state.docked {
+            // Snapshot the floating layout so undock restores it exactly.
+            guard.state.main_was_maximized = main.is_maximized().unwrap_or(false);
+            guard.state.main_restore = read_geometry(&main);
+            if let Some(geometry) = read_geometry(&preview) {
+                guard.state.floating = Some(geometry);
+            }
+        }
+        guard.state.docked = true;
+        persist(&guard);
+    }
+
+    // A maximized window ignores explicit geometry, so drop out of it first.
+    if main.is_maximized().unwrap_or(false) {
+        let _ = main.unmaximize();
+    }
+    if preview.is_maximized().unwrap_or(false) {
+        let _ = preview.unmaximize();
+    }
+    let _ = preview.set_min_size(Some(LogicalSize::new(
+        DOCKED_PREVIEW_MIN_LOGICAL_WIDTH,
+        DOCKED_PREVIEW_MIN_LOGICAL_HEIGHT,
+    )));
+
+    let top = work_area.position.y;
+    let height = work_area.size.height;
+
+    main.set_position(PhysicalPosition::new(work_area.position.x, top))
+        .map_err(|error| format!("Failed to position Hive Manager: {error}"))?;
+    main.set_size(PhysicalSize::new(main_width, height))
+        .map_err(|error| format!("Failed to resize Hive Manager: {error}"))?;
+    preview
+        .set_position(PhysicalPosition::new(
+            work_area.position.x + main_width as i32,
+            top,
+        ))
+        .map_err(|error| format!("Failed to position the preview: {error}"))?;
+    preview
+        .set_size(PhysicalSize::new(preview_width, height))
+        .map_err(|error| format!("Failed to resize the preview: {error}"))?;
+
+    Ok(())
+}
+
+/// Give the main window back the geometry it had before docking. Split out from
+/// [`leave_docked_mode`] because closing a docked preview must also do it -
+/// otherwise Hive Manager is stranded in the left-hand column with nothing
+/// beside it.
+#[cfg(not(test))]
+fn restore_main_window_geometry(
+    app: &AppHandle,
+    app_state: &Arc<AppState>,
+) -> Result<(), String> {
+    let (geometry, was_maximized) = {
+        let mut guard = runtime(app_state).lock();
+        let geometry = guard.state.main_restore.take();
+        let was_maximized = std::mem::take(&mut guard.state.main_was_maximized);
+        persist(&guard);
+        (geometry, was_maximized)
+    };
+
+    let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
+        return Ok(());
+    };
+
+    if was_maximized {
+        main.maximize()
+            .map_err(|error| format!("Failed to restore Hive Manager: {error}"))?;
+    } else if let Some(geometry) = geometry {
+        apply_remembered_geometry(&main, geometry);
+    }
+
+    Ok(())
+}
+
+/// Undo the docked LAYOUT on teardown while keeping the dock PREFERENCE, so the
+/// next open re-tiles.
+///
+/// Both teardown paths funnel through here - the `close_preview_window` command
+/// AND the native titlebar X, which reaches only `WindowEvent::Destroyed`
+/// (there is no `CloseRequested` handler in this crate). Closing a docked
+/// preview with the X used to skip the restore entirely, stranding Hive Manager
+/// in the left-hand column beside empty desktop - and since the emitted
+/// `open: false` hides the dock/pop-out/close cluster, no in-app control was
+/// left to undo it.
+#[cfg(not(test))]
+fn undock_layout_after_teardown(
+    app: &AppHandle,
+    app_state: &Arc<AppState>,
+) -> Result<(), String> {
+    if !runtime(app_state).lock().state.docked {
+        return Ok(());
+    }
+    restore_main_window_geometry(app, app_state)
+}
+
+#[cfg(not(test))]
+fn leave_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), String> {
+    restore_main_window_geometry(app, app_state)?;
+
+    let floating = {
+        let mut guard = runtime(app_state).lock();
+        guard.state.docked = false;
+        persist(&guard);
+        guard.state.floating
+    };
+
+    let Some(preview) = app.get_webview_window(PREVIEW_WINDOW_LABEL) else {
+        return Ok(());
+    };
+
+    let _ = preview.set_min_size(Some(LogicalSize::new(
+        FLOATING_PREVIEW_MIN_LOGICAL_WIDTH,
+        FLOATING_PREVIEW_MIN_LOGICAL_HEIGHT,
+    )));
+
+    if let Some(geometry) = floating {
+        apply_remembered_geometry(&preview, geometry);
+    }
+
+    Ok(())
+}
+
+/// Keep the docked preview flush against the main window after the operator
+/// moves, resizes or DPI-shifts it.
+///
+/// This is a deliberately ONE-WAY follow: the preview tracks the main window and
+/// never the other way round. Resizing the main window here would emit another
+/// `Resized` and recurse.
+#[cfg(not(test))]
+fn follow_docked_preview(app: &AppHandle) -> Result<(), String> {
+    let main = require_window(app, MAIN_WINDOW_LABEL)?;
+    let preview = require_window(app, PREVIEW_WINDOW_LABEL)?;
+
+    let position = main
+        .outer_position()
+        .map_err(|error| format!("Failed to read the Hive Manager position: {error}"))?;
+    let size = main
+        .outer_size()
+        .map_err(|error| format!("Failed to read the Hive Manager size: {error}"))?;
+    let monitor = main
+        .current_monitor()
+        .map_err(|error| format!("Failed to read the current monitor: {error}"))?
+        .ok_or_else(|| "Could not determine which monitor Hive Manager is on".to_string())?;
+
+    let scale = monitor.scale_factor();
+    let work_area = *monitor.work_area();
+
+    let floor = (DOCKED_PREVIEW_MIN_LOGICAL_WIDTH * scale).round() as i32;
+    let work_right = work_area.position.x + work_area.size.width as i32;
+    let main_right = position.x + size.width as i32;
+    let available = work_right - main_right;
+
+    let (x, width) = if available >= floor {
+        (main_right, available)
+    } else {
+        // Degenerate case: the operator widened the main window past the work
+        // area minus the floor. Keep the preview on-screen at its minimum rather
+        // than pushing it off the desktop.
+        (work_right - floor, floor)
+    };
+
+    preview
+        .set_position(PhysicalPosition::new(x, position.y))
+        .map_err(|error| format!("Failed to position the preview: {error}"))?;
+    preview
+        .set_size(PhysicalSize::new(width.max(1) as u32, size.height))
+        .map_err(|error| format!("Failed to resize the preview: {error}"))?;
+
+    Ok(())
+}
+
+/// Wire the window listeners that keep the dock aligned and the persisted
+/// geometry current.
+///
+/// The main-window listener lives for the whole process, so it is installed at
+/// most once. The preview-window listener dies with its window, so it is
+/// re-attached to every preview window - a shared "already wired" flag here
+/// would silently leave a re-opened preview unwatched.
+#[cfg(not(test))]
+fn wire_window_events(app: &AppHandle, app_state: &Arc<AppState>, preview: &WebviewWindow) {
+    let wire_main = {
+        let mut guard = runtime(app_state).lock();
+        let first = !guard.events_wired;
+        guard.events_wired = true;
+        first
+    };
+
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL).filter(|_| wire_main) {
+        let follow_app = app.clone();
+        let follow_state = Arc::clone(app_state);
+        main.on_window_event(move |event| {
+            // `ScaleFactorChanged` is handled alongside `Resized`/`Moved` on
+            // purpose. On a mixed-DPI multi-monitor desktop the main window's
+            // physical rectangle changes when it crosses monitors without a
+            // reliable Moved/Resized pair, and a preview that ignored the DPI
+            // event would drift out of alignment or overlap.
+            if !matches!(
+                event,
+                WindowEvent::Resized(_)
+                    | WindowEvent::Moved(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                return;
+            }
+
+            if !runtime(&follow_state).lock().state.docked {
+                return;
+            }
+
+            // Coalesce the event storm a window drag produces, and get off the
+            // window-event callback before touching window geometry.
+            if RETILE_PENDING.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let retile_app = follow_app.clone();
+            let retile_state = Arc::clone(&follow_state);
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(RETILE_DEBOUNCE_MS)).await;
+                RETILE_PENDING.store(false, Ordering::SeqCst);
+                if !runtime(&retile_state).lock().state.docked {
+                    return;
+                }
+                if let Err(error) = follow_docked_preview(&retile_app) {
+                    tracing::debug!("Preview dock follow skipped: {error}");
+                }
+            });
+        });
+    }
+
+    let preview_app = app.clone();
+    let preview_state = Arc::clone(app_state);
+    preview.on_window_event(move |event| match event {
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+            let Some(window) = preview_app.get_webview_window(PREVIEW_WINDOW_LABEL) else {
+                return;
+            };
+            let Some(geometry) = read_geometry(&window) else {
+                return;
+            };
+            // Held in memory and flushed on close/dock/undock rather than
+            // written on every frame of a drag.
+            let mut guard = runtime(&preview_state).lock();
+            if !guard.state.docked {
+                guard.state.floating = Some(geometry);
+            }
+        }
+        WindowEvent::Destroyed => {
+            let docked = {
+                let mut guard = runtime(&preview_state).lock();
+                guard.current_url = None;
+                persist(&guard);
+                guard.state.docked
+            };
+
+            // The native titlebar X lands here and nowhere else, so this arm
+            // has to mirror `close_preview_window` or a docked close strands
+            // the main window. Same discipline as the retile follow above: get
+            // off the window-event callback before touching window geometry.
+            // Idempotent when the command already restored - the geometry it
+            // takes is gone, so this second pass is a no-op.
+            if docked {
+                let restore_app = preview_app.clone();
+                let restore_state = Arc::clone(&preview_state);
+                tauri::async_runtime::spawn(async move {
+                    let restored = undock_layout_after_teardown(&restore_app, &restore_state);
+                    if let Err(error) = restored {
+                        tracing::warn!(
+                            "Failed to restore Hive Manager after the preview closed: {error}"
+                        );
+                    }
+                });
+            }
+
+            emit_status(
+                &preview_app,
+                &PreviewStatus {
+                    open: false,
+                    docked: false,
+                    url: None,
+                    session_url: None,
+                },
+            );
+        }
+        _ => {}
+    });
+}
+
+#[cfg(not(test))]
+fn create_preview_window(
+    app: &AppHandle,
+    app_state: &Arc<AppState>,
+    url: Url,
+    configured_api_port: u16,
+) -> Result<WebviewWindow, String> {
+    let mut config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == PREVIEW_WINDOW_LABEL)
+        .cloned()
+        .ok_or_else(|| "Preview window configuration is missing".to_string())?;
+    config.url = WebviewUrl::External(url);
+    // Realised hidden so the remembered geometry can be applied before the
+    // operator sees the window at the configured default position.
+    config.visible = false;
+
+    let navigation_app = app.clone();
+    let navigation_state = Arc::clone(app_state);
+
+    let mut builder = WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| format!("Failed to configure preview window: {error}"))?
+        .on_navigation(move |url| {
+            if !preview_navigation_allowed(url, configured_api_port) {
+                return false;
+            }
+            // Address-bar sync: this closure already sees every navigation, so
+            // the main window is told where in-page navigation actually went.
+            let current = url.to_string();
+            runtime(&navigation_state).lock().current_url = Some(current.clone());
+            let _ = navigation_app.emit_to(
+                MAIN_WINDOW_LABEL,
+                PREVIEW_NAVIGATED_EVENT,
+                serde_json::json!({ "url": current }),
+            );
+            true
+        })
+        .on_new_window(|_, _| NewWindowResponse::Deny);
+
+    // Owner semantics rather than a child webview. Verified against the
+    // `WebviewWindowBuilder::parent` doc contract in tauri 2.10.1: on Windows the
+    // parent is set as the OWNER window, so the preview stays above Hive Manager
+    // in the z-order, is destroyed automatically when Hive Manager closes, and is
+    // hidden when Hive Manager minimizes. No `unstable` cargo feature, no child
+    // webview, and no widening of the capability boundary.
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        builder = builder
+            .parent(&main)
+            .map_err(|error| format!("Failed to parent the preview window: {error}"))?;
+    }
+
+    let window = builder
+        .build()
+        .map_err(|error| format!("Failed to open preview window: {error}"))?;
+
+    wire_window_events(app, app_state, &window);
+
+    let floating = { runtime(app_state).lock().state.floating };
+    if let Some(geometry) = floating {
+        apply_remembered_geometry(&window, geometry);
+    }
+
+    window
+        .show()
+        .map_err(|error| format!("Failed to show preview window: {error}"))?;
+
+    Ok(window)
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
 
 /// Open the operator preview, or navigate and focus the existing preview window.
 ///
@@ -81,9 +1045,24 @@ pub async fn open_preview_window(
     app: AppHandle,
     app_state: State<'_, Arc<AppState>>,
     url: String,
-) -> Result<(), String> {
+    session_id: Option<String>,
+) -> Result<PreviewStatus, String> {
     let configured_api_port = app_state.config.read().await.api.port;
-    let url = validate_preview_url(&url, configured_api_port)?;
+    // The one and only normalizing entry point: this URL was typed by a human.
+    let url = validate_operator_preview_input(&url, configured_api_port)?;
+    let state = Arc::clone(app_state.inner());
+
+    {
+        let mut guard = runtime(&state).lock();
+        guard.current_url = Some(url.to_string());
+        if let Some(session_id) = session_id.as_deref() {
+            guard
+                .state
+                .session_urls
+                .insert(session_id.to_string(), url.to_string());
+        }
+        persist(&guard);
+    }
 
     if let Some(window) = app.get_webview_window(PREVIEW_WINDOW_LABEL) {
         window
@@ -98,39 +1077,153 @@ pub async fn open_preview_window(
         window
             .set_focus()
             .map_err(|error| format!("Failed to focus preview window: {error}"))?;
-        return Ok(());
+    } else {
+        let window = create_preview_window(&app, &state, url, configured_api_port)?;
+
+        // The persisted dock preference survives across opens, so a freshly
+        // created window re-tiles itself. A display that can no longer host the
+        // split downgrades to floating instead of failing the open.
+        if runtime(&state).lock().state.docked {
+            if let Err(error) = enter_docked_mode(&app, &state) {
+                tracing::warn!("Preview opened floating instead of docked: {error}");
+                let mut guard = runtime(&state).lock();
+                guard.state.docked = false;
+                persist(&guard);
+            }
+        }
+
+        window
+            .set_focus()
+            .map_err(|error| format!("Failed to focus preview window: {error}"))?;
     }
 
-    let mut config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|config| config.label == PREVIEW_WINDOW_LABEL)
-        .cloned()
-        .ok_or_else(|| "Preview window configuration is missing".to_string())?;
-    config.url = WebviewUrl::External(url);
+    Ok(publish_status(&app, &state, session_id.as_deref()))
+}
 
-    let window = WebviewWindowBuilder::from_config(&app, &config)
-        .map_err(|error| format!("Failed to configure preview window: {error}"))?
-        .on_navigation(move |url| preview_navigation_allowed(url, configured_api_port))
-        .on_new_window(|_, _| NewWindowResponse::Deny)
-        .build()
-        .map_err(|error| format!("Failed to open preview window: {error}"))?;
+/// Current preview state, plus the last URL used for `session_id` if the caller
+/// supplies one. Lets the main window prefill its address bar per session.
+#[cfg(not(test))]
+#[tauri::command]
+pub async fn get_preview_status(
+    app: AppHandle,
+    app_state: State<'_, Arc<AppState>>,
+    session_id: Option<String>,
+) -> Result<PreviewStatus, String> {
+    let state = Arc::clone(app_state.inner());
+    let guard = runtime(&state).lock();
+    Ok(status_for(&app, &guard, session_id.as_deref()))
+}
 
-    window
-        .set_focus()
-        .map_err(|error| format!("Failed to focus preview window: {error}"))?;
-    Ok(())
+/// Tile the preview beside the main window.
+#[cfg(not(test))]
+#[tauri::command]
+pub async fn dock_preview_window(
+    app: AppHandle,
+    app_state: State<'_, Arc<AppState>>,
+    session_id: Option<String>,
+) -> Result<PreviewStatus, String> {
+    let state = Arc::clone(app_state.inner());
+    enter_docked_mode(&app, &state)?;
+    Ok(publish_status(&app, &state, session_id.as_deref()))
+}
+
+/// Return the preview to a free-floating window at its remembered geometry, and
+/// give the main window back the size it had before docking.
+#[cfg(not(test))]
+#[tauri::command]
+pub async fn undock_preview_window(
+    app: AppHandle,
+    app_state: State<'_, Arc<AppState>>,
+    session_id: Option<String>,
+) -> Result<PreviewStatus, String> {
+    let state = Arc::clone(app_state.inner());
+    leave_docked_mode(&app, &state)?;
+    Ok(publish_status(&app, &state, session_id.as_deref()))
+}
+
+/// Reload whatever the preview is currently showing.
+#[cfg(not(test))]
+#[tauri::command]
+pub async fn reload_preview_window(app: AppHandle) -> Result<(), String> {
+    require_window(&app, PREVIEW_WINDOW_LABEL)?
+        .reload()
+        .map_err(|error| format!("Failed to reload the preview: {error}"))
+}
+
+/// Close the preview window, persisting its geometry first.
+#[cfg(not(test))]
+#[tauri::command]
+pub async fn close_preview_window(
+    app: AppHandle,
+    app_state: State<'_, Arc<AppState>>,
+    session_id: Option<String>,
+) -> Result<PreviewStatus, String> {
+    let state = Arc::clone(app_state.inner());
+
+    if let Some(window) = app.get_webview_window(PREVIEW_WINDOW_LABEL) {
+        {
+            let mut guard = runtime(&state).lock();
+            if !guard.state.docked {
+                if let Some(geometry) = read_geometry(&window) {
+                    guard.state.floating = Some(geometry);
+                }
+            }
+        }
+
+        // The dock *preference* survives the close (so the next open re-tiles);
+        // only the layout is undone here. Shared with the `Destroyed` arm so the
+        // titlebar X cannot diverge from this command.
+        undock_layout_after_teardown(&app, &state)?;
+
+        window
+            .destroy()
+            .map_err(|error| format!("Failed to close preview window: {error}"))?;
+    }
+
+    {
+        let mut guard = runtime(&state).lock();
+        guard.current_url = None;
+        persist(&guard);
+    }
+
+    Ok(publish_status(&app, &state, session_id.as_deref()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The operator-typed path: normalization THEN the rules.
     fn validate(input: &str) -> Result<Url, String> {
-        validate_preview_url(input, LOCAL_API_PORT)
+        validate_operator_preview_input(input, LOCAL_API_PORT)
     }
+
+    /// The untrusted navigation gate: the rules, and nothing but the rules.
+    fn navigable(input: &str) -> bool {
+        let url = Url::parse(input)
+            .unwrap_or_else(|error| panic!("{input:?} should parse as a URL, got {error:?}"));
+        preview_navigation_allowed(&url, LOCAL_API_PORT)
+    }
+
+    /// Every scheme verified to reach an OS protocol handler through the
+    /// `://`-only scheme test. `ms-msdt:` is the Follina launcher.
+    const OS_PROTOCOL_HANDLER_URLS: &[&str] = &[
+        "vscode:/x",
+        "steam:/run/1",
+        "ms-settings:/",
+        "javascript:0",
+        "tel:12345",
+        "ms-msdt:/id PCWDiagnostic /skip force /param IT_LaunchMethod=ContextMenu",
+    ];
+
+    /// Reserved-API-port spellings WHATWG special-scheme parsing accepts.
+    const SLASH_VARIANT_API_PORT_URLS: &[&str] = &[
+        "http:/localhost:18800",
+        "https:/localhost:18800",
+        r"http:\\localhost:18800",
+        r"http:/\localhost:18800",
+        "http:/127.0.0.1:18800",
+    ];
 
     #[test]
     fn accepts_http_and_https_urls_with_hosts() {
@@ -239,5 +1332,546 @@ mod tests {
             LOCAL_API_PORT
         ));
         assert!(!preview_navigation_allowed(&blocked_api, LOCAL_API_PORT));
+    }
+
+    /// Architectural lock for finding 1: the untrusted navigation gate must
+    /// never normalize.
+    ///
+    /// A `true` from `preview_navigation_allowed` lets wry navigate to the
+    /// ORIGINAL url, so any scheme the gate accepts is a scheme a page inside
+    /// the preview can reach - including OS protocol handlers. This asserts on
+    /// the gate itself rather than on `has_explicit_scheme`, so the gate cannot
+    /// regain normalization even if the lexical scan is rewritten again.
+    #[test]
+    fn the_navigation_gate_never_normalizes() {
+        for input in OS_PROTOCOL_HANDLER_URLS {
+            assert!(
+                !navigable(input),
+                "{input:?} reaches an OS protocol handler and must be denied \
+                 by the navigation gate"
+            );
+            assert!(
+                validate_preview_url(input, LOCAL_API_PORT).is_err(),
+                "{input:?} must be rejected by the rules themselves"
+            );
+        }
+
+        // The operator path normalizes, but must reach the same verdict.
+        for input in OS_PROTOCOL_HANDLER_URLS {
+            assert!(
+                validate(input).is_err(),
+                "{input:?} must be rejected on the operator path too"
+            );
+        }
+
+        // The sharp end of Layer 1, and the part that does NOT depend on the
+        // lexical scan being right. These genuinely ARE the `host:port` shape,
+        // so the operator path is correct to normalize them - but arriving at
+        // the gate the very same text is a real scheme with an opaque body, and
+        // a `true` there sends wry to the ORIGINAL string and into whatever
+        // handler owns `com.evil.app:`. The two paths must disagree here.
+        for input in ["localhost:5173", "example.com:80", "com.evil.app:12345"] {
+            let parsed = Url::parse(input)
+                .unwrap_or_else(|error| panic!("{input:?} should parse, got {error:?}"));
+            assert_eq!(
+                parsed.as_str(),
+                input,
+                "sanity: {input:?} reaches the gate as a scheme, unmodified"
+            );
+            assert!(
+                !navigable(input),
+                "{input:?} must be denied by the gate - normalizing there would \
+                 launder a custom scheme into https and navigate to the original"
+            );
+            assert!(
+                validate(input).is_ok(),
+                "{input:?} is exactly the forgiving entry an operator types, \
+                 and must still work on the operator path"
+            );
+        }
+
+        // Sanity: the gate still passes ordinary web content.
+        assert!(navigable("https://example.com/next"));
+        assert!(navigable("http://localhost:5173/dashboard"));
+    }
+
+    /// Regression lock for finding 2.
+    ///
+    /// `Url::parse` implements WHATWG special-scheme parsing and accepts a
+    /// scheme followed by zero, one or many `/` or `\`. Under the `://` scheme
+    /// test `http:/localhost:18800` was classified scheme-less, became
+    /// `https://http:/localhost:18800` (host `http`, port 443, path
+    /// `/localhost:18800`), and the reserved-API-port guard flipped from reject
+    /// to accept.
+    #[test]
+    fn slash_variant_spellings_still_hit_the_reserved_api_port() {
+        for input in SLASH_VARIANT_API_PORT_URLS {
+            // Whatever the slashes, this really is the Hive API origin.
+            let parsed = Url::parse(input)
+                .unwrap_or_else(|error| panic!("{input:?} should parse, got {error:?}"));
+            assert_eq!(
+                parsed.port_or_known_default(),
+                Some(LOCAL_API_PORT),
+                "sanity: {input:?} really does resolve to the reserved API port"
+            );
+
+            assert!(!navigable(input), "{input:?} must be denied by the gate");
+            assert!(
+                validate(input).is_err(),
+                "{input:?} must be rejected on the operator path"
+            );
+        }
+
+        // Same trick against the trusted app origin rather than the API port.
+        assert!(!navigable("http:/tauri.localhost"));
+        assert!(validate("http:/tauri.localhost").is_err());
+
+        // And the plain spellings are unchanged.
+        assert!(validate("http://localhost:18800").is_err());
+        assert!(!navigable("http://localhost:18800"));
+    }
+
+    /// Regression lock for finding 3.
+    ///
+    /// The url crate PRESERVES a trailing FQDN dot, so these spellings reach the
+    /// very same origin as the bare ones while comparing unequal to them.
+    #[test]
+    fn trusted_main_window_origin_folds_trailing_fqdn_dots() {
+        for input in [
+            "http://tauri.localhost.",
+            "https://tauri.localhost./app",
+            "http://tauri.localhost..",
+            "http://localhost.:1420",
+            "http://LOCALHOST.:1420",
+            "http://localhost..:1420",
+        ] {
+            let url = Url::parse(input)
+                .unwrap_or_else(|error| panic!("{input:?} should parse, got {error:?}"));
+            assert!(
+                is_trusted_main_window_origin(&url),
+                "{input:?} is the trusted app origin in FQDN-absolute spelling"
+            );
+            assert!(
+                validate(input).is_err(),
+                "{input:?} should be rejected on the operator path"
+            );
+            assert!(!navigable(input), "{input:?} should be denied by the gate");
+        }
+
+        // Sanity: the dot really is preserved, which is what made this a bypass.
+        assert_eq!(
+            Url::parse("http://tauri.localhost.").unwrap().host_str(),
+            Some("tauri.localhost."),
+            "sanity: the url crate keeps the trailing dot"
+        );
+
+        // Folding dots must not over-match: the dev-server port still gates the
+        // bare `localhost` case, and unrelated hosts stay allowed.
+        assert!(validate("http://localhost.:5173").is_ok());
+        assert!(validate("http://127.0.0.1:1420").is_ok());
+    }
+
+    // -- issue #157 §1: forgiving URL entry ---------------------------------
+
+    #[test]
+    fn scheme_detection_is_lexical_not_parse_based() {
+        // Parses successfully with the bogus scheme `localhost`.
+        assert!(!has_explicit_scheme("localhost:5173"));
+        // Fails to parse outright.
+        assert!(!has_explicit_scheme("127.0.0.1:5173"));
+        assert!(!has_explicit_scheme("[::1]:5173"));
+        assert!(!has_explicit_scheme("example.com"));
+        assert!(!has_explicit_scheme("//localhost:3000/api"));
+        // A `:` after a path separator is not a scheme delimiter.
+        assert!(!has_explicit_scheme("example.com/a:b//c"));
+
+        assert!(has_explicit_scheme("http://example.com"));
+        assert!(has_explicit_scheme("HTTPS://example.com"));
+        assert!(has_explicit_scheme("file:///tmp/x"));
+        assert!(has_explicit_scheme("ftp://example.com"));
+        assert!(has_explicit_scheme("x+y-z.1://example.com"));
+    }
+
+    /// Regression lock for the `://` scheme test (findings 1 and 2).
+    ///
+    /// Requiring a double slash classified every opaque and single-slash scheme
+    /// as SCHEME-LESS, so `https://` was prepended and the result passed the
+    /// allowlist as "https". Accepting any `scheme:` instead would re-break
+    /// `localhost:5173`. A scheme prefix therefore wins unless the input is
+    /// unambiguously `host:port`. This is the full trace table.
+    #[test]
+    fn explicit_scheme_detection_requires_a_host_port_shape() {
+        // SCHEME-LESS: the forgiving `host:port` entry the feature exists for.
+        for input in [
+            "localhost:5173",     // known local single-label name
+            "LOCALHOST:18800",    // ... case-insensitively
+            "localhost.:18800",   // ... and its FQDN-absolute spelling
+            "127.0.0.1:3000/x",   // IPv4: caught by the leading-digit guard
+            "[::1]:8080",         // IPv6: caught by the leading-`[` guard
+            "example.com:80",     // multi-label name
+            "foo.localhost:3000", //
+            "example.com:8443/path?q=1#frag",
+            "github.com/rdfitted/hive-manager", // no colon at all
+            "//localhost:18800/api",            // `/` inside the scheme candidate
+        ] {
+            assert!(
+                !has_explicit_scheme(input),
+                "{input:?} is operator `host:port` entry and must be scheme-less"
+            );
+        }
+
+        // EXPLICIT: a real scheme, handed to `Url::parse` untouched so the
+        // allowlist can reject it.
+        for input in [
+            "about:blank",
+            "javascript:alert(1)",
+            "javascript:0",   // digit body, but `javascript` is not a hostname
+            "tel:12345",      // the shape that forbids "any `scheme:` is explicit"
+            "mailto:1",       //
+            "svn+ssh:22",     // `+` is legal in a scheme, never in a hostname
+            "vscode:/x",      // non-digit body
+            "ms-settings:/",  // empty body
+            "steam:/run/1",   //
+            "data:text/html,<h1>x</h1>",
+            "file:///tmp/x",
+            "http://localhost:18800",
+        ] {
+            assert!(
+                has_explicit_scheme(input),
+                "{input:?} carries a real scheme and must NOT be normalized"
+            );
+        }
+
+        for input in OS_PROTOCOL_HANDLER_URLS.iter().chain(SLASH_VARIANT_API_PORT_URLS) {
+            assert!(
+                has_explicit_scheme(input),
+                "{input:?} carries a real scheme and must NOT be normalized"
+            );
+        }
+    }
+
+    #[test]
+    fn scheme_less_input_opens_with_the_right_scheme() {
+        for (input, expected) in [
+            ("localhost:5173", "http://localhost:5173/"),
+            ("127.0.0.1:3000/x", "http://127.0.0.1:3000/x"),
+            (
+                "github.com/rdfitted/hive-manager",
+                "https://github.com/rdfitted/hive-manager",
+            ),
+            ("[::1]:8080", "http://[::1]:8080/"),
+            ("foo.localhost:3000", "http://foo.localhost:3000/"),
+        ] {
+            let url = validate(input)
+                .unwrap_or_else(|error| panic!("{input:?} should validate, got {error:?}"));
+            assert_eq!(url.as_str(), expected, "wrong normalization for {input:?}");
+        }
+    }
+
+    #[test]
+    fn scheme_less_input_still_hits_every_rejection() {
+        for input in [
+            // Reserved Hive API port, in every spelling that reaches it.
+            "localhost:18800",
+            "127.0.0.1:18800",
+            "LOCALHOST:18800",
+            "//localhost:18800/api",
+            "localhost:18800/api/health",
+            "localhost.:18800",
+            // Origins reserved for the trusted main window.
+            "tauri.localhost",
+            "localhost:1420",
+        ] {
+            assert!(
+                validate(input).is_err(),
+                "{input:?} should be rejected after normalization"
+            );
+        }
+    }
+
+    /// Regression lock for a real bypass.
+    ///
+    /// A normalizer that decomposes input into host + path and reassembles it
+    /// turns `localhost:18800` into `http://localhost/18800`: the reserved port
+    /// moves into the PATH, `port_or_known_default()` returns 80, and the local
+    /// Hive API sails through validation. The only safe implementation is a
+    /// string prepend onto the trimmed raw input.
+    #[test]
+    fn normalization_never_relocates_the_port() {
+        for (input, scheme) in [
+            ("localhost:18800", "http"),
+            ("localhost:5173", "http"),
+            ("127.0.0.1:3000/x", "http"),
+            ("[::1]:8080", "http"),
+            ("foo.localhost:3000", "http"),
+            ("example.com:8443/path?q=1#frag", "https"),
+            ("github.com/rdfitted/hive-manager", "https"),
+            ("//localhost:18800/api", "http"),
+        ] {
+            let normalized = normalize_preview_input(input);
+            assert_eq!(
+                normalized,
+                format!("{scheme}://{input}"),
+                "normalization of {input:?} must be a pure prefix of the raw input"
+            );
+            assert!(
+                normalized.ends_with(input),
+                "normalization of {input:?} rewrote the input body"
+            );
+        }
+
+        // The specific shape of the bypass, named so a future refactor that
+        // reintroduces it fails here with an obvious message.
+        assert_ne!(
+            normalize_preview_input("localhost:18800"),
+            "http://localhost/18800",
+            "the reserved API port was relocated from the authority into the path"
+        );
+        assert_eq!(
+            Url::parse("http://localhost/18800")
+                .unwrap()
+                .port_or_known_default(),
+            Some(80),
+            "sanity: the bypass shape really does present as port 80"
+        );
+    }
+
+    #[test]
+    fn normalization_leaves_scheme_bearing_input_alone() {
+        for input in [
+            "http://localhost:5173/x",
+            "https://github.com/acme/repo",
+            "file:///tmp/index.html",
+            "ftp://example.com/file",
+        ] {
+            assert_eq!(normalize_preview_input(input), input);
+        }
+        assert_eq!(
+            normalize_preview_input("  https://example.com/x  "),
+            "https://example.com/x"
+        );
+        assert_eq!(normalize_preview_input("   "), "");
+    }
+
+    /// Path-only input must stay path-only.
+    ///
+    /// `https:///relative/path` is NOT hostless once parsed: the WHATWG
+    /// "special authority ignore slashes" rule eats the extra slash and promotes
+    /// `relative` to the host, so a naive prepend would turn a clearly invalid
+    /// entry into a live navigation to `https://relative/path`.
+    #[test]
+    fn normalization_refuses_to_invent_a_host_for_path_only_input() {
+        for input in ["/relative/path", "///a/b", "?q=1", "#frag", "//"] {
+            assert_eq!(
+                normalize_preview_input(input),
+                input,
+                "{input:?} has no authority and must not be given a scheme"
+            );
+            assert!(validate(input).is_err(), "{input:?} should be rejected");
+        }
+
+        // Contrast: protocol-relative input DOES carry an authority, and the
+        // pure prepend leaves the redundant slashes for `Url::parse` to collapse.
+        assert_eq!(
+            normalize_preview_input("//example.com/x"),
+            "https:////example.com/x"
+        );
+        assert_eq!(
+            validate("//example.com/x").unwrap().as_str(),
+            "https://example.com/x"
+        );
+    }
+
+    #[test]
+    fn localhost_classification_covers_the_documented_host_forms() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "localhost.",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "foo.localhost",
+            "a.b.LOCALHOST",
+        ] {
+            assert!(is_localhostish_host(host), "{host:?} should be localhost-ish");
+        }
+
+        for host in [
+            "example.com",
+            "localhost.example.com",
+            "notlocalhost",
+            "127.0.0.2",
+            "",
+        ] {
+            assert!(
+                !is_localhostish_host(host),
+                "{host:?} should not be localhost-ish"
+            );
+        }
+    }
+
+    #[test]
+    fn schemeless_host_extraction_handles_ports_paths_and_ipv6() {
+        assert_eq!(schemeless_host("localhost:5173"), "localhost");
+        assert_eq!(schemeless_host("127.0.0.1:3000/x"), "127.0.0.1");
+        assert_eq!(schemeless_host("github.com/a/b?c#d"), "github.com");
+        assert_eq!(schemeless_host("[::1]:8080"), "::1");
+        assert_eq!(schemeless_host("[::1]"), "::1");
+        assert_eq!(schemeless_host("//localhost:18800/api"), "localhost");
+        assert_eq!(schemeless_host("user:pass@example.com:8080"), "example.com");
+        // A non-numeric suffix is not a port, so it is left attached and simply
+        // fails to classify as localhost-ish.
+        assert_eq!(schemeless_host("data:text/html,x"), "data:text");
+    }
+
+    /// Regression lock for finding 4.
+    ///
+    /// The port-strip branch used to require a NON-EMPTY port segment, so an
+    /// authority with an empty port kept its trailing colon: `localhost:` is not
+    /// recognised by `is_localhostish_host` (which trims `.`, `[` and `]`, but
+    /// not `:`), so the operator's plain-HTTP dev server was scheme-selected as
+    /// `https` and died on the TLS handshake.
+    #[test]
+    fn schemeless_host_strips_an_empty_port_segment() {
+        assert_eq!(schemeless_host("localhost:/dashboard"), "localhost");
+        assert_eq!(schemeless_host("localhost:"), "localhost");
+        assert_eq!(schemeless_host("//localhost:/dashboard"), "localhost");
+        assert_eq!(schemeless_host("user@localhost:/x"), "localhost");
+        assert_eq!(schemeless_host("127.0.0.1:?q=1"), "127.0.0.1");
+
+        // ... and the stripped host now classifies, so the scheme is `http`.
+        for input in ["//localhost:/dashboard", "//127.0.0.1:/x"] {
+            let normalized = normalize_preview_input(input);
+            assert!(
+                normalized.starts_with("http://"),
+                "{input:?} is a local dev server and must not be given https, \
+                 got {normalized:?}"
+            );
+        }
+
+        // The empty port is NOT the `host:port` shape, so `localhost:/dashboard`
+        // is an EXPLICIT `localhost:` scheme and is rejected outright rather
+        // than silently navigated to a TLS failure. Pinned so the interaction
+        // with `has_explicit_scheme` stays deliberate.
+        assert!(has_explicit_scheme("localhost:/dashboard"));
+        assert!(validate("localhost:/dashboard").is_err());
+    }
+
+    /// Regression lock for finding 5.
+    ///
+    /// `restore_main_window_geometry` was reachable only from
+    /// `leave_docked_mode` and the `close_preview_window` command. There is no
+    /// `CloseRequested` handler in this crate, so closing a DOCKED preview with
+    /// the native titlebar X ran `WindowEvent::Destroyed` alone: the main window
+    /// stayed tiled in the left column beside empty desktop, and because the
+    /// emitted `open: false` hides the dock/pop-out/close cluster, no in-app
+    /// control was left to undo it.
+    ///
+    /// The window runtime is `#[cfg(not(test))]` and needs a live `AppHandle`,
+    /// so this asserts on the source text - the only way to keep the two
+    /// teardown paths in step.
+    #[test]
+    fn the_destroyed_arm_restores_the_main_window_like_the_close_command() {
+        const SOURCE: &str = include_str!("mod.rs");
+
+        let arm_start = SOURCE
+            .find("WindowEvent::Destroyed =>")
+            .expect("the preview window event handler must still match Destroyed");
+        let arm = &SOURCE[arm_start..];
+        let arm_end = arm
+            .find("_ => {}")
+            .expect("the Destroyed arm must still be followed by the catch-all arm");
+        let arm = &arm[..arm_end];
+
+        assert!(
+            arm.contains("undock_layout_after_teardown"),
+            "closing a docked preview with the titlebar X must put the main \
+             window back, exactly like close_preview_window does"
+        );
+        assert!(
+            arm.contains("state.docked"),
+            "the Destroyed arm must consult the dock state to decide whether \
+             to restore the main window layout"
+        );
+        assert!(
+            arm.contains("async_runtime::spawn"),
+            "window geometry must not be touched from inside the window-event \
+             callback - get off it first, as the retile follow does"
+        );
+
+        // The command path must keep using the shared helper, so the two
+        // teardown routes cannot drift apart again.
+        let command = SOURCE
+            .find("pub async fn close_preview_window")
+            .map(|start| &SOURCE[start..])
+            .expect("close_preview_window must still exist");
+        assert!(
+            command[..command.find("\n}\n").unwrap_or(command.len())]
+                .contains("undock_layout_after_teardown"),
+            "close_preview_window must share the teardown helper with the \
+             Destroyed arm"
+        );
+    }
+
+    // -- issue #157 §2: dock geometry ---------------------------------------
+
+    #[test]
+    fn dock_split_columns_are_flush_and_never_overlap() {
+        for (width, scale) in [
+            (1920u32, 1.0f64),
+            (1920, 1.5),
+            (2560, 1.0),
+            (3840, 2.0),
+            (1440, 1.0),
+            (1366, 1.0),
+        ] {
+            let (main, preview) = dock_split(width, scale)
+                .unwrap_or_else(|error| panic!("{width}@{scale} should split: {error}"));
+            assert_eq!(
+                main + preview,
+                width,
+                "columns must tile {width} exactly at scale {scale}"
+            );
+            assert!(
+                f64::from(main) >= MAIN_MIN_LOGICAL_WIDTH * scale,
+                "main column below its minimum at {width}@{scale}"
+            );
+            assert!(
+                f64::from(preview) >= DOCKED_PREVIEW_MIN_LOGICAL_WIDTH * scale,
+                "preview column below its minimum at {width}@{scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn dock_split_refuses_displays_that_cannot_host_both_windows() {
+        // 1220 logical px is exactly the floor; anything under it must refuse
+        // rather than produce an overlapping "best effort" layout.
+        assert!(dock_split(1219, 1.0).is_err());
+        assert!(dock_split(1220, 1.0).is_ok());
+        // 1080p at 200% scale is only 960 logical px of work area.
+        assert!(dock_split(1920, 2.0).is_err());
+        // A nonsensical scale factor falls back to 1.0 instead of panicking.
+        assert!(dock_split(1920, 0.0).is_ok());
+        assert!(dock_split(1920, f64::NAN).is_ok());
+    }
+
+    #[test]
+    fn remembered_positions_are_only_restored_onto_a_live_monitor() {
+        // Primary at the origin, a second monitor to its left (negative x, the
+        // usual Windows layout for a display placed left of the primary).
+        let monitors = [(0i32, 0i32, 1920u32, 1040u32), (-2560, -200, 2560, 1400)];
+
+        assert!(position_is_on_a_monitor(10, 10, &monitors));
+        assert!(position_is_on_a_monitor(-2000, 0, &monitors));
+        assert!(position_is_on_a_monitor(1919, 1039, &monitors));
+
+        // The external display was unplugged: the remembered corner is nowhere.
+        assert!(!position_is_on_a_monitor(-2000, 0, &monitors[..1]));
+        // Just past the bottom-right corner of the primary.
+        assert!(!position_is_on_a_monitor(1920, 1040, &monitors[..1]));
+        // No monitors reported at all is treated as "do not restore".
+        assert!(!position_is_on_a_monitor(0, 0, &[]));
     }
 }

@@ -184,6 +184,62 @@ describe('KnowledgeGraph', () => {
     expect(requestAnimationFrameMock).toHaveBeenCalledOnce();
   });
 
+  it('draws relationship folders as diamonds and names the distinction in the accessible label', async () => {
+    reducedMotionMatches = true;
+    const clientNode = {
+      ...forceMocks.pinnedNode,
+      id: 'clients/acme',
+      title: 'Acme Corp',
+      folder: 'clients',
+      path: 'clients/acme.md',
+      x: 200,
+      y: 220,
+      fx: null,
+      fy: null,
+    };
+    const patternNode = {
+      ...forceMocks.pinnedNode,
+      id: 'patterns/alpha',
+      title: 'Alpha Pattern',
+      folder: 'patterns',
+      path: 'patterns/alpha.md',
+      x: 90,
+      y: 110,
+      fx: null,
+      fy: null,
+    };
+    forceMocks.createForceSimulation.mockImplementationOnce(() => ({
+      ...forceMocks.simulation,
+      nodes: [clientNode, patternNode],
+    }));
+
+    const { getByRole } = render(KnowledgeGraph, {
+      props: {
+        nodes: [clientNode, patternNode],
+        edges: [],
+        selectedId: null,
+        onSelect: vi.fn(),
+      },
+    });
+    await tick();
+
+    const clientMark = getByRole('button', { name: /Acme Corp/ });
+    const patternMark = getByRole('button', { name: /Alpha Pattern/ });
+
+    // Shape carries the relationship/operational split...
+    expect(clientMark.querySelector('.node-core')?.tagName.toLowerCase()).toBe('rect');
+    expect(clientMark.querySelector('.node-core')?.getAttribute('transform')).toBe('rotate(45)');
+    expect(patternMark.querySelector('.node-core')?.tagName.toLowerCase()).toBe('circle');
+    expect(clientMark.querySelector('.node-halo')?.tagName.toLowerCase()).toBe('rect');
+    expect(patternMark.querySelector('.node-halo')?.tagName.toLowerCase()).toBe('circle');
+
+    // ...and it is never the only signal: the accessible name says it too.
+    expect(clientMark.getAttribute('aria-label')).toContain('clients relationship entity');
+    expect(patternMark.getAttribute('aria-label')).toContain('patterns operational knowledge');
+    expect(clientMark.querySelector('title')?.textContent).toContain('relationship entity');
+    expect(patternMark.querySelector('title')?.textContent).toContain('operational knowledge');
+  });
+
   it('rolls back a cancelled drag without selecting or retaining a partial pin', async () => {
     reducedMotionMatches = true;
     forceMocks.pinnedNode.vx = 1.5;

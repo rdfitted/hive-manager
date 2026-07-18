@@ -2,7 +2,13 @@
   import { onMount, untrack } from 'svelte';
   import { ArrowClockwise } from 'phosphor-svelte';
   import { createForceSimulation, type ForceNode, type ForceSimulation } from '$lib/knowledge/forceSim';
-  import { EDGE_COLORS, folderColor, nodeDegree } from '$lib/knowledge/graphUtils';
+  import {
+    EDGE_COLORS,
+    folderColor,
+    folderKindLabel,
+    isRelationshipFolder,
+    nodeDegree,
+  } from '$lib/knowledge/graphUtils';
   import type { KnowledgeEdge, KnowledgeNode } from '$lib/knowledge/types';
 
   interface Props {
@@ -249,6 +255,15 @@
     return Math.min(11, 5 + Math.sqrt(nodeDegree(node)) * 1.25);
   }
 
+  /**
+   * Side of a 45deg-rotated square whose half-diagonal equals `r`, so a diamond
+   * occupies exactly the circle's horizontal/vertical extent. Layout, label
+   * offsets and the pin mark all keep using radius() untouched.
+   */
+  function diamondSide(r: number): number {
+    return r * Math.SQRT2;
+  }
+
   function shortTitle(title: string): string {
     return title.length > 34 ? `${title.slice(0, 31)}…` : title;
   }
@@ -306,6 +321,11 @@
       {#each positions as node (node.id)}
         {@const isSelected = node.id === selectedId}
         {@const isMuted = selectedId !== null && !selectedNeighbors.has(node.id)}
+        {@const isRelationship = isRelationshipFolder(node.folder)}
+        {@const kindLabel = folderKindLabel(node.folder)}
+        {@const shapeLabel = isRelationship ? 'diamond' : 'circle'}
+        {@const tooltip =
+          `${node.title} · ${node.path} · ${kindLabel} (${shapeLabel}) · Double-click to unpin`}
         <g
           class="node"
           class:selected={isSelected}
@@ -314,7 +334,7 @@
           transform={`translate(${node.x} ${node.y})`}
           role="button"
           tabindex="0"
-          aria-label={`${node.title}, ${node.folder}, ${nodeDegree(node)} connections${node.fx !== null ? ', pinned' : ''}`}
+          aria-label={`${node.title}, ${node.folder} ${kindLabel}, ${nodeDegree(node)} connections${node.fx !== null ? ', pinned' : ''}`}
           onpointerdown={(event) => handlePointerDown(event, node)}
           onmouseenter={() => hoveredId = node.id}
           onmouseleave={() => hoveredId = null}
@@ -326,15 +346,38 @@
             }
           }}
         >
-          <circle class="node-halo" r={radius(node) + 5} fill={folderColor(node.folder)} />
-          <circle class="node-core" r={radius(node)} fill={folderColor(node.folder)} />
+          {#if isRelationship}
+            {@const haloSide = diamondSide(radius(node) + 5)}
+            {@const coreSide = diamondSide(radius(node))}
+            <rect
+              class="node-halo"
+              x={-haloSide / 2}
+              y={-haloSide / 2}
+              width={haloSide}
+              height={haloSide}
+              transform="rotate(45)"
+              fill={folderColor(node.folder)}
+            />
+            <rect
+              class="node-core"
+              x={-coreSide / 2}
+              y={-coreSide / 2}
+              width={coreSide}
+              height={coreSide}
+              transform="rotate(45)"
+              fill={folderColor(node.folder)}
+            />
+          {:else}
+            <circle class="node-halo" r={radius(node) + 5} fill={folderColor(node.folder)} />
+            <circle class="node-core" r={radius(node)} fill={folderColor(node.folder)} />
+          {/if}
           {#if node.fx !== null}
             <circle class="pin-mark" cx={radius(node) - 1} cy={-radius(node) + 1} r="2.5" />
           {/if}
           {#if isSelected || hoveredId === node.id || nodes.length <= 36}
             <text x={radius(node) + 7} y="4">{shortTitle(node.title)}</text>
           {/if}
-          <title>{node.title} · {node.path} · Double-click to unpin</title>
+          <title>{tooltip}</title>
         </g>
       {/each}
     </g>

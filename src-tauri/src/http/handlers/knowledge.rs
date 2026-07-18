@@ -16,10 +16,27 @@ use super::validate_session_id;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 
-const WIKI_FOLDERS: [KnowledgeFolder; 3] = [
+/// Compiled-in ceiling for the global wiki subtrees the Atlas may read. Operator config can only
+/// narrow or re-select within this array (see `resolve_wiki_folders_from`); it can never add a
+/// folder, so an operator config value can never become an arbitrary filesystem path.
+///
+/// `agents/` is deliberately excluded, and that exclusion is a product decision, not an oversight:
+///   1. Privacy. It holds third-party recruiting-candidate dossiers with personal contact details
+///      of people who never consented to appear in a graph UI.
+///   2. Signal. It is 63 of roughly 163 otherwise-reachable files, so including it would swamp the
+///      graph with one subtree.
+///   3. Correctness. It carries 11 unfiltered `README.md` / `_TEMPLATE.md` files. Duplicate
+///      basenames collide in the `by_title` / `by_basename` maps, `unique_lookup` then returns
+///      `None` for the ambiguous key, and unrelated edges elsewhere in the graph silently drop.
+/// Re-including `agents` therefore requires fixing (3) first, not just adding the variant.
+const WIKI_FOLDERS: [KnowledgeFolder; 7] = [
     KnowledgeFolder::Patterns,
     KnowledgeFolder::Practices,
     KnowledgeFolder::Research,
+    KnowledgeFolder::Clients,
+    KnowledgeFolder::Partners,
+    KnowledgeFolder::Vendors,
+    KnowledgeFolder::Operations,
 ];
 const PROJECT_FILES: [&str; 2] = ["project-dna.md", "bug-patterns.md"];
 const DEFAULT_WIKI_ROOT: &str = "~/.ai-docs/wiki";
@@ -48,24 +65,84 @@ pub(crate) enum KnowledgeFolder {
     Patterns,
     Practices,
     Research,
+    Clients,
+    Partners,
+    Vendors,
+    Operations,
     Project,
 }
 
 impl KnowledgeFolder {
+    /// Directory name on disk and the stable node-ID prefix carried over the API.
+    ///
+    /// This is a *separate* mechanism from the `#[serde(rename_all = "snake_case")]` wire encoding
+    /// above; the two only happen to agree. Both must be updated together when a variant is added,
+    /// and `as_str_matches_the_serialized_folder_tag` pins them to each other.
     fn as_str(self) -> &'static str {
         match self {
             Self::Patterns => "patterns",
             Self::Practices => "practices",
             Self::Research => "research",
+            Self::Clients => "clients",
+            Self::Partners => "partners",
+            Self::Vendors => "vendors",
+            Self::Operations => "operations",
             Self::Project => "project",
         }
     }
 
+    /// Map an ID prefix onto the *compiled-in* allowlist, deliberately ignoring any operator
+    /// narrowing. Narrowing is enforced once, at enumeration: a folder excluded by config produces
+    /// no sources, so its IDs 404 instead of 400. Keeping validation on the superset means the
+    /// status code for an unknown page does not leak which folders an operator has switched off.
     fn from_id_prefix(prefix: &str) -> Option<Self> {
         WIKI_FOLDERS
             .into_iter()
             .chain(std::iter::once(Self::Project))
             .find(|folder| folder.as_str() == prefix)
+    }
+}
+
+/// Resolve the effective wiki folder set from optional operator config.
+///
+/// Security property: entries are *matched against* the compiled-in `WIKI_FOLDERS` variants. They
+/// select, they never construct. An unrecognized entry — `"agents"`, `"../../../etc"`, an absolute
+/// path — is logged and dropped, so config can only ever narrow or reorder the scan, never widen
+/// it or aim it at a directory outside the wiki root. Absent or fully-unrecognized config falls
+/// back to the built-in default rather than scanning nothing, so a typo degrades to the documented
+/// behavior instead of silently emptying the Atlas.
+fn resolve_wiki_folders_from(configured: Option<&[String]>) -> Vec<KnowledgeFolder> {
+    let Some(configured) = configured else {
+        return WIKI_FOLDERS.to_vec();
+    };
+
+    let mut selected: Vec<KnowledgeFolder> = Vec::new();
+    for raw in configured {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        match WIKI_FOLDERS
+            .into_iter()
+            .find(|folder| folder.as_str() == name)
+        {
+            Some(folder) => {
+                if !selected.contains(&folder) {
+                    selected.push(folder);
+                }
+            }
+            None => tracing::warn!(
+                entry = %raw,
+                "ignoring unrecognized knowledge_wiki_folders entry; the Knowledge Atlas folder \
+                 set is bounded to the compiled-in wiki allowlist"
+            ),
+        }
+    }
+
+    if selected.is_empty() {
+        WIKI_FOLDERS.to_vec()
+    } else {
+        selected
     }
 }
 
@@ -188,13 +265,14 @@ pub async fn get_knowledge_graph(
     }
     let max_nodes = query.max_nodes.unwrap_or(MAX_NODES).min(MAX_NODES);
     let wiki_root = resolve_wiki_root(&state).await;
+    let wiki_folders = resolve_wiki_folders(&state).await;
     let project_root = resolve_project_root(&state, query.session_id.as_deref())?;
     let Ok(_permit) = knowledge_scan_limiter().acquire().await else {
         return Ok(Json(KnowledgeGraphResponse::default()));
     };
 
     let graph = tokio::task::spawn_blocking(move || {
-        scan_knowledge(&wiki_root, project_root.as_deref(), max_nodes)
+        scan_knowledge(&wiki_root, &wiki_folders, project_root.as_deref(), max_nodes)
     })
     .await
     .unwrap_or_default();
@@ -212,6 +290,7 @@ pub async fn get_knowledge_page(
 ) -> Result<Json<KnowledgePageResponse>, ApiError> {
     validate_knowledge_id(&query.id)?;
     let wiki_root = resolve_wiki_root(&state).await;
+    let wiki_folders = resolve_wiki_folders(&state).await;
     let project_root = resolve_project_root(&state, query.session_id.as_deref())?;
     let id = query.id;
     let Ok(_permit) = knowledge_scan_limiter().acquire().await else {
@@ -219,7 +298,7 @@ pub async fn get_knowledge_page(
     };
 
     let page = tokio::task::spawn_blocking(move || {
-        preview_knowledge_page(&wiki_root, project_root.as_deref(), &id)
+        preview_knowledge_page(&wiki_root, &wiki_folders, project_root.as_deref(), &id)
     })
     .await
     .ok()
@@ -233,6 +312,11 @@ async fn resolve_wiki_root(state: &AppState) -> PathBuf {
     let configured = state.config.read().await.global_wiki_path.clone();
     let env_root = std::env::var_os("HIVE_WIKI_ROOT").filter(|value| !value.is_empty());
     resolve_wiki_root_from(env_root, configured.as_deref(), user_home().as_deref())
+}
+
+async fn resolve_wiki_folders(state: &AppState) -> Vec<KnowledgeFolder> {
+    let configured = state.config.read().await.knowledge_wiki_folders.clone();
+    resolve_wiki_folders_from(configured.as_deref())
 }
 
 fn resolve_wiki_root_from(
@@ -328,13 +412,18 @@ fn resolve_project_root_from_sessions<'a>(
 }
 
 /// Build a bounded graph from the global wiki and the session project's allowlisted documents.
+///
+/// `wiki_folders` is the effective folder set, already resolved against the compiled-in
+/// `WIKI_FOLDERS` ceiling by `resolve_wiki_folders_from`. Callers must never synthesize it from
+/// raw operator input.
 pub(crate) fn scan_knowledge(
     wiki_root: &Path,
+    wiki_folders: &[KnowledgeFolder],
     project_root: Option<&Path>,
     max_nodes: usize,
 ) -> KnowledgeGraphResponse {
     let node_cap = max_nodes.clamp(1, MAX_NODES);
-    let enumeration = enumerate_sources(wiki_root, project_root);
+    let enumeration = enumerate_sources(wiki_root, wiki_folders, project_root);
     let mut truncated = enumeration.truncated;
     let mut nodes = Vec::new();
     let mut raw_edges = Vec::new();
@@ -409,6 +498,7 @@ pub(crate) fn scan_knowledge(
 /// Resolve an allowlisted page ID and return its bounded Markdown preview.
 pub(crate) fn preview_knowledge_page(
     wiki_root: &Path,
+    wiki_folders: &[KnowledgeFolder],
     project_root: Option<&Path>,
     id: &str,
 ) -> Option<KnowledgePageResponse> {
@@ -416,7 +506,7 @@ pub(crate) fn preview_knowledge_page(
         return None;
     }
 
-    let source = enumerate_sources(wiki_root, project_root)
+    let source = enumerate_sources(wiki_root, wiki_folders, project_root)
         .sources
         .into_iter()
         .find(|source| node_id_for(source).as_deref() == Some(id))?;
@@ -479,12 +569,18 @@ fn validate_knowledge_id(id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn enumerate_sources(wiki_root: &Path, project_root: Option<&Path>) -> SourceEnumeration {
+fn enumerate_sources(
+    wiki_root: &Path,
+    wiki_folders: &[KnowledgeFolder],
+    project_root: Option<&Path>,
+) -> SourceEnumeration {
     let mut enumeration = SourceEnumeration::default();
     let mut entries_seen = 0;
     let canonical_wiki_root = fs::canonicalize(wiki_root).ok();
 
-    for folder in WIKI_FOLDERS {
+    // The subtree path is always `wiki_root` joined with a `KnowledgeFolder::as_str()` literal, so
+    // no caller-supplied string ever reaches the filesystem here.
+    for &folder in wiki_folders {
         let subtree = wiki_root.join(folder.as_str());
         let Ok(metadata) = fs::symlink_metadata(&subtree) else {
             continue;
@@ -1146,8 +1242,19 @@ fn resolve_hint(hint: &str, lookup: &NodeLookup) -> Option<String> {
 
 /// Corpus research pages sometimes refer to a sibling allow-listed subtree with
 /// `../patterns/foo.md`. These strings are lookup hints only (never filesystem paths), but parent
-/// components are still normalized narrowly: after removing leading parents, the hint must name
-/// one of the three global wiki allow-list roots. `../clients/foo.md` therefore remains invalid.
+/// components are still normalized narrowly: after removing leading parents, the hint must name one
+/// of the global wiki allow-list roots in `WIKI_FOLDERS`. That set now spans the operational roots
+/// (`patterns`, `practices`, `research`) *and* the relationship/entity roots (`clients`,
+/// `partners`, `vendors`, `operations`), so `../clients/foo.md` resolves — that cross-half linking
+/// is the point of this folder set.
+///
+/// Still invalid, by design: `../agents/foo.md` (never allow-listed, see `WIKI_FOLDERS`) and
+/// `../project/project-dna.md` (`project` is session-scoped and must not be reachable from a
+/// global-wiki hint).
+///
+/// This gate intentionally uses the compiled-in ceiling rather than the operator-narrowed set. A
+/// hint only becomes an edge when it resolves to a node that was actually enumerated, so narrowing
+/// already removes those edges; re-checking here would add nothing but a second source of truth.
 fn normalize_parent_relative_hint(mut slug: String) -> Option<String> {
     let had_parent_prefix = slug.starts_with("../");
     while let Some(rest) = slug.strip_prefix("../") {
@@ -1280,7 +1387,7 @@ mod tests {
         write_page(
             wiki.path(),
             "patterns/source.md",
-            "---\ntitle: Source #153\nlast_updated: 2026-07-18\ncross_refs:\n  - wiki/practices/cross.md\n  - clients/cross.md\nrelated: [research/frontmatter-related.md]\n---\n# Source\n[[Wiki Target]]\n-> global: patterns/global.md\n-> related: [[body-related]] (strong match)\n<-> related: wiki/research/frontmatter-related.md (§details)\n<- from: research/from.md\n",
+            "---\ntitle: Source #153\nlast_updated: 2026-07-18\ncross_refs:\n  - wiki/practices/cross.md\n  - agents/cross.md\nrelated: [research/frontmatter-related.md]\n---\n# Source\n[[Wiki Target]]\n-> global: patterns/global.md\n-> related: [[body-related]] (strong match)\n<-> related: wiki/research/frontmatter-related.md (§details)\n<- from: research/from.md\n",
         );
         write_page(
             wiki.path(),
@@ -1300,10 +1407,12 @@ mod tests {
             "# Frontmatter Related\n",
         );
         write_page(wiki.path(), "research/from.md", "# From\n");
+        // `agents/` is the never-allow-listed folder, so this fixture keeps proving the allowlist
+        // gate now that `clients/` is deliberately in-scope.
         write_page(
             wiki.path(),
-            "clients/cross.md",
-            "---\ntitle: Private Client\n---\n",
+            "agents/cross.md",
+            "---\ntitle: Recruiting Dossier\n---\n",
         );
         write_page(
             project.path(),
@@ -1321,13 +1430,21 @@ mod tests {
             "# Must Not Be Scanned\n",
         );
 
-        let graph = scan_knowledge(wiki.path(), Some(project.path()), MAX_NODES);
+        let graph = scan_knowledge(
+            wiki.path(),
+            &WIKI_FOLDERS,
+            Some(project.path()),
+            MAX_NODES,
+        );
         let node_ids: HashSet<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
         assert!(node_ids.contains("patterns/source"));
         assert!(node_ids.contains("project/project-dna"));
         assert!(node_ids.contains("project/bug-patterns"));
-        assert!(!node_ids.iter().any(|id| id.contains("clients")));
+        assert!(!node_ids.iter().any(|id| id.contains("agents")));
         assert!(!node_ids.contains("project/architecture"));
+        assert!(!serde_json::to_string(&graph)
+            .unwrap()
+            .contains("Recruiting Dossier"));
 
         let kinds: HashSet<_> = graph.edges.iter().map(|edge| edge.kind).collect();
         assert_eq!(
@@ -1387,7 +1504,7 @@ mod tests {
             "# Bug Patterns\n",
         );
 
-        let graph = scan_knowledge(wiki.path(), Some(project.path()), MAX_NODES);
+        let graph = scan_knowledge(wiki.path(), &WIKI_FOLDERS, Some(project.path()), MAX_NODES);
         let node_ids: Vec<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
 
         assert_eq!(graph.nodes.len(), MAX_NODES);
@@ -1439,43 +1556,343 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn relative_allowlisted_hints_resolve_without_disallowed_basename_fallback() {
-        let nodes = vec![KnowledgeNode {
-            id: "patterns/cross".to_string(),
-            title: "Cross".to_string(),
-            folder: KnowledgeFolder::Patterns,
-            path: "patterns/cross.md".to_string(),
+    fn test_node(id: &str, title: &str, folder: KnowledgeFolder) -> KnowledgeNode {
+        KnowledgeNode {
+            id: id.to_string(),
+            title: title.to_string(),
+            folder,
+            path: format!("{id}.md"),
             last_updated: String::new(),
             in_degree: 0,
             out_degree: 0,
-        }];
+        }
+    }
+
+    /// The entity nodes below must actually exist for this test to mean anything. With a
+    /// patterns-only fixture the `clients/*` assertions passed for the wrong reason — the
+    /// exact-ID lookup simply missed and the explicit-path guard blocked the basename fallback —
+    /// so they would have stayed green even if the allowlist gate had been deleted entirely.
+    #[test]
+    fn relative_allowlisted_hints_resolve_without_disallowed_basename_fallback() {
+        let nodes = vec![
+            test_node("patterns/cross", "Pattern Cross", KnowledgeFolder::Patterns),
+            test_node("clients/cross", "Client Cross", KnowledgeFolder::Clients),
+            test_node("partners/cross", "Partner Cross", KnowledgeFolder::Partners),
+            test_node("vendors/cross", "Vendor Cross", KnowledgeFolder::Vendors),
+            test_node(
+                "operations/cross",
+                "Operations Cross",
+                KnowledgeFolder::Operations,
+            ),
+            test_node(
+                "clients/acme/dashboard",
+                "Acme Dashboard",
+                KnowledgeFolder::Clients,
+            ),
+        ];
         let lookup = NodeLookup::from_nodes(&nodes);
-        assert_eq!(
-            resolve_hint("patterns/cross.md", &lookup).as_deref(),
-            Some("patterns/cross")
-        );
-        assert_eq!(
-            resolve_hint("../patterns/cross.md", &lookup).as_deref(),
-            Some("patterns/cross")
-        );
-        assert_eq!(
-            resolve_hint(
+
+        for (hint, expected) in [
+            ("patterns/cross.md", "patterns/cross"),
+            ("../patterns/cross.md", "patterns/cross"),
+            (
                 "../../wiki/patterns/cross.md (corpus annotation)",
-                &lookup,
-            )
-            .as_deref(),
-            Some("patterns/cross")
-        );
-        assert_eq!(resolve_hint("clients/cross.md", &lookup), None);
-        assert_eq!(resolve_hint("partners/cross.md", &lookup), None);
-        assert_eq!(resolve_hint("../clients/cross.md", &lookup), None);
-        assert_eq!(resolve_hint("../partners/cross.md", &lookup), None);
-        assert_eq!(resolve_hint("../project/project-dna.md", &lookup), None);
+                "patterns/cross",
+            ),
+            // The entity roots resolve now, including through a parent-relative hint and into a
+            // nested `clients/<slug>/dashboard.md` page.
+            ("clients/cross.md", "clients/cross"),
+            ("../clients/cross.md", "clients/cross"),
+            ("partners/cross.md", "partners/cross"),
+            ("../partners/cross.md", "partners/cross"),
+            ("vendors/cross.md", "vendors/cross"),
+            ("operations/cross.md", "operations/cross"),
+            ("clients/acme/dashboard.md", "clients/acme/dashboard"),
+            ("../clients/acme/dashboard.md", "clients/acme/dashboard"),
+        ] {
+            assert_eq!(
+                resolve_hint(hint, &lookup).as_deref(),
+                Some(expected),
+                "hint {hint} did not resolve"
+            );
+        }
+
+        // `agents/` is never allow-listed, and an explicit path must not fall back by basename to
+        // one of the five genuinely-present `*/cross` nodes.
+        for rejected in [
+            "agents/cross.md",
+            "../agents/cross.md",
+            "agents/recruiting/candidate.md",
+            "../project/project-dna.md",
+            "../patterns/../agents/cross.md",
+        ] {
+            assert_eq!(resolve_hint(rejected, &lookup), None, "accepted {rejected}");
+        }
+
+        // Ambiguity guard: the bare basename `cross` now maps to five nodes across five folders,
+        // so `unique_lookup` declines rather than inventing an edge to whichever one hashed first.
+        // No node is titled plain "Cross", so the title fallback cannot rescue it either -- this is
+        // exactly the duplicate-basename failure mode that keeps `agents/` out of `WIKI_FOLDERS`.
+        assert_eq!(resolve_hint("cross", &lookup), None);
+        // An unambiguous title still resolves, so the guard above is narrow, not a blanket block.
         assert_eq!(
-            resolve_hint("../patterns/../clients/cross.md", &lookup),
-            None
+            resolve_hint("Acme Dashboard", &lookup).as_deref(),
+            Some("clients/acme/dashboard")
         );
+    }
+
+    /// `as_str()` (directory name + node-ID prefix) and the `serde(rename_all = "snake_case")`
+    /// wire tag are independent mechanisms that only happen to agree. Adding a variant that
+    /// updates one but not the other would ship a graph whose folder tags do not match the IDs
+    /// the frontend filters on, so pin them to each other.
+    #[test]
+    fn as_str_matches_the_serialized_folder_tag() {
+        for folder in WIKI_FOLDERS
+            .into_iter()
+            .chain(std::iter::once(KnowledgeFolder::Project))
+        {
+            let serialized = serde_json::to_string(&folder).unwrap();
+            assert_eq!(
+                serialized,
+                format!("\"{}\"", folder.as_str()),
+                "serde tag and as_str disagree for {folder:?}"
+            );
+        }
+
+        assert_eq!(
+            WIKI_FOLDERS.map(KnowledgeFolder::as_str),
+            [
+                "patterns",
+                "practices",
+                "research",
+                "clients",
+                "partners",
+                "vendors",
+                "operations",
+            ]
+        );
+    }
+
+    #[test]
+    fn id_prefix_gate_admits_entity_roots_and_still_rejects_agents() {
+        for allowed in [
+            "patterns",
+            "practices",
+            "research",
+            "clients",
+            "partners",
+            "vendors",
+            "operations",
+            "project",
+        ] {
+            assert!(
+                KnowledgeFolder::from_id_prefix(allowed).is_some(),
+                "{allowed} should be an allow-listed ID prefix"
+            );
+        }
+        for rejected in ["agents", "", "..", "Clients", "clients/acme", "etc"] {
+            assert!(
+                KnowledgeFolder::from_id_prefix(rejected).is_none(),
+                "{rejected} should not be an allow-listed ID prefix"
+            );
+        }
+    }
+
+    /// Operator config may only narrow or re-select within `WIKI_FOLDERS`. It must never be able to
+    /// widen the scan back to `agents/`, nor turn a string into a filesystem path.
+    #[test]
+    fn configured_folders_can_only_narrow_the_compiled_allowlist() {
+        assert_eq!(resolve_wiki_folders_from(None), WIKI_FOLDERS.to_vec());
+
+        // Absent-equivalent inputs fall back to the documented default rather than scanning
+        // nothing, so a typo degrades gracefully instead of silently emptying the Atlas.
+        assert_eq!(resolve_wiki_folders_from(Some(&[])), WIKI_FOLDERS.to_vec());
+        assert_eq!(
+            resolve_wiki_folders_from(Some(&[String::new()])),
+            WIKI_FOLDERS.to_vec()
+        );
+        assert_eq!(
+            resolve_wiki_folders_from(Some(&["   ".to_string()])),
+            WIKI_FOLDERS.to_vec()
+        );
+
+        // Narrowing: a privacy-conscious machine drops the entity roots.
+        assert_eq!(
+            resolve_wiki_folders_from(Some(&[
+                "patterns".to_string(),
+                "practices".to_string()
+            ])),
+            vec![KnowledgeFolder::Patterns, KnowledgeFolder::Practices]
+        );
+
+        // Case and surrounding whitespace are tolerated; duplicates collapse.
+        assert_eq!(
+            resolve_wiki_folders_from(Some(&[
+                "  Clients ".to_string(),
+                "CLIENTS".to_string(),
+                "clients".to_string(),
+            ])),
+            vec![KnowledgeFolder::Clients]
+        );
+
+        // Widening attempts are dropped, not honored, and never become paths.
+        assert_eq!(
+            resolve_wiki_folders_from(Some(&[
+                "agents".to_string(),
+                "../../../etc".to_string(),
+                "/etc/passwd".to_string(),
+                "C:\\Windows\\System32".to_string(),
+                "project".to_string(),
+                "..".to_string(),
+                "clients/../agents".to_string(),
+                "research".to_string(),
+            ])),
+            vec![KnowledgeFolder::Research],
+            "config must select among compiled-in variants, never construct new ones"
+        );
+
+        // Even an entirely hostile list cannot widen: it collapses to the built-in default, which
+        // still excludes `agents` and `project`.
+        let effective = resolve_wiki_folders_from(Some(&[
+            "agents".to_string(),
+            "../../../etc".to_string(),
+        ]));
+        assert_eq!(effective, WIKI_FOLDERS.to_vec());
+        assert!(!effective.contains(&KnowledgeFolder::Project));
+    }
+
+    /// End-to-end proof that narrowing is enforced where it matters — the filesystem walk — and
+    /// that an excluded folder yields no nodes and no preview.
+    #[test]
+    fn configured_narrowing_is_enforced_at_enumeration() {
+        let wiki = TempDir::new().unwrap();
+        write_page(
+            wiki.path(),
+            "patterns/kept.md",
+            "---\ntitle: Kept\n---\n# Kept\n",
+        );
+        write_page(
+            wiki.path(),
+            "clients/acme/dashboard.md",
+            "---\ntitle: Acme\n---\n# Acme\n",
+        );
+        write_page(
+            wiki.path(),
+            "agents/recruiting/candidate.md",
+            "---\ntitle: Candidate\n---\n# Candidate\n",
+        );
+
+        let full = resolve_wiki_folders_from(None);
+        let graph = scan_knowledge(wiki.path(), &full, None, MAX_NODES);
+        let ids: HashSet<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert!(ids.contains("patterns/kept"));
+        assert!(ids.contains("clients/acme/dashboard"));
+        assert!(!ids.iter().any(|id| id.starts_with("agents/")));
+
+        // A machine that narrows to `patterns` loses the entity nodes...
+        let narrowed = resolve_wiki_folders_from(Some(&["patterns".to_string()]));
+        let narrowed_graph = scan_knowledge(wiki.path(), &narrowed, None, MAX_NODES);
+        let narrowed_ids: HashSet<_> = narrowed_graph
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(narrowed_ids, HashSet::from(["patterns/kept"]));
+        assert!(
+            preview_knowledge_page(wiki.path(), &narrowed, None, "clients/acme/dashboard")
+                .is_none(),
+            "a config-excluded folder must not be previewable"
+        );
+
+        // ...and a config naming `agents` cannot get it back.
+        let hostile =
+            resolve_wiki_folders_from(Some(&["agents".to_string(), "patterns".to_string()]));
+        let hostile_graph = scan_knowledge(wiki.path(), &hostile, None, MAX_NODES);
+        assert!(!hostile_graph
+            .nodes
+            .iter()
+            .any(|node| node.id.starts_with("agents/")));
+        assert!(
+            preview_knowledge_page(wiki.path(), &hostile, None, "agents/recruiting/candidate")
+                .is_none()
+        );
+    }
+
+    /// Nested entity pages and the operational/relationship cross-half edges the Atlas exists to
+    /// show. `clients/<slug>/dashboard.md` is a future corpus shape, so it only exists here.
+    #[test]
+    fn nested_entity_pages_scan_and_cross_link_between_graph_halves() {
+        let wiki = TempDir::new().unwrap();
+        write_page(
+            wiki.path(),
+            "clients/acme/dashboard.md",
+            "---\ntitle: Acme Dashboard\nlast_updated: 2026-07-18\n---\n# Acme\n\
+             [[partners/beta]]\n",
+        );
+        write_page(
+            wiki.path(),
+            "partners/beta.md",
+            "---\ntitle: Beta Partner\n---\n# Beta\n",
+        );
+        write_page(
+            wiki.path(),
+            "patterns/delivery.md",
+            "---\ntitle: Delivery\ncross_refs:\n  - clients/acme/dashboard.md\n---\n# Delivery\n\
+             [[partners/beta]]\n",
+        );
+
+        let folders = resolve_wiki_folders_from(None);
+        let graph = scan_knowledge(wiki.path(), &folders, None, MAX_NODES);
+        let ids: HashSet<_> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert!(ids.contains("clients/acme/dashboard"));
+        assert!(ids.contains("partners/beta"));
+
+        let dashboard = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "clients/acme/dashboard")
+            .unwrap();
+        assert_eq!(dashboard.title, "Acme Dashboard");
+        assert_eq!(dashboard.folder, KnowledgeFolder::Clients);
+        assert_eq!(dashboard.path, "clients/acme/dashboard.md");
+
+        let has_edge = |source: &str, target: &str, kind: KnowledgeEdgeKind| {
+            graph
+                .edges
+                .iter()
+                .any(|edge| edge.source == source && edge.target == target && edge.kind == kind)
+        };
+        // Entity <-> entity.
+        assert!(has_edge(
+            "clients/acme/dashboard",
+            "partners/beta",
+            KnowledgeEdgeKind::Wikilink
+        ));
+        // Operational -> entity, joining the two halves of the graph.
+        assert!(has_edge(
+            "patterns/delivery",
+            "clients/acme/dashboard",
+            KnowledgeEdgeKind::CrossRef
+        ));
+        assert!(has_edge(
+            "patterns/delivery",
+            "partners/beta",
+            KnowledgeEdgeKind::Wikilink
+        ));
+        assert_eq!(dashboard.in_degree, 1);
+        assert_eq!(dashboard.out_degree, 1);
+
+        assert!(!serde_json::to_string(&graph)
+            .unwrap()
+            .contains(&wiki.path().to_string_lossy().to_string()));
+
+        let page =
+            preview_knowledge_page(wiki.path(), &folders, None, "clients/acme/dashboard").unwrap();
+        assert_eq!(page.path, "clients/acme/dashboard.md");
+        assert_eq!(page.folder, KnowledgeFolder::Clients);
+        assert!(!serde_json::to_string(&page)
+            .unwrap()
+            .contains(&wiki.path().to_string_lossy().to_string()));
     }
 
     #[test]
@@ -1555,7 +1972,7 @@ mod tests {
             ),
         );
 
-        let page = preview_knowledge_page(wiki.path(), None, "patterns/preview").unwrap();
+        let page = preview_knowledge_page(wiki.path(), &WIKI_FOLDERS, None, "patterns/preview").unwrap();
         assert_eq!(page.id, "patterns/preview");
         assert_eq!(page.path, "patterns/preview.md");
         assert_eq!(page.title, "Preview Title");
@@ -1563,26 +1980,41 @@ mod tests {
         assert!(page.truncated);
         assert!(page.content.len() <= MAX_PREVIEW_BYTES);
         assert!(page.content.is_char_boundary(page.content.len()));
-        assert!(preview_knowledge_page(wiki.path(), None, "patterns/missing").is_none());
+        assert!(preview_knowledge_page(wiki.path(), &WIKI_FOLDERS, None, "patterns/missing").is_none());
     }
 
     #[test]
     fn preview_id_validation_rejects_traversal_and_absolute_forms() {
         for invalid in [
             "",
-            "../clients/secret",
-            "patterns/../clients/secret",
+            // `agents/` replaces the old `clients/` cases: `clients` is allow-listed now, so
+            // reusing it here would assert nothing about the folder gate.
+            "../agents/secret",
+            "patterns/../agents/secret",
+            "clients/../agents/secret",
             "/patterns/secret",
             "C:/patterns/secret",
             "\\\\server\\patterns\\secret",
             "patterns\\secret",
-            "clients/secret",
+            "clients\\acme\\dashboard",
+            "agents/secret",
+            "agents/recruiting/candidate",
+            "clients",
             "project/architecture",
         ] {
             assert!(validate_knowledge_id(invalid).is_err(), "accepted {invalid}");
         }
-        assert!(validate_knowledge_id("patterns/nested/page").is_ok());
-        assert!(validate_knowledge_id("project/project-dna").is_ok());
+        for valid in [
+            "patterns/nested/page",
+            "project/project-dna",
+            "clients/acme",
+            "clients/acme/dashboard",
+            "partners/beta",
+            "vendors/gamma",
+            "operations/runbook",
+        ] {
+            assert!(validate_knowledge_id(valid).is_ok(), "rejected {valid}");
+        }
     }
 
     #[test]
@@ -1597,18 +2029,18 @@ mod tests {
             &"x".repeat(MAX_FILE_BYTES + 1),
         );
 
-        let graph = scan_knowledge(wiki.path(), None, 2);
+        let graph = scan_knowledge(wiki.path(), &WIKI_FOLDERS, None, 2);
         assert_eq!(graph.nodes.len(), 2);
         assert!(graph.truncated);
 
-        let uncapped = scan_knowledge(wiki.path(), None, MAX_NODES);
+        let uncapped = scan_knowledge(wiki.path(), &WIKI_FOLDERS, None, MAX_NODES);
         assert!(uncapped.truncated);
         assert!(!uncapped
             .nodes
             .iter()
             .any(|node| node.id.ends_with("oversize")));
 
-        let missing = scan_knowledge(&wiki.path().join("missing"), None, MAX_NODES);
+        let missing = scan_knowledge(&wiki.path().join("missing"), &WIKI_FOLDERS, None, MAX_NODES);
         assert!(missing.nodes.is_empty());
         assert!(missing.edges.is_empty());
     }
@@ -1626,7 +2058,7 @@ mod tests {
             ),
         );
 
-        let graph = scan_knowledge(wiki.path(), None, MAX_NODES);
+        let graph = scan_knowledge(wiki.path(), &WIKI_FOLDERS, None, MAX_NODES);
         let node = graph
             .nodes
             .iter()
@@ -1638,7 +2070,7 @@ mod tests {
         assert!(graph.truncated);
         assert!(serde_json::to_vec(&graph).unwrap().len() <= MAX_GRAPH_RESPONSE_BYTES);
 
-        let page = preview_knowledge_page(wiki.path(), None, "patterns/metadata").unwrap();
+        let page = preview_knowledge_page(wiki.path(), &WIKI_FOLDERS, None, "patterns/metadata").unwrap();
         assert!(page.title.len() <= MAX_TITLE_BYTES);
         assert!(page.truncated);
     }
@@ -1774,7 +2206,7 @@ mod tests {
         )
         .unwrap();
 
-        let graph = scan_knowledge(wiki.path(), None, MAX_NODES);
+        let graph = scan_knowledge(wiki.path(), &WIKI_FOLDERS, None, MAX_NODES);
         assert!(graph.nodes.is_empty());
     }
 }
