@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 #[cfg(not(test))]
 use tauri::{
-    webview::NewWindowResponse, AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition,
-    PhysicalSize, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    webview::NewWindowResponse, AppHandle, Emitter, LogicalSize, Manager, Monitor,
+    PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent,
 };
 
 #[cfg(not(test))]
@@ -813,6 +814,52 @@ fn apply_geometry(window: &WebviewWindow, geometry: WindowGeometry) -> Result<()
         .map_err(|error| format!("Failed to resize window: {error}"))
 }
 
+/// The monitor whose work area the dock geometry is computed against.
+///
+/// ONE helper because the fallback policy has to be the same at both call
+/// sites. `enter_docked_mode` sizes the two columns from this monitor's work
+/// area and `follow_docked_preview` re-derives the preview's column from it on
+/// every move/resize, so a fallback that only the dock honoured would let the
+/// pane stop tracking in exactly the state the fallback was added to survive -
+/// docked via the fallback, then never followed again (issue #161).
+///
+/// The fallback is right for BOTH, because `Ok(None)` never means "on a
+/// monitor we cannot name" on any backend tao supports - it means "on no
+/// monitor at all", so there is no correct non-primary monitor for the
+/// fallback to override:
+/// - Windows: unreachable. `current_monitor` is `MonitorFromWindow(hwnd,
+///   MONITOR_DEFAULTTONEAREST)` wrapped unconditionally in `Some`.
+/// - Linux/GTK: the backend already applies this exact primary fallback
+///   internally, so `None` means even the primary is unavailable.
+/// - macOS: `NSWindow::screen()` is nil only when the window is offscreen.
+///
+/// `match` rather than `.or(..)`: `.or` is EAGER, so it would call
+/// `primary_monitor()` on every lookup even when the current monitor is
+/// already in hand - and its `?` would then propagate a teardown-race error
+/// out of a caller that had everything it needed. The fallback is a cold path.
+///
+/// `Ok(None)` and `Err(e)` stay DISTINCT arms. An exhausted lookup and a failed
+/// one are different diagnostics; collapsing them discards the backend's error.
+///
+/// Both getters are blocking round-trips to the event-loop thread
+/// (tauri-runtime-wry's `window_getter!` posts a user message and blocks on
+/// `rx.recv()` with no timeout), and that thread takes [`PREVIEW_RUNTIME`] in
+/// the window-event handlers. MUST NOT be called while that mutex is held.
+/// [`DOCK_TRANSITION`] is fine - the event loop never takes it.
+#[cfg(not(test))]
+fn resolve_dock_monitor(window: &WebviewWindow) -> Result<Monitor, String> {
+    match window
+        .current_monitor()
+        .map_err(|error| format!("Failed to read the current monitor: {error}"))?
+    {
+        Some(monitor) => Some(monitor),
+        None => window
+            .primary_monitor()
+            .map_err(|error| format!("Failed to read the primary monitor: {error}"))?,
+    }
+    .ok_or_else(|| "Could not determine which monitor Hive Manager is on".to_string())
+}
+
 /// Tile the main window and the preview side by side across the current
 /// monitor's work area.
 #[cfg(not(test))]
@@ -839,20 +886,9 @@ fn enter_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), S
     let main = require_window(app, MAIN_WINDOW_LABEL)?;
     let preview = require_window(app, PREVIEW_WINDOW_LABEL)?;
 
-    // `match` rather than `.or(..)`: `.or` is EAGER, so it would call
-    // `primary_monitor()` on every dock even when the current monitor is
-    // already in hand - and its `?` would then propagate a teardown-race error
-    // out of a dock that had everything it needed. The fallback is a cold path.
-    let monitor = match main
-        .current_monitor()
-        .map_err(|error| format!("Failed to read the current monitor: {error}"))?
-    {
-        Some(monitor) => Some(monitor),
-        None => main
-            .primary_monitor()
-            .map_err(|error| format!("Failed to read the primary monitor: {error}"))?,
-    }
-    .ok_or_else(|| "Could not determine which monitor Hive Manager is on".to_string())?;
+    // Shared with `follow_docked_preview` so the two cannot drift apart on the
+    // fallback. Taken before the runtime lock, never under it.
+    let monitor = resolve_dock_monitor(&main)?;
 
     let scale = monitor.scale_factor();
     let work_area = *monitor.work_area();
@@ -1103,10 +1139,9 @@ fn follow_docked_preview(app: &AppHandle) -> Result<(), String> {
     let size = main
         .outer_size()
         .map_err(|error| format!("Failed to read the Hive Manager size: {error}"))?;
-    let monitor = main
-        .current_monitor()
-        .map_err(|error| format!("Failed to read the current monitor: {error}"))?
-        .ok_or_else(|| "Could not determine which monitor Hive Manager is on".to_string())?;
+    // The SAME resolution the dock used, fallback included. This runs on a
+    // spawned task off the window-event callback, holding neither mutex.
+    let monitor = resolve_dock_monitor(&main)?;
 
     let scale = monitor.scale_factor();
     let work_area = *monitor.work_area();
@@ -2694,6 +2729,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- issue #161: one monitor-resolution policy, not two ------------------
+
+    /// Both monitor lookups must resolve through ONE helper.
+    ///
+    /// `enter_docked_mode` falls back to `primary_monitor()` when
+    /// `current_monitor()` returns `Ok(None)`; `follow_docked_preview` used to
+    /// do the same lookup with no fallback at all. So a dock that only
+    /// succeeded BECAUSE of the fallback was never followed again - the pane
+    /// stopped tracking in exactly the state the fallback was added to
+    /// survive. Same class as the trailing-dot host divergence from #159.
+    ///
+    /// The whole path is `#[cfg(not(test))]` and needs a live `AppHandle`, so -
+    /// same discipline as the locks above - this is pinned against the source
+    /// text.
+    #[test]
+    fn both_monitor_lookups_share_one_fallback_policy() {
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        // Runtime half only. This test names the getters it is checking for,
+        // so matching the whole file would let it pass against its own text.
+        let runtime_source = &source[..source
+            .find("mod tests {")
+            .expect("the test module must still terminate the runtime source")];
+
+        for name in ["enter_docked_mode", "follow_docked_preview"] {
+            let body = body_of(runtime_source, name);
+            assert!(
+                body.contains("resolve_dock_monitor(&main)?"),
+                "{name} must resolve the monitor through the shared helper: two \
+                 open-coded lookups are free to disagree about the fallback, \
+                 which is how docking came to survive an absent current monitor \
+                 while the follow that keeps the pane tiled beside it did not"
+            );
+            for getter in ["current_monitor()", "primary_monitor()"] {
+                assert!(
+                    !body.contains(getter),
+                    "{name} must not call {getter} itself - the fallback policy \
+                     lives in resolve_dock_monitor and nowhere else, or the two \
+                     sites drift apart again"
+                );
+            }
+        }
+
+        let helper = body_of(runtime_source, "resolve_dock_monitor");
+        let current = helper
+            .find("current_monitor()")
+            .expect("resolve_dock_monitor must still read the current monitor");
+        let cold_arm = helper
+            .find("None => window")
+            .expect("the fallback must sit on the None arm of a match");
+        let primary = helper
+            .find("primary_monitor()")
+            .expect("resolve_dock_monitor must still fall back to the primary monitor");
+        assert!(
+            current < cold_arm && cold_arm < primary,
+            "primary_monitor() must stay on the COLD path, reached only through \
+             the None arm: `.or(..)` is EAGER, so it would call the fallback on \
+             every dock and every follow even with the current monitor already \
+             in hand, and its `?` would then propagate a teardown-race error out \
+             of a caller that had everything it needed"
+        );
+        assert!(
+            !helper.contains(".or("),
+            "resolve_dock_monitor must not reach for the eager `.or(..)` \
+             combinator - that is the regression #159 fixed"
+        );
+        assert!(
+            helper.contains("Failed to read the current monitor: {error}")
+                && helper.contains("Could not determine which monitor Hive Manager is on"),
+            "the two diagnostics must stay DISTINCT: a failed read and an \
+             exhausted lookup are different faults, and folding Ok(None) in with \
+             Err(e) discards the backend's error"
+        );
+
+        // The helper's getters are blocking round-trips to the event-loop
+        // thread, so the follow must not reach it from that thread (#159).
+        // Anchor on the retile hop specifically: `wire_window_events` holds a
+        // SECOND spawn in the preview's Destroyed arm, so a bare `find` would
+        // measure against whichever one happens to sort first. And bind the
+        // check to CONTAINMENT, not order - "the spawn appears somewhere above
+        // the follow" stays true when the follow is hoisted back out of it.
+        let wiring = body_of(runtime_source, "wire_window_events");
+        let retile = wiring
+            .find("let retile_app")
+            .expect("the retile follow must still clone the handle it hops with");
+        let block = &wiring[retile..];
+        let open = block
+            .find("tauri::async_runtime::spawn(async move {")
+            .expect("the retile follow must hop off the window-event callback");
+        let block = &block[open..];
+        let close = block
+            .find("\n            });")
+            .expect("the retile spawn must close at its 12-space `});`");
+        assert!(
+            block[..close].contains("follow_docked_preview(&retile_app)"),
+            "follow_docked_preview must be reached from INSIDE the SPAWNED task, never \
+             inline in the window-event callback: it resolves the monitor \
+             through getters that post a message to the event-loop thread and \
+             block on the reply, so running it ON that thread deadlocks the \
+             event loop against itself with no timeout to break it"
+        );
     }
 
     // -- issue #157 §2: dock geometry ---------------------------------------
