@@ -298,4 +298,88 @@ describe('SessionHeader preview action freshness', () => {
     expect(container.querySelector('.preview-error')).toBeNull();
     expect(container.querySelector('#session-preview-url')?.getAttribute('aria-invalid')).toBeFalsy();
   });
+
+  /**
+   * `previewBusy` is what disables the dock/pop-out cluster, and the backend
+   * treats an open and a dock as two dock transitions. `openPreview` guards on
+   * `openingPreview` — which the session-change block DOES reset — while
+   * claiming `previewBusy`, which it does not. So a second open can start while
+   * the first is still in flight, and an unconditional clear in the first one's
+   * `finally` would re-enable the controls mid-transition.
+   */
+  it('does not let a superseded transition release the newer one’s busy claim', async () => {
+    const OPEN_STATUS = {
+      open: true,
+      docked: false,
+      url: 'http://localhost:5173/',
+      session_url: 'http://localhost:5173/',
+    };
+    const staleDock = deferred<unknown>();
+    const laterOpen = deferred<unknown>();
+    let openCalls = 0;
+
+    tauriMocks.invoke.mockImplementation((command: string) => {
+      if (command === 'open_preview_window') {
+        openCalls += 1;
+        // First open settles immediately so the live cluster renders; the
+        // second is the newer transition whose claim must survive.
+        return openCalls === 1 ? Promise.resolve(OPEN_STATUS) : laterOpen.promise;
+      }
+      if (command === 'dock_preview_window') return staleDock.promise;
+      return Promise.resolve(OPEN_STATUS);
+    });
+
+    const { container } = render(SessionHeader);
+    storeMocks.setActiveSession?.(fakeSession('session-a'));
+
+    const submitUrl = async (value: string) => {
+      const input = container.querySelector<HTMLInputElement>('#session-preview-url')!;
+      await fireEvent.input(input, { target: { value } });
+      await fireEvent.submit(container.querySelector('.preview-form')!);
+    };
+    const dockButton = () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('.preview-action')).find(
+        (button) => button.getAttribute('aria-label')?.startsWith('Dock'),
+      );
+
+    const toggle = await waitFor(() => {
+      const found = container.querySelector<HTMLButtonElement>('.preview-toggle');
+      if (!found) throw new Error('toggle never rendered');
+      return found;
+    });
+    await fireEvent.click(toggle);
+    await submitUrl('localhost:5173');
+    await flush();
+
+    // The live cluster is now rendered and idle.
+    await waitFor(() => {
+      if (!dockButton()) throw new Error('dock cluster never rendered');
+    });
+    expect(dockButton()!.disabled).toBe(false);
+
+    // Start a dock, then start an open while it is still in flight. `openPreview`
+    // guards on `openingPreview`, NOT on `previewBusy`, so it can take the claim
+    // out from under the dock — which is precisely the hole being closed.
+    await fireEvent.click(dockButton()!);
+    await flush();
+    expect(dockButton()!.disabled).toBe(true);
+
+    await submitUrl('localhost:6006');
+    await flush();
+    expect(openCalls).toBe(2);
+
+    // The superseded dock now settles. An unconditional clear here would
+    // re-enable the controls while the open transition is still running.
+    staleDock.resolve(OPEN_STATUS);
+    await staleDock.promise.catch(() => {});
+    await flush();
+    expect(dockButton()!.disabled).toBe(true);
+
+    // ...and once the OWNER settles the controls are released rather than
+    // stranded — the failure mode a plain request-id gate would introduce.
+    laterOpen.resolve(OPEN_STATUS);
+    await laterOpen.promise.catch(() => {});
+    await flush();
+    expect(dockButton()!.disabled).toBe(false);
+  });
 });

@@ -26,6 +26,13 @@
     let previewDocked = false;
     let previewCurrentUrl = '';
     let previewBusy = '';
+    // Identity token for `previewBusy`, same shape as the poll guard in PR #154.
+    // Neither an ungated nor a request-gated clear is correct on its own: ungated
+    // lets an older transition's `finally` wipe a NEWER one's claim and re-enable
+    // the dock controls mid-flight, while gating on `previewRequestId` strands the
+    // controls disabled when no newer request follows. Each claimer takes a
+    // generation and clears only if it still owns it.
+    let previewBusyGeneration = 0;
     let previewUrlCopied = false;
 
     // Last URL previewed for each session, so switching sessions and coming back
@@ -141,6 +148,7 @@
         // could start a second transition. The backend serializes them
         // regardless (DOCK_TRANSITION); this just stops the UI offering it.
         previewBusy = 'open';
+        const busyGeneration = ++previewBusyGeneration;
         previewError = '';
         try {
             const status = await invoke<PreviewStatus>('open_preview_window', { url, sessionId });
@@ -156,10 +164,15 @@
             if (requestId === previewRequestId) {
                 openingPreview = false;
             }
-            // Ungated, matching `runPreviewAction`: the session-change block
-            // never resets `previewBusy`, so clearing it only for the current
-            // request would strand the controls disabled after a switch.
-            previewBusy = '';
+            // Ownership-gated, NOT request-gated. The session-change block
+            // resets `openingPreview` but not `previewBusy`, so a newer
+            // `openPreview` can start and claim the flag while this one is
+            // still in flight; an unconditional clear here would then re-enable
+            // the dock cluster mid-transition. Whoever holds the newest
+            // generation clears it, so it is never stranded either.
+            if (busyGeneration === previewBusyGeneration) {
+                previewBusy = '';
+            }
         }
     }
 
@@ -167,6 +180,7 @@
         if (previewBusy) return;
         const sessionId = previewSessionId;
         previewBusy = key;
+        const busyGeneration = ++previewBusyGeneration;
         previewError = '';
         try {
             const status = await invoke<PreviewStatus>(command, { sessionId });
@@ -188,11 +202,15 @@
             // via role="alert" and flagging that session's URL input invalid.
             if (sessionId === previewSessionId) previewError = String(error);
         } finally {
-            // Unconditional, unlike openPreview's gated reset — this is why
-            // previewBusy needs no explicit clear on the session-change path
-            // (and must not get one, or the re-entrancy guard above would let a
-            // second action start while the first is still in flight).
-            previewBusy = '';
+            // Ownership-gated, like openPreview. `openPreview` does NOT check
+            // `previewBusy` before claiming it (it guards on `openingPreview`),
+            // so it can take the flag out from under an in-flight action here;
+            // clearing unconditionally would then release a claim this call no
+            // longer owns. previewBusy still needs no reset on the
+            // session-change path — the newest owner always clears it.
+            if (busyGeneration === previewBusyGeneration) {
+                previewBusy = '';
+            }
         }
     }
 
@@ -207,13 +225,17 @@
     async function reloadPreview() {
         if (previewBusy) return;
         previewBusy = 'reload';
+        const busyGeneration = ++previewBusyGeneration;
         previewError = '';
         try {
             await invoke('reload_preview_window');
         } catch (error) {
             previewError = String(error);
         } finally {
-            previewBusy = '';
+            // Ownership-gated for the same reason as the two above.
+            if (busyGeneration === previewBusyGeneration) {
+                previewBusy = '';
+            }
         }
     }
 
