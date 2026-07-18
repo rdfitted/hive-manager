@@ -503,6 +503,126 @@ impl PersistedPreviewState {
             std::mem::take(&mut self.main_was_maximized),
         )
     }
+
+    fn dock_fields(&self) -> DockFields {
+        DockFields {
+            docked: self.docked,
+            floating: self.floating,
+            main_restore: self.main_restore,
+            main_was_maximized: self.main_was_maximized,
+            layout_applied: self.layout_applied,
+        }
+    }
+
+    /// Prepare a dock attempt from reads that must happen BEFORE any window
+    /// moves, without touching a single field.
+    ///
+    /// Taking `&self` is the load-bearing part: it makes "commit the ACTIVE
+    /// state before the tiling is known to have worked" un-writable rather than
+    /// merely discouraged.
+    fn stage_dock(
+        &self,
+        main_geometry: Option<WindowGeometry>,
+        main_was_maximized: bool,
+        preview_geometry: Option<WindowGeometry>,
+    ) -> StagedDock {
+        StagedDock {
+            previous: self.dock_fields(),
+            snapshot_owed: self.needs_main_snapshot(),
+            main_geometry,
+            main_was_maximized,
+            preview_geometry,
+        }
+    }
+
+    /// Apply the outcome of the tiling attempt - the one place `docked` is ever
+    /// set.
+    ///
+    /// `docked` is what `status_for` reports AND what the main-window follow
+    /// handler gates its retile on, so setting it before the geometry calls
+    /// returned left a failed dock reporting docked, keeping the docked minimum
+    /// size applied, and letting the next drag snap the preview into a column
+    /// for a dock that had errored. Committing here, off the tiling result,
+    /// is what makes that unrepresentable.
+    fn settle_dock<E>(&mut self, staged: StagedDock, tiled: &Result<(), E>) {
+        if tiled.is_ok() {
+            self.commit_dock(staged);
+        } else {
+            self.rollback_dock(staged);
+        }
+    }
+
+    fn commit_dock(&mut self, staged: StagedDock) {
+        // Gated on the LAYOUT bit, not the preference - see `needs_main_snapshot`.
+        if staged.snapshot_owed {
+            self.record_main_snapshot(staged.main_geometry, staged.main_was_maximized);
+        }
+        // The FLOATING snapshot keeps its gate on the PREFERENCE as it stood
+        // before the attempt: a reopened preview is a brand-new window at
+        // config-default geometry, and re-snapshotting it there would clobber
+        // the operator's remembered floating position.
+        //
+        // Writing the staged read HERE rather than at stage time also closes a
+        // race the old ordering had no answer for: the preview's own
+        // `Moved`/`Resized` handler records `floating` whenever `!docked`, so
+        // the tiling of the preview into its column can land in `floating`
+        // while the dock is still in flight. This overwrites that with the
+        // geometry actually read before the window moved.
+        if !staged.previous.docked {
+            if let Some(geometry) = staged.preview_geometry {
+                self.floating = Some(geometry);
+            }
+        }
+        self.docked = true;
+    }
+
+    /// Put every dock field back exactly as it was.
+    ///
+    /// Restoring `floating` matters even though `stage_dock` never wrote it:
+    /// the preview's window-event handler may have recorded the half-tiled
+    /// column into it while the dock was in flight.
+    fn rollback_dock(&mut self, staged: StagedDock) {
+        let DockFields {
+            docked,
+            floating,
+            main_restore,
+            main_was_maximized,
+            layout_applied,
+        } = staged.previous;
+        self.docked = docked;
+        self.floating = floating;
+        self.main_restore = main_restore;
+        self.main_was_maximized = main_was_maximized;
+        self.layout_applied = layout_applied;
+    }
+}
+
+/// The dock-mode fields of [`PersistedPreviewState`], captured before a dock
+/// attempt so a failed tiling can put every one of them back.
+#[derive(Debug, Clone, Copy)]
+struct DockFields {
+    docked: bool,
+    floating: Option<WindowGeometry>,
+    main_restore: Option<WindowGeometry>,
+    main_was_maximized: bool,
+    layout_applied: bool,
+}
+
+/// A dock attempt that has been PREPARED but not applied.
+///
+/// Carries the geometry reads that only make sense before any window moves,
+/// alongside the field values to restore if the tiling fails.
+#[derive(Debug, Clone, Copy)]
+struct StagedDock {
+    previous: DockFields,
+    /// True when this attempt is the one establishing the docked layout, so it
+    /// owes the pre-dock snapshot - and, on failure, owes the physical undo.
+    /// False for a redundant re-tile of a layout that is already live and
+    /// already owns its snapshot.
+    snapshot_owed: bool,
+    main_geometry: Option<WindowGeometry>,
+    main_was_maximized: bool,
+    preview_geometry: Option<WindowGeometry>,
 }
 
 #[cfg(not(test))]
@@ -708,30 +828,72 @@ fn enter_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), S
     // must leave both windows exactly where they were.
     let (main_width, preview_width) = dock_split(work_area.size.width, scale)?;
 
+    // Every read that only makes sense BEFORE a window moves, taken while the
+    // state is still completely untouched.
+    //
+    // Taken OUTSIDE the lock deliberately: each of these is a blocking
+    // round-trip to the event-loop thread (tauri-runtime-wry's `window_getter!`
+    // posts a user message and blocks on `rx.recv()` with no timeout), and that
+    // same thread takes this mutex in the window-event handlers below. This is
+    // an async command, so it never short-circuits onto the main thread -
+    // holding the lock across these reads deadlocks the event loop against the
+    // command with no way out but killing the process.
+    let main_geometry = read_geometry(&main);
+    let main_was_maximized = main.is_maximized().unwrap_or(false);
+    let preview_geometry = read_geometry(&preview);
+
+    // `stage_dock` borrows the state immutably, so nothing here can commit the
+    // docked state early.
+    let staged = {
+        let guard = runtime(app_state).lock();
+        guard
+            .state
+            .stage_dock(main_geometry, main_was_maximized, preview_geometry)
+    };
+
+    let tiled = tile_docked_windows(
+        &main,
+        &preview,
+        work_area.position,
+        work_area.size.height,
+        main_width,
+        preview_width,
+    );
+
+    // Commit or roll back off the tiling RESULT. The lock is deliberately not
+    // held across the geometry calls above: the preview's own window-event
+    // handler takes it too.
     {
         let mut guard = runtime(app_state).lock();
-        // Snapshot the pre-dock layout so undock/close restores it exactly.
-        // Gated on the LAYOUT bit, not the preference: a re-dock must not
-        // re-snapshot the already-tiled geometry as its own restore target, but
-        // a reopen after a docked close - which keeps the preference and has
-        // already spent its snapshot - must take a fresh one.
-        if guard.state.needs_main_snapshot() {
-            let geometry = read_geometry(&main);
-            let maximized = main.is_maximized().unwrap_or(false);
-            guard.state.record_main_snapshot(geometry, maximized);
-        }
-        // The FLOATING snapshot stays gated on the preference: a reopened
-        // preview is a brand-new window at config-default geometry, and
-        // re-snapshotting it there would clobber the remembered position.
-        if !guard.state.docked {
-            if let Some(geometry) = read_geometry(&preview) {
-                guard.state.floating = Some(geometry);
-            }
-        }
-        guard.state.docked = true;
+        guard.state.settle_dock(staged, &tiled);
         persist(&guard);
     }
 
+    if let Err(error) = tiled {
+        // The state is already back where it started; put the windows back too.
+        // Best effort, and deliberately after the rollback so the ORIGINAL
+        // cause below is what the operator sees.
+        undo_failed_dock(&main, &preview, staged);
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+/// Issue the geometry calls that put the two windows into their columns.
+///
+/// Split out from [`enter_docked_mode`] so the dock state machine settles on
+/// its RESULT: nothing in here touches the persisted state, which is what makes
+/// "tile, then commit" an ordering the caller cannot get wrong.
+#[cfg(not(test))]
+fn tile_docked_windows(
+    main: &WebviewWindow,
+    preview: &WebviewWindow,
+    origin: PhysicalPosition<i32>,
+    height: u32,
+    main_width: u32,
+    preview_width: u32,
+) -> Result<(), String> {
     // A maximized window ignores explicit geometry, so drop out of it first.
     if main.is_maximized().unwrap_or(false) {
         let _ = main.unmaximize();
@@ -744,24 +906,58 @@ fn enter_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), S
         DOCKED_PREVIEW_MIN_LOGICAL_HEIGHT,
     )));
 
-    let top = work_area.position.y;
-    let height = work_area.size.height;
-
-    main.set_position(PhysicalPosition::new(work_area.position.x, top))
+    main.set_position(PhysicalPosition::new(origin.x, origin.y))
         .map_err(|error| format!("Failed to position Hive Manager: {error}"))?;
     main.set_size(PhysicalSize::new(main_width, height))
         .map_err(|error| format!("Failed to resize Hive Manager: {error}"))?;
     preview
-        .set_position(PhysicalPosition::new(
-            work_area.position.x + main_width as i32,
-            top,
-        ))
+        .set_position(PhysicalPosition::new(origin.x + main_width as i32, origin.y))
         .map_err(|error| format!("Failed to position the preview: {error}"))?;
     preview
         .set_size(PhysicalSize::new(preview_width, height))
-        .map_err(|error| format!("Failed to resize the preview: {error}"))?;
+        .map_err(|error| format!("Failed to resize the preview: {error}"))
+}
 
-    Ok(())
+/// Best-effort physical undo of a dock whose tiling failed, run after
+/// [`PersistedPreviewState::settle_dock`] has already rolled the state back.
+///
+/// Every step logs and continues rather than propagating: the caller still owes
+/// the operator the ORIGINAL tiling error, and a secondary failure in here must
+/// never mask it.
+#[cfg(not(test))]
+fn undo_failed_dock(main: &WebviewWindow, preview: &WebviewWindow, staged: StagedDock) {
+    // Gated on the LAYOUT fact rather than the dock PREFERENCE: when a docked
+    // layout was already live this attempt was a redundant re-tile, so it owns
+    // none of the side effects below and the live layout - along with the
+    // restore snapshot that is the only way back out of it - is left alone.
+    if !staged.snapshot_owed {
+        return;
+    }
+
+    if let Err(error) = preview.set_min_size(Some(LogicalSize::new(
+        FLOATING_PREVIEW_MIN_LOGICAL_WIDTH,
+        FLOATING_PREVIEW_MIN_LOGICAL_HEIGHT,
+    ))) {
+        tracing::warn!(
+            "Failed to relax the docked preview minimum size after a failed dock: {error}"
+        );
+    }
+
+    if let Some(geometry) = staged.preview_geometry {
+        if let Err(error) = apply_geometry(preview, geometry) {
+            tracing::warn!("Failed to put the preview back after a failed dock: {error}");
+        }
+    }
+
+    if staged.main_was_maximized {
+        if let Err(error) = main.maximize() {
+            tracing::warn!("Failed to re-maximize Hive Manager after a failed dock: {error}");
+        }
+    } else if let Some(geometry) = staged.main_geometry {
+        if let Err(error) = apply_geometry(main, geometry) {
+            tracing::warn!("Failed to put Hive Manager back after a failed dock: {error}");
+        }
+    }
 }
 
 /// Give the main window back the geometry it had before docking. Split out from
@@ -1942,35 +2138,408 @@ mod tests {
         // strings, which makes the lock pass against any source at all.
         let source = include_str!("mod.rs").replace("\r\n", "\n");
 
-        /// The text of `fn <name>` up to the first column-0 `}`.
-        fn body_of<'a>(source: &'a str, name: &str) -> &'a str {
-            let needle = format!("fn {name}");
-            let body = source
-                .find(&needle)
-                .map(|start| &source[start..])
-                .unwrap_or_else(|| panic!("{name} must still exist"));
-            let end = body
-                .find("\n}\n")
-                .unwrap_or_else(|| panic!("{name} must have a column-0 closing brace"));
-            &body[..end]
-        }
-
         let dock = body_of(&source, "enter_docked_mode");
         assert!(
-            dock.contains("needs_main_snapshot"),
-            "enter_docked_mode must gate its pre-dock snapshot on the live-layout \
-             bit; gating on `docked` makes a reopened dock skip the snapshot"
+            dock.contains("stage_dock"),
+            "enter_docked_mode must route its pre-dock reads through the state \
+             machine, or the transition tests below bind nothing"
+        );
+        // The gate itself moved into the state machine when the commit was
+        // deferred past the tiling (issue #160); it is still the LAYOUT bit.
+        assert!(
+            method_of(&source, "stage_dock").contains("needs_main_snapshot"),
+            "the pre-dock snapshot must stay gated on the live-layout bit; \
+             gating on `docked` makes a reopened dock skip the snapshot"
         );
         assert!(
-            dock.contains("record_main_snapshot"),
+            method_of(&source, "commit_dock").contains("record_main_snapshot"),
             "the snapshot must be recorded through the helper, so the geometry \
              and the layout bit are always set together"
+        );
+        // `stage_dock`'s mention above is an unconditional field initializer -
+        // structurally mandatory for `StagedDock` to compile, so it cannot
+        // encode whether the gate survives. This pins the gate itself.
+        assert!(
+            method_of(&source, "commit_dock").contains("if staged.snapshot_owed"),
+            "the pre-dock snapshot must stay GATED on the live-layout bit, not \
+             merely computed from it: an ungated commit overwrites the restore \
+             geometry on every re-dock"
         );
 
         assert!(
             body_of(&source, "restore_main_window_geometry").contains("take_main_restore"),
             "the teardown must consume the snapshot through the helper, so the \
              layout bit cannot stay set after the geometry is gone"
+        );
+    }
+
+    /// The text of `fn <name>` up to the first column-0 `}`.
+    ///
+    /// Callers must hand in CRLF-normalized source: a missed `\n}\n` here would
+    /// widen the slice to the rest of the file and let an assertion pass by
+    /// matching this test module's own text.
+    fn body_of<'a>(source: &'a str, name: &str) -> &'a str {
+        let needle = format!("fn {name}");
+        let body = source
+            .find(&needle)
+            .map(|start| &source[start..])
+            .unwrap_or_else(|| panic!("{name} must still exist"));
+        let end = body
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{name} must have a column-0 closing brace"));
+        &body[..end]
+    }
+
+    /// The text of an indented `fn <name>` method up to its 4-space closing
+    /// brace. Same delimiter discipline as [`body_of`].
+    fn method_of<'a>(source: &'a str, name: &str) -> &'a str {
+        let needle = format!("    fn {name}");
+        let body = source
+            .find(&needle)
+            .map(|start| &source[start..])
+            .unwrap_or_else(|| panic!("{name} must still exist as a method"));
+        let end = body
+            .find("\n    }\n")
+            .unwrap_or_else(|| panic!("{name} must have a 4-space closing brace"));
+        &body[..end]
+    }
+
+    // -- issue #160: a dock that fails partway must not half-apply -----------
+
+    /// The geometry a dock reads before it moves anything.
+    fn staging_reads() -> (WindowGeometry, WindowGeometry) {
+        (
+            // main, pre-dock
+            WindowGeometry {
+                x: 64,
+                y: 32,
+                width: 1280.0,
+                height: 800.0,
+            },
+            // preview, floating where the operator left it
+            WindowGeometry {
+                x: 900,
+                y: 120,
+                width: 800.0,
+                height: 600.0,
+            },
+        )
+    }
+
+    /// Regression lock for issue #160.
+    ///
+    /// `enter_docked_mode` used to set `docked = true` and record the pre-dock
+    /// snapshot BEFORE issuing its `set_position`/`set_size` calls. A geometry
+    /// call that failed partway returned `Err` with the session already
+    /// reporting docked: the frontend showed a docked state the operator had
+    /// just been told had failed, the docked minimum size stayed applied, and
+    /// the main-window follow handler - which gates purely on `docked` - snapped
+    /// the preview into a column on the next drag, half-applying a dock that
+    /// had errored.
+    #[test]
+    fn a_dock_whose_tiling_fails_leaves_no_trace_in_the_state_machine() {
+        let (main_before, preview_before) = staging_reads();
+        let mut state = PersistedPreviewState::default();
+        state.floating = Some(preview_before);
+
+        let staged = state.stage_dock(Some(main_before), false, Some(preview_before));
+
+        // Staging alone must change nothing at all - it only borrows the state.
+        assert!(!state.docked);
+        assert!(!state.layout_applied);
+        assert!(state.main_restore.is_none());
+        assert!(staged.snapshot_owed);
+
+        // Stand in for the preview's own `Moved`/`Resized` handler, which runs
+        // while the dock is in flight - `enter_docked_mode` deliberately drops
+        // the lock across the geometry calls - and records `floating` on every
+        // move so long as `!docked`. Without this the rollback below has
+        // nothing to undo, and "the restore put the field back" is
+        // indistinguishable from "nothing ever touched the field".
+        state.floating = Some(WindowGeometry {
+            x: 768,
+            y: 0,
+            width: 512.0,
+            height: 1040.0,
+        });
+
+        // Inject the failure the real geometry calls would produce.
+        let tiled: Result<(), &str> = Err("Failed to resize Hive Manager: os error 5");
+        state.settle_dock(staged, &tiled);
+
+        assert!(
+            !state.docked,
+            "a dock whose tiling failed must report NOT docked - `docked` is \
+             both what status_for surfaces and what the follow handler retiles on"
+        );
+        assert!(
+            !state.layout_applied,
+            "no docked layout is live after a failed dock"
+        );
+        assert!(
+            state.main_restore.is_none(),
+            "a failed dock must not leave a restore snapshot stranded behind a \
+             `docked: false` that no teardown path will ever consume"
+        );
+        assert!(
+            state.needs_main_snapshot(),
+            "the operator must be able to retry cleanly: the retry owes a fresh \
+             pre-dock snapshot"
+        );
+        assert_eq!(
+            state.floating.map(|geometry| (geometry.x, geometry.y)),
+            Some((900, 120)),
+            "the remembered floating position must survive a failed dock"
+        );
+    }
+
+    /// The success half of the same transition: the ACTIVE state is committed,
+    /// and both bits land together.
+    #[test]
+    fn a_dock_commits_the_active_state_once_the_tiling_succeeds() {
+        let (main_before, preview_before) = staging_reads();
+        let mut state = PersistedPreviewState::default();
+
+        let staged = state.stage_dock(Some(main_before), true, Some(preview_before));
+        let tiled: Result<(), &str> = Ok(());
+        state.settle_dock(staged, &tiled);
+
+        assert!(state.docked, "a dock that tiled must report docked");
+        assert!(!state.needs_main_snapshot(), "the layout is now live");
+        assert_eq!(
+            state.main_restore.map(|geometry| (geometry.x, geometry.y)),
+            Some((64, 32)),
+            "the snapshot must hold the geometry read BEFORE the windows moved"
+        );
+        assert!(state.main_was_maximized);
+        assert_eq!(
+            state.floating.map(|geometry| (geometry.x, geometry.y)),
+            Some((900, 120)),
+            "the floating snapshot must hold the pre-tiling read, not whatever \
+             the preview's own Moved handler recorded while the dock was in flight"
+        );
+    }
+
+    /// A redundant dock over an ALREADY LIVE layout is the one case where the
+    /// rollback must keep its hands off: that layout is still applied and its
+    /// restore snapshot is the only way back out of it.
+    #[test]
+    fn a_failed_re_dock_leaves_the_live_layout_and_its_snapshot_alone() {
+        let (main_before, preview_before) = staging_reads();
+        let mut state = PersistedPreviewState::default();
+        state.floating = Some(preview_before);
+        state.record_main_snapshot(Some(main_before), true);
+        state.docked = true;
+
+        // Both windows are already tiled, so these reads are of the COLUMNS.
+        let tiled_main = WindowGeometry {
+            x: 0,
+            y: 0,
+            width: 768.0,
+            height: 1040.0,
+        };
+        let tiled_preview = WindowGeometry {
+            x: 768,
+            y: 0,
+            width: 512.0,
+            height: 1040.0,
+        };
+        let staged = state.stage_dock(Some(tiled_main), false, Some(tiled_preview));
+        assert!(
+            !staged.snapshot_owed,
+            "a live layout already owns its snapshot"
+        );
+
+        let tiled: Result<(), &str> = Err("Failed to position the preview: os error 5");
+        state.settle_dock(staged, &tiled);
+
+        assert!(state.docked, "the layout that was already live stays live");
+        assert!(!state.needs_main_snapshot());
+        assert_eq!(
+            state.main_restore.map(|geometry| (geometry.x, geometry.y)),
+            Some((64, 32)),
+            "a failed re-tile must not overwrite the live layout's restore \
+             snapshot with the already-tiled column geometry"
+        );
+        assert!(state.main_was_maximized);
+        assert_eq!(
+            state.floating.map(|geometry| (geometry.x, geometry.y)),
+            Some((900, 120)),
+            "the rollback restores `floating` verbatim: the preview's own \
+             Moved handler may have recorded the half-tiled column into it \
+             while the dock was in flight"
+        );
+    }
+
+    /// The fourth quadrant of the transition matrix, and the ONLY one that
+    /// reaches the false branch of EITHER gate in `commit_dock`: a redundant
+    /// dock over a live layout that SUCCEEDS.
+    ///
+    /// Not hypothetical - this is the reopen path. `open_preview_window`
+    /// re-tiles off the surviving `docked` preference, so `commit_dock` runs
+    /// with `previous.docked == true` on every reopen of a docked preview, and
+    /// `dock_preview_window` is an unguarded command besides. Both staged reads
+    /// are therefore of the COLUMNS, and each gate is the only thing keeping
+    /// that column geometry out of a snapshot the next teardown will restore
+    /// from.
+    #[test]
+    fn a_successful_re_dock_keeps_the_live_layouts_snapshots() {
+        let (main_before, preview_before) = staging_reads();
+        let mut state = PersistedPreviewState::default();
+        state.floating = Some(preview_before);
+        state.record_main_snapshot(Some(main_before), true);
+        state.docked = true;
+
+        // Both windows are already tiled, so these reads are of the COLUMNS.
+        let tiled_main = WindowGeometry {
+            x: 0,
+            y: 0,
+            width: 768.0,
+            height: 1040.0,
+        };
+        let tiled_preview = WindowGeometry {
+            x: 768,
+            y: 0,
+            width: 512.0,
+            height: 1040.0,
+        };
+        let staged = state.stage_dock(Some(tiled_main), false, Some(tiled_preview));
+        assert!(
+            !staged.snapshot_owed,
+            "a live layout already owns its snapshot"
+        );
+
+        let tiled: Result<(), &str> = Ok(());
+        state.settle_dock(staged, &tiled);
+
+        assert!(state.docked, "the layout stays live");
+        assert!(!state.needs_main_snapshot());
+        assert_eq!(
+            state.floating.map(|geometry| (geometry.x, geometry.y)),
+            Some((900, 120)),
+            "commit_dock's `!docked` gate is the only thing standing between a \
+             re-dock and the operator's remembered floating position: without \
+             it the docked column is committed as `floating`, and the next \
+             undock drops the preview into a column-shaped window instead of \
+             where the operator left it"
+        );
+        assert_eq!(
+            state.main_restore.map(|geometry| (geometry.x, geometry.y)),
+            Some((64, 32)),
+            "a re-dock over a live layout owes no fresh snapshot, so \
+             `snapshot_owed` must gate it: without that gate the pre-dock \
+             geometry is overwritten with the already-tiled column, and the \
+             undock after it restores the main window into the column it is \
+             already in"
+        );
+        assert!(
+            state.main_was_maximized,
+            "the maximized bit belongs to the pre-dock read, not the re-tile"
+        );
+    }
+
+    /// The transition tests above only bind the app if `enter_docked_mode`
+    /// actually routes through them in the right order. That function needs a
+    /// live `AppHandle`, so - same discipline as the #159 locks above - the
+    /// ordering is pinned against the source text.
+    #[test]
+    fn the_dock_path_commits_its_active_state_only_after_the_tiling() {
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        let dock = body_of(&source, "enter_docked_mode");
+
+        let split = dock
+            .find("dock_split(")
+            .expect("enter_docked_mode must still compute the split");
+        let stage = dock
+            .find("stage_dock(")
+            .expect("enter_docked_mode must stage the dock through the state machine");
+        let tile = dock
+            .find("tile_docked_windows(")
+            .expect("enter_docked_mode must issue its geometry calls through the tiler");
+        // The ARGUMENTS are pinned, not just the position: a settle handed a
+        // fabricated `Ok` sits in exactly the right place in the ordering below
+        // while committing `docked = true` for a tiling that failed - issue
+        // #160 restored, green. `body_of` slices only this function, so the
+        // transition tests' own `settle_dock(staged, &tiled)` calls cannot
+        // satisfy it.
+        let settle = dock
+            .find("settle_dock(staged, &tiled)")
+            .expect("enter_docked_mode must settle the state machine on the ACTUAL tiling result");
+
+        assert!(
+            split < stage,
+            "the too-narrow-display bail must stay ahead of every mutation"
+        );
+        assert!(
+            stage < tile && tile < settle,
+            "the docked state must be committed AFTER the geometry calls, not \
+             before them: a set_position/set_size that fails partway otherwise \
+             returns Err with the session already reporting docked"
+        );
+        assert!(
+            dock.contains("undo_failed_dock"),
+            "a failed dock must undo the window side effects it applied, not \
+             just the persisted state"
+        );
+        assert!(
+            !dock.contains("docked = true"),
+            "enter_docked_mode must not set the ACTIVE dock bit itself - that \
+             belongs to commit_dock, which only runs on a successful tiling"
+        );
+
+        let propagate = dock
+            .find("return Err(error)")
+            .expect("a failed tiling must be reported to the caller");
+        assert!(
+            settle < propagate,
+            "the original tiling error must reach the operator AFTER the state \
+             has settled: without the propagation the dock command reports \
+             success for a dock that never tiled, and open_preview_window's \
+             downgrade-to-floating never fires"
+        );
+
+        assert!(
+            method_of(&source, "commit_dock").contains("!staged.previous.docked"),
+            "the floating snapshot must stay gated on the PREFERENCE as it \
+             stood before the attempt, or a re-dock commits the column"
+        );
+
+        // Deadlock lock. Every one of these reads is a blocking round-trip to
+        // the event-loop thread, and that thread takes this same mutex in the
+        // window-event handlers. This is an async command, so it is never ON
+        // the event-loop thread and never short-circuits: a read taken under
+        // the guard freezes the event loop against the command with no timeout
+        // on either side. Pinned textually because the whole path is
+        // `#[cfg(not(test))]` and cannot be driven from a test.
+        let guard = dock
+            .find("runtime(app_state).lock()")
+            .expect("enter_docked_mode must take the runtime lock to stage");
+        for read in [
+            "read_geometry(&main)",
+            "main.is_maximized()",
+            "read_geometry(&preview)",
+        ] {
+            let at = dock
+                .find(read)
+                .unwrap_or_else(|| panic!("enter_docked_mode must still call {read}"));
+            assert!(
+                at < guard,
+                "`{read}` must be hoisted ABOVE the runtime lock: it blocks on \
+                 a reply from the event-loop thread, which takes that same \
+                 mutex in the preview's Moved/Resized/Destroyed handlers - \
+                 holding it across the read deadlocks both windows permanently"
+            );
+        }
+
+        // The rollback must not swallow the cause the operator needs.
+        assert!(
+            method_of(&source, "settle_dock").contains("rollback_dock"),
+            "a failed tiling must roll the dock fields back"
+        );
+        assert!(
+            body_of(&source, "undo_failed_dock").contains("tracing::warn!"),
+            "the physical undo is best effort: a secondary failure must be \
+             logged, never propagated over the original tiling error"
         );
     }
 
