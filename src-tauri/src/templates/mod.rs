@@ -1122,6 +1122,22 @@ Branch: {{branch}}
 ## Your Stance
 {{stance}}
 
+## Prior Wiki Context
+
+Ground your argument in existing institutional knowledge before writing this round.
+
+{{#if has_global_wiki}}
+- The global wiki path is: `{{global_wiki_path}}`
+- Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
+  ```bash
+  cat "{{global_wiki_path}}/index.md"
+  ```
+  Then read the pages from the index that are relevant to the debate topic. Use this prior knowledge to sharpen your argument and to avoid re-deriving what is already documented.
+{{/if}}
+{{#if no_global_wiki}}
+- No global wiki path is configured. Skip this phase gracefully and argue with no prior-wiki context.
+{{/if}}
+
 ## Round
 Round {{round}} of {{total_rounds}}
 
@@ -1163,6 +1179,22 @@ Then update your task file:
 
 ## Argument Files
 {{round_files}}
+
+## Prior Wiki Context
+
+Ground your verdict in existing institutional knowledge before evaluating the arguments.
+
+{{#if has_global_wiki}}
+- The global wiki path is: `{{global_wiki_path}}`
+- Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
+  ```bash
+  cat "{{global_wiki_path}}/index.md"
+  ```
+  Then read the pages from the index that are relevant to the debate topic. Weigh the arguments against what is already documented, and note where a position contradicts or extends prior knowledge.
+{{/if}}
+{{#if no_global_wiki}}
+- No global wiki path is configured. Skip this phase gracefully and judge with no prior-wiki context.
+{{/if}}
 
 ## Evaluation Process
 1. Read every argument file listed above.

@@ -3485,6 +3485,24 @@ Last updated: {timestamp}
         Ok(file_path)
     }
 
+    /// Insert the `global_wiki_path` prompt variable plus the `{{#if}}` gate flags
+    /// that wrap the "Prior Wiki Context" load phase in the debate templates.
+    ///
+    /// The flags exist so an unset/blank wiki path renders a prompt containing no
+    /// read of an empty path: the whole `cat "<path>/index.md"` block is dropped
+    /// and a short skip notice renders in its place. A debate must still run to
+    /// completion with no wiki configured.
+    fn insert_debate_wiki_variables(
+        variables: &mut HashMap<String, String>,
+        global_wiki_path: &str,
+    ) {
+        let configured = !global_wiki_path.trim().is_empty();
+        variables.insert("global_wiki_path".to_string(), global_wiki_path.to_string());
+        variables.insert("has_global_wiki".to_string(), configured.to_string());
+        variables.insert("no_global_wiki".to_string(), (!configured).to_string());
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build_debate_debater_prompt(
         session_id: &str,
         debater: &DebateDebaterMetadata,
@@ -3495,6 +3513,7 @@ Last updated: {timestamp}
         previous_round_dir: Option<&Path>,
         opponent_files: &str,
         task_file: &Path,
+        global_wiki_path: &str,
     ) -> String {
         let mut variables = HashMap::new();
         let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
@@ -3532,6 +3551,7 @@ Last updated: {timestamp}
         );
         variables.insert("opponent_files".to_string(), opponent_files.to_string());
         variables.insert("task_file".to_string(), Self::prompt_path(task_file));
+        Self::insert_debate_wiki_variables(&mut variables, global_wiki_path);
 
         let engine = TemplateEngine::default();
         let context = PromptContext {
@@ -3573,7 +3593,7 @@ Last updated: {timestamp}
         );
         variables.insert("rounds".to_string(), metadata.rounds.to_string());
         variables.insert("verdict_file".to_string(), metadata.verdict_file.clone());
-        variables.insert("global_wiki_path".to_string(), global_wiki_path.to_string());
+        Self::insert_debate_wiki_variables(&mut variables, global_wiki_path);
 
         let debater_list = metadata
             .debaters
@@ -8755,6 +8775,14 @@ phases and do EXACTLY this, then stop:
             None
         };
 
+        let global_wiki_path = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.load_config().ok())
+            .and_then(|cfg| cfg.global_wiki_path)
+            .unwrap_or_default();
+        let global_wiki_path = expand_tilde(&global_wiki_path);
+
         let mut new_agents = Vec::new();
         for debater in &metadata.debaters {
             let spawning_changes = {
@@ -8805,6 +8833,7 @@ phases and do EXACTLY this, then stop:
                 previous_round_dir.as_deref(),
                 &opponent_files,
                 &task_file,
+                &global_wiki_path,
             );
             let prompt_filename =
                 format!("debate-debater-{}-round-{}-prompt.md", debater.index, round);
@@ -13991,8 +14020,9 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 mod tests {
     use super::{
         extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
-        AgentInfo, AuthStrategy, CompletionError, FusionVariantMetadata, QaWorkerConfig, Session,
-        SessionController, SessionError, SessionState, SessionType,
+        AgentInfo, AuthStrategy, CompletionError, DebateDebaterMetadata, DebateSessionMetadata,
+        FusionVariantMetadata, QaWorkerConfig, Session, SessionController, SessionError,
+        SessionState, SessionType,
     };
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
@@ -16075,5 +16105,191 @@ mod tests {
         assert!(isolated.contains("git -C"));
         assert!(isolated.contains("cherry-pick <sha>"));
         assert!(isolated.contains("hive/session/worker-N"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Debate mode: "Prior Wiki Context" load phase (issue #120)
+    //
+    // The acceptance criterion is prompt text, so these assert on the string
+    // the builders actually return -- never on the template constant, which
+    // would prove nothing about what a debater receives.
+    // ---------------------------------------------------------------------
+
+    const DEBATE_TEST_WIKI_PATH: &str = "/home/tester/.ai-docs/wiki";
+
+    fn debate_test_debater() -> DebateDebaterMetadata {
+        DebateDebaterMetadata {
+            index: 1,
+            name: "Debater 1".to_string(),
+            stance: Some("Monolith first".to_string()),
+            slug: "debater-1".to_string(),
+            branch: "debate/session-wiki-debater-1".to_string(),
+            worktree_path: "/projects/app/debater-1".to_string(),
+            config: AgentConfig::default(),
+        }
+    }
+
+    fn debate_test_metadata() -> DebateSessionMetadata {
+        DebateSessionMetadata {
+            base_branch: "main".to_string(),
+            debaters: vec![debate_test_debater()],
+            judge_config: AgentConfig::default(),
+            topic: "Monolith versus microservices".to_string(),
+            rounds: 2,
+            verdict_file: ".hive-manager/session-wiki/debate/verdict.md".to_string(),
+        }
+    }
+
+    fn render_debate_test_debater_prompt(global_wiki_path: &str) -> String {
+        SessionController::build_debate_debater_prompt(
+            "session-wiki",
+            &debate_test_debater(),
+            "Monolith versus microservices",
+            1,
+            2,
+            Path::new("/projects/app/debater-1/argument.md"),
+            None,
+            "- Debater 2: `/projects/app/debater-2/argument.md`",
+            Path::new("/projects/app/debater-1/task.md"),
+            global_wiki_path,
+        )
+    }
+
+    /// Any leftover mustache control token means the render silently produced a
+    /// prompt with raw template syntax in it -- the exact failure mode an
+    /// unset `{{#if}}` gate flag causes.
+    fn assert_no_unrendered_template_syntax(prompt: &str, label: &str) {
+        for token in ["{{#if", "{{/if}}", "{{global_wiki_path}}"] {
+            assert!(
+                !prompt.contains(token),
+                "{} prompt leaked unrendered template syntax {}:\n{}",
+                label,
+                token,
+                prompt
+            );
+        }
+    }
+
+    /// A prompt with no wiki configured must contain no read of an empty path.
+    /// `cat "/index.md"` (from a blank `{{global_wiki_path}}`) is the dangling
+    /// read this guards against.
+    fn assert_no_dangling_wiki_read(prompt: &str, label: &str) {
+        assert!(
+            !prompt.contains("/index.md"),
+            "{} prompt still instructs a wiki index read with no wiki configured:\n{}",
+            label,
+            prompt
+        );
+        assert!(
+            !prompt.contains("cat \""),
+            "{} prompt still contains a dangling cat of an empty path:\n{}",
+            label,
+            prompt
+        );
+    }
+
+    #[test]
+    fn debater_prompt_loads_prior_wiki_context_when_path_configured() {
+        let prompt = render_debate_test_debater_prompt(DEBATE_TEST_WIKI_PATH);
+
+        assert!(
+            prompt.contains("## Prior Wiki Context"),
+            "debater prompt is missing the wiki load phase:\n{}",
+            prompt
+        );
+        assert!(
+            prompt.contains(DEBATE_TEST_WIKI_PATH),
+            "debater prompt never names the configured wiki path:\n{}",
+            prompt
+        );
+        assert!(
+            prompt.contains(&format!("cat \"{}/index.md\"", DEBATE_TEST_WIKI_PATH)),
+            "debater prompt is missing the concrete index read:\n{}",
+            prompt
+        );
+        assert!(
+            !prompt.contains("No global wiki path is configured"),
+            "debater prompt rendered the skip notice despite a configured path:\n{}",
+            prompt
+        );
+        assert_no_unrendered_template_syntax(&prompt, "debater");
+    }
+
+    #[test]
+    fn debater_prompt_skips_wiki_load_gracefully_when_path_unset() {
+        for unset in ["", "   "] {
+            let prompt = render_debate_test_debater_prompt(unset);
+
+            assert_no_dangling_wiki_read(&prompt, "debater");
+            assert_no_unrendered_template_syntax(&prompt, "debater");
+            assert!(
+                prompt.contains("No global wiki path is configured"),
+                "debater prompt is missing the explicit skip notice:\n{}",
+                prompt
+            );
+
+            // ...and the prompt is still a usable debate brief.
+            assert!(prompt.contains("Monolith versus microservices"));
+            assert!(prompt.contains("Monolith first"));
+            assert!(prompt.contains("Round 1 of 2"));
+            assert!(prompt.contains("## Deliverable"));
+            assert!(prompt.contains("/projects/app/debater-1/argument.md"));
+        }
+    }
+
+    #[test]
+    fn debate_judge_prompt_loads_prior_wiki_context_when_path_configured() {
+        let prompt = SessionController::build_debate_judge_prompt(
+            "session-wiki",
+            &debate_test_metadata(),
+            DEBATE_TEST_WIKI_PATH,
+        );
+
+        assert!(
+            prompt.contains("## Prior Wiki Context"),
+            "judge prompt is missing the wiki load phase:\n{}",
+            prompt
+        );
+        assert!(
+            prompt.contains(&format!("cat \"{}/index.md\"", DEBATE_TEST_WIKI_PATH)),
+            "judge prompt is missing the concrete index read:\n{}",
+            prompt
+        );
+        assert!(
+            !prompt.contains("No global wiki path is configured"),
+            "judge prompt rendered the skip notice despite a configured path:\n{}",
+            prompt
+        );
+        // The pre-existing capture half must survive alongside the new load half.
+        assert!(
+            prompt.contains("## Wiki Capture"),
+            "judge prompt lost its wiki capture phase:\n{}",
+            prompt
+        );
+        assert_no_unrendered_template_syntax(&prompt, "judge");
+    }
+
+    #[test]
+    fn debate_judge_prompt_skips_wiki_load_gracefully_when_path_unset() {
+        for unset in ["", "   "] {
+            let prompt = SessionController::build_debate_judge_prompt(
+                "session-wiki",
+                &debate_test_metadata(),
+                unset,
+            );
+
+            assert_no_dangling_wiki_read(&prompt, "judge");
+            assert_no_unrendered_template_syntax(&prompt, "judge");
+            assert!(
+                prompt.contains("No global wiki path is configured"),
+                "judge prompt is missing the explicit skip notice:\n{}",
+                prompt
+            );
+
+            // ...and the prompt is still a usable judging brief.
+            assert!(prompt.contains("Monolith versus microservices"));
+            assert!(prompt.contains("## Verdict Format"));
+            assert!(prompt.contains(".hive-manager/session-wiki/debate/verdict.md"));
+        }
     }
 }
