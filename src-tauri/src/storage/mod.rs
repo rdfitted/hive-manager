@@ -779,6 +779,7 @@ impl SessionStorage {
                 port: 18800,
             },
             global_wiki_path: default_global_wiki_path(),
+            knowledge_wiki_folders: None,
         }
     }
 
@@ -1443,6 +1444,23 @@ pub struct AppConfig {
     /// files (written before this field existed) still deserialize.
     #[serde(default = "default_global_wiki_path")]
     pub global_wiki_path: Option<String>,
+    /// Optional operator narrowing of the Knowledge Atlas global-wiki folder set.
+    ///
+    /// Entries are *matched against* the compiled-in allowlist in
+    /// `http::handlers::knowledge::WIKI_FOLDERS` — they select, they never construct. An
+    /// unrecognized entry is logged and ignored, so this field can only narrow or reorder the
+    /// scan; it can never widen it or point the scanner at an arbitrary directory. `None` (the
+    /// default, and what every pre-existing `config.json` deserializes to) means the built-in
+    /// folder set.
+    ///
+    /// **`Some(..)` fails closed.** This is a privacy boundary — its purpose is keeping entity
+    /// folders (`clients`, `partners`, `vendors`) out of a browsable graph — so a present-but-
+    /// unusable value scans *nothing* rather than reverting to the full default. A typo such as
+    /// `["pattern"]` therefore yields an empty Atlas and an error-level log, not a silent scan of
+    /// every folder the operator was trying to exclude. An empty Atlas is loud and self-correcting;
+    /// silently rendering data the operator believed was excluded is neither.
+    #[serde(default)]
+    pub knowledge_wiki_folders: Option<Vec<String>>,
 }
 
 /// Default location of the global LLM wiki used by Research mode.

@@ -1,8 +1,18 @@
 <script lang="ts">
     import { invoke } from '@tauri-apps/api/core';
-    import { tick } from 'svelte';
-    import { Browser, GitBranch } from 'phosphor-svelte';
+    import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+    import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+    import { onDestroy, onMount, tick } from 'svelte';
+    import { ArrowClockwise, ArrowSquareOut, Browser, Columns, Copy, GitBranch, X } from 'phosphor-svelte';
     import { activeSession, serdeEnumVariantName } from '../../stores/sessions';
+
+    /** Mirrors `PreviewStatus` in src-tauri/src/preview/mod.rs. */
+    type PreviewStatus = {
+        open: boolean;
+        docked: boolean;
+        url: string | null;
+        session_url: string | null;
+    };
 
     let previewExpanded = false;
     let previewUrl = '';
@@ -11,6 +21,72 @@
     let previewInput: HTMLInputElement;
     let previewSessionId: string | null = null;
     let previewRequestId = 0;
+
+    let previewOpen = false;
+    let previewDocked = false;
+    let previewCurrentUrl = '';
+    let previewBusy = '';
+    let previewUrlCopied = false;
+
+    // Last URL previewed for each session, so switching sessions and coming back
+    // does not make the operator retype it. Seeded from the backend, which
+    // persists the same mapping across app restarts.
+    const rememberedPreviewUrls = new Map<string, string>();
+
+    let unlisteners: UnlistenFn[] = [];
+    let destroyed = false;
+    let copyResetTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function applyPreviewStatus(status: PreviewStatus | null, sessionId: string | null) {
+        if (!status) return;
+        previewOpen = status.open;
+        previewDocked = status.docked;
+        previewCurrentUrl = status.url ?? '';
+        if (sessionId && status.session_url) {
+            rememberedPreviewUrls.set(sessionId, status.session_url);
+            if (!previewUrl) previewUrl = status.session_url;
+        }
+    }
+
+    async function refreshPreviewStatus(sessionId: string | null) {
+        try {
+            const status = await invoke<PreviewStatus>('get_preview_status', { sessionId });
+            if (sessionId === previewSessionId) applyPreviewStatus(status, sessionId);
+        } catch {
+            // A status probe failing must never block the header from rendering.
+        }
+    }
+
+    onMount(() => {
+        Promise.all([
+            listen<{ url: string }>('preview-navigated', (event) => {
+                if (!event.payload?.url) return;
+                previewCurrentUrl = event.payload.url;
+                previewOpen = true;
+            }),
+            listen<PreviewStatus>('preview-status', (event) => {
+                if (!event.payload) return;
+                previewOpen = event.payload.open;
+                previewDocked = event.payload.docked;
+                previewCurrentUrl = event.payload.url ?? '';
+            })
+        ])
+            .then((fns) => {
+                if (destroyed) {
+                    fns.forEach((fn) => fn());
+                    return;
+                }
+                unlisteners = fns;
+            })
+            .catch(() => {});
+    });
+
+    onDestroy(() => {
+        destroyed = true;
+        unlisteners.forEach((fn) => fn());
+        unlisteners = [];
+        if (copyResetTimer) clearTimeout(copyResetTimer);
+    });
 
     $: session = $activeSession;
     $: mode = session ? serdeEnumVariantName(session.session_type)?.toLowerCase() ?? 'session' : 'session';
@@ -34,9 +110,11 @@
         previewRequestId += 1;
         previewSessionId = session?.id ?? null;
         previewExpanded = false;
-        previewUrl = '';
+        // Per-session recall rather than an unconditional clear.
+        previewUrl = previewSessionId ? rememberedPreviewUrls.get(previewSessionId) ?? '' : '';
         previewError = '';
         openingPreview = false;
+        void refreshPreviewStatus(previewSessionId);
     }
 
     async function expandPreview() {
@@ -52,10 +130,15 @@
         if (!url || openingPreview) return;
 
         const requestId = ++previewRequestId;
+        const sessionId = previewSessionId;
         openingPreview = true;
         previewError = '';
         try {
-            await invoke('open_preview_window', { url });
+            const status = await invoke<PreviewStatus>('open_preview_window', { url, sessionId });
+            if (requestId === previewRequestId) {
+                if (sessionId) rememberedPreviewUrls.set(sessionId, url);
+                applyPreviewStatus(status, sessionId);
+            }
         } catch (error) {
             if (requestId === previewRequestId) {
                 previewError = String(error);
@@ -64,6 +147,74 @@
             if (requestId === previewRequestId) {
                 openingPreview = false;
             }
+        }
+    }
+
+    async function runPreviewAction(command: string, key: string) {
+        if (previewBusy) return;
+        const sessionId = previewSessionId;
+        previewBusy = key;
+        previewError = '';
+        try {
+            const status = await invoke<PreviewStatus>(command, { sessionId });
+            // Freshness gate, mirroring refreshPreviewStatus: the payload is
+            // session-scoped (status_for derives session_url from the caller's
+            // session_id), so a response that lands after the operator switched
+            // sessions would otherwise seed the OLD session's URL into the NEW
+            // session's input via applyPreviewStatus.
+            //
+            // Deliberately NOT the `++previewRequestId` pattern used by
+            // openPreview: bumping it from the dock/close path would invalidate
+            // a concurrently in-flight openPreview and skip its
+            // `openingPreview = false` reset, leaving the UI stuck busy.
+            if (sessionId === previewSessionId) applyPreviewStatus(status, sessionId);
+        } catch (error) {
+            // Same gate as the success path: the session-change reactive block
+            // clears previewError, so an ungated write here would replay the
+            // OLD session's failure into the NEW session's header — announced
+            // via role="alert" and flagging that session's URL input invalid.
+            if (sessionId === previewSessionId) previewError = String(error);
+        } finally {
+            // Unconditional, unlike openPreview's gated reset — this is why
+            // previewBusy needs no explicit clear on the session-change path
+            // (and must not get one, or the re-entrancy guard above would let a
+            // second action start while the first is still in flight).
+            previewBusy = '';
+        }
+    }
+
+    function togglePreviewDock() {
+        return runPreviewAction(previewDocked ? 'undock_preview_window' : 'dock_preview_window', 'dock');
+    }
+
+    function closePreview() {
+        return runPreviewAction('close_preview_window', 'close');
+    }
+
+    async function reloadPreview() {
+        if (previewBusy) return;
+        previewBusy = 'reload';
+        previewError = '';
+        try {
+            await invoke('reload_preview_window');
+        } catch (error) {
+            previewError = String(error);
+        } finally {
+            previewBusy = '';
+        }
+    }
+
+    async function copyPreviewUrl() {
+        if (!previewCurrentUrl) return;
+        try {
+            await writeText(previewCurrentUrl);
+            previewUrlCopied = true;
+            if (copyResetTimer) clearTimeout(copyResetTimer);
+            copyResetTimer = setTimeout(() => {
+                previewUrlCopied = false;
+            }, 1400);
+        } catch (error) {
+            previewError = String(error);
         }
     }
 
@@ -94,14 +245,22 @@
                 {#if previewExpanded}
                     <form class="preview-form" onsubmit={openPreview}>
                         <label class="sr-only" for="session-preview-url">Preview URL</label>
+                        <!--
+                            type="text", not type="url": native constraint validation
+                            rejects scheme-less input before submit ever fires, which
+                            would make the backend's forgiving normalization
+                            unreachable. inputmode/autocomplete keep the URL keyboard
+                            and autofill behaviour.
+                        -->
                         <input
                             id="session-preview-url"
                             bind:this={previewInput}
                             bind:value={previewUrl}
-                            type="url"
+                            type="text"
                             inputmode="url"
                             autocomplete="url"
-                            placeholder="http://localhost:5173 or PR URL"
+                            spellcheck="false"
+                            placeholder="localhost:5173, github.com/owner/repo"
                             oninput={clearPreviewError}
                             aria-invalid={previewError ? 'true' : undefined}
                             aria-describedby={previewError ? 'session-preview-error' : undefined}
@@ -115,21 +274,79 @@
                             {openingPreview ? 'Opening…' : 'Open'}
                         </button>
                     </form>
-                    {#if previewError}
-                        <span id="session-preview-error" class="preview-error" role="alert">{previewError}</span>
-                    {/if}
                 {:else}
                     <button
                         class="preview-toggle"
                         type="button"
                         onclick={expandPreview}
                         aria-expanded="false"
-                        aria-label="Enter a URL to open in the isolated preview window"
-                        title="Preview a dev server or pull request URL"
+                        aria-label="Enter a URL to open in the isolated preview browser. The scheme is optional, so localhost:5173 or github.com/owner/repo both work."
+                        title="Preview a dev server or pull request URL (the http:// is optional)"
                     >
                         <Browser size={16} weight="light" aria-hidden="true" />
                         Preview
                     </button>
+                {/if}
+
+                {#if previewOpen}
+                    <div class="preview-live" aria-live="polite">
+                        <span class="preview-live-mode">{previewDocked ? 'Docked' : 'Popped out'}</span>
+                        <span class="preview-live-url" title={previewCurrentUrl}>
+                            {previewUrlCopied ? 'Copied' : previewCurrentUrl || 'Loading…'}
+                        </span>
+                        <button
+                            class="preview-action"
+                            type="button"
+                            onclick={copyPreviewUrl}
+                            disabled={!previewCurrentUrl}
+                            title="Copy the current preview URL"
+                            aria-label="Copy the current preview URL"
+                        >
+                            <Copy size={13} weight="light" aria-hidden="true" />
+                        </button>
+                        <button
+                            class="preview-action"
+                            type="button"
+                            onclick={reloadPreview}
+                            disabled={Boolean(previewBusy)}
+                            title="Reload the preview"
+                            aria-label="Reload the preview"
+                        >
+                            <ArrowClockwise size={13} weight="light" aria-hidden="true" />
+                        </button>
+                        <button
+                            class="preview-action"
+                            type="button"
+                            onclick={togglePreviewDock}
+                            disabled={Boolean(previewBusy)}
+                            title={previewDocked
+                                ? 'Pop the preview out into a free-floating window'
+                                : 'Dock the preview beside Hive Manager'}
+                            aria-label={previewDocked
+                                ? 'Pop the preview out into a free-floating window'
+                                : 'Dock the preview beside Hive Manager'}
+                        >
+                            {#if previewDocked}
+                                <ArrowSquareOut size={13} weight="light" aria-hidden="true" />
+                            {:else}
+                                <Columns size={13} weight="light" aria-hidden="true" />
+                            {/if}
+                        </button>
+                        <button
+                            class="preview-action"
+                            type="button"
+                            onclick={closePreview}
+                            disabled={Boolean(previewBusy)}
+                            title="Close the preview"
+                            aria-label="Close the preview"
+                        >
+                            <X size={13} weight="light" aria-hidden="true" />
+                        </button>
+                    </div>
+                {/if}
+
+                {#if previewError}
+                    <span id="session-preview-error" class="preview-error" role="alert">{previewError}</span>
                 {/if}
             </div>
             <div class="stat">
@@ -310,6 +527,65 @@
     .preview-open:disabled {
         cursor: not-allowed;
         opacity: 0.5;
+    }
+
+    .preview-live {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        max-width: min(360px, 42vw);
+        height: 24px;
+        padding: 0 4px 0 8px;
+        border: 1px solid var(--border-structural);
+        border-radius: var(--radius-sm);
+        background: var(--bg-elevated);
+    }
+
+    .preview-live-mode {
+        flex-shrink: 0;
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent-cyan);
+    }
+
+    .preview-live-url {
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--text-secondary);
+    }
+
+    .preview-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        border: none;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+    }
+
+    .preview-action:hover:not(:disabled),
+    .preview-action:focus-visible {
+        color: var(--accent-cyan);
+        background: var(--bg-surface);
+        outline: none;
+    }
+
+    .preview-action:disabled {
+        cursor: not-allowed;
+        opacity: 0.4;
     }
 
     .preview-error {

@@ -8,12 +8,34 @@ import {
   type SortDirection,
 } from './types';
 
+/**
+ * Hues are spread around the wheel so all eight folders stay separable in the
+ * dark UI: cyan 186, green 144, amber 37, silver 212 (low chroma), violet 274,
+ * coral 5, lime 81, indigo 227. `operations` (227) is the closest neighbour to
+ * `project` (212) by hue, but `project` is a 27%-saturation neutral while
+ * `operations` is fully saturated, so they never read as the same swatch.
+ */
 export const FOLDER_COLORS: Record<string, string> = {
   patterns: '#00e5ff',
   practices: '#00ff66',
   research: '#ff9d00',
   project: '#a3b8cc',
+  clients: '#c77dff',
+  partners: '#ff5f52',
+  vendors: '#b6f24a',
+  operations: '#6f8dff',
 };
+
+/**
+ * Relationship entities — *who* we work with. Everything else in
+ * {@link FOLDER_COLORS} is operational knowledge (*how* we work). The graph
+ * double-codes this split as shape + accessible text, never colour alone.
+ */
+export const RELATIONSHIP_FOLDERS: ReadonlySet<string> = new Set([
+  'clients',
+  'partners',
+  'vendors',
+]);
 
 export const EDGE_COLORS: Record<KnowledgeEdgeKind, string> = {
   cross_ref: '#00e5ff',
@@ -140,6 +162,19 @@ export function normalizeKnowledgePage(value: unknown): import('./types').Knowle
 
 export function folderColor(folder: string): string {
   return FOLDER_COLORS[folder.toLowerCase()] ?? DEFAULT_FOLDER_COLOR;
+}
+
+/** Case-folded so a folder string from the API cannot slip past the set. */
+export function isRelationshipFolder(folder: string): boolean {
+  return RELATIONSHIP_FOLDERS.has(folder.trim().toLowerCase());
+}
+
+/**
+ * Text equivalent of the node-shape encoding, for aria-labels and tooltips.
+ * Shape alone is not an accessible signal.
+ */
+export function folderKindLabel(folder: string): string {
+  return isRelationshipFolder(folder) ? 'relationship entity' : 'operational knowledge';
 }
 
 export function nodeDegree(node: KnowledgeNode): number {

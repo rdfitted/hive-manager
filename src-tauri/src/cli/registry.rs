@@ -390,6 +390,7 @@ mod tests {
                 port: 18800,
             },
             global_wiki_path: None,
+            knowledge_wiki_folders: None,
         }
     }
 

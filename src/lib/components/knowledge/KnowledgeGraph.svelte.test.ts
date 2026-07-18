@@ -184,6 +184,140 @@ describe('KnowledgeGraph', () => {
     expect(requestAnimationFrameMock).toHaveBeenCalledOnce();
   });
 
+  it('draws relationship folders as diamonds and names the distinction in the accessible label', async () => {
+    reducedMotionMatches = true;
+    const clientNode = {
+      ...forceMocks.pinnedNode,
+      id: 'clients/acme',
+      title: 'Acme Corp',
+      folder: 'clients',
+      path: 'clients/acme.md',
+      x: 200,
+      y: 220,
+      fx: null,
+      fy: null,
+    };
+    const patternNode = {
+      ...forceMocks.pinnedNode,
+      id: 'patterns/alpha',
+      title: 'Alpha Pattern',
+      folder: 'patterns',
+      path: 'patterns/alpha.md',
+      x: 90,
+      y: 110,
+      fx: null,
+      fy: null,
+    };
+    forceMocks.createForceSimulation.mockImplementationOnce(() => ({
+      ...forceMocks.simulation,
+      nodes: [clientNode, patternNode],
+    }));
+
+    const { getByRole } = render(KnowledgeGraph, {
+      props: {
+        nodes: [clientNode, patternNode],
+        edges: [],
+        selectedId: null,
+        onSelect: vi.fn(),
+      },
+    });
+    await tick();
+
+    const clientMark = getByRole('button', { name: /Acme Corp/ });
+    const patternMark = getByRole('button', { name: /Alpha Pattern/ });
+
+    // Shape carries the relationship/operational split...
+    expect(clientMark.querySelector('.node-core')?.tagName.toLowerCase()).toBe('rect');
+    expect(clientMark.querySelector('.node-core')?.getAttribute('transform')).toBe('rotate(45)');
+    expect(patternMark.querySelector('.node-core')?.tagName.toLowerCase()).toBe('circle');
+    expect(clientMark.querySelector('.node-halo')?.tagName.toLowerCase()).toBe('rect');
+    expect(patternMark.querySelector('.node-halo')?.tagName.toLowerCase()).toBe('circle');
+
+    // ...and it is never the only signal: the accessible name says it too.
+    expect(clientMark.getAttribute('aria-label')).toContain('clients relationship entity');
+    expect(patternMark.getAttribute('aria-label')).toContain('patterns operational knowledge');
+    expect(clientMark.querySelector('title')?.textContent).toContain('relationship entity');
+    expect(patternMark.querySelector('title')?.textContent).toContain('operational knowledge');
+  });
+
+  it('keeps the pin mark touching the node edge for diamonds as well as circles', async () => {
+    reducedMotionMatches = true;
+    // Degree must be >= 3: the diamond's pin only detaches once the node grows,
+    // so a degree-0 fixture would pass against the unfixed code and prove nothing.
+    const degree = { in_degree: 2, out_degree: 2 };
+    const radius = Math.min(11, 5 + Math.sqrt(degree.in_degree + degree.out_degree) * 1.25);
+    const clientNode = {
+      ...forceMocks.pinnedNode,
+      ...degree,
+      id: 'clients/acme',
+      title: 'Acme Corp',
+      folder: 'clients',
+      path: 'clients/acme.md',
+      x: 200,
+      y: 220,
+      fx: 200 as number | null,
+      fy: 220 as number | null,
+    };
+    const patternNode = {
+      ...clientNode,
+      id: 'patterns/alpha',
+      title: 'Alpha Pattern',
+      folder: 'patterns',
+      path: 'patterns/alpha.md',
+    };
+    forceMocks.createForceSimulation.mockImplementationOnce(() => ({
+      ...forceMocks.simulation,
+      nodes: [clientNode, patternNode],
+    }));
+
+    const { getByRole } = render(KnowledgeGraph, {
+      props: {
+        nodes: [clientNode, patternNode],
+        edges: [],
+        selectedId: null,
+        onSelect: vi.fn(),
+      },
+    });
+    await tick();
+
+    const pinOf = (name: RegExp) => {
+      const mark = getByRole('button', { name }).querySelector('.pin-mark');
+      expect(mark).not.toBeNull();
+      // Assert presence before converting: `Number(null)` is 0, so a pin that
+      // lost its coordinates entirely would otherwise read as (0, 0) and slip
+      // past the geometry assertions below as though it were well-placed.
+      const rawCx = mark!.getAttribute('cx');
+      const rawCy = mark!.getAttribute('cy');
+      expect(rawCx).not.toBeNull();
+      expect(rawCy).not.toBeNull();
+      return { cx: Number(rawCx), cy: Number(rawCy) };
+    };
+
+    // A diamond's boundary is the L1 circle |x| + |y| = r, so the perpendicular
+    // distance of the pin's centre past that edge is (|cx| + |cy| - r) / sqrt(2).
+    // Netting off the 2.5px pin radius and the 1px outward half of the core's
+    // 2px stroke leaves the visible gap, which must not be positive.
+    const diamond = pinOf(/Acme Corp/);
+    const diamondGap = (Math.abs(diamond.cx) + Math.abs(diamond.cy) - radius) / Math.SQRT2 - 3.5;
+    // Bounded on BOTH sides. `<= 0` alone is satisfied by a pin retracted to
+    // the centre, so it would not notice the anchor collapsing inward - it only
+    // rejects the original bug, which overshot to +0.39. The lower bound is one
+    // pin-plus-stroke width, so the mark must still overlap the rim rather than
+    // float somewhere in the node's interior.
+    expect(diamondGap).toBeLessThanOrEqual(0);
+    expect(diamondGap).toBeGreaterThanOrEqual(-3.5);
+    // The anchor is diagonal, so the two axes must stay mirror images; a fix
+    // that moved only one of them would keep the L1 distance plausible.
+    expect(diamond.cx).toBeCloseTo(-diamond.cy, 10);
+
+    // Circles are untouched by the shape-aware anchor: still the bounding-box
+    // corner inset 1px, which sits inside the rim at every degree.
+    const circle = pinOf(/Alpha Pattern/);
+    expect(circle.cx).toBeCloseTo(radius - 1, 10);
+    expect(circle.cy).toBeCloseTo(-(radius - 1), 10);
+    expect(Math.hypot(circle.cx, circle.cy) - radius - 3.5).toBeLessThanOrEqual(0);
+  });
+
   it('rolls back a cancelled drag without selecting or retaining a partial pin', async () => {
     reducedMotionMatches = true;
     forceMocks.pinnedNode.vx = 1.5;

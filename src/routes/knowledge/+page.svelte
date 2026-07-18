@@ -17,6 +17,8 @@
     EDGE_LABELS,
     filterKnowledgeGraph,
     folderColor,
+    folderKindLabel,
+    isRelationshipFolder,
   } from '$lib/knowledge/graphUtils';
   import { KNOWLEDGE_EDGE_KINDS, type KnowledgeView } from '$lib/knowledge/types';
   import { knowledgeStore } from '$lib/stores/knowledge';
@@ -33,7 +35,18 @@
   let previewReturnFocus = $state.raw<FocusTarget | null>(null);
 
   let folders = $derived.by(() => {
-    const preferredOrder = ['patterns', 'practices', 'research', 'project'];
+    // Must stay lowercase and exact — indexOf does not case-fold, and a
+    // mismatch silently sorts the folder to the tail with no error.
+    const preferredOrder = [
+      'patterns',
+      'practices',
+      'research',
+      'project',
+      'clients',
+      'partners',
+      'vendors',
+      'operations',
+    ];
     return [...new Set($knowledgeStore.graph.nodes.map((node) => node.folder))].sort(
       (left, right) => {
         const leftIndex = preferredOrder.indexOf(left);
@@ -169,7 +182,10 @@
         <div class="full-state empty-state">
           <Brain size={32} weight="light" />
           <strong>No knowledge pages found</strong>
-          <p>Add markdown under patterns, practices, research, or the project’s .ai-docs folder.</p>
+          <p>
+            Add markdown under the wiki folders — patterns, practices, research, clients,
+            partners, vendors, operations — or the project’s .ai-docs folder.
+          </p>
           <button type="button" onclick={() => knowledgeStore.loadGraph(sessionId)}>Scan again</button>
         </div>
       {:else if filteredGraph.nodes.length === 0}
@@ -202,12 +218,22 @@
             {/if}
           </div>
           <footer class="legend">
-            <div class="legend-group" aria-label="Folder colors">
+            <div class="legend-group" aria-label="Folder colors and shapes">
               {#each folders as name (name)}
-                <span><i style:background={folderColor(name)}></i>{name}</span>
+                <span>
+                  <i
+                    class:diamond={isRelationshipFolder(name)}
+                    style:background={folderColor(name)}
+                  ></i>
+                  <span class="sr-only">{folderKindLabel(name)}:</span>{name}
+                </span>
               {/each}
             </div>
             {#if view === 'graph'}
+              <div class="legend-group" aria-label="Node shape key">
+                <span><i class="shape-key diamond"></i>Diamond · relationship entity</span>
+                <span><i class="shape-key circle"></i>Circle · operational knowledge</span>
+              </div>
               <div class="legend-group edge-legend" aria-label="Relationship types">
                 {#each KNOWLEDGE_EDGE_KINDS as kind (kind)}
                   <span><i style:background={EDGE_COLORS[kind]}></i>{EDGE_LABELS[kind]}</span>
@@ -505,6 +531,9 @@
   }
 
   .legend-group i { width: 6px; height: 6px; }
+  .legend-group i.diamond { transform: rotate(45deg); }
+  .shape-key { background: var(--text-secondary); }
+  .shape-key.circle { border-radius: 50%; }
   .edge-legend i { width: 13px; height: 1px; }
 
   .full-state {
