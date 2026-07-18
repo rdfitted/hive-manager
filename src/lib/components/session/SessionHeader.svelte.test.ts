@@ -67,10 +67,18 @@ function fakeSession(id: string): Session {
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
+}
+
+/** Flushes the component's await continuations plus Svelte's scheduler. */
+async function flush() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 const CLOSED_STATUS = { open: false, docked: false, url: null, session_url: null };
@@ -215,5 +223,73 @@ describe('SessionHeader preview action freshness', () => {
     // Without the freshness gate this is session-a's URL, and submitting it
     // would persist it under session-b's id.
     expect(input.value).toBe('');
+  });
+
+  /**
+   * Renders the header on session-a with the preview open, fires the dock
+   * action, and hands back a handle that rejects it on demand. The two tests
+   * below differ only in whether the operator switches sessions first, so the
+   * flush timing is identical — that is what makes the negative assertion in
+   * the second test meaningful rather than a race that happens to pass.
+   */
+  async function dockFailureHarness() {
+    const staleDock = deferred<unknown>();
+
+    tauriMocks.invoke.mockImplementation((command: string, args?: { sessionId?: string }) => {
+      if (command === 'get_preview_status') {
+        return Promise.resolve(
+          args?.sessionId === 'session-a'
+            ? { open: true, docked: false, url: 'http://127.0.0.1:5173/', session_url: null }
+            : CLOSED_STATUS,
+        );
+      }
+      if (command === 'dock_preview_window') return staleDock.promise;
+      return Promise.resolve(CLOSED_STATUS);
+    });
+
+    const { container } = render(SessionHeader);
+    storeMocks.setActiveSession?.(fakeSession('session-a'));
+
+    const dockButton = await waitFor(() => {
+      const buttons = container.querySelectorAll<HTMLButtonElement>('.preview-action');
+      const found = Array.from(buttons).find(
+        (button) => button.getAttribute('aria-label') === 'Dock the preview beside Hive Manager',
+      );
+      if (!found) throw new Error('dock button never rendered');
+      return found;
+    });
+    await fireEvent.click(dockButton);
+
+    return { container, staleDock };
+  }
+
+  it('surfaces a dock failure that lands while its own session is still active', async () => {
+    const { container, staleDock } = await dockFailureHarness();
+
+    staleDock.reject(new Error('dock failed for session-a'));
+    await staleDock.promise.catch(() => {});
+    await flush();
+
+    const error = container.querySelector('.preview-error');
+    expect(error?.textContent).toContain('dock failed for session-a');
+  });
+
+  it('drops a dock/close failure that rejects after the session changed', async () => {
+    const { container, staleDock } = await dockFailureHarness();
+
+    // The operator switches away while the dock request is still in flight.
+    storeMocks.setActiveSession?.(fakeSession('session-b'));
+    await waitFor(() => {
+      expect(container.querySelector('.preview-toggle')).not.toBeNull();
+    });
+
+    staleDock.reject(new Error('dock failed for session-a'));
+    await staleDock.promise.catch(() => {});
+    await flush();
+
+    // session-a's failure must not be announced in session-b's header, nor
+    // mark session-b's URL input invalid.
+    expect(container.querySelector('.preview-error')).toBeNull();
+    expect(container.querySelector('#session-preview-url')?.getAttribute('aria-invalid')).toBeFalsy();
   });
 });

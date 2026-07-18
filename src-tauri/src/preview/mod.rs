@@ -4,9 +4,9 @@ use tauri::Url;
 use crate::http::state::AppState;
 #[cfg(not(test))]
 use parking_lot::Mutex;
-#[cfg(not(test))]
+// Unconditional: the persisted preview STATE MACHINE below is plain data and is
+// compiled in test builds too, so its transitions can be driven directly.
 use serde::{Deserialize, Serialize};
-#[cfg(not(test))]
 use std::collections::BTreeMap;
 #[cfg(not(test))]
 use std::path::PathBuf;
@@ -448,7 +448,6 @@ const RETILE_DEBOUNCE_MS: u64 = 60;
 /// monitor) while the size is LOGICAL (DPI-independent, so restoring onto a
 /// differently scaled monitor preserves apparent size instead of halving or
 /// doubling it).
-#[cfg(not(test))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct WindowGeometry {
     x: i32,
@@ -457,7 +456,6 @@ struct WindowGeometry {
     height: f64,
 }
 
-#[cfg(not(test))]
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct PersistedPreviewState {
     #[serde(default)]
@@ -468,8 +466,43 @@ struct PersistedPreviewState {
     main_restore: Option<WindowGeometry>,
     #[serde(default)]
     main_was_maximized: bool,
+    /// True while a docked LAYOUT is applied, i.e. `main_restore` holds a
+    /// snapshot that has NOT been consumed yet.
+    ///
+    /// Deliberately not the same bit as `docked`: that is the operator
+    /// PREFERENCE and survives a teardown so the next open re-tiles. Conflating
+    /// the two made a reopened dock skip the pre-dock snapshot, leaving the
+    /// undock/close after it with nothing to restore and Hive Manager stranded
+    /// in the left-hand column.
+    #[serde(default)]
+    layout_applied: bool,
     #[serde(default)]
     session_urls: BTreeMap<String, String>,
+}
+
+impl PersistedPreviewState {
+    /// A snapshot is owed whenever no live layout is applied - including the
+    /// reopen after a docked close, which keeps `docked` but has already had its
+    /// snapshot consumed.
+    fn needs_main_snapshot(&self) -> bool {
+        !self.layout_applied
+    }
+
+    fn record_main_snapshot(&mut self, geometry: Option<WindowGeometry>, maximized: bool) {
+        self.main_restore = geometry;
+        self.main_was_maximized = maximized;
+        self.layout_applied = true;
+    }
+
+    /// Consumes the snapshot. Clearing the flag alongside the `take` is what
+    /// keeps "a layout is live" and "a snapshot exists" from ever disagreeing.
+    fn take_main_restore(&mut self) -> (Option<WindowGeometry>, bool) {
+        self.layout_applied = false;
+        (
+            self.main_restore.take(),
+            std::mem::take(&mut self.main_was_maximized),
+        )
+    }
 }
 
 #[cfg(not(test))]
@@ -653,13 +686,20 @@ fn enter_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), S
     let main = require_window(app, MAIN_WINDOW_LABEL)?;
     let preview = require_window(app, PREVIEW_WINDOW_LABEL)?;
 
-    let monitor = main
+    // `match` rather than `.or(..)`: `.or` is EAGER, so it would call
+    // `primary_monitor()` on every dock even when the current monitor is
+    // already in hand - and its `?` would then propagate a teardown-race error
+    // out of a dock that had everything it needed. The fallback is a cold path.
+    let monitor = match main
         .current_monitor()
         .map_err(|error| format!("Failed to read the current monitor: {error}"))?
-        .or(main
+    {
+        Some(monitor) => Some(monitor),
+        None => main
             .primary_monitor()
-            .map_err(|error| format!("Failed to read the primary monitor: {error}"))?)
-        .ok_or_else(|| "Could not determine which monitor Hive Manager is on".to_string())?;
+            .map_err(|error| format!("Failed to read the primary monitor: {error}"))?,
+    }
+    .ok_or_else(|| "Could not determine which monitor Hive Manager is on".to_string())?;
 
     let scale = monitor.scale_factor();
     let work_area = *monitor.work_area();
@@ -670,10 +710,20 @@ fn enter_docked_mode(app: &AppHandle, app_state: &Arc<AppState>) -> Result<(), S
 
     {
         let mut guard = runtime(app_state).lock();
+        // Snapshot the pre-dock layout so undock/close restores it exactly.
+        // Gated on the LAYOUT bit, not the preference: a re-dock must not
+        // re-snapshot the already-tiled geometry as its own restore target, but
+        // a reopen after a docked close - which keeps the preference and has
+        // already spent its snapshot - must take a fresh one.
+        if guard.state.needs_main_snapshot() {
+            let geometry = read_geometry(&main);
+            let maximized = main.is_maximized().unwrap_or(false);
+            guard.state.record_main_snapshot(geometry, maximized);
+        }
+        // The FLOATING snapshot stays gated on the preference: a reopened
+        // preview is a brand-new window at config-default geometry, and
+        // re-snapshotting it there would clobber the remembered position.
         if !guard.state.docked {
-            // Snapshot the floating layout so undock restores it exactly.
-            guard.state.main_was_maximized = main.is_maximized().unwrap_or(false);
-            guard.state.main_restore = read_geometry(&main);
             if let Some(geometry) = read_geometry(&preview) {
                 guard.state.floating = Some(geometry);
             }
@@ -725,10 +775,9 @@ fn restore_main_window_geometry(
 ) -> Result<(), String> {
     let (geometry, was_maximized) = {
         let mut guard = runtime(app_state).lock();
-        let geometry = guard.state.main_restore.take();
-        let was_maximized = std::mem::take(&mut guard.state.main_was_maximized);
+        let taken = guard.state.take_main_restore();
         persist(&guard);
-        (geometry, was_maximized)
+        taken
     };
 
     let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
@@ -1773,12 +1822,20 @@ mod tests {
     /// teardown paths in step.
     #[test]
     fn the_destroyed_arm_restores_the_main_window_like_the_close_command() {
-        const SOURCE: &str = include_str!("mod.rs");
+        // This file is checked out with CRLF on Windows, so a `\n`-based
+        // delimiter search silently misses. That is not cosmetic: the
+        // command-path check below paired a missed delimiter with
+        // `unwrap_or(len())`, which widened the slice to the whole rest of the
+        // file - including this test's own assertion strings - so it passed by
+        // matching itself. Normalize once, and make every delimiter fatal
+        // rather than falling back to a wider slice.
+        let normalized = include_str!("mod.rs").replace("\r\n", "\n");
+        let source: &str = &normalized;
 
-        let arm_start = SOURCE
+        let arm_start = source
             .find("WindowEvent::Destroyed =>")
             .expect("the preview window event handler must still match Destroyed");
-        let arm = &SOURCE[arm_start..];
+        let arm = &source[arm_start..];
         let arm_end = arm
             .find("_ => {}")
             .expect("the Destroyed arm must still be followed by the catch-all arm");
@@ -1802,15 +1859,118 @@ mod tests {
 
         // The command path must keep using the shared helper, so the two
         // teardown routes cannot drift apart again.
-        let command = SOURCE
+        let command = source
             .find("pub async fn close_preview_window")
-            .map(|start| &SOURCE[start..])
+            .map(|start| &source[start..])
             .expect("close_preview_window must still exist");
+        let body_end = command
+            .find("\n}\n")
+            .expect("close_preview_window must be terminated by a column-0 closing brace");
         assert!(
-            command[..command.find("\n}\n").unwrap_or(command.len())]
-                .contains("undock_layout_after_teardown"),
+            command[..body_end].contains("undock_layout_after_teardown"),
             "close_preview_window must share the teardown helper with the \
              Destroyed arm"
+        );
+    }
+
+    /// Regression lock: the dock PREFERENCE and the live-layout FACT are
+    /// separate bits.
+    ///
+    /// `enter_docked_mode` used to gate its pre-dock snapshot on `!docked`, but
+    /// `docked` deliberately survives a teardown so the next open re-tiles -
+    /// while the teardown unconditionally CONSUMES `main_restore`. A docked
+    /// close therefore left `docked: true, main_restore: None`, the reopen
+    /// skipped the snapshot, and the undock/close after it had nothing to put
+    /// back: Hive Manager stranded in the left-hand column beside empty desktop.
+    #[test]
+    fn reopening_a_docked_preview_takes_a_fresh_restore_snapshot() {
+        let mut state = PersistedPreviewState::default();
+        let before = WindowGeometry {
+            x: 100,
+            y: 80,
+            width: 1280.0,
+            height: 800.0,
+        };
+
+        // open -> dock
+        assert!(state.needs_main_snapshot());
+        state.record_main_snapshot(Some(before), false);
+        state.docked = true;
+
+        // dock again: idempotent, must NOT re-snapshot the tiled geometry as the
+        // restore target - that would make undock a no-op.
+        assert!(
+            !state.needs_main_snapshot(),
+            "a redundant dock must not overwrite the pre-dock snapshot with the \
+             already-tiled geometry"
+        );
+
+        // close (the command or the titlebar X) restores and consumes the
+        // snapshot; the PREFERENCE survives so the next open re-tiles.
+        assert_eq!(state.take_main_restore().0.map(|g| g.x), Some(100));
+        assert!(state.docked, "the dock preference must survive a teardown");
+        // the Destroyed arm's second, idempotent pass
+        assert!(state.take_main_restore().0.is_none());
+
+        // reopen re-tiles off the surviving preference - and MUST snapshot again
+        assert!(
+            state.needs_main_snapshot(),
+            "a reopened dock that skips the snapshot leaves the undock/close \
+             after it with nothing to restore, stranding the main window in the \
+             docked column"
+        );
+        let reopened = WindowGeometry {
+            x: 220,
+            y: 140,
+            width: 1440.0,
+            height: 900.0,
+        };
+        state.record_main_snapshot(Some(reopened), false);
+
+        assert_eq!(state.take_main_restore().0.map(|g| g.x), Some(220));
+    }
+
+    /// The state machine above is only meaningful if the windowing layer
+    /// actually routes through it. That layer is `#[cfg(not(test))]` and needs a
+    /// live `AppHandle`, so - same discipline as the `Destroyed` arm lock above
+    /// - the wiring is pinned against the source text.
+    #[test]
+    fn the_dock_path_gates_its_snapshot_on_the_layout_bit_not_the_preference() {
+        // This file is checked out CRLF on Windows, so the `\n}\n` terminator
+        // below only finds a function end after normalization. Without it the
+        // slice silently runs to EOF and swallows this test's own assertion
+        // strings, which makes the lock pass against any source at all.
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+
+        /// The text of `fn <name>` up to the first column-0 `}`.
+        fn body_of<'a>(source: &'a str, name: &str) -> &'a str {
+            let needle = format!("fn {name}");
+            let body = source
+                .find(&needle)
+                .map(|start| &source[start..])
+                .unwrap_or_else(|| panic!("{name} must still exist"));
+            let end = body
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{name} must have a column-0 closing brace"));
+            &body[..end]
+        }
+
+        let dock = body_of(&source, "enter_docked_mode");
+        assert!(
+            dock.contains("needs_main_snapshot"),
+            "enter_docked_mode must gate its pre-dock snapshot on the live-layout \
+             bit; gating on `docked` makes a reopened dock skip the snapshot"
+        );
+        assert!(
+            dock.contains("record_main_snapshot"),
+            "the snapshot must be recorded through the helper, so the geometry \
+             and the layout bit are always set together"
+        );
+
+        assert!(
+            body_of(&source, "restore_main_window_geometry").contains("take_main_restore"),
+            "the teardown must consume the snapshot through the helper, so the \
+             layout bit cannot stay set after the geometry is gone"
         );
     }
 

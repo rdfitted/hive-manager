@@ -169,7 +169,11 @@
             // `openingPreview = false` reset, leaving the UI stuck busy.
             if (sessionId === previewSessionId) applyPreviewStatus(status, sessionId);
         } catch (error) {
-            previewError = String(error);
+            // Same gate as the success path: the session-change reactive block
+            // clears previewError, so an ungated write here would replay the
+            // OLD session's failure into the NEW session's header — announced
+            // via role="alert" and flagging that session's URL input invalid.
+            if (sessionId === previewSessionId) previewError = String(error);
         } finally {
             // Unconditional, unlike openPreview's gated reset — this is why
             // previewBusy needs no explicit clear on the session-change path

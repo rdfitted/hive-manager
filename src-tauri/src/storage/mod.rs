@@ -1452,6 +1452,13 @@ pub struct AppConfig {
     /// scan; it can never widen it or point the scanner at an arbitrary directory. `None` (the
     /// default, and what every pre-existing `config.json` deserializes to) means the built-in
     /// folder set.
+    ///
+    /// **`Some(..)` fails closed.** This is a privacy boundary — its purpose is keeping entity
+    /// folders (`clients`, `partners`, `vendors`) out of a browsable graph — so a present-but-
+    /// unusable value scans *nothing* rather than reverting to the full default. A typo such as
+    /// `["pattern"]` therefore yields an empty Atlas and an error-level log, not a silent scan of
+    /// every folder the operator was trying to exclude. An empty Atlas is loud and self-correcting;
+    /// silently rendering data the operator believed was excluded is neither.
     #[serde(default)]
     pub knowledge_wiki_folders: Option<Vec<String>>,
 }

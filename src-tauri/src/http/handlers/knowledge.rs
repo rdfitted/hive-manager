@@ -108,9 +108,15 @@ impl KnowledgeFolder {
 /// Security property: entries are *matched against* the compiled-in `WIKI_FOLDERS` variants. They
 /// select, they never construct. An unrecognized entry — `"agents"`, `"../../../etc"`, an absolute
 /// path — is logged and dropped, so config can only ever narrow or reorder the scan, never widen
-/// it or aim it at a directory outside the wiki root. Absent or fully-unrecognized config falls
-/// back to the built-in default rather than scanning nothing, so a typo degrades to the documented
-/// behavior instead of silently emptying the Atlas.
+/// it or aim it at a directory outside the wiki root.
+///
+/// Fail closed: this is a privacy boundary, not a display preference. `None` — the key absent,
+/// which is what every pre-existing `config.json` deserializes to — means "no operator opinion"
+/// and selects the built-in default. `Some(_)` is an operator-supplied boundary and is never
+/// widened past what it names, so a list that resolves to nothing (empty, blank, or entirely
+/// unrecognized) selects nothing. A typo empties the Atlas — loud, obvious, and instantly
+/// self-correcting — instead of silently restoring `clients`, `partners`, and `vendors` to a
+/// graph the operator believed excluded them.
 fn resolve_wiki_folders_from(configured: Option<&[String]>) -> Vec<KnowledgeFolder> {
     let Some(configured) = configured else {
         return WIKI_FOLDERS.to_vec();
@@ -140,10 +146,16 @@ fn resolve_wiki_folders_from(configured: Option<&[String]>) -> Vec<KnowledgeFold
     }
 
     if selected.is_empty() {
-        WIKI_FOLDERS.to_vec()
-    } else {
-        selected
+        // `error!` rather than `warn!`: `lib.rs` initializes `EnvFilter::from_default_env()` with no
+        // fallback directive, so with `RUST_LOG` unset — the normal case for a GUI-launched desktop
+        // build — anything below ERROR is filtered out and this failure would be fully silent.
+        tracing::error!(
+            configured_entries = configured.len(),
+            "knowledge_wiki_folders named no recognized folder; the Knowledge Atlas will scan no \
+             global-wiki folders. Remove the key entirely to restore the built-in default set."
+        );
     }
+    selected
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -1704,16 +1716,18 @@ mod tests {
     fn configured_folders_can_only_narrow_the_compiled_allowlist() {
         assert_eq!(resolve_wiki_folders_from(None), WIKI_FOLDERS.to_vec());
 
-        // Absent-equivalent inputs fall back to the documented default rather than scanning
-        // nothing, so a typo degrades gracefully instead of silently emptying the Atlas.
-        assert_eq!(resolve_wiki_folders_from(Some(&[])), WIKI_FOLDERS.to_vec());
+        // `None` is the only absent-equivalent input: no operator opinion, so the built-in default
+        // applies. Anything the operator actually wrote is a boundary, and a boundary naming no
+        // recognized folder selects none of them rather than quietly restoring all seven.
+        let none_selected = Vec::<KnowledgeFolder>::new();
+        assert_eq!(resolve_wiki_folders_from(Some(&[])), none_selected);
         assert_eq!(
             resolve_wiki_folders_from(Some(&[String::new()])),
-            WIKI_FOLDERS.to_vec()
+            none_selected
         );
         assert_eq!(
             resolve_wiki_folders_from(Some(&["   ".to_string()])),
-            WIKI_FOLDERS.to_vec()
+            none_selected
         );
 
         // Narrowing: a privacy-conscious machine drops the entity roots.
@@ -1751,14 +1765,17 @@ mod tests {
             "config must select among compiled-in variants, never construct new ones"
         );
 
-        // Even an entirely hostile list cannot widen: it collapses to the built-in default, which
-        // still excludes `agents` and `project`.
+        // An entirely unrecognized list cannot widen — and it does not fall back to the default
+        // either. It selects nothing, so a typo empties the Atlas instead of restoring the entity
+        // roots the operator was trying to exclude.
         let effective = resolve_wiki_folders_from(Some(&[
             "agents".to_string(),
             "../../../etc".to_string(),
         ]));
-        assert_eq!(effective, WIKI_FOLDERS.to_vec());
-        assert!(!effective.contains(&KnowledgeFolder::Project));
+        assert!(
+            effective.is_empty(),
+            "a fully unrecognized narrowing must select nothing, got {effective:?}"
+        );
     }
 
     /// End-to-end proof that narrowing is enforced where it matters — the filesystem walk — and
@@ -1815,6 +1832,38 @@ mod tests {
         assert!(
             preview_knowledge_page(wiki.path(), &hostile, None, "agents/recruiting/candidate")
                 .is_none()
+        );
+    }
+
+    /// Fail-closed at the scan layer. The failure pinned here is the fail-open one: an operator
+    /// who typos `["clients"]` intends to *exclude* the entity roots, and must never end up with
+    /// `clients/`, `partners/`, and `vendors/` rendered in a graph they believe excludes them.
+    #[test]
+    fn unrecognized_narrowing_scans_nothing_rather_than_falling_open() {
+        let wiki = TempDir::new().unwrap();
+        write_page(
+            wiki.path(),
+            "patterns/kept.md",
+            "---\ntitle: Kept\n---\n# Kept\n",
+        );
+        write_page(
+            wiki.path(),
+            "clients/acme/dashboard.md",
+            "---\ntitle: Acme\n---\n# Acme\n",
+        );
+
+        let typo = resolve_wiki_folders_from(Some(&["cleints".to_string()]));
+        assert!(typo.is_empty(), "a typo must not resolve to the default set");
+
+        let graph = scan_knowledge(wiki.path(), &typo, None, MAX_NODES);
+        assert!(
+            graph.nodes.is_empty(),
+            "a typo'd narrowing must not scan the entity roots, got {:?}",
+            graph.nodes
+        );
+        assert!(
+            preview_knowledge_page(wiki.path(), &typo, None, "clients/acme/dashboard").is_none(),
+            "a typo'd narrowing must not leave client pages previewable"
         );
     }
 

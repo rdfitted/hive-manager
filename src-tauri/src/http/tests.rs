@@ -1570,6 +1570,84 @@ async fn test_knowledge_operator_folder_narrowing_reaches_graph_and_page_endpoin
     }
 }
 
+/// The fail-closed property, pinned through the HTTP stack rather than against the pure resolver.
+///
+/// An operator config that names only unrecognized folders is still an operator-supplied privacy
+/// boundary, and must select nothing. If it instead fell back to the compiled-in default, a single
+/// typo would silently republish `clients/`, `partners/`, and `vendors/` into the Atlas the
+/// operator believed excluded them — and the resolver-level tests alone would not catch it, since
+/// the wiring layer is exactly where a previous regression went undetected.
+#[tokio::test]
+async fn test_knowledge_unrecognized_folder_config_fails_closed_at_endpoints() {
+    let _environment_lock = KNOWLEDGE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let wiki = TempDir::new().unwrap();
+    let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", wiki.path());
+
+    write_knowledge_fixture(
+        wiki.path(),
+        "patterns/kept.md",
+        "---\ntitle: Kept Pattern\n---\n# Kept pattern body\n",
+    );
+    write_knowledge_fixture(
+        wiki.path(),
+        "clients/acme/dashboard.md",
+        "---\ntitle: Acme Client Dashboard\n---\n# Confidential client engagement\n",
+    );
+    write_knowledge_fixture(
+        wiki.path(),
+        "vendors/gamma.md",
+        "---\ntitle: Gamma Vendor\n---\n# Vendor contract terms\n",
+    );
+
+    // A typo for `clients`. The intent is exclusionary, so the failure mode must be an empty
+    // Atlas, never a fully-populated one.
+    let (_storage_dir, app) = setup_isolated_test_app_with_config(|config| {
+        config.knowledge_wiki_folders = Some(vec!["cleints".to_string()]);
+    })
+    .await;
+
+    let graph_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(graph_response.status(), StatusCode::OK);
+    let graph = read_json_body(graph_response).await;
+    let nodes = graph["nodes"].as_array().unwrap();
+    assert!(
+        nodes.is_empty(),
+        "an unrecognized narrowing must fail closed, but the scan fell back to the default set \
+         and produced nodes: {nodes:?}"
+    );
+
+    let excluded_page_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/page?id=clients%2Facme%2Fdashboard")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(excluded_page_response.status(), StatusCode::NOT_FOUND);
+    let excluded_body = axum::body::to_bytes(excluded_page_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let excluded_body = String::from_utf8_lossy(&excluded_body);
+    assert!(
+        !excluded_body.contains("Confidential client engagement"),
+        "fail-open narrowing leaked client page content: {excluded_body}"
+    );
+}
+
 #[tokio::test]
 async fn test_knowledge_project_pages_are_bound_to_the_requested_session() {
     let _environment_lock = KNOWLEDGE_ENV_LOCK

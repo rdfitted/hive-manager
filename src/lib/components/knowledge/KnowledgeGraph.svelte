@@ -264,6 +264,16 @@
     return r * Math.SQRT2;
   }
 
+  /**
+   * Axis coordinate of the pin mark's centre. A circle's bounding-box corner
+   * inset 1px lands on the rim; a diamond's 45deg diagonal crosses its edge at
+   * r/2, nudged 1px out so the mark overhangs by a constant ~1.4px at every
+   * degree instead of drifting off the edge as the node grows.
+   */
+  function pinAxis(r: number, isRelationship: boolean): number {
+    return isRelationship ? r / 2 + 1 : r - 1;
+  }
+
   function shortTitle(title: string): string {
     return title.length > 34 ? `${title.slice(0, 31)}…` : title;
   }
@@ -372,7 +382,8 @@
             <circle class="node-core" r={radius(node)} fill={folderColor(node.folder)} />
           {/if}
           {#if node.fx !== null}
-            <circle class="pin-mark" cx={radius(node) - 1} cy={-radius(node) + 1} r="2.5" />
+            {@const pin = pinAxis(radius(node), isRelationship)}
+            <circle class="pin-mark" cx={pin} cy={-pin} r="2.5" />
           {/if}
           {#if isSelected || hoveredId === node.id || nodes.length <= 36}
             <text x={radius(node) + 7} y="4">{shortTitle(node.title)}</text>
