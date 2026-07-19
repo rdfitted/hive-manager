@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::artifacts::collector::ArtifactCollector;
 use crate::cli::{CliBehavior, CliRegistry};
+use crate::coordination::queue_manager::{heartbeat_cadence_label, STUCK_CUTOFF_SECS};
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::domain::{ArtifactBundle, HiveExecutionPolicy, HiveLaunchKind, WorkspaceStrategy};
 use crate::events::{EventBus, EventEmitter};
@@ -764,9 +765,18 @@ fn get_polling_instructions(
     role_type: Option<&str>,
     heartbeat_command: Option<&str>,
 ) -> String {
+    // #141: the cadence is derived from the reclaim cutoff, and EVERY behavior gets it. A
+    // behavior that receives no cadence instruction produces a silent worker, and a silent
+    // worker is indistinguishable from a dead one to `reclaim_stuck`.
+    let cadence = heartbeat_cadence_label();
     let heartbeat_line = heartbeat_command
         .map(|command| format!("  {command}\n"))
         .unwrap_or_default();
+    // Behaviors that get no bash loop need the same instruction in their own register.
+    let heartbeat_block = |lead: &str| match heartbeat_command {
+        Some(command) => format!("\n{lead}\n```bash\n{command}\n```\n"),
+        None => String::new(),
+    };
 
     match CliRegistry::get_behavior_for_role(cli, role_type) {
         CliBehavior::ExplicitPolling => {
@@ -776,16 +786,20 @@ fn get_polling_instructions(
 Run this bash loop to wait for task activation:
 ```bash
 while true; do
-  STATUS=$(grep "^## Status:" "{}" | head -1)
+  STATUS=$(grep "^## Status:" "{task_file}" | head -1)
   if [[ "$STATUS" == *"ACTIVE"* ]]; then break; fi
-{}
-  sleep {}
+{heartbeat_line}
+  sleep {poll_secs}
 done
 ```
+The `sleep {poll_secs}` keeps you inside the required heartbeat cadence ({cadence}). Do not
+lengthen it: the orchestrator requeues a worker whose last heartbeat is over {cutoff_secs}s old.
 "#,
-                task_file,
-                heartbeat_line,
-                ACTIVATION_POLL_INTERVAL.as_secs()
+                task_file = task_file,
+                heartbeat_line = heartbeat_line,
+                poll_secs = ACTIVATION_POLL_INTERVAL.as_secs(),
+                cadence = cadence,
+                cutoff_secs = STUCK_CUTOFF_SECS,
             )
         }
         CliBehavior::ActionProne => {
@@ -794,30 +808,45 @@ done
 ## WAIT FOR ACTIVATION (CRITICAL)
 WARNING: You MUST wait for your task file Status to become ACTIVE.
 WARNING: Do NOT start working just because you received this prompt.
-WARNING: Read {} - if Status is STANDBY, WAIT.
-
-Check the file, then wait. Do not proceed until ACTIVE.
+WARNING: Read {task_file} - if Status is STANDBY, WAIT.
+WARNING: Waiting is NOT silence. You MUST send a heartbeat {cadence} the entire time you
+wait. The orchestrator requeues a worker whose last heartbeat is over {cutoff_secs}s old.
+{heartbeat_block}
+Check the file, heartbeat, then wait. Do not proceed until ACTIVE.
 "#,
-                task_file
+                task_file = task_file,
+                cadence = cadence,
+                cutoff_secs = STUCK_CUTOFF_SECS,
+                heartbeat_block = heartbeat_block("Send this heartbeat while waiting:"),
             )
         }
         CliBehavior::InstructionFollowing => {
             format!(
                 r#"
 ## Task Coordination
-Read {}. Begin work only when Status is ACTIVE.
-"#,
-                task_file
+Read {task_file}. Begin work only when Status is ACTIVE.
+While the status is still STANDBY, send a heartbeat {cadence}. A worker whose last heartbeat
+is over {cutoff_secs}s old is treated as stuck and its run is requeued.
+{heartbeat_block}"#,
+                task_file = task_file,
+                cadence = cadence,
+                cutoff_secs = STUCK_CUTOFF_SECS,
+                heartbeat_block = heartbeat_block("Heartbeat command:"),
             )
         }
         CliBehavior::Interactive => {
             format!(
                 r#"
 ## Task Coordination
-Read {}. Begin work only when Status is ACTIVE.
+Read {task_file}. Begin work only when Status is ACTIVE.
 Use the interactive interface to monitor your task file.
-"#,
-                task_file
+While you monitor, run this heartbeat {cadence} from the interactive shell. A worker whose
+last heartbeat is over {cutoff_secs}s old is treated as stuck and its run is requeued.
+{heartbeat_block}"#,
+                task_file = task_file,
+                cadence = cadence,
+                cutoff_secs = STUCK_CUTOFF_SECS,
+                heartbeat_block = heartbeat_block("Heartbeat command:"),
             )
         }
     }
@@ -6205,7 +6234,9 @@ Use only the native tools exposed by the configured harness. The Capability Card
 - Send progress, blockers, and completion evidence to POST /api/sessions/{session_id}/conversations/queen/append.
 - If the API is unavailable, append the same message to {queen_conversation}.
 
-Heartbeat while active:
+Heartbeat while active ({heartbeat_cadence} — REQUIRED). Long silent stretches (indexing, builds,
+long tool calls) still need it: a run whose last heartbeat is over {stuck_cutoff_secs}s old is
+treated as stuck and requeued.
 {working_heartbeat}
 
 {learnings_section}{project_context}After reporting completion, stop and continue monitoring the inbox without sending another heartbeat. Do not take a new task until its task file status is ACTIVE; once reactivated, send a working heartbeat."#,
@@ -6230,6 +6261,8 @@ Heartbeat while active:
             queen_conversation = queen_conversation,
             shared_conversation = shared_conversation,
             working_heartbeat = working_heartbeat,
+            heartbeat_cadence = heartbeat_cadence_label(),
+            stuck_cutoff_secs = STUCK_CUTOFF_SECS,
             learnings_section = learnings_section,
             project_context = project_context,
         )
@@ -14024,6 +14057,10 @@ mod tests {
         FusionVariantMetadata, QaWorkerConfig, Session, SessionController, SessionError,
         SessionState, SessionType,
     };
+    use super::{heartbeat_cadence_label, CliBehavior, CliRegistry, ACTIVATION_POLL_INTERVAL};
+    use crate::coordination::queue_manager::{
+        HEARTBEAT_MAX_INTERVAL_SECS, HEARTBEAT_MIN_INTERVAL_SECS,
+    };
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::workspace::git::current_head;
@@ -14543,6 +14580,185 @@ mod tests {
             &restored.execution_policy,
         );
         assert!(prompt.contains(&SessionController::prompt_path(&task_path)));
+    }
+
+    /// Every `CliBehavior` must name a CLI here. Adding a variant breaks this match at
+    /// compile time, which forces the new behavior into the coverage test below instead of
+    /// letting it silently ship without a heartbeat instruction (#141 defect A).
+    fn representative_cli_for(behavior: &CliBehavior) -> &'static str {
+        match behavior {
+            CliBehavior::ActionProne => "claude",
+            CliBehavior::InstructionFollowing => "qwen",
+            CliBehavior::ExplicitPolling => "codex",
+            CliBehavior::Interactive => "droid",
+        }
+    }
+
+    /// Enumerate every `CliBehavior` EXHAUSTIVELY BY CONSTRUCTION. A hand-written `vec![]`
+    /// would compile unchanged when a variant is added, so the new behavior would never be
+    /// rendered by the coverage test below and its polling arm would ship uncovered — the
+    /// exhaustive match in `representative_cli_for` forces a variant to NAME a CLI, not to
+    /// enter the iterated collection. The successor chain below closes that gap: its match
+    /// is compiler-checked, so a fifth variant is a build error here (E0004) rather than a
+    /// silent hole. A `const ALL: [CliBehavior; N]` would NOT work — array arity is not tied
+    /// to variant count.
+    fn all_cli_behaviors() -> Vec<CliBehavior> {
+        let mut all = Vec::new();
+        let mut next = Some(CliBehavior::ActionProne);
+        while let Some(behavior) = next {
+            next = match behavior {
+                CliBehavior::ActionProne => Some(CliBehavior::InstructionFollowing),
+                CliBehavior::InstructionFollowing => Some(CliBehavior::ExplicitPolling),
+                CliBehavior::ExplicitPolling => Some(CliBehavior::Interactive),
+                CliBehavior::Interactive => None,
+            };
+            all.push(behavior);
+        }
+        all
+    }
+
+    fn worker_prompt_for_cli(cli: &str) -> String {
+        let temp = tempfile::tempdir().expect("temp project");
+        SessionController::build_worker_prompt(
+            1,
+            &AgentConfig {
+                cli: cli.to_string(),
+                role: Some(WorkerRole::new("backend", "Backend", cli)),
+                ..AgentConfig::default()
+            },
+            "session-141-queen",
+            "session-141",
+            temp.path(),
+            temp.path(),
+            &HiveExecutionPolicy::default(),
+        )
+    }
+
+    /// #141 defect A: `heartbeat_line` was interpolated only into the `ExplicitPolling` arm,
+    /// so workers on the other three behaviors were handed no heartbeat instruction at all
+    /// and went silent straight into `reclaim_stuck`. Asserted against the RENDERED prompt,
+    /// not a template constant.
+    #[test]
+    fn worker_prompt_instructs_heartbeat_cadence_for_every_cli_behavior() {
+        let cadence = heartbeat_cadence_label();
+
+        for behavior in all_cli_behaviors() {
+            let cli = representative_cli_for(&behavior);
+            assert_eq!(
+                CliRegistry::get_behavior(cli),
+                behavior,
+                "representative CLI {cli} no longer maps to the behavior it stands in for"
+            );
+
+            let prompt = worker_prompt_for_cli(cli);
+            assert!(
+                prompt.contains(&cadence),
+                "{behavior:?} ({cli}) prompt carries no heartbeat cadence instruction"
+            );
+            assert!(
+                prompt.contains(r#""status":"idle""#),
+                "{behavior:?} ({cli}) prompt drops the activation-wait heartbeat command"
+            );
+            assert!(
+                prompt.contains(r#""status":"working""#),
+                "{behavior:?} ({cli}) prompt drops the active-work heartbeat command"
+            );
+            assert!(
+                prompt.contains("/api/sessions/session-141/heartbeat"),
+                "{behavior:?} ({cli}) prompt has no heartbeat endpoint to call"
+            );
+
+            // The active-work heartbeat is the one that keeps a `running` queue row fresh,
+            // so its own instruction must state the cadence rather than leaving the worker
+            // to infer it from the activation-wait section.
+            let active_line = prompt
+                .lines()
+                .find(|line| line.starts_with("Heartbeat while active"))
+                .unwrap_or_else(|| {
+                    panic!("{behavior:?} ({cli}) prompt has no active-work heartbeat instruction")
+                });
+            assert!(
+                active_line.contains(&cadence),
+                "{behavior:?} ({cli}) active-work heartbeat states no cadence: {active_line}"
+            );
+
+            // #155/#156 on the status axis: the completed heartbeat is built outside the
+            // CliBehavior match, so it already reaches every behavior. Guard that — gating it
+            // the way `heartbeat_line` was gated would resurrect the same defect.
+            assert!(
+                prompt.contains("Completion Protocol (MANDATORY)")
+                    && prompt.contains(r#""status":"completed""#),
+                "{behavior:?} ({cli}) prompt drops the completed heartbeat instruction"
+            );
+
+            // The polling section must stand on its own: a worker parked in STANDBY never
+            // reaches the active-work section.
+            let polling = super::get_polling_instructions(
+                cli,
+                "worker-1-task.md",
+                Some("backend"),
+                Some("HEARTBEAT_COMMAND"),
+            );
+            assert!(
+                polling.contains(&cadence) && polling.contains("HEARTBEAT_COMMAND"),
+                "{behavior:?} ({cli}) polling section omits the heartbeat instruction: {polling}"
+            );
+        }
+    }
+
+    /// The behavior enum is only reachable in production through real CLI names, so cover
+    /// the allowlist too: a CLI whose behavior mapping changes must not lose its cadence.
+    #[test]
+    fn every_allowlisted_cli_receives_the_heartbeat_cadence() {
+        let cadence = heartbeat_cadence_label();
+
+        for cli in crate::adapters::VALID_CLIS {
+            let prompt = worker_prompt_for_cli(cli);
+            assert!(
+                prompt.contains(&cadence),
+                "cli {cli} prompt carries no heartbeat cadence instruction"
+            );
+            assert!(
+                prompt.contains(r#""status":"idle""#),
+                "cli {cli} prompt drops the activation-wait heartbeat command"
+            );
+
+            // Assert the POLLING SECTION on its own. The whole-prompt check above is ALSO
+            // satisfied by the unconditional "Heartbeat while active" line, which lives
+            // outside the `CliBehavior` match — so on its own it can never see a behavior arm
+            // that drops the cadence. This is also the assertion that covers the
+            // `get_behavior` catch-all: a CLI added to VALID_CLIS with no mapping arm
+            // silently inherits ActionProne, and only a VALID_CLIS-driven loop notices.
+            let polling = super::get_polling_instructions(
+                cli,
+                "worker-1-task.md",
+                Some("backend"),
+                Some("HEARTBEAT_COMMAND"),
+            );
+            assert!(
+                polling.contains(&cadence) && polling.contains("HEARTBEAT_COMMAND"),
+                "cli {cli} polling section omits the heartbeat instruction: {polling}"
+            );
+        }
+    }
+
+    /// The `ExplicitPolling` loop is one of several cadences enforced by code rather than by
+    /// the model obeying prose — the evaluator and prince poll loops in `templates/` are the
+    /// others, and they are guarded by `heartbeat_loops_sleep_within_the_instructed_cadence`.
+    /// Wherever a sleep sits between two heartbeats, it must satisfy the instruction it
+    /// ships with.
+    #[test]
+    fn activation_poll_loop_obeys_the_instructed_cadence() {
+        assert!(
+            ACTIVATION_POLL_INTERVAL.as_secs() <= HEARTBEAT_MAX_INTERVAL_SECS,
+            "polling loop sleeps {}s, longer than the instructed {HEARTBEAT_MAX_INTERVAL_SECS}s maximum",
+            ACTIVATION_POLL_INTERVAL.as_secs()
+        );
+        assert!(
+            ACTIVATION_POLL_INTERVAL.as_secs() >= HEARTBEAT_MIN_INTERVAL_SECS,
+            "polling loop sleeps {}s, shorter than the instructed {HEARTBEAT_MIN_INTERVAL_SECS}s minimum",
+            ACTIVATION_POLL_INTERVAL.as_secs()
+        );
     }
 
     #[test]

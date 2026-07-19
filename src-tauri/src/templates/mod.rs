@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::coordination::queue_manager::{heartbeat_cadence_label, HEARTBEAT_MAX_INTERVAL_SECS};
 use crate::domain::{SessionMode, WorkspaceStrategy};
 use crate::pty::WorkerRole;
 use crate::session::SessionType;
@@ -327,7 +328,7 @@ You are a Backend Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
-## Heartbeat (every 60-90s — REQUIRED)
+## Heartbeat ({{heartbeat_cadence}} — REQUIRED)
 ```bash
 {{generic_heartbeat_snippet}}
 ```
@@ -365,7 +366,7 @@ You are a Frontend Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
-## Heartbeat (every 60-90s — REQUIRED)
+## Heartbeat ({{heartbeat_cadence}} — REQUIRED)
 ```bash
 {{generic_heartbeat_snippet}}
 ```
@@ -397,7 +398,7 @@ You are a Coherence Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
-## Heartbeat (every 60-90s — REQUIRED)
+## Heartbeat ({{heartbeat_cadence}} — REQUIRED)
 ```bash
 {{generic_heartbeat_snippet}}
 ```
@@ -429,7 +430,7 @@ You are a Simplify Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
-## Heartbeat (every 60-90s — REQUIRED)
+## Heartbeat ({{heartbeat_cadence}} — REQUIRED)
 ```bash
 {{generic_heartbeat_snippet}}
 ```
@@ -458,7 +459,7 @@ You are a Worker in a multi-agent coding session.
 - Report progress to `queen.md` after milestones
 - Read `shared.md` for broadcasts
 
-## Heartbeat (every 60-90s — REQUIRED)
+## Heartbeat ({{heartbeat_cadence}} — REQUIRED)
 ```bash
 {{generic_heartbeat_snippet}}
 ```
@@ -494,16 +495,23 @@ implementation being evaluated.
    ```
 2. You MUST use this inline bash polling loop. You MUST NOT use `/loop`.
    The first poll waits {{evaluator_first_poll_interval}} (`sleep {{evaluator_first_poll_secs}}`); after that, poll every {{idle_poll_interval}} (`sleep {{idle_poll_secs}}`).
+   The heartbeat is nested INSIDE the wait so it keeps the required {{heartbeat_cadence}}
+   cadence: the file check may be slow, but going quiet gets your run treated as stuck.
    ```bash
    FIRST_WAIT=1
    while [ ! -f ".hive-manager/{{session_id}}/peer/milestone-ready.json" ]; do
-     {{evaluator_idle_heartbeat_snippet}}
      if [ "$FIRST_WAIT" = "1" ]; then
        FIRST_WAIT=0
-       sleep {{evaluator_first_poll_secs}}
+       WAIT_FOR={{evaluator_first_poll_secs}}
      else
-       sleep {{idle_poll_secs}}
+       WAIT_FOR={{idle_poll_secs}}
      fi
+     WAITED=0
+     while [ "$WAITED" -lt "$WAIT_FOR" ]; do
+       {{evaluator_idle_heartbeat_snippet}}
+       sleep {{heartbeat_interval_secs}}
+       WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+     done
    done
    cat ".hive-manager/{{session_id}}/peer/milestone-ready.json"
    ```
@@ -527,14 +535,18 @@ Use these defaults when spawning QA workers unless the plan specifies otherwise.
 1. You MUST act as a coordinator, not a tester.
 2. You MUST spawn all {{qa_worker_count}} QA workers one at a time in this exact order:
 {{qa_worker_spawn_plan}}
-3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`, and emit a heartbeat inside each polling iteration:
+3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`, and emit a heartbeat {{heartbeat_cadence}} while you wait. The heartbeat is nested INSIDE the poll interval on purpose — checking task files slowly is fine, going quiet is not:
    ```bash
    while true; do
-     curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-       -H "Content-Type: application/json" \
-       -d '{"agent_id":"{{session_id}}-evaluator","status":"working","summary":"Polling QA workers"}'
      # Check QA worker task files here; break when all are COMPLETED or BLOCKED.
-     sleep {{active_poll_secs}}
+     WAITED=0
+     while [ "$WAITED" -lt {{active_poll_secs}} ]; do
+       curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+         -H "Content-Type: application/json" \
+         -d '{"agent_id":"{{session_id}}-evaluator","status":"working","summary":"Polling QA workers"}'
+       sleep {{heartbeat_interval_secs}}
+       WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+     done
    done
    ```
 4. You MUST wait for all {{qa_worker_count}} QA workers to finish before you render the verdict.
@@ -991,12 +1003,18 @@ git, build, and test commands against that path.
 ## Phase 1: Wait For The QA Verdict
 
 1. You MUST poll for the Evaluator's verdict. You MUST NOT use `/loop`.
+   The heartbeat is nested INSIDE the {{idle_poll_secs}}s file poll so it keeps the required
+   {{heartbeat_cadence}} cadence — a run that goes quiet longer than that is treated as stuck.
    ```bash
    while [ ! -f ".hive-manager/{{session_id}}/peer/qa-verdict.json" ]; do
-     curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-       -H "Content-Type: application/json" \
-       -d '{"agent_id":"{{session_id}}-prince","status":"idle","summary":"Waiting for QA verdict"}'
-     sleep {{idle_poll_secs}}
+     WAITED=0
+     while [ "$WAITED" -lt {{idle_poll_secs}} ]; do
+       curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+         -H "Content-Type: application/json" \
+         -d '{"agent_id":"{{session_id}}-prince","status":"idle","summary":"Waiting for QA verdict"}'
+       sleep {{heartbeat_interval_secs}}
+       WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+     done
    done
    cat ".hive-manager/{{session_id}}/peer/qa-verdict.json"
    ```
@@ -1025,11 +1043,17 @@ git, build, and test commands against that path.
    - You MUST give each fixer a precise, self-contained task derived from the QA finding.
    - You MUST put the full finding text to resolve, verbatim, in `initial_task`.
 2. You MUST poll your fixers' task files every {{active_poll_secs}}s until each reaches
-   `COMPLETED` or `BLOCKED`, emitting a heartbeat inside each iteration:
+   `COMPLETED` or `BLOCKED`. Poll the files on that interval, but send this heartbeat
+   {{heartbeat_cadence}} throughout — the file poll is slow by design, your heartbeat is not:
    ```bash
-   curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-     -H "Content-Type: application/json" \
-     -d '{"agent_id":"{{session_id}}-prince","status":"working","summary":"Driving fixers"}'
+   WAITED=0
+   while [ "$WAITED" -lt {{active_poll_secs}} ]; do
+     curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+       -H "Content-Type: application/json" \
+       -d '{"agent_id":"{{session_id}}-prince","status":"working","summary":"Driving fixers"}'
+     sleep {{heartbeat_interval_secs}}
+     WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+   done
    ```
 3. You MUST verify each finding is actually resolved (inspect the diff / re-run the relevant check).
    You own the outcome — do not certify on a fixer's say-so alone.
@@ -1298,7 +1322,7 @@ curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?sinc
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
-### Heartbeat (every 60-90s):
+### Heartbeat ({{heartbeat_cadence}}):
 {{queen_heartbeat_snippet}}
 
 ## Learning Curation Protocol
@@ -1432,7 +1456,7 @@ curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?sinc
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 #### Broadcast to all:
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
-#### Heartbeat (every 60-90s):
+#### Heartbeat ({{heartbeat_cadence}}):
 {{queen_heartbeat_snippet}}
 
 ### Communication Format
@@ -1514,7 +1538,7 @@ curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?sinc
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
 ### Broadcast to all:
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
-### Heartbeat (every 60-90s):
+### Heartbeat ({{heartbeat_cadence}}):
 {{queen_heartbeat_snippet}}
 
 ## Resolver Invocation
@@ -1924,6 +1948,17 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
         );
         let api_base_url = normalize_api_base_url(context.variables.get("api_base_url"));
         rendered = rendered.replace("{{api_base_url}}", &api_base_url);
+        // #141: cadence is substituted from the constant derived off STUCK_CUTOFF_MS, never
+        // from the caller's variables — a caller that forgot to supply it would silently ship
+        // a prompt with no cadence at all.
+        rendered = rendered.replace("{{heartbeat_cadence}}", &heartbeat_cadence_label());
+        // #141: the numeric form, for templates that sleep on a code-enforced clock rather
+        // than asking the model to obey prose. A long FILE-poll interval is fine; a long
+        // HEARTBEAT interval is not, so these two cadences must be substituted separately.
+        rendered = rendered.replace(
+            "{{heartbeat_interval_secs}}",
+            &HEARTBEAT_MAX_INTERVAL_SECS.to_string(),
+        );
         rendered = rendered.replace(
             "{{queen_heartbeat_snippet}}",
             &heartbeat_snippet(
@@ -2111,9 +2146,9 @@ mod tests {
     use crate::pty::WorkerRole;
 
     use super::{
-        builtin_role_packs, builtin_session_templates, heartbeat_snippet, normalize_api_base_url,
-        PromptContext, SessionTemplate, TemplateCatalog, TemplateEngine, TemplateError,
-        DEFAULT_API_BASE_URL,
+        builtin_role_packs, builtin_session_templates, heartbeat_cadence_label, heartbeat_snippet,
+        normalize_api_base_url, PromptContext, SessionTemplate, TemplateCatalog, TemplateEngine,
+        TemplateError, DEFAULT_API_BASE_URL, HEARTBEAT_MAX_INTERVAL_SECS,
     };
 
     #[test]
@@ -2234,6 +2269,139 @@ mod tests {
             ));
             assert!(prompt.contains("UI completion checkoff and stall monitor depend on it"));
         }
+    }
+
+    /// #141 defect B: the cadence used to be prose typed into eight templates, free to drift
+    /// from `STUCK_CUTOFF_MS`. Assert the RENDERED prompts carry the derived label and that
+    /// no hand-typed cadence survives anywhere in the built-ins.
+    #[test]
+    fn rendered_prompts_take_their_heartbeat_cadence_from_the_stuck_cutoff() {
+        let cadence = heartbeat_cadence_label();
+        let engine = TemplateEngine::default();
+
+        let mut variables = HashMap::new();
+        variables.insert("agent_id".to_string(), "session-141-worker-1".to_string());
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert("heartbeat_summary".to_string(), "Implementing".to_string());
+        let context = PromptContext {
+            session_id: "session-141".to_string(),
+            project_path: ".".to_string(),
+            task: Some("Build API".to_string()),
+            variables,
+        };
+
+        for role_type in ["backend", "frontend", "coherence", "simplify", "custom"] {
+            let prompt = engine
+                .render_worker_prompt(&WorkerRole::new(role_type, role_type, "claude"), &context)
+                .expect("render worker role prompt");
+            assert!(
+                prompt.contains(&cadence),
+                "roles/{role_type} lost its derived heartbeat cadence"
+            );
+            assert!(
+                !prompt.contains("{{heartbeat_cadence}}"),
+                "roles/{role_type} leaked the cadence placeholder"
+            );
+        }
+
+        for template_name in ["queen-hive", "queen-research", "queen-fusion"] {
+            let prompt = engine
+                .render_template(template_name, &context)
+                .expect("render queen prompt");
+            assert!(
+                prompt.contains(&cadence),
+                "{template_name} lost its derived heartbeat cadence"
+            );
+            assert!(
+                !prompt.contains("{{heartbeat_cadence}}"),
+                "{template_name} leaked the cadence placeholder"
+            );
+        }
+
+        let engine_with_builtins = TemplateEngine::default();
+        for (name, body) in engine_with_builtins.builtin_templates.iter() {
+            assert!(
+                !body.contains("60-90"),
+                "{name} still hardcodes a cadence instead of deriving it from STUCK_CUTOFF_MS"
+            );
+        }
+    }
+
+    /// #141 follow-up: a heartbeat nested in a bash loop is a cadence enforced by CODE, not
+    /// by the model obeying prose — the loop's own `sleep` decides the real beat rate, and
+    /// prose stating otherwise is decoration. The evaluator and prince polled files every
+    /// 480s (first poll 1200s) with the heartbeat INSIDE that loop, so they beat 12x-30x
+    /// slower than the instruction they shipped with, while the whole suite stayed green.
+    /// Assert the structural rule instead of any literal: every `sleep` sitting between two
+    /// heartbeats must stay within the instructed cadence. A literal sweep (the `60-90`
+    /// check above) structurally cannot catch this.
+    #[test]
+    fn heartbeat_loops_sleep_within_the_instructed_cadence() {
+        let engine = TemplateEngine::default();
+
+        let mut variables = HashMap::new();
+        variables.insert("agent_id".to_string(), "session-141-worker-1".to_string());
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert("heartbeat_summary".to_string(), "Implementing".to_string());
+        // The real STANDARD_* wiring from `polling_intervals.rs`: what every non-smoke
+        // session renders. Substituting them is what makes the sleeps parseable below.
+        variables.insert("idle_poll_secs".to_string(), "480".to_string());
+        variables.insert("active_poll_secs".to_string(), "480".to_string());
+        variables.insert("evaluator_first_poll_secs".to_string(), "1200".to_string());
+        let context = PromptContext {
+            session_id: "session-141".to_string(),
+            project_path: ".".to_string(),
+            task: Some("Build API".to_string()),
+            variables,
+        };
+
+        let names: Vec<String> = engine.builtin_templates.keys().cloned().collect();
+        let mut heartbeat_blocks = 0usize;
+
+        for name in names {
+            let rendered = match engine.render_template(&name, &context) {
+                Ok(rendered) => rendered,
+                // A template needing variables this test does not supply is not the subject
+                // here; the ones that carry heartbeat loops all render from the set above.
+                Err(_) => continue,
+            };
+
+            for block in rendered.split("```bash").skip(1) {
+                let block = block.split("```").next().unwrap_or("");
+                if !block.contains("/heartbeat") {
+                    continue;
+                }
+                heartbeat_blocks += 1;
+
+                let tokens: Vec<&str> = block.split_whitespace().collect();
+                for pair in tokens.windows(2) {
+                    if pair[0] != "sleep" {
+                        continue;
+                    }
+                    let secs: u64 = pair[1].parse().unwrap_or_else(|_| {
+                        panic!(
+                            "{name}: `sleep {}` inside a heartbeat loop did not resolve to a \
+                             number — an unsubstituted placeholder would hide the real cadence",
+                            pair[1]
+                        )
+                    });
+                    assert!(
+                        secs <= HEARTBEAT_MAX_INTERVAL_SECS,
+                        "{name}: heartbeat loop sleeps {secs}s, far longer than the instructed \
+                         {HEARTBEAT_MAX_INTERVAL_SECS}s maximum — the prompt's stated cadence \
+                         is decoration if the loop it ships with beats slower"
+                    );
+                }
+            }
+        }
+
+        // Guard the guard: if the block-detection heuristic stops matching, this test would
+        // pass by scanning nothing.
+        assert!(
+            heartbeat_blocks >= 4,
+            "expected to scan the evaluator and prince heartbeat loops, only found \
+             {heartbeat_blocks} heartbeat-bearing bash blocks"
+        );
     }
 
     #[test]
