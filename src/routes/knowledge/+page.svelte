@@ -13,6 +13,7 @@
   import KnowledgePagePreview from '$lib/components/knowledge/KnowledgePagePreview.svelte';
   import KnowledgeTable from '$lib/components/knowledge/KnowledgeTable.svelte';
   import {
+    describeOmission,
     EDGE_COLORS,
     EDGE_LABELS,
     filterKnowledgeGraph,
@@ -30,36 +31,38 @@
 
   let sessionId = $derived($routePage.url.searchParams.get('session_id') || null);
   let query = $state('');
-  let folder = $state('all');
+  let folder = $state<string | null>(null);
   let view = $state<KnowledgeView>('graph');
   let previewReturnFocus = $state.raw<FocusTarget | null>(null);
 
+  // The backend discovers folders from the wiki root, so this list is open-ended.
+  // `preferredOrder` is a *hint* for the familiar folders only: anything it does
+  // not name still appears, sorted alphabetically after them, and is selectable.
+  // Comparison is case-folded so a folder named `Field Notes` cannot be silently
+  // shunted to the tail by a casing mismatch.
+  const PREFERRED_FOLDER_ORDER = [
+    'patterns',
+    'practices',
+    'research',
+    '.project',
+    'clients',
+    'partners',
+    'vendors',
+    'operations',
+    'root',
+  ];
+
   let folders = $derived.by(() => {
-    // Must stay lowercase and exact — indexOf does not case-fold, and a
-    // mismatch silently sorts the folder to the tail with no error.
-    const preferredOrder = [
-      'patterns',
-      'practices',
-      'research',
-      'project',
-      'clients',
-      'partners',
-      'vendors',
-      'operations',
-    ];
+    const rank = (name: string) => {
+      const index = PREFERRED_FOLDER_ORDER.indexOf(name.trim().toLowerCase());
+      return index === -1 ? PREFERRED_FOLDER_ORDER.length : index;
+    };
     return [...new Set($knowledgeStore.graph.nodes.map((node) => node.folder))].sort(
-      (left, right) => {
-        const leftIndex = preferredOrder.indexOf(left);
-        const rightIndex = preferredOrder.indexOf(right);
-        if (leftIndex !== -1 || rightIndex !== -1) {
-          return (leftIndex === -1 ? preferredOrder.length : leftIndex) -
-            (rightIndex === -1 ? preferredOrder.length : rightIndex);
-        }
-        return left.localeCompare(right);
-      },
+      (left, right) => rank(left) - rank(right) || left.localeCompare(right),
     );
   });
   let filteredGraph = $derived(filterKnowledgeGraph($knowledgeStore.graph, query, folder));
+  let omissions = $derived($knowledgeStore.graph.omissions ?? []);
 
   $effect(() => {
     const currentSessionId = sessionId;
@@ -113,7 +116,7 @@
     <label class="folder-field">
       <span class="sr-only">Filter by folder</span>
       <select bind:value={folder} aria-label="Filter by folder">
-        <option value="all">All folders ({$knowledgeStore.graph.nodes.length})</option>
+        <option value={null}>All folders ({$knowledgeStore.graph.nodes.length})</option>
         {#each folders as name (name)}
           <option value={name}>{name} ({folderCount(name)})</option>
         {/each}
@@ -157,9 +160,19 @@
       Refresh failed: {$knowledgeStore.error}. Showing the last loaded graph.
     </div>
   {/if}
-  {#if $knowledgeStore.graph.truncated}
+  {#if omissions.length > 0}
     <div class="notice cap-notice">
-      This atlas reached its safety cap. Refine the corpus to see pages beyond the current bounded scan.
+      <strong>Not everything is shown.</strong>
+      <ul>
+        {#each omissions as omission (omission.reason)}
+          <li>{describeOmission(omission)}</li>
+        {/each}
+      </ul>
+    </div>
+  {:else if $knowledgeStore.graph.truncated}
+    <!-- Older backend: the boolean without the report behind it. -->
+    <div class="notice cap-notice">
+      This atlas reached a scan limit, but this backend does not report which one.
     </div>
   {/if}
 
@@ -183,8 +196,8 @@
           <Brain size={32} weight="light" />
           <strong>No knowledge pages found</strong>
           <p>
-            Add markdown under the wiki folders — patterns, practices, research, clients,
-            partners, vendors, operations — or the project’s .ai-docs folder.
+            Add markdown anywhere under the wiki root — every top-level folder is scanned, plus
+            loose pages at the root itself — or in the project’s .ai-docs folder.
           </p>
           <button type="button" onclick={() => knowledgeStore.loadGraph(sessionId)}>Scan again</button>
         </div>
@@ -193,7 +206,7 @@
           <MagnifyingGlass size={30} weight="light" />
           <strong>No matching pages</strong>
           <p>Try a broader search or choose another folder.</p>
-          <button type="button" onclick={() => { query = ''; folder = 'all'; }}>Clear filters</button>
+          <button type="button" onclick={() => { query = ''; folder = null; }}>Clear filters</button>
         </div>
       {:else}
         <div class="view-frame">
@@ -464,6 +477,17 @@
 
   .error-notice { color: var(--status-warning); }
   .cap-notice { color: var(--accent-amber); }
+  .cap-notice strong { font-weight: 600; }
+  .cap-notice ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px var(--space-3);
+    margin: 2px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .cap-notice li { color: var(--text-secondary); }
+  .cap-notice li::before { content: '· '; color: var(--accent-amber); }
 
   .workspace {
     flex: 1;

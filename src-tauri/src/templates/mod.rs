@@ -1178,9 +1178,10 @@ Ground your argument in existing institutional knowledge before writing this rou
 - The global wiki path is: `{{global_wiki_path}}`
 - Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
   ```bash
-  cat "{{global_wiki_path}}/index.md"
+  cat "{{global_wiki_path}}/index.md" || echo "WIKI INDEX UNREADABLE: {{global_wiki_path}}/index.md"
   ```
   Then read the pages from the index that are relevant to the debate topic. Use this prior knowledge to sharpen your argument and to avoid re-deriving what is already documented.
+- **Verify the read actually succeeded.** If the index does not print — or `WIKI INDEX UNREADABLE` does — do NOT silently continue with no prior context. Say so explicitly at the top of this round's argument file, so the missing grounding is visible to the judge instead of invisible to everyone.
 {{/if}}
 {{#if no_global_wiki}}
 - No global wiki path is configured. Skip this phase gracefully and argue with no prior-wiki context.
@@ -1236,9 +1237,10 @@ Ground your verdict in existing institutional knowledge before evaluating the ar
 - The global wiki path is: `{{global_wiki_path}}`
 - Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
   ```bash
-  cat "{{global_wiki_path}}/index.md"
+  cat "{{global_wiki_path}}/index.md" || echo "WIKI INDEX UNREADABLE: {{global_wiki_path}}/index.md"
   ```
   Then read the pages from the index that are relevant to the debate topic. Weigh the arguments against what is already documented, and note where a position contradicts or extends prior knowledge.
+- **Verify the read actually succeeded.** If the index does not print — or `WIKI INDEX UNREADABLE` does — do NOT silently continue with no prior context. Record that fact in the verdict's Summary section, so a verdict reached without prior grounding is visibly labelled as such.
 {{/if}}
 {{#if no_global_wiki}}
 - No global wiki path is configured. Skip this phase gracefully and judge with no prior-wiki context.
@@ -1453,13 +1455,18 @@ The system assigns the worker its ID (`{{session_id}}-worker-N`) and a read-only
 
 Ground your research in existing institutional knowledge before delegating.
 
+{{#if has_global_wiki}}
 - The global wiki path is: `{{global_wiki_path}}`
-- **If `{{global_wiki_path}}` is non-empty**: read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
+- Read the wiki index and the topic-relevant pages directly with your own CLI filesystem access:
   ```bash
-  cat "{{global_wiki_path}}/index.md"
+  cat "{{global_wiki_path}}/index.md" || echo "WIKI INDEX UNREADABLE: {{global_wiki_path}}/index.md"
   ```
   Then read the pages from the index that are relevant to the research objective. Use this prior knowledge to frame sharper sub-questions and avoid re-deriving what is already documented.
-- **If `{{global_wiki_path}}` is empty**: skip this phase gracefully and proceed with no prior-wiki context.
+- **Verify the read actually succeeded.** If the index does not print — or `WIKI INDEX UNREADABLE` does — do NOT silently continue as if no wiki were configured. Post a short note to the conversation naming the path you tried, then proceed without prior context. A wiki that was configured but unreadable is a defect the user needs to see, not a silent downgrade.
+{{/if}}
+{{#if no_global_wiki}}
+- No global wiki path is configured. Skip this phase gracefully and proceed with no prior-wiki context.
+{{/if}}
 
 ## Phase 2 — Coordinate Researchers
 
