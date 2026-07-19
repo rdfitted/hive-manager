@@ -24,10 +24,26 @@ export interface KnowledgeEdge {
   kind: KnowledgeEdgeKind;
 }
 
+/**
+ * Why something the operator might have expected is missing. The backend replaced a single
+ * `truncated: boolean` — which was assigned in a dozen unrelated places and so meant nothing
+ * actionable — with a countable list of these.
+ */
+export interface KnowledgeOmission {
+  reason: string;
+  count: number;
+  /** One sentence, safe to render verbatim. */
+  detail: string;
+  /** Up to a handful of affected page IDs. Never absolute filesystem paths. */
+  examples: string[];
+}
+
 export interface KnowledgeGraph {
   nodes: KnowledgeNode[];
   edges: KnowledgeEdge[];
+  /** Derived from `omissions` being non-empty; kept for backward compatibility. */
   truncated?: boolean;
+  omissions?: KnowledgeOmission[];
 }
 
 export interface KnowledgePage {
@@ -38,6 +54,7 @@ export interface KnowledgePage {
   content: string;
   last_updated: string | number | null;
   truncated?: boolean;
+  omissions?: KnowledgeOmission[];
 }
 
 export type KnowledgeView = 'graph' | 'table';

@@ -3,7 +3,7 @@
   import { X } from 'phosphor-svelte';
   import MarkdownInline from './MarkdownInline.svelte';
   import { parseMarkdown } from '$lib/knowledge/markdown';
-  import { folderColor, formatLastUpdated } from '$lib/knowledge/graphUtils';
+  import { describeOmission, folderColor, formatLastUpdated } from '$lib/knowledge/graphUtils';
   import type { KnowledgePage } from '$lib/knowledge/types';
 
   interface FocusTarget {
@@ -84,7 +84,11 @@
       <div class="page-meta">
         <code>{page.path}</code>
         <span>Updated {formatLastUpdated(page.last_updated)}</span>
-        {#if page.truncated}<span class="truncated">Preview capped for safety</span>{/if}
+        {#each page.omissions ?? [] as omission (omission.reason)}
+          <span class="truncated">{describeOmission(omission)}</span>
+        {:else}
+          {#if page.truncated}<span class="truncated">Preview capped for safety</span>{/if}
+        {/each}
       </div>
     </div>
 

@@ -1098,7 +1098,7 @@ title: Public Source
 last_updated: 2026-07-18
 cross_refs:
   - wiki/practices/cross.md
-  - agents/private-dossier.md
+  - agents/dossier.md
 ---
 # Source body
 [[Wiki Target]]
@@ -1120,17 +1120,23 @@ cross_refs:
         "---\ntitle: Body Related\n---\n# Related\n",
     );
     write_knowledge_fixture(wiki.path(), "research/from.md", "# From\n");
-    // `clients/` is allow-listed as of #158, so the non-allow-listed folder in this fixture must
-    // be `agents/` — otherwise these exclusion assertions would pass vacuously.
+    // `agents/` used to be excluded by a compiled-in folder enum. The folder set is now discovered
+    // from the wiki root, so this page is part of the operator's memory system like any other —
+    // and the `agents/private-dossier.md` cross-ref above must now resolve to a real edge.
     write_knowledge_fixture(
         wiki.path(),
-        "agents/private-dossier.md",
-        "---\ntitle: Private Recruiting Dossier\n---\n# Never expose this\n",
+        "agents/dossier.md",
+        "---\ntitle: Agent Dossier\n---\n# Dossier body\n",
     );
+    // Root-level markdown sits in no folder and was unreachable by construction; it now arrives
+    // under the synthetic `root` prefix.
+    write_knowledge_fixture(wiki.path(), "index.md", "# Wiki Index\n");
+    // Previously hidden by `is_forbidden_name`.
+    write_knowledge_fixture(wiki.path(), "patterns/log.md", "# Patterns Log\n");
     write_knowledge_fixture(
         wiki.path(),
         "patterns/oversized.md",
-        vec![b'x'; 256 * 1024 + 1],
+        vec![b'x'; 1024 * 1024 + 1],
     );
     write_knowledge_fixture(
         project.path(),
@@ -1171,10 +1177,40 @@ cross_refs:
         .filter_map(|node| node["id"].as_str())
         .collect();
     assert!(node_ids.contains("patterns/source"));
-    assert!(node_ids.contains("project/project-dna"));
-    assert!(!node_ids.contains("project/architecture"));
+    assert!(node_ids.contains(".project/project-dna"));
+    assert!(!node_ids.contains(".project/architecture"));
+    // Everything the old allowlist and denylist hid is now reachable over the API.
+    assert!(node_ids.contains("agents/dossier"));
+    assert!(node_ids.contains("root/index"));
+    assert!(node_ids.contains("patterns/log"));
+    // Still omitted, but now for a reason the client can name and explain.
     assert!(!node_ids.contains("patterns/oversized"));
     assert!(graph["truncated"].as_bool().unwrap());
+
+    let omissions = graph["omissions"].as_array().unwrap();
+    assert_eq!(
+        omissions
+            .iter()
+            .filter_map(|omission| omission["reason"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["file_too_large"],
+        "the only omission here is the oversized page, and the report must say exactly that"
+    );
+    let too_large = &omissions[0];
+    assert_eq!(too_large["count"], 1);
+    assert_eq!(
+        too_large["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|example| example.as_str())
+            .collect::<Vec<_>>(),
+        vec!["patterns/oversized"]
+    );
+    assert!(too_large["detail"]
+        .as_str()
+        .unwrap()
+        .contains("larger than the read limit"));
 
     let edges = graph["edges"].as_array().unwrap();
     let edge_kinds: std::collections::HashSet<_> = edges
@@ -1200,9 +1236,14 @@ cross_refs:
                 .is_some_and(|id| node_ids.contains(id))
     }));
 
+    // The `agents/` cross-ref resolves now that the folder is reachable.
+    assert!(edges.iter().any(|edge| {
+        edge["source"] == "patterns/source"
+            && edge["target"] == "agents/dossier"
+            && edge["kind"] == "cross_ref"
+    }));
+
     let serialized_graph = serde_json::to_string(&graph).unwrap();
-    assert!(!serialized_graph.contains("Private Recruiting Dossier"));
-    assert!(!serialized_graph.contains("agents/private-dossier"));
     assert!(!serialized_graph.contains(wiki.path().to_string_lossy().as_ref()));
     assert!(!serialized_graph.contains(project.path().to_string_lossy().as_ref()));
 
@@ -1228,11 +1269,37 @@ cross_refs:
         .unwrap()
         .contains(wiki.path().to_string_lossy().as_ref()));
 
+    // A previously-hidden page is now previewable end to end.
+    let agents_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/page?id=agents%2Fdossier&session_id=session-knowledge")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(agents_response.status(), StatusCode::OK);
+    let agents_preview = read_json_body(agents_response).await;
+    assert_eq!(agents_preview["folder"], "agents");
+    assert!(agents_preview["content"]
+        .as_str()
+        .unwrap()
+        .contains("Dossier body"));
+    assert!(agents_preview["omissions"].as_array().unwrap().is_empty());
+    assert!(!agents_preview["truncated"].as_bool().unwrap());
+
+    // Traversal and absolute forms are still rejected before any filesystem work happens. These
+    // are shape violations, not folder-membership violations, so discovery does not weaken them.
     for invalid_id in [
-        "patterns%2F..%2Fagents%2Fprivate-dossier",
+        "patterns%2F..%2Fagents%2Fdossier",
         "%2Fpatterns%2Fsource",
-        "agents%2Fprivate-dossier",
-        "clients%2F..%2Fagents%2Fprivate-dossier",
+        "clients%2F..%2Fagents%2Fdossier",
+        "patterns%5Csource",
+        "C%3A%2Fpatterns%2Fsource",
+        "patterns%2F.%2Fsource",
+        ".project%2Farchitecture",
     ] {
         let response = app
             .clone()
@@ -1302,11 +1369,12 @@ async fn test_knowledge_entity_folders_scan_nested_pages_and_cross_link_graph_ha
         "---\ntitle: Engagement Pattern\ncross_refs:\n  - clients/acme/dashboard.md\n---\n\
          # Engagement\n[[partners/beta]]\n",
     );
-    // Still never scanned.
+    // Discovered like every other folder now — the folder set comes from the wiki root, not from
+    // a compiled-in list of blessed names.
     write_knowledge_fixture(
         wiki.path(),
         "agents/recruiting/candidate.md",
-        "---\ntitle: Candidate Dossier\n---\n# Personal contact details\n",
+        "---\ntitle: Candidate Dossier\n---\n# Candidate notes\n",
     );
 
     let (_storage_dir, app, _controller, _storage) =
@@ -1336,11 +1404,12 @@ async fn test_knowledge_entity_folders_scan_nested_pages_and_cross_link_graph_ha
         "vendors/gamma",
         "operations/runbook",
         "patterns/engagement",
+        "agents/recruiting/candidate",
     ] {
         assert!(node_ids.contains(expected), "missing node {expected}");
     }
-    assert!(!node_ids.iter().any(|id| id.starts_with("agents/")));
     assert!(!graph["truncated"].as_bool().unwrap());
+    assert!(graph["omissions"].as_array().unwrap().is_empty());
 
     let dashboard = nodes
         .iter()
@@ -1411,7 +1480,7 @@ async fn test_knowledge_entity_folders_scan_nested_pages_and_cross_link_graph_ha
     assert!(page["content"].as_str().unwrap().contains("# Acme"));
     assert!(!page["content"].as_str().unwrap().contains("title: Acme"));
 
-    // The never-allow-listed folder stays unreachable through the preview path too.
+    // The formerly-excluded folder is reachable through the preview path too.
     let agents_response = app
         .clone()
         .oneshot(
@@ -1422,7 +1491,10 @@ async fn test_knowledge_entity_folders_scan_nested_pages_and_cross_link_graph_ha
         )
         .await
         .unwrap();
-    assert_eq!(agents_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(agents_response.status(), StatusCode::OK);
+    let agents_page = read_json_body(agents_response).await;
+    assert_eq!(agents_page["folder"], "agents");
+    assert_eq!(agents_page["path"], "agents/recruiting/candidate.md");
 
     // No absolute filesystem path may appear in any response body. Compare against both the raw
     // path and its JSON-escaped form -- on Windows the raw backslashes are re-escaped on the wire,
@@ -1435,13 +1507,13 @@ async fn test_knowledge_entity_folders_scan_nested_pages_and_cross_link_graph_ha
     for body in [
         serde_json::to_string(&graph).unwrap(),
         serde_json::to_string(&page).unwrap(),
+        serde_json::to_string(&agents_page).unwrap(),
     ] {
         assert!(!body.contains(&wiki_display), "leaked wiki path: {body}");
         assert!(
             !body.contains(&wiki_json_escaped),
             "leaked escaped wiki path: {body}"
         );
-        assert!(!body.contains("Candidate Dossier"));
     }
 }
 
@@ -1716,7 +1788,7 @@ async fn test_knowledge_project_pages_are_bound_to_the_requested_session() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|node| node["id"] == "project/project-dna")
+            .find(|node| node["id"] == ".project/project-dna")
             .expect("session-scoped project node");
         assert_eq!(project_node["title"], expected_title);
 
@@ -1725,7 +1797,7 @@ async fn test_knowledge_project_pages_are_bound_to_the_requested_session() {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/api/knowledge/page?id=project%2Fproject-dna&session_id={session_id}"
+                        "/api/knowledge/page?id=.project%2Fproject-dna&session_id={session_id}"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -1754,7 +1826,7 @@ async fn test_knowledge_project_pages_are_bound_to_the_requested_session() {
         .as_array()
         .unwrap()
         .iter()
-        .all(|node| node["folder"] != "project"));
+        .all(|node| node["folder"] != ".project"));
 
     let unknown_session = app
         .oneshot(
@@ -1768,15 +1840,18 @@ async fn test_knowledge_project_pages_are_bound_to_the_requested_session() {
     assert_eq!(unknown_session.status(), StatusCode::NOT_FOUND);
 }
 
+/// A corpus larger than the *old* 400-node ceiling must now come back whole and unflagged, and the
+/// cap must still bind — with a named reason and an accurate count — when a caller asks for one.
 #[tokio::test]
-async fn test_knowledge_graph_enforces_hard_node_cap() {
+async fn test_knowledge_graph_serves_a_corpus_past_the_old_cap_and_reports_a_requested_cap() {
     let _environment_lock = KNOWLEDGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let wiki = TempDir::new().unwrap();
     let _wiki_root = ScopedEnvironmentVariable::set("HIVE_WIKI_ROOT", wiki.path());
 
-    for index in 0..405 {
+    let corpus = 450;
+    for index in 0..corpus {
         write_knowledge_fixture(
             wiki.path(),
             &format!("patterns/page-{index:03}.md"),
@@ -1786,6 +1861,7 @@ async fn test_knowledge_graph_enforces_hard_node_cap() {
 
     let app = setup_test_app().await;
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/knowledge/graph")
@@ -1796,8 +1872,38 @@ async fn test_knowledge_graph_enforces_hard_node_cap() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let graph = read_json_body(response).await;
-    assert_eq!(graph["nodes"].as_array().unwrap().len(), 400);
-    assert!(graph["truncated"].as_bool().unwrap());
+    assert_eq!(
+        graph["nodes"].as_array().unwrap().len(),
+        corpus,
+        "a growing personal wiki must not be silently cut"
+    );
+    assert!(!graph["truncated"].as_bool().unwrap());
+    assert!(graph["omissions"].as_array().unwrap().is_empty());
+
+    let capped_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/knowledge/graph?max_nodes=50")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(capped_response.status(), StatusCode::OK);
+    let capped = read_json_body(capped_response).await;
+    assert_eq!(capped["nodes"].as_array().unwrap().len(), 50);
+    assert!(capped["truncated"].as_bool().unwrap());
+    let omissions = capped["omissions"].as_array().unwrap();
+    assert_eq!(omissions.len(), 1);
+    assert_eq!(omissions[0]["reason"], "node_cap_reached");
+    assert_eq!(
+        omissions[0]["count"], 400,
+        "the count must cover every skipped page, not just the one the scan stopped on"
+    );
+    assert!(!omissions[0]["examples"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

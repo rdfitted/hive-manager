@@ -2690,7 +2690,7 @@ impl SessionController {
     /// Add prompt argument to args based on CLI type
     /// Each CLI has different syntax for accepting initial prompts
     fn add_prompt_to_args(cli: &str, args: &mut Vec<String>, prompt_path: &str) {
-        let prompt_path = if matches!(cli, "cursor" | "wsl") {
+        let prompt_path = if Self::cli_runs_under_wsl(cli) {
             Self::to_wsl_path(prompt_path)
         } else {
             prompt_path.to_string()
@@ -3517,16 +3517,26 @@ Last updated: {timestamp}
     /// Insert the `global_wiki_path` prompt variable plus the `{{#if}}` gate flags
     /// that wrap the "Prior Wiki Context" load phase in the debate templates.
     ///
-    /// The flags exist so an unset/blank wiki path renders a prompt containing no
+    /// **Every** template that renders `{{global_wiki_path}}` — `queen-research`,
+    /// `debater`, and `debate-judge` — MUST get the variable from here. All three embed
+    /// it in quoted shell commands, so all three need the same separator/WSL handling;
+    /// normalizing per-site is exactly the sibling divergence that produced the
+    /// trailing-dot split fixed in #159 and the missing outer loop fixed in #169.
+    /// `cli` is the CLI that will execute the rendered prompt (see
+    /// [`Self::normalize_wiki_path_for_cli`]).
+    ///
+    /// The gate flags exist so an unset/blank wiki path renders a prompt containing no
     /// read of an empty path: the whole `cat "<path>/index.md"` block is dropped
     /// and a short skip notice renders in its place. A debate must still run to
     /// completion with no wiki configured.
-    fn insert_debate_wiki_variables(
+    fn insert_wiki_path_variables(
         variables: &mut HashMap<String, String>,
         global_wiki_path: &str,
+        cli: &str,
     ) {
-        let configured = !global_wiki_path.trim().is_empty();
-        variables.insert("global_wiki_path".to_string(), global_wiki_path.to_string());
+        let normalized = Self::normalize_wiki_path_for_cli(global_wiki_path, cli);
+        let configured = !normalized.trim().is_empty();
+        variables.insert("global_wiki_path".to_string(), normalized);
         variables.insert("has_global_wiki".to_string(), configured.to_string());
         variables.insert("no_global_wiki".to_string(), (!configured).to_string());
     }
@@ -3580,7 +3590,8 @@ Last updated: {timestamp}
         );
         variables.insert("opponent_files".to_string(), opponent_files.to_string());
         variables.insert("task_file".to_string(), Self::prompt_path(task_file));
-        Self::insert_debate_wiki_variables(&mut variables, global_wiki_path);
+        // The debater's own CLI executes this prompt, so it decides the wiki path form.
+        Self::insert_wiki_path_variables(&mut variables, global_wiki_path, &debater.config.cli);
 
         let engine = TemplateEngine::default();
         let context = PromptContext {
@@ -3599,10 +3610,14 @@ Last updated: {timestamp}
         })
     }
 
+    /// `judge_cli` is the **resolved** CLI the judge will run under (i.e. after the
+    /// session-default fallback for a blank `metadata.judge_config.cli`), because it
+    /// decides how the wiki path must be spelled in the prompt's shell blocks.
     fn build_debate_judge_prompt(
         session_id: &str,
         metadata: &DebateSessionMetadata,
         global_wiki_path: &str,
+        judge_cli: &str,
     ) -> String {
         let mut variables = HashMap::new();
         variables.insert(
@@ -3622,7 +3637,7 @@ Last updated: {timestamp}
         );
         variables.insert("rounds".to_string(), metadata.rounds.to_string());
         variables.insert("verdict_file".to_string(), metadata.verdict_file.clone());
-        Self::insert_debate_wiki_variables(&mut variables, global_wiki_path);
+        Self::insert_wiki_path_variables(&mut variables, global_wiki_path, judge_cli);
 
         let debater_list = metadata
             .debaters
@@ -3668,6 +3683,45 @@ Last updated: {timestamp}
 
     fn prompt_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
+    }
+
+    /// Does `cli` execute its prompt inside WSL rather than on the Windows host?
+    ///
+    /// `build_command` maps `cli == "cursor"` to the `wsl` executable, and call sites
+    /// pass the *remapped* command name (`&cmd`) to `add_prompt_to_args`, so both
+    /// spellings must answer yes. Centralized so the "runs under WSL" set is defined
+    /// once instead of being re-`matches!`-ed at every site that needs to translate a
+    /// host path (the divergence class behind #159 and #169).
+    fn cli_runs_under_wsl(cli: &str) -> bool {
+        matches!(cli.trim(), "cursor" | "wsl")
+    }
+
+    /// Normalize a configured global wiki path for embedding in the **quoted shell
+    /// commands** of a rendered prompt, for the CLI that will actually execute it.
+    ///
+    /// `expand_tilde` resolves `~` from `USERPROFILE` on Windows, so the value reaching
+    /// a prompt is mixed-separator — `C:\Users\RDuff/.ai-docs/wiki` for the default
+    /// `~/.ai-docs/wiki`. Inside bash double quotes a backslash is only special before
+    /// `$`, a backtick, `"`, `\`, or a newline, so `\U` survives literally and Git Bash's
+    /// MSYS layer usually still resolves it — which is why this never visibly broke.
+    ///
+    /// It genuinely breaks under WSL: neither `C:\Users\...` **nor** `C:/Users/...`
+    /// resolves there, only `/mnt/c/Users/...`. A separator swap alone would therefore
+    /// look fixed while leaving the one adapter that needs real translation still broken,
+    /// so WSL-backed CLIs are routed through [`Self::to_wsl_path`] — the same translation
+    /// `add_prompt_to_args` already applies to the prompt file path for cursor.
+    ///
+    /// A blank path is returned unchanged so the `{{#if has_global_wiki}}` gates and the
+    /// queen-research "if empty, skip gracefully" prose keep seeing an empty string.
+    fn normalize_wiki_path_for_cli(global_wiki_path: &str, cli: &str) -> String {
+        if global_wiki_path.trim().is_empty() {
+            return global_wiki_path.to_string();
+        }
+        if Self::cli_runs_under_wsl(cli) {
+            Self::to_wsl_path(global_wiki_path)
+        } else {
+            global_wiki_path.replace('\\', "/")
+        }
     }
 
     fn to_wsl_path(path: &str) -> String {
@@ -8212,18 +8266,12 @@ Last updated: {timestamp}
         // template's quoted shell commands (`cd "{{global_wiki_path}}"`).
         let global_wiki_path = expand_tilde(&global_wiki_path);
 
-        let mut extra_queen_vars = HashMap::new();
-        extra_queen_vars.insert("global_wiki_path".to_string(), global_wiki_path);
-        // `smoke_directive` is rendered near the top of the queen-research prompt. It is
-        // empty for a normal run and a hard override for a smoke run (spawn ONE
-        // researcher, trivial canned task, no wiki load/capture).
-        extra_queen_vars.insert(
-            "smoke_directive".to_string(),
-            if smoke_test {
-                Self::research_smoke_directive()
-            } else {
-                String::new()
-            },
+        // The Queen executes this prompt, so the Queen's CLI decides how the wiki path
+        // must be spelled in its shell blocks.
+        let extra_queen_vars = Self::research_queen_extra_vars(
+            &global_wiki_path,
+            &hive_config.queen_config.cli,
+            smoke_test,
         );
 
         // Research never touches git: no worktrees, no branches, and no pre-spawned
@@ -8236,6 +8284,36 @@ Last updated: {timestamp}
             false,
             false,
         )
+    }
+
+    /// Assemble the `queen-research`-specific template variables.
+    ///
+    /// Extracted from [`Self::launch_research`] so the rendered research Queen prompt is
+    /// reachable from a test without standing up storage and a PTY — a
+    /// template-constant assertion would prove nothing about what the Queen receives.
+    ///
+    /// `queen_cli` is the CLI that will execute the prompt; the wiki path goes through
+    /// the same [`Self::insert_wiki_path_variables`] the debate templates use, so the
+    /// two insert sites cannot drift.
+    fn research_queen_extra_vars(
+        global_wiki_path: &str,
+        queen_cli: &str,
+        smoke_test: bool,
+    ) -> HashMap<String, String> {
+        let mut extra_queen_vars = HashMap::new();
+        Self::insert_wiki_path_variables(&mut extra_queen_vars, global_wiki_path, queen_cli);
+        // `smoke_directive` is rendered near the top of the queen-research prompt. It is
+        // empty for a normal run and a hard override for a smoke run (spawn ONE
+        // researcher, trivial canned task, no wiki load/capture).
+        extra_queen_vars.insert(
+            "smoke_directive".to_string(),
+            if smoke_test {
+                Self::research_smoke_directive()
+            } else {
+                String::new()
+            },
+        );
+        extra_queen_vars
     }
 
     /// Hard-override banner injected at the top of the queen-research prompt for a
@@ -11478,16 +11556,10 @@ phases and do EXACTLY this, then stop:
             .and_then(|cfg| cfg.global_wiki_path)
             .unwrap_or_default();
         let global_wiki_path = expand_tilde(&global_wiki_path);
-        let judge_prompt =
-            Self::build_debate_judge_prompt(session_id, &metadata, &global_wiki_path);
-        let prompt_file = Self::write_prompt_file(
-            &session.project_path,
-            session_id,
-            "debate-judge-prompt.md",
-            &judge_prompt,
-        )?;
-        let prompt_path = prompt_file.to_string_lossy().to_string();
 
+        // Resolve the judge's effective CLI/model BEFORE rendering: the prompt spells the
+        // wiki path differently for a WSL-backed CLI, so it must see the post-fallback
+        // value, not a blank `judge_config.cli`.
         let mut judge_config = metadata.judge_config.clone();
         if judge_config.cli.trim().is_empty() {
             judge_config.cli = session.default_cli.clone();
@@ -11495,6 +11567,20 @@ phases and do EXACTLY this, then stop:
         if judge_config.model.is_none() {
             judge_config.model = session.default_model.clone();
         }
+
+        let judge_prompt = Self::build_debate_judge_prompt(
+            session_id,
+            &metadata,
+            &global_wiki_path,
+            &judge_config.cli,
+        );
+        let prompt_file = Self::write_prompt_file(
+            &session.project_path,
+            session_id,
+            "debate-judge-prompt.md",
+            &judge_prompt,
+        )?;
+        let prompt_path = prompt_file.to_string_lossy().to_string();
 
         let (cmd, mut args) = Self::build_command(&judge_config);
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
@@ -16333,7 +16419,7 @@ mod tests {
 
     const DEBATE_TEST_WIKI_PATH: &str = "/home/tester/.ai-docs/wiki";
 
-    fn debate_test_debater() -> DebateDebaterMetadata {
+    fn debate_test_debater_with_cli(cli: &str) -> DebateDebaterMetadata {
         DebateDebaterMetadata {
             index: 1,
             name: "Debater 1".to_string(),
@@ -16341,8 +16427,15 @@ mod tests {
             slug: "debater-1".to_string(),
             branch: "debate/session-wiki-debater-1".to_string(),
             worktree_path: "/projects/app/debater-1".to_string(),
-            config: AgentConfig::default(),
+            config: AgentConfig {
+                cli: cli.to_string(),
+                ..AgentConfig::default()
+            },
         }
+    }
+
+    fn debate_test_debater() -> DebateDebaterMetadata {
+        debate_test_debater_with_cli("claude")
     }
 
     fn debate_test_metadata() -> DebateSessionMetadata {
@@ -16356,10 +16449,10 @@ mod tests {
         }
     }
 
-    fn render_debate_test_debater_prompt(global_wiki_path: &str) -> String {
+    fn render_debate_test_debater_prompt_for_cli(global_wiki_path: &str, cli: &str) -> String {
         SessionController::build_debate_debater_prompt(
             "session-wiki",
-            &debate_test_debater(),
+            &debate_test_debater_with_cli(cli),
             "Monolith versus microservices",
             1,
             2,
@@ -16369,6 +16462,10 @@ mod tests {
             Path::new("/projects/app/debater-1/task.md"),
             global_wiki_path,
         )
+    }
+
+    fn render_debate_test_debater_prompt(global_wiki_path: &str) -> String {
+        render_debate_test_debater_prompt_for_cli(global_wiki_path, "claude")
     }
 
     /// Any leftover mustache control token means the render silently produced a
@@ -16459,6 +16556,7 @@ mod tests {
             "session-wiki",
             &debate_test_metadata(),
             DEBATE_TEST_WIKI_PATH,
+            "claude",
         );
 
         assert!(
@@ -16492,6 +16590,7 @@ mod tests {
                 "session-wiki",
                 &debate_test_metadata(),
                 unset,
+                "claude",
             );
 
             assert_no_dangling_wiki_read(&prompt, "judge");
@@ -16506,6 +16605,201 @@ mod tests {
             assert!(prompt.contains("Monolith versus microservices"));
             assert!(prompt.contains("## Verdict Format"));
             assert!(prompt.contains(".hive-manager/session-wiki/debate/verdict.md"));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // `global_wiki_path` separator / WSL normalization (issue #168)
+    //
+    // `expand_tilde` resolves `~` from `USERPROFILE` on Windows, so what reaches a
+    // prompt is MIXED-separator. Every assertion below is on the string a builder
+    // actually returns: a template-constant assertion would prove nothing about
+    // what the agent receives, which is the whole point of the issue.
+    // ---------------------------------------------------------------------
+
+    /// Exactly what `expand_tilde("~/.ai-docs/wiki")` yields on Windows: `USERPROFILE`
+    /// contributes backslashes, the configured remainder keeps its forward slashes.
+    const MIXED_SEPARATOR_WIKI_PATH: &str = r"C:\Users\RDuff/.ai-docs/wiki";
+    /// The Git-Bash/MSYS-safe spelling every non-WSL CLI must receive.
+    const FORWARD_SLASH_WIKI_PATH: &str = "C:/Users/RDuff/.ai-docs/wiki";
+    /// The only spelling that resolves under WSL. `C:/Users/...` does NOT.
+    const WSL_WIKI_PATH: &str = "/mnt/c/Users/RDuff/.ai-docs/wiki";
+
+    fn render_research_queen_prompt(global_wiki_path: &str, queen_cli: &str) -> String {
+        let extra_vars =
+            SessionController::research_queen_extra_vars(global_wiki_path, queen_cli, false);
+        SessionController::build_templated_queen_prompt(
+            "queen-research",
+            "session-wiki",
+            &[AgentConfig::default()],
+            Some("Investigate prompt path handling"),
+            extra_vars,
+        )
+    }
+
+    /// A backslash surviving into the prompt is the defect. Asserting on the drive
+    /// prefix catches it wherever in the prompt it appears -- the load block, the
+    /// prose line naming the path, or the Phase 4 / Wiki Capture `cd`.
+    fn assert_no_windows_separators(prompt: &str, label: &str) {
+        assert!(
+            !prompt.contains(r"C:\"),
+            "{} prompt still carries a backslash-separated Windows wiki path:\n{}",
+            label,
+            prompt
+        );
+    }
+
+    #[test]
+    fn research_queen_prompt_renders_a_forward_slash_wiki_path() {
+        let prompt = render_research_queen_prompt(MIXED_SEPARATOR_WIKI_PATH, "claude");
+
+        assert!(
+            prompt.contains(&format!("cat \"{}/index.md\"", FORWARD_SLASH_WIKI_PATH)),
+            "queen-research prompt is missing the normalized index read:\n{}",
+            prompt
+        );
+        // Phase 4's capture block quotes the same variable and must agree.
+        assert!(
+            prompt.contains(&format!("cd \"{}\"", FORWARD_SLASH_WIKI_PATH)),
+            "queen-research wiki capture `cd` was not normalized:\n{}",
+            prompt
+        );
+        assert_no_windows_separators(&prompt, "queen-research");
+        assert_no_unrendered_template_syntax(&prompt, "queen-research");
+    }
+
+    /// A separator swap alone would leave `C:/Users/...` here, which is just as
+    /// unresolvable under WSL as `C:\Users\...` -- solved-looking but not solved.
+    #[test]
+    fn research_queen_prompt_translates_the_wiki_path_for_a_wsl_backed_queen() {
+        let prompt = render_research_queen_prompt(MIXED_SEPARATOR_WIKI_PATH, "cursor");
+
+        assert!(
+            prompt.contains(&format!("cat \"{}/index.md\"", WSL_WIKI_PATH)),
+            "cursor-backed queen-research prompt did not get a /mnt-translated path:\n{}",
+            prompt
+        );
+        assert!(
+            prompt.contains(&format!("cd \"{}\"", WSL_WIKI_PATH)),
+            "cursor-backed queen-research capture `cd` was not translated:\n{}",
+            prompt
+        );
+        assert!(
+            !prompt.contains("C:"),
+            "cursor-backed queen-research prompt still names a drive letter WSL cannot \
+             resolve:\n{}",
+            prompt
+        );
+        assert_no_unrendered_template_syntax(&prompt, "queen-research");
+    }
+
+    #[test]
+    fn debate_prompts_render_a_forward_slash_wiki_path() {
+        let debater =
+            render_debate_test_debater_prompt_for_cli(MIXED_SEPARATOR_WIKI_PATH, "claude");
+        assert!(
+            debater.contains(&format!("cat \"{}/index.md\"", FORWARD_SLASH_WIKI_PATH)),
+            "debater prompt is missing the normalized index read:\n{}",
+            debater
+        );
+        assert_no_windows_separators(&debater, "debater");
+        assert_no_unrendered_template_syntax(&debater, "debater");
+
+        let judge = SessionController::build_debate_judge_prompt(
+            "session-wiki",
+            &debate_test_metadata(),
+            MIXED_SEPARATOR_WIKI_PATH,
+            "claude",
+        );
+        assert!(
+            judge.contains(&format!("cat \"{}/index.md\"", FORWARD_SLASH_WIKI_PATH)),
+            "judge prompt is missing the normalized index read:\n{}",
+            judge
+        );
+        assert!(
+            judge.contains(&format!("cd \"{}\"", FORWARD_SLASH_WIKI_PATH)),
+            "judge wiki capture `cd` was not normalized:\n{}",
+            judge
+        );
+        assert_no_windows_separators(&judge, "judge");
+        assert_no_unrendered_template_syntax(&judge, "judge");
+    }
+
+    #[test]
+    fn debate_prompts_translate_the_wiki_path_for_wsl_backed_clis() {
+        let debater =
+            render_debate_test_debater_prompt_for_cli(MIXED_SEPARATOR_WIKI_PATH, "cursor");
+        assert!(
+            debater.contains(&format!("cat \"{}/index.md\"", WSL_WIKI_PATH)),
+            "cursor-backed debater prompt did not get a /mnt-translated path:\n{}",
+            debater
+        );
+        assert!(
+            !debater.contains("C:"),
+            "cursor-backed debater prompt still names a drive letter WSL cannot resolve:\n{}",
+            debater
+        );
+
+        let judge = SessionController::build_debate_judge_prompt(
+            "session-wiki",
+            &debate_test_metadata(),
+            MIXED_SEPARATOR_WIKI_PATH,
+            "cursor",
+        );
+        assert!(
+            judge.contains(&format!("cat \"{}/index.md\"", WSL_WIKI_PATH)),
+            "cursor-backed judge prompt did not get a /mnt-translated path:\n{}",
+            judge
+        );
+        assert!(
+            judge.contains(&format!("cd \"{}\"", WSL_WIKI_PATH)),
+            "cursor-backed judge capture `cd` was not translated:\n{}",
+            judge
+        );
+        assert!(
+            !judge.contains("C:"),
+            "cursor-backed judge prompt still names a drive letter WSL cannot resolve:\n{}",
+            judge
+        );
+    }
+
+    /// A failed `cat` currently degrades to "no prior context" with no signal to
+    /// anyone. Every prompt that instructs the read must also instruct the report.
+    #[test]
+    fn wiki_loading_prompts_require_reporting_a_failed_read() {
+        let prompts = [
+            (
+                "queen-research",
+                render_research_queen_prompt(MIXED_SEPARATOR_WIKI_PATH, "claude"),
+            ),
+            (
+                "debater",
+                render_debate_test_debater_prompt(DEBATE_TEST_WIKI_PATH),
+            ),
+            (
+                "judge",
+                SessionController::build_debate_judge_prompt(
+                    "session-wiki",
+                    &debate_test_metadata(),
+                    DEBATE_TEST_WIKI_PATH,
+                    "claude",
+                ),
+            ),
+        ];
+
+        for (label, prompt) in prompts {
+            assert!(
+                prompt.contains("WIKI INDEX UNREADABLE"),
+                "{} prompt does not make a failed wiki read observable:\n{}",
+                label,
+                prompt
+            );
+            assert!(
+                prompt.contains("Verify the read actually succeeded"),
+                "{} prompt does not instruct the agent to check the read:\n{}",
+                label,
+                prompt
+            );
         }
     }
 }

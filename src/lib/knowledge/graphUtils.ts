@@ -4,27 +4,62 @@ import {
   type KnowledgeEdgeKind,
   type KnowledgeGraph,
   type KnowledgeNode,
+  type KnowledgeOmission,
   type KnowledgeSortKey,
   type SortDirection,
 } from './types';
 
 /**
- * Hues are spread around the wheel so all eight folders stay separable in the
- * dark UI: cyan 186, green 144, amber 37, silver 212 (low chroma), violet 274,
- * coral 5, lime 81, indigo 227. `operations` (227) is the closest neighbour to
- * `project` (212) by hue, but `project` is a 27%-saturation neutral while
- * `operations` is fully saturated, so they never read as the same swatch.
+ * Hues are spread around the wheel so these folders stay separable in the
+ * dark UI: cyan 186, green 144, amber 37, silver 209 (low chroma), violet 274,
+ * coral 5, lime 81, indigo 227, mint 164. `operations` (227) is the closest
+ * neighbour to `.project` (209) by hue, but `.project` is a 29%-saturation neutral
+ * while `operations` is fully saturated, so they never read as the same swatch.
+ *
+ * This map is no longer exhaustive: the backend discovers folders from the wiki
+ * root, so any name can arrive. Unlisted folders get a deterministic colour from
+ * {@link folderColor} rather than all collapsing onto one fallback swatch.
  */
 export const FOLDER_COLORS: Record<string, string> = {
   patterns: '#00e5ff',
   practices: '#00ff66',
   research: '#ff9d00',
-  project: '#a3b8cc',
+  '.project': '#a3b8cc',
   clients: '#c77dff',
   partners: '#ff5f52',
   vendors: '#b6f24a',
   operations: '#6f8dff',
+  root: '#8ce8d0',
 };
+
+/** Hue in degrees of a `#rrggbb` swatch. */
+function hexHue(hex: string): number {
+  const red = parseInt(hex.slice(1, 3), 16) / 255;
+  const green = parseInt(hex.slice(3, 5), 16) / 255;
+  const blue = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(red, green, blue);
+  const delta = max - Math.min(red, green, blue);
+  if (delta === 0) return 0;
+  let hue: number;
+  if (max === red) {
+    hue = 60 * (((green - blue) / delta) % 6);
+  } else if (max === green) {
+    hue = 60 * ((blue - red) / delta + 2);
+  } else {
+    hue = 60 * ((red - green) / delta + 4);
+  }
+  return hue < 0 ? hue + 360 : hue;
+}
+
+/**
+ * Hues reserved by {@link FOLDER_COLORS}, in degrees. Generated colours keep a
+ * wide berth from these so a discovered folder never reads as a known one.
+ *
+ * Derived from the swatches themselves rather than hand-maintained: a
+ * transcribed list drifts the moment a swatch is retuned, and even rounding it
+ * to whole degrees eats into the separation margin.
+ */
+const RESERVED_HUES = Object.values(FOLDER_COLORS).map(hexHue);
 
 /**
  * Relationship entities — *who* we work with. Everything else in
@@ -52,8 +87,6 @@ export const EDGE_LABELS: Record<KnowledgeEdgeKind, string> = {
   related: 'Related',
   from: 'Provenance',
 };
-
-const DEFAULT_FOLDER_COLOR = '#ff6bcb';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -138,7 +171,63 @@ export function normalizeKnowledgeGraph(value: unknown): KnowledgeGraph {
         )
     : [];
 
-  return { nodes, edges, truncated: value.truncated === true };
+  const omissions = normalizeOmissions(value.omissions);
+  return {
+    nodes,
+    edges,
+    // Prefer the structured report when the backend sends one; fall back to the
+    // legacy boolean so an older backend still raises the banner.
+    truncated: omissions.length > 0 || value.truncated === true,
+    omissions,
+  };
+}
+
+function normalizeOmission(value: unknown): KnowledgeOmission | null {
+  if (!isRecord(value)) return null;
+  const reason = stringValue(value.reason);
+  if (!reason) return null;
+  const count =
+    typeof value.count === 'number' && Number.isFinite(value.count) && value.count > 0
+      ? Math.floor(value.count)
+      : 1;
+  const examples = Array.isArray(value.examples)
+    ? value.examples.filter((example): example is string => typeof example === 'string')
+    : [];
+  return {
+    reason,
+    count,
+    detail: stringValue(value.detail) ?? reason.replace(/_/g, ' '),
+    examples,
+  };
+}
+
+export function normalizeOmissions(value: unknown): KnowledgeOmission[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is KnowledgeOmission => normalizeOmission(entry) !== null)
+    .map((entry) => normalizeOmission(entry) as KnowledgeOmission);
+}
+
+/** How many example IDs the banner names inline before collapsing to `+N more`. */
+const MAX_SHOWN_EXAMPLES = 3;
+
+/**
+ * One banner line per reason, e.g. `3 pages omitted: the file is larger than the
+ * read limit (patterns/huge, patterns/other)`. This is the whole point of the
+ * structured report: the operator learns what they lost and why, instead of an
+ * amber bar that could mean any of a dozen things.
+ */
+export function describeOmission(omission: KnowledgeOmission): string {
+  const head = `${omission.count} ${omission.detail}`;
+  if (omission.examples.length === 0) return head;
+  const shownExamples = omission.examples.slice(0, MAX_SHOWN_EXAMPLES);
+  const shown = shownExamples.join(', ');
+  // Subtract what was actually rendered, not how many the backend supplied. It sends up to
+  // MAX_OMISSION_EXAMPLES = 5 (knowledge.rs) but only MAX_SHOWN_EXAMPLES are named, so subtracting
+  // examples.length made `named + implied` fall short of `count` — and when count === examples
+  // .length it dropped the `+N more` suffix entirely, silently discarding two named pages.
+  const rest = omission.count - shownExamples.length;
+  const more = rest > 0 ? `, +${rest} more` : '';
+  return `${head} (${shown}${more})`;
 }
 
 export function normalizeKnowledgePage(value: unknown): import('./types').KnowledgePage | null {
@@ -149,6 +238,7 @@ export function normalizeKnowledgePage(value: unknown): import('./types').Knowle
   const path = stringValue(value.path);
   if (!id || !title || !folder || !path || typeof value.content !== 'string') return null;
 
+  const omissions = normalizeOmissions(value.omissions);
   return {
     id,
     title,
@@ -156,12 +246,54 @@ export function normalizeKnowledgePage(value: unknown): import('./types').Knowle
     path,
     content: value.content,
     last_updated: updatedValue(value.last_updated),
-    truncated: value.truncated === true,
+    truncated: omissions.length > 0 || value.truncated === true,
+    omissions,
   };
 }
 
+/** FNV-1a. Small, dependency-free, and well spread for short ASCII-ish keys. */
+function hashFolderName(folder: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < folder.length; index += 1) {
+    hash ^= folder.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
+/**
+ * Stable colour for a folder tag.
+ *
+ * Known folders keep their curated swatch. Every other folder — the backend now
+ * discovers them from the wiki root, so the set is open — gets a colour derived
+ * from its name, which makes it (a) stable across reloads, and (b) distinct from
+ * its neighbours, instead of every unknown folder sharing one fallback pink.
+ *
+ * The generated hue is placed in a gap between the reserved hues, and saturation
+ * and lightness are pinned to a legible band for the dark UI rather than being
+ * hashed too, so no folder can land on an unreadable near-black or a washed-out
+ * grey.
+ */
 export function folderColor(folder: string): string {
-  return FOLDER_COLORS[folder.toLowerCase()] ?? DEFAULT_FOLDER_COLOR;
+  const key = folder.trim().toLowerCase();
+  const known = FOLDER_COLORS[key];
+  if (known) return known;
+
+  const hash = hashFolderName(key);
+  // Walk the hue circle in a coprime step so successive folders land far apart,
+  // then nudge away from any reserved hue.
+  let hue = (hash * 47) % 360;
+  for (let attempt = 0; attempt < RESERVED_HUES.length; attempt += 1) {
+    const clash = RESERVED_HUES.find((reserved) => {
+      const distance = Math.abs(((hue - reserved + 540) % 360) - 180);
+      return distance < 14;
+    });
+    if (clash === undefined) break;
+    hue = (hue + 17) % 360;
+  }
+  const saturation = 62 + ((hash >>> 8) % 26); // 62–87%
+  const lightness = 58 + ((hash >>> 16) % 14); // 58–71%
+  return `hsl(${hue} ${saturation}% ${lightness}%)`;
 }
 
 /** Case-folded so a folder string from the API cannot slip past the set. */
@@ -222,14 +354,19 @@ export function compareKnowledgeNodes(
   return direction === 'asc' ? comparison : -comparison;
 }
 
+/**
+ * `folder` is `null` for "no filter". A string sentinel cannot work here: the backend discovers
+ * folders from the wiki root, so `all` is a legal directory name and a folder literally named
+ * `all` would be unselectable — the dropdown would offer a control that silently did nothing.
+ */
 export function filterKnowledgeGraph(
   graph: KnowledgeGraph,
   query: string,
-  folder: string,
+  folder: string | null,
 ): KnowledgeGraph {
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const nodes = graph.nodes.filter((node) => {
-    if (folder !== 'all' && node.folder !== folder) return false;
+    if (folder !== null && node.folder !== folder) return false;
     if (!normalizedQuery) return true;
     return [node.title, node.path, node.folder].some((value) =>
       value.toLocaleLowerCase().includes(normalizedQuery),
@@ -239,5 +376,7 @@ export function filterKnowledgeGraph(
   const edges = graph.edges.filter(
     (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
   );
-  return { nodes, edges, truncated: graph.truncated };
+  // Omissions describe the corpus scan, not the client-side filter, so they pass
+  // through untouched — filtering to one folder must not imply pages were dropped.
+  return { nodes, edges, truncated: graph.truncated, omissions: graph.omissions };
 }
