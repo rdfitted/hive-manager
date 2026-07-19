@@ -1063,17 +1063,20 @@ git, build, and test commands against that path.
    The sleep is clamped to whatever is LEFT of the poll interval, so a short interval never
    overshoots:
    ```bash
-   WAITED=0
-   while [ "$WAITED" -lt {{active_poll_secs}} ]; do
-     curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
-       -H "Content-Type: application/json" \
-       -d '{"agent_id":"{{session_id}}-prince","status":"working","summary":"Driving fixers"}'
-     SLEEP_TIME={{heartbeat_interval_secs}}
-     if [ $(({{active_poll_secs}} - WAITED)) -lt "$SLEEP_TIME" ]; then
-       SLEEP_TIME=$(({{active_poll_secs}} - WAITED))
-     fi
-     sleep "$SLEEP_TIME"
-     WAITED=$((WAITED + SLEEP_TIME))
+   while true; do
+     # Check each fixer's task file here; break when all are COMPLETED or BLOCKED.
+     WAITED=0
+     while [ "$WAITED" -lt {{active_poll_secs}} ]; do
+       curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
+         -H "Content-Type: application/json" \
+         -d '{"agent_id":"{{session_id}}-prince","status":"working","summary":"Driving fixers"}'
+       SLEEP_TIME={{heartbeat_interval_secs}}
+       if [ $(({{active_poll_secs}} - WAITED)) -lt "$SLEEP_TIME" ]; then
+         SLEEP_TIME=$(({{active_poll_secs}} - WAITED))
+       fi
+       sleep "$SLEEP_TIME"
+       WAITED=$((WAITED + SLEEP_TIME))
+     done
    done
    ```
 3. You MUST verify each finding is actually resolved (inspect the diff / re-run the relevant check).
