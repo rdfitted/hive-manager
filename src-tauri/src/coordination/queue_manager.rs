@@ -22,11 +22,88 @@ use crate::storage::StorageError;
 /// genuinely-working-but-quiet worker that keeps heartbeating is never reclaimed.
 pub const STUCK_CUTOFF_MS: i64 = 90_000;
 
+/// `STUCK_CUTOFF_MS` in whole seconds, for prompt prose.
+pub const STUCK_CUTOFF_SECS: u64 = (STUCK_CUTOFF_MS as u64) / 1_000;
+
+/// Rounding granularity for the derived cadence, so prompts read in round numbers.
+const HEARTBEAT_CADENCE_GRANULARITY_SECS: u64 = 5;
+
+/// Headroom multiplier between the cadence workers are INSTRUCTED to heartbeat at and
+/// `STUCK_CUTOFF_MS` (#141). A worker obeying the upper bound of its instruction fits at
+/// least this many beats inside one cutoff window, so it takes a genuinely missed beat —
+/// not ordinary jitter — before `reclaim_stuck` can requeue it. Raising the factor tightens
+/// the instructed cadence; it never relaxes the cutoff.
+pub const HEARTBEAT_SAFETY_FACTOR: u64 = 2;
+
+/// Upper bound of the instructed heartbeat cadence, in seconds. DERIVED from
+/// `STUCK_CUTOFF_MS` — do not hand-edit, and never hardcode a cadence into a prompt
+/// template. Prompts take this through [`heartbeat_cadence_label`], which is the only way
+/// the instruction and the reclaim cutoff stay pinned to each other.
+pub const HEARTBEAT_MAX_INTERVAL_SECS: u64 = derived_heartbeat_max_interval_secs();
+
+/// Lower bound of the instructed cadence. Exists only so workers do not hammer the
+/// heartbeat endpoint; the reclaim invariant rides on the upper bound.
+pub const HEARTBEAT_MIN_INTERVAL_SECS: u64 = derived_heartbeat_min_interval_secs();
+
+/// Largest cadence that still leaves `HEARTBEAT_SAFETY_FACTOR` beats STRICTLY inside the
+/// cutoff window, rounded down to `HEARTBEAT_CADENCE_GRANULARITY_SECS`.
+const fn derived_heartbeat_max_interval_secs() -> u64 {
+    let budget = STUCK_CUTOFF_SECS / HEARTBEAT_SAFETY_FACTOR;
+    let rounded =
+        (budget / HEARTBEAT_CADENCE_GRANULARITY_SECS) * HEARTBEAT_CADENCE_GRANULARITY_SECS;
+    // Exact division lands the worker ON the cutoff, which is the #141 defect. Step down one
+    // granularity so the product is strictly below it.
+    let strict = if rounded * HEARTBEAT_SAFETY_FACTOR < STUCK_CUTOFF_SECS {
+        rounded
+    } else {
+        rounded.saturating_sub(HEARTBEAT_CADENCE_GRANULARITY_SECS)
+    };
+
+    if strict == 0 {
+        1
+    } else {
+        strict
+    }
+}
+
+const fn derived_heartbeat_min_interval_secs() -> u64 {
+    let half = HEARTBEAT_MAX_INTERVAL_SECS / 2;
+    let rounded = (half / HEARTBEAT_CADENCE_GRANULARITY_SECS) * HEARTBEAT_CADENCE_GRANULARITY_SECS;
+
+    if rounded == 0 {
+        HEARTBEAT_MAX_INTERVAL_SECS
+    } else {
+        rounded
+    }
+}
+
+/// The one cadence phrase every prompt must use, e.g. `every 20-40s`. Single source of
+/// truth: prose in a template can no longer drift away from `STUCK_CUTOFF_MS`.
+pub fn heartbeat_cadence_label() -> String {
+    format!("every {HEARTBEAT_MIN_INTERVAL_SECS}-{HEARTBEAT_MAX_INTERVAL_SECS}s")
+}
+
 /// Finalize a run once it has produced this many continuations (distinct status changes).
 pub const MAX_CONTINUATIONS: i64 = 8;
 
+/// Wall-clock window a run may hold a single status before `finalize_no_progress` retires
+/// it. A liveness heartbeat carries a FIXED status per phase (see `heartbeat_snippet`), so
+/// consecutive beats ALWAYS take the no-progress branch in `record_heartbeat` — the budget
+/// must therefore be a wall-clock decision, not a beat count. Must exceed the longest
+/// legitimate quiet stretch: codex indexes 8-12 minutes before emitting any output.
+pub const NO_PROGRESS_WINDOW_SECS: u64 = 1_800;
+
 /// Finalize a run once it has produced this many consecutive no-progress heartbeats.
-pub const MAX_NO_PROGRESS_CONTINUATIONS: i64 = 5;
+/// DERIVED from the instructed cadence (#141): the cadence and this budget are coupled in
+/// OPPOSITE directions, so tightening `HEARTBEAT_SAFETY_FACTOR` must raise the beat count
+/// rather than shrink the wall-clock budget. Hardcoding it is how a healthy worker that
+/// simply beats faster gets flipped to the TERMINAL `finalized` state mid-run — after which
+/// `record_heartbeat` matches no rows and `reclaim_stuck` can never recover it.
+///
+/// Ceiling division so the realised budget is never shorter than the window.
+pub const MAX_NO_PROGRESS_CONTINUATIONS: i64 = NO_PROGRESS_WINDOW_SECS
+    .div_ceil(HEARTBEAT_MIN_INTERVAL_SECS)
+    as i64;
 
 /// Coordination-layer façade over the durable queue. Cheaply clonable.
 #[derive(Clone)]
@@ -307,6 +384,81 @@ mod tests {
         mgr.claim_and_spawn("r1", "s1", "s1-worker-1").await.unwrap();
         let e3 = rx.recv().await.unwrap();
         assert_eq!(e3.event_type, EventType::WorkerClaimFailed);
+    }
+
+    /// #141 follow-up: the instructed cadence and the no-progress budget are coupled in
+    /// OPPOSITE directions — a faster cadence spends the beat budget sooner. A liveness
+    /// heartbeat carries a fixed status per phase, so every beat after the first takes the
+    /// `last_status = ?4` branch in `record_heartbeat` and climbs `no_progress_count`. Pin
+    /// the budget in WALL-CLOCK terms so tightening the cadence can never flip a healthy
+    /// worker to the terminal `finalized` state mid-run.
+    #[test]
+    fn no_progress_budget_outlives_a_long_quiet_worker() {
+        // Route through a call so the assertions exercise real values rather than being
+        // const-folded into `assert!(true)`.
+        fn derived_budget() -> (u64, u64, u64) {
+            (
+                MAX_NO_PROGRESS_CONTINUATIONS as u64,
+                HEARTBEAT_MIN_INTERVAL_SECS,
+                NO_PROGRESS_WINDOW_SECS,
+            )
+        }
+
+        let (max_beats, min_interval, window) = derived_budget();
+
+        // The floor: a worker obeying the FAST end of the instructed cadence burns the beat
+        // budget quickest, so that product is the shortest survivable quiet stretch.
+        let shortest_budget_secs = max_beats * min_interval;
+
+        assert!(
+            shortest_budget_secs >= window,
+            "a worker obeying the instructed cadence is finalized after {shortest_budget_secs}s \
+             of legitimate quiet work, short of the {window}s no-progress window"
+        );
+        // 12 minutes is the observed codex indexing ceiling — a run must survive it silently.
+        assert!(
+            shortest_budget_secs > 12 * 60,
+            "budget {shortest_budget_secs}s is shorter than a normal codex indexing pass"
+        );
+    }
+
+    /// #141 defect B: the instructed cadence used to be prose ("every 60-90s") whose upper
+    /// bound landed EXACTLY on the 90s cutoff, so ordinary jitter reclaimed a healthy worker.
+    /// Assert the relationship between the two values, not the literals — the point is that
+    /// they cannot drift apart.
+    #[test]
+    fn instructed_cadence_keeps_safety_margin_under_stuck_cutoff() {
+        // Read the constants through a call so the assertions exercise real values instead
+        // of being folded into `assert!(true)`.
+        fn derived_cadence() -> (u64, u64, u64, u64) {
+            (
+                HEARTBEAT_MIN_INTERVAL_SECS,
+                HEARTBEAT_MAX_INTERVAL_SECS,
+                HEARTBEAT_SAFETY_FACTOR,
+                STUCK_CUTOFF_MS as u64,
+            )
+        }
+
+        let (min, max, factor, cutoff_ms) = derived_cadence();
+
+        assert!(
+            factor >= 2,
+            "a factor below 2 leaves no room for a single missed beat"
+        );
+        assert!(
+            max * factor * 1_000 < cutoff_ms,
+            "instructed max cadence {max}s x{factor} must stay strictly under \
+             STUCK_CUTOFF_MS ({cutoff_ms}ms)"
+        );
+        assert!(
+            min > 0 && min <= max,
+            "cadence bounds {min}-{max}s must describe a usable range"
+        );
+        assert_eq!(
+            heartbeat_cadence_label(),
+            format!("every {min}-{max}s"),
+            "the prompt-facing label must report the derived bounds verbatim"
+        );
     }
 
     #[tokio::test]
