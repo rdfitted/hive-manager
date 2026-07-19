@@ -497,6 +497,8 @@ implementation being evaluated.
    The first poll waits {{evaluator_first_poll_interval}} (`sleep {{evaluator_first_poll_secs}}`); after that, poll every {{idle_poll_interval}} (`sleep {{idle_poll_secs}}`).
    The heartbeat is nested INSIDE the wait so it keeps the required {{heartbeat_cadence}}
    cadence: the file check may be slow, but going quiet gets your run treated as stuck.
+   The sleep is clamped to whatever is LEFT of the wait, so a short poll window never
+   overshoots into a longer sleep than it asked for.
    ```bash
    FIRST_WAIT=1
    while [ ! -f ".hive-manager/{{session_id}}/peer/milestone-ready.json" ]; do
@@ -509,8 +511,12 @@ implementation being evaluated.
      WAITED=0
      while [ "$WAITED" -lt "$WAIT_FOR" ]; do
        {{evaluator_idle_heartbeat_snippet}}
-       sleep {{heartbeat_interval_secs}}
-       WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+       SLEEP_TIME={{heartbeat_interval_secs}}
+       if [ $((WAIT_FOR - WAITED)) -lt "$SLEEP_TIME" ]; then
+         SLEEP_TIME=$((WAIT_FOR - WAITED))
+       fi
+       sleep "$SLEEP_TIME"
+       WAITED=$((WAITED + SLEEP_TIME))
      done
    done
    cat ".hive-manager/{{session_id}}/peer/milestone-ready.json"
@@ -535,7 +541,7 @@ Use these defaults when spawning QA workers unless the plan specifies otherwise.
 1. You MUST act as a coordinator, not a tester.
 2. You MUST spawn all {{qa_worker_count}} QA workers one at a time in this exact order:
 {{qa_worker_spawn_plan}}
-3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`, and emit a heartbeat {{heartbeat_cadence}} while you wait. The heartbeat is nested INSIDE the poll interval on purpose — checking task files slowly is fine, going quiet is not:
+3. You MUST poll worker task files every {{active_poll_interval}} (`sleep {{active_poll_secs}}`) until every QA worker reaches `COMPLETED` or `BLOCKED`, and emit a heartbeat {{heartbeat_cadence}} while you wait. The heartbeat is nested INSIDE the poll interval on purpose — checking task files slowly is fine, going quiet is not. The sleep is clamped to whatever is LEFT of the poll interval, so a short interval never overshoots:
    ```bash
    while true; do
      # Check QA worker task files here; break when all are COMPLETED or BLOCKED.
@@ -544,8 +550,12 @@ Use these defaults when spawning QA workers unless the plan specifies otherwise.
        curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
          -H "Content-Type: application/json" \
          -d '{"agent_id":"{{session_id}}-evaluator","status":"working","summary":"Polling QA workers"}'
-       sleep {{heartbeat_interval_secs}}
-       WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+       SLEEP_TIME={{heartbeat_interval_secs}}
+       if [ $(({{active_poll_secs}} - WAITED)) -lt "$SLEEP_TIME" ]; then
+         SLEEP_TIME=$(({{active_poll_secs}} - WAITED))
+       fi
+       sleep "$SLEEP_TIME"
+       WAITED=$((WAITED + SLEEP_TIME))
      done
    done
    ```
@@ -1005,6 +1015,7 @@ git, build, and test commands against that path.
 1. You MUST poll for the Evaluator's verdict. You MUST NOT use `/loop`.
    The heartbeat is nested INSIDE the {{idle_poll_secs}}s file poll so it keeps the required
    {{heartbeat_cadence}} cadence — a run that goes quiet longer than that is treated as stuck.
+   The sleep is clamped to whatever is LEFT of the file poll, so a short poll never overshoots.
    ```bash
    while [ ! -f ".hive-manager/{{session_id}}/peer/qa-verdict.json" ]; do
      WAITED=0
@@ -1012,8 +1023,12 @@ git, build, and test commands against that path.
        curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
          -H "Content-Type: application/json" \
          -d '{"agent_id":"{{session_id}}-prince","status":"idle","summary":"Waiting for QA verdict"}'
-       sleep {{heartbeat_interval_secs}}
-       WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+       SLEEP_TIME={{heartbeat_interval_secs}}
+       if [ $(({{idle_poll_secs}} - WAITED)) -lt "$SLEEP_TIME" ]; then
+         SLEEP_TIME=$(({{idle_poll_secs}} - WAITED))
+       fi
+       sleep "$SLEEP_TIME"
+       WAITED=$((WAITED + SLEEP_TIME))
      done
    done
    cat ".hive-manager/{{session_id}}/peer/qa-verdict.json"
@@ -1044,15 +1059,21 @@ git, build, and test commands against that path.
    - You MUST put the full finding text to resolve, verbatim, in `initial_task`.
 2. You MUST poll your fixers' task files every {{active_poll_secs}}s until each reaches
    `COMPLETED` or `BLOCKED`. Poll the files on that interval, but send this heartbeat
-   {{heartbeat_cadence}} throughout — the file poll is slow by design, your heartbeat is not:
+   {{heartbeat_cadence}} throughout — the file poll is slow by design, your heartbeat is not.
+   The sleep is clamped to whatever is LEFT of the poll interval, so a short interval never
+   overshoots:
    ```bash
    WAITED=0
    while [ "$WAITED" -lt {{active_poll_secs}} ]; do
      curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
        -H "Content-Type: application/json" \
        -d '{"agent_id":"{{session_id}}-prince","status":"working","summary":"Driving fixers"}'
-     sleep {{heartbeat_interval_secs}}
-     WAITED=$((WAITED + {{heartbeat_interval_secs}}))
+     SLEEP_TIME={{heartbeat_interval_secs}}
+     if [ $(({{active_poll_secs}} - WAITED)) -lt "$SLEEP_TIME" ]; then
+       SLEEP_TIME=$(({{active_poll_secs}} - WAITED))
+     fi
+     sleep "$SLEEP_TIME"
+     WAITED=$((WAITED + SLEEP_TIME))
    done
    ```
 3. You MUST verify each finding is actually resolved (inspect the diff / re-run the relevant check).
@@ -2327,6 +2348,173 @@ mod tests {
         }
     }
 
+    /// Poll-interval profiles a heartbeat loop has to survive: `(label, idle, active,
+    /// evaluator_first)`. `standard` and `smoke` mirror `polling_intervals.rs`; `tight` is
+    /// the degenerate case the #169 review named, where the poll window is far SHORTER than
+    /// the heartbeat cadence and an unclamped sleep overshoots it 8x.
+    const POLL_PROFILES: [(&str, &str, &str, &str); 3] = [
+        ("standard", "480", "480", "1200"),
+        ("smoke", "30", "15", "30"),
+        ("tight", "5", "5", "5"),
+    ];
+
+    fn heartbeat_loop_context(idle: &str, active: &str, evaluator_first: &str) -> PromptContext {
+        let mut variables = HashMap::new();
+        variables.insert("agent_id".to_string(), "session-141-worker-1".to_string());
+        variables.insert("heartbeat_status".to_string(), "working".to_string());
+        variables.insert("heartbeat_summary".to_string(), "Implementing".to_string());
+        variables.insert("idle_poll_secs".to_string(), idle.to_string());
+        variables.insert("active_poll_secs".to_string(), active.to_string());
+        variables.insert(
+            "evaluator_first_poll_secs".to_string(),
+            evaluator_first.to_string(),
+        );
+        PromptContext {
+            session_id: "session-141".to_string(),
+            project_path: ".".to_string(),
+            task: Some("Build API".to_string()),
+            variables,
+        }
+    }
+
+    /// Right-hand side of every `NAME=...` assignment in `block`, in source order.
+    fn shell_assignments<'a>(block: &'a str, name: &str) -> Vec<&'a str> {
+        let prefix = format!("{name}=");
+        block
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(prefix.as_str()))
+            .map(str::trim)
+            .collect()
+    }
+
+    /// `if [ EXPR -lt "$var" ]; then` -> `Some(EXPR)`. Any other line -> `None`.
+    fn downward_guard_expression<'a>(line: &'a str, var: &str) -> Option<&'a str> {
+        let rest = line.trim().strip_prefix("if [ ")?;
+        let quoted = format!("-lt \"${var}\" ]");
+        let bare = format!("-lt ${var} ]");
+        let cut = rest.find(&quoted).or_else(|| rest.find(&bare))?;
+        Some(rest[..cut].trim())
+    }
+
+    /// The poll window an inner `while [ "$WAITED" -lt <token> ]` loop is serving, as
+    /// `(ident, seconds)`. `None` means the block has no such loop. Panics rather than
+    /// returning `None` when a window exists but cannot be resolved — an unresolvable
+    /// window would silently drop this guard's coverage of that block.
+    fn resolve_poll_window(label: &str, block: &str) -> Option<(String, u64)> {
+        let mut window = None;
+        for line in block.lines() {
+            let Some(rest) = line.trim().strip_prefix("while [ \"$WAITED\" -lt ") else {
+                continue;
+            };
+            let token = rest.split(']').next().unwrap_or("").trim().trim_matches('"');
+            if let Ok(secs) = token.parse::<u64>() {
+                window = Some((token.to_string(), secs));
+                continue;
+            }
+            // A shell-variable window (the evaluator's `$WAIT_FOR`): the loop must fit
+            // inside the SMALLEST value the block ever assigns it, so bound on that.
+            let ident = token.trim_start_matches('$').to_string();
+            let tightest = shell_assignments(block, &ident)
+                .into_iter()
+                .filter_map(|rhs| rhs.parse::<u64>().ok())
+                .min()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: poll window `{token}` has no literal assignment in its \
+                         block, so no sleep in it can be bounded — resolve the window or \
+                         this guard is scanning blind"
+                    )
+                });
+            window = Some((ident, tightest));
+        }
+        window
+    }
+
+    /// Prove that `sleep "$var"` can never exceed the cadence OR the poll window, without
+    /// evaluating shell arithmetic.
+    ///
+    /// A general shell-arithmetic evaluator is out of scope, and simply skipping `$`-tokens
+    /// would make this guard blind to the exact four loops the clamp lives in. So the SHAPE
+    /// is pinned instead — the only shape that is provably non-raising:
+    ///   1. the first assignment is a literal no larger than the instructed cadence, and
+    ///   2. every later assignment sits directly under an `if [ EXPR -lt "$var" ]` guard and
+    ///      assigns that same `EXPR` — a branch taken only when `EXPR` is already smaller,
+    ///      assigning exactly what was proven smaller, so `var` can only ever go DOWN, and
+    ///   3. `EXPR` is the time remaining in this loop's own window (`window - WAITED`), so
+    ///      the clamp restores the loop's polling semantics rather than some other bound.
+    fn assert_sleep_var_is_clamped(label: &str, block: &str, var: &str, window_ident: &str) {
+        let lines: Vec<&str> = block.lines().collect();
+        let prefix = format!("{var}=");
+        let mut initialised: Option<u64> = None;
+        let mut clamps = 0usize;
+
+        for (idx, line) in lines.iter().enumerate() {
+            let Some(rhs) = line.trim().strip_prefix(prefix.as_str()) else {
+                continue;
+            };
+            let rhs = rhs.trim();
+
+            if initialised.is_none() {
+                let init = rhs.parse::<u64>().unwrap_or_else(|_| {
+                    panic!(
+                        "{label}: `sleep \"${var}\"` — the first assignment is `{var}={rhs}`, \
+                         not a literal. {var} must start from the rendered heartbeat interval \
+                         or its bound is unprovable"
+                    )
+                });
+                assert!(
+                    init <= HEARTBEAT_MAX_INTERVAL_SECS,
+                    "{label}: {var} is initialised to {init}s, ABOVE the instructed \
+                     {HEARTBEAT_MAX_INTERVAL_SECS}s cadence — the loop would beat slower than \
+                     the prompt it ships with"
+                );
+                initialised = Some(init);
+                continue;
+            }
+
+            let guard = idx
+                .checked_sub(1)
+                .and_then(|prev| downward_guard_expression(lines[prev], var))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: `{var}={rhs}` is not the body of an \
+                         `if [ ... -lt \"${var}\" ]` guard — an unguarded reassignment can \
+                         RAISE the sleep above the {HEARTBEAT_MAX_INTERVAL_SECS}s cadence"
+                    )
+                });
+            assert_eq!(
+                guard, rhs,
+                "{label}: the clamp tests `{guard}` but assigns `{rhs}` — only assigning the \
+                 very expression proven smaller can lower {var}"
+            );
+            // Operand ORDER, not just operand presence. `$((WAITED - 480))` mentions both
+            // idents and is textually identical on each side of the guard, so a containment
+            // check alone accepts it — while it evaluates negative, `sleep` rejects the
+            // argument, and the loop spins hot hammering the heartbeat endpoint. That is a
+            // worse failure than the overshoot this clamp exists to fix.
+            let remaining = format!("{window_ident} - WAITED");
+            assert!(
+                guard.contains(&remaining),
+                "{label}: the clamp tests `{guard}`, which is not the time REMAINING in this \
+                 loop's own window — that must be `{remaining}` in exactly that order. \
+                 Reversed operands evaluate negative, `sleep` rejects it, and the loop spins \
+                 without ever sleeping"
+            );
+            clamps += 1;
+        }
+
+        assert!(
+            initialised.is_some(),
+            "{label}: `sleep \"${var}\"` with no assignment to {var} anywhere in the block — \
+             an unbounded sleep in a heartbeat loop"
+        );
+        assert!(
+            clamps >= 1,
+            "{label}: `sleep \"${var}\"` is never clamped down to the remaining poll window, \
+             so a window shorter than {HEARTBEAT_MAX_INTERVAL_SECS}s overshoots it"
+        );
+    }
+
     /// #141 follow-up: a heartbeat nested in a bash loop is a cadence enforced by CODE, not
     /// by the model obeying prose — the loop's own `sleep` decides the real beat rate, and
     /// prose stating otherwise is decoration. The evaluator and prince polled files every
@@ -2335,72 +2523,156 @@ mod tests {
     /// Assert the structural rule instead of any literal: every `sleep` sitting between two
     /// heartbeats must stay within the instructed cadence. A literal sweep (the `60-90`
     /// check above) structurally cannot catch this.
+    ///
+    /// #169 review: #141 then over-corrected, sleeping the full cadence UNCONDITIONALLY
+    /// inside the poll loop, so a 15s smoke window slept 40s — an 8x overshoot in the other
+    /// direction. A sleep must therefore fit inside BOTH bounds: the cadence (going quiet is
+    /// fatal) and the loop's own poll window (overshooting it changes the loop's semantics).
+    /// Sleeping LESS than the cadence is always safe; sleeping more is not.
     #[test]
     fn heartbeat_loops_sleep_within_the_instructed_cadence() {
-        let engine = TemplateEngine::default();
-
-        let mut variables = HashMap::new();
-        variables.insert("agent_id".to_string(), "session-141-worker-1".to_string());
-        variables.insert("heartbeat_status".to_string(), "working".to_string());
-        variables.insert("heartbeat_summary".to_string(), "Implementing".to_string());
-        // The real STANDARD_* wiring from `polling_intervals.rs`: what every non-smoke
-        // session renders. Substituting them is what makes the sleeps parseable below.
-        variables.insert("idle_poll_secs".to_string(), "480".to_string());
-        variables.insert("active_poll_secs".to_string(), "480".to_string());
-        variables.insert("evaluator_first_poll_secs".to_string(), "1200".to_string());
-        let context = PromptContext {
-            session_id: "session-141".to_string(),
-            project_path: ".".to_string(),
-            task: Some("Build API".to_string()),
-            variables,
-        };
-
-        let names: Vec<String> = engine.builtin_templates.keys().cloned().collect();
+        // Counted across ALL profiles, and asserted only once every profile has been
+        // scanned: the per-sleep assertions are the substantive ones, and a profile-scoped
+        // count guard would short-circuit them before the short-window profiles ever ran.
         let mut heartbeat_blocks = 0usize;
+        let mut clamped_sleeps: Vec<String> = Vec::new();
 
-        for name in names {
-            let rendered = match engine.render_template(&name, &context) {
-                Ok(rendered) => rendered,
-                // A template needing variables this test does not supply is not the subject
-                // here; the ones that carry heartbeat loops all render from the set above.
-                Err(_) => continue,
-            };
+        for (profile, idle, active, evaluator_first) in POLL_PROFILES {
+            let engine = TemplateEngine::default();
+            let context = heartbeat_loop_context(idle, active, evaluator_first);
+            let names: Vec<String> = engine.builtin_templates.keys().cloned().collect();
 
-            for block in rendered.split("```bash").skip(1) {
-                let block = block.split("```").next().unwrap_or("");
-                if !block.contains("/heartbeat") {
-                    continue;
-                }
-                heartbeat_blocks += 1;
+            for name in names {
+                let rendered = engine
+                    .render_template(&name, &context)
+                    .unwrap_or_else(|err| panic!("{profile}/{name}: render failed: {err:?}"));
 
-                let tokens: Vec<&str> = block.split_whitespace().collect();
-                for pair in tokens.windows(2) {
-                    if pair[0] != "sleep" {
+                for block in rendered.split("```bash").skip(1) {
+                    let block = block.split("```").next().unwrap_or("");
+                    if !block.contains("/heartbeat") {
                         continue;
                     }
-                    let secs: u64 = pair[1].parse().unwrap_or_else(|_| {
-                        panic!(
-                            "{name}: `sleep {}` inside a heartbeat loop did not resolve to a \
-                             number — an unsubstituted placeholder would hide the real cadence",
-                            pair[1]
-                        )
-                    });
-                    assert!(
-                        secs <= HEARTBEAT_MAX_INTERVAL_SECS,
-                        "{name}: heartbeat loop sleeps {secs}s, far longer than the instructed \
-                         {HEARTBEAT_MAX_INTERVAL_SECS}s maximum — the prompt's stated cadence \
-                         is decoration if the loop it ships with beats slower"
-                    );
+                    heartbeat_blocks += 1;
+
+                    let label = format!("{profile}/{name}");
+                    let window = resolve_poll_window(&label, block);
+
+                    let tokens: Vec<&str> = block.split_whitespace().collect();
+                    for pair in tokens.windows(2) {
+                        if pair[0] != "sleep" {
+                            continue;
+                        }
+                        let token = pair[1].trim_matches('"');
+
+                        if let Some(var) = token.strip_prefix('$') {
+                            let (window_ident, _) = window.as_ref().unwrap_or_else(|| {
+                                panic!(
+                                    "{label}: `sleep {token}` is not inside a \
+                                     `while [ \"$WAITED\" -lt ... ]` poll loop, so there is no \
+                                     window to bound it against"
+                                )
+                            });
+                            assert_sleep_var_is_clamped(&label, block, var, window_ident);
+                            clamped_sleeps.push(format!("{profile}/{name}"));
+                            continue;
+                        }
+
+                        let secs: u64 = token.parse().unwrap_or_else(|_| {
+                            panic!(
+                                "{label}: `sleep {token}` inside a heartbeat loop resolved to \
+                                 neither a number nor a clamped variable — an unsubstituted \
+                                 placeholder would hide the real cadence"
+                            )
+                        });
+                        assert!(
+                            secs <= HEARTBEAT_MAX_INTERVAL_SECS,
+                            "{label}: heartbeat loop sleeps {secs}s, far longer than the \
+                             instructed {HEARTBEAT_MAX_INTERVAL_SECS}s maximum — the prompt's \
+                             stated cadence is decoration if the loop it ships with beats slower"
+                        );
+                        if let Some((_, bound)) = window.as_ref() {
+                            assert!(
+                                secs <= *bound,
+                                "{label}: heartbeat loop sleeps {secs}s to serve a {bound}s poll \
+                                 window — it overshoots the window it is waiting out and changes \
+                                 the loop's polling semantics. Clamp to the remaining window."
+                            );
+                        }
+                    }
                 }
             }
         }
 
         // Guard the guard: if the block-detection heuristic stops matching, this test would
-        // pass by scanning nothing.
+        // pass by scanning nothing. Name the two templates that actually carry the clamped
+        // loops per profile, so losing any one of them fails loudly rather than quietly
+        // shrinking the count.
+        let profiles = POLL_PROFILES.len();
         assert!(
-            heartbeat_blocks >= 4,
-            "expected to scan the evaluator and prince heartbeat loops, only found \
-             {heartbeat_blocks} heartbeat-bearing bash blocks"
+            heartbeat_blocks >= 4 * profiles,
+            "expected to scan the evaluator and prince heartbeat loops in every profile, only \
+             found {heartbeat_blocks} heartbeat-bearing bash blocks"
+        );
+        for (profile, ..) in POLL_PROFILES {
+            for owner in ["roles/evaluator", "roles/prince"] {
+                let expected = format!("{profile}/{owner}");
+                // Two clamped loops apiece: evaluator idle + QA poll, prince verdict + fixers.
+                let found = clamped_sleeps.iter().filter(|got| **got == expected).count();
+                assert_eq!(
+                    found, 2,
+                    "expected 2 clamped heartbeat sleeps in {expected}, found {found} — the \
+                     four loops this guard exists for are {clamped_sleeps:?}"
+                );
+            }
+        }
+    }
+
+    /// #169 review, rendered-output half: the constants are not the deliverable, the prompt
+    /// text is. With a poll window SHORTER than the cadence, the rendered prompt must not
+    /// instruct the longer sleep — and the clamp it does render must be bound to that
+    /// window's actual number.
+    #[test]
+    fn a_poll_window_shorter_than_the_cadence_renders_no_longer_sleep() {
+        let engine = TemplateEngine::default();
+        let context = heartbeat_loop_context("5", "5", "5");
+        let cadence_sleep = format!("sleep {HEARTBEAT_MAX_INTERVAL_SECS}");
+
+        // The evaluator's window is the shell var it just assigned from the 5s poll values;
+        // the prince's is the substituted literal. Both must clamp against their own window.
+        let expected_clamps = [
+            ("roles/evaluator", "SLEEP_TIME=$((WAIT_FOR - WAITED))"),
+            ("roles/prince", "SLEEP_TIME=$((5 - WAITED))"),
+        ];
+
+        for (name, expected_clamp) in expected_clamps {
+            let rendered = engine
+                .render_template(name, &context)
+                .expect("render heartbeat-loop template");
+
+            assert!(
+                !rendered.contains(&cadence_sleep),
+                "{name}: renders `{cadence_sleep}` for a 5s poll window — an 8x-over sleep \
+                 the window never asked for"
+            );
+            assert!(
+                rendered.contains(expected_clamp),
+                "{name}: the rendered clamp `{expected_clamp}` is not bound to the 5s window \
+                 it was rendered with"
+            );
+            assert!(
+                rendered.contains("sleep \"$SLEEP_TIME\""),
+                "{name}: rendered prompt no longer sleeps the clamped value"
+            );
+        }
+
+        // The evaluator's `$WAIT_FOR` is only a 5s bound because it was assigned from the 5s
+        // poll values — assert that link, or the clamp above proves nothing about the window.
+        let evaluator = engine
+            .render_template("roles/evaluator", &context)
+            .expect("render evaluator");
+        assert!(
+            evaluator.contains("WAIT_FOR=5"),
+            "roles/evaluator: `$WAIT_FOR` is not the 5s poll window it was rendered with"
         );
     }
 
