@@ -201,10 +201,39 @@ function normalizeOmission(value: unknown): KnowledgeOmission | null {
   };
 }
 
+/**
+ * Normalizes and — critically — upholds the backend's one-entry-per-reason contract.
+ *
+ * `TruncationReport::record` dedupes by reason, incrementing an existing entry rather
+ * than pushing a second, so a well-formed response never repeats one. The UI relies on
+ * that: both banners key their `{#each}` on `omission.reason`, and Svelte throws at
+ * runtime on a duplicate key. Since this function accepts arbitrary JSON, enforcing the
+ * invariant here is what makes that key safe — merging is the right answer rather than
+ * weakening the key to an index, which would discard identity across updates.
+ *
+ * Single pass: `normalizeOmission` is called once per entry, not once in a filter and
+ * again in a map.
+ */
 export function normalizeOmissions(value: unknown): KnowledgeOmission[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is KnowledgeOmission => normalizeOmission(entry) !== null)
-    .map((entry) => normalizeOmission(entry) as KnowledgeOmission);
+  const byReason = new Map<string, KnowledgeOmission>();
+  for (const entry of value) {
+    const normalized = normalizeOmission(entry);
+    if (normalized === null) continue;
+    const existing = byReason.get(normalized.reason);
+    if (existing === undefined) {
+      byReason.set(normalized.reason, { ...normalized });
+      continue;
+    }
+    // Merge, mirroring the backend accumulator: counts add, examples concatenate
+    // up to the same inline budget the banner shows.
+    existing.count += normalized.count;
+    for (const example of normalized.examples) {
+      if (existing.examples.length >= MAX_SHOWN_EXAMPLES) break;
+      if (!existing.examples.includes(example)) existing.examples.push(example);
+    }
+  }
+  return [...byReason.values()];
 }
 
 /** How many example IDs the banner names inline before collapsing to `+N more`. */

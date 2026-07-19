@@ -16550,6 +16550,40 @@ mod tests {
         }
     }
 
+    /// The sibling the debate templates had and `queen-research` did not.
+    ///
+    /// Its Phase 1 was gated by PROSE alone ("If the path is non-empty... / If it is
+    /// empty..."), so an unset wiki rendered a literal `cat "/index.md"` — and the
+    /// "verify the read succeeded, this is a defect the user needs to see" instruction
+    /// then fired for a wiki that was never configured, turning a supported flow into a
+    /// reported failure. The `{{#if}}` gate the debater and judge already used is what
+    /// makes the empty case a real skip rather than a promise in prose.
+    #[test]
+    fn research_queen_prompt_skips_wiki_load_gracefully_when_path_unset() {
+        for unset in ["", "   "] {
+            let prompt = render_research_queen_prompt(unset, "claude");
+
+            assert_no_dangling_wiki_read(&prompt, "queen-research");
+            assert_no_unrendered_template_syntax(&prompt, "queen-research");
+            assert!(
+                prompt.contains("No global wiki path is configured"),
+                "queen-research prompt is missing the explicit skip notice:\n{}",
+                prompt
+            );
+            // The contradictory half: an unconfigured wiki must NOT be reported as an
+            // unreadable one.
+            assert!(
+                !prompt.contains("WIKI INDEX UNREADABLE"),
+                "queen-research tells the queen to report an unreadable wiki when none \
+                 is configured at all:\n{}",
+                prompt
+            );
+            // ...and it is still a usable research brief.
+            assert!(prompt.contains("Investigate prompt path handling"));
+            assert!(prompt.contains("Phase 2"));
+        }
+    }
+
     #[test]
     fn debate_judge_prompt_loads_prior_wiki_context_when_path_configured() {
         let prompt = SessionController::build_debate_judge_prompt(
