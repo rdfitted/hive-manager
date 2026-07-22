@@ -88,17 +88,17 @@ describe('StatusPanel CLI health', () => {
           staleHint: true,
         },
         {
-          cli: 'gemini',
+          cli: 'cursor',
           resolved: true,
-          binPath: '/usr/bin/gemini',
+          binPath: '/usr/bin/wsl',
           loggedIn: 'no',
           detail: '',
           staleHint: false,
         },
         {
-          cli: 'antigravity',
+          cli: 'droid',
           resolved: true,
-          binPath: '/usr/bin/agy',
+          binPath: '/usr/bin/droid',
           loggedIn: 'unknown',
           detail: '',
           staleHint: false,
@@ -122,13 +122,13 @@ describe('StatusPanel CLI health', () => {
         'warning',
       );
       expectCliState(
-        cliItem(container, 'Gemini CLI'),
+        cliItem(container, 'Cursor'),
         'Login required',
         'The CLI is installed but needs authentication.',
         'error',
       );
       expectCliState(
-        cliItem(container, 'Antigravity CLI'),
+        cliItem(container, 'Droid'),
         'Auth unknown',
         'The CLI is installed, but authentication cannot be verified automatically.',
         'warning',

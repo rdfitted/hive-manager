@@ -120,15 +120,11 @@ impl CliRegistry {
 
     /// Get the built-in default model for a CLI.
     ///
-    /// Returns `None` for CLIs whose model is set out-of-band (e.g. `antigravity`,
-    /// whose model lives in `~/.gemini/antigravity-cli/settings.json`). Frontend
-    /// uses `None` as the signal to hide the model field.
+    /// Returns `None` for CLIs whose model is set out-of-band. Frontend uses
+    /// `None` as the signal to hide the model field.
     pub fn default_model(cli: &str) -> Option<&'static str> {
         match cli {
             "claude" => Some("opus"),
-            "gemini" => Some("gemini-2.5-pro"),
-            // antigravity (agy) has no model flag; settings.json owns the model.
-            "antigravity" => None,
             "opencode" => Some("opencode/big-pickle"),
             "codex" => Some("gpt-5.6-sol"),
             "cursor" => Some("composer-2.5"),
@@ -238,7 +234,7 @@ impl CliRegistry {
     /// Get the behavioral profile for a CLI
     pub fn get_behavior(cli: &str) -> CliBehavior {
         match cli {
-            "claude" | "antigravity" | "gemini" => CliBehavior::ActionProne,
+            "claude" => CliBehavior::ActionProne,
             "qwen" => CliBehavior::InstructionFollowing,
             // Codex principals commonly start in STANDBY and are activated by
             // a task-file update. Until the runtime injects an explicit wake-up,
@@ -303,27 +299,6 @@ mod tests {
                 auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
                 model_flag: Some("--model".to_string()),
                 default_model: "opus".to_string(),
-                env: None,
-            },
-        );
-        clis.insert(
-            "gemini".to_string(),
-            CliConfig {
-                command: "gemini".to_string(),
-                auto_approve_flag: Some("-y".to_string()),
-                model_flag: Some("-m".to_string()),
-                default_model: "gemini-2.5-pro".to_string(),
-                env: None,
-            },
-        );
-        clis.insert(
-            "antigravity".to_string(),
-            CliConfig {
-                command: "agy".to_string(),
-                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
-                // agy has no model flag — model lives in ~/.gemini/antigravity-cli/settings.json
-                model_flag: None,
-                default_model: String::new(),
                 env: None,
             },
         );
@@ -551,14 +526,6 @@ mod tests {
             CliBehavior::ActionProne
         );
         assert_eq!(
-            CliRegistry::get_behavior("gemini"),
-            CliBehavior::ActionProne
-        );
-        assert_eq!(
-            CliRegistry::get_behavior("antigravity"),
-            CliBehavior::ActionProne
-        );
-        assert_eq!(
             CliRegistry::get_behavior("qwen"),
             CliBehavior::InstructionFollowing
         );
@@ -584,8 +551,6 @@ mod tests {
     #[test]
     fn test_needs_role_hardening() {
         assert!(CliRegistry::needs_role_hardening("claude"));
-        assert!(CliRegistry::needs_role_hardening("gemini"));
-        assert!(CliRegistry::needs_role_hardening("antigravity"));
         assert!(!CliRegistry::needs_role_hardening("qwen"));
         assert!(!CliRegistry::needs_role_hardening("codex"));
         assert!(!CliRegistry::needs_role_hardening("droid"));
@@ -604,45 +569,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_antigravity_command() {
-        let registry = CliRegistry::new(test_config());
-        let config = AgentConfig {
-            cli: "antigravity".to_string(),
-            // Model is intentionally provided; antigravity must ignore it because
-            // agy has no --model flag.
-            model: Some("Gemini 3.1 Pro".to_string()),
-            flags: vec![],
-            label: None,
-            name: None,
-            description: None,
-            role: None,
-            initial_prompt: None,
-        };
-
-        let built = registry.build_command(&config).unwrap();
-        assert_eq!(built.command, "agy");
-        assert!(built
-            .args
-            .contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(
-            !built.args.iter().any(|a| a == "-m" || a == "--model"),
-            "antigravity must not produce a model flag (model lives in settings.json)"
-        );
-        assert!(
-            !built.args.iter().any(|a| a.contains("Gemini 3.1 Pro")),
-            "Model value from config must not leak into args"
-        );
-    }
-
-    #[test]
     fn test_default_model_lookup() {
         assert_eq!(CliRegistry::default_model("claude"), Some("opus"));
-        assert_eq!(CliRegistry::default_model("gemini"), Some("gemini-2.5-pro"));
         assert_eq!(CliRegistry::default_model("codex"), Some("gpt-5.6-sol"));
         assert_eq!(CliRegistry::default_model("droid"), Some("glm-5.1"));
         assert_eq!(CliRegistry::default_model("cursor"), Some("composer-2.5"));
         assert_eq!(CliRegistry::default_model("unknown"), None);
-        // antigravity has no model flag — None signals the UI to hide the field.
+        // Removed CLIs must no longer resolve a default model.
+        assert_eq!(CliRegistry::default_model("gemini"), None);
         assert_eq!(CliRegistry::default_model("antigravity"), None);
     }
 
@@ -708,10 +642,6 @@ mod tests {
             CliRegistry::infer_capabilities("custom-harness").native_delegation,
             CapabilitySupport::Unknown
         );
-        assert_eq!(
-            CliRegistry::infer_capabilities("antigravity").native_delegation,
-            CapabilitySupport::Unknown
-        );
     }
 
     #[test]
@@ -754,23 +684,26 @@ mod tests {
     }
 
     #[test]
-    fn test_build_gemini_command() {
+    fn test_build_command_rejects_removed_gemini_and_antigravity() {
         let registry = CliRegistry::new(test_config());
-        let config = AgentConfig {
-            cli: "gemini".to_string(),
-            model: Some("gemini-2.5-pro".to_string()),
-            flags: vec![],
-            label: None,
-            name: None,
-            description: None,
-            role: None,
-            initial_prompt: None,
-        };
-
-        let built = registry.build_command(&config).unwrap();
-        assert_eq!(built.command, "gemini");
-        assert!(built.args.contains(&"-y".to_string()));
-        assert!(built.args.contains(&"-m".to_string()));
-        assert!(built.args.contains(&"gemini-2.5-pro".to_string()));
+        for cli in ["gemini", "antigravity"] {
+            let config = AgentConfig {
+                cli: cli.to_string(),
+                model: None,
+                flags: vec![],
+                label: None,
+                name: None,
+                description: None,
+                role: None,
+                initial_prompt: None,
+            };
+            assert!(
+                matches!(
+                    registry.build_command(&config),
+                    Err(RegistryError::UnknownCli(_))
+                ),
+                "{cli} must no longer be buildable"
+            );
+        }
     }
 }

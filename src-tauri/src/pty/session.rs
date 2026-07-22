@@ -62,8 +62,8 @@ impl Default for WorkerRole {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentConfig {
     #[serde(default = "default_cli")]
-    pub cli: String,              // "claude", "gemini", "antigravity", "opencode", "codex"
-    pub model: Option<String>,    // "opus", "gemini-2.5-pro", "gpt-5.6-sol", etc. Ignored for "antigravity" (settings.json owns it)
+    pub cli: String,              // "claude", "codex", "opencode", "cursor", "droid", "qwen"
+    pub model: Option<String>,    // "opus", "gpt-5.6-sol", "gpt-5.6-terra", etc.
     #[serde(default)]
     pub flags: Vec<String>,       // Additional CLI flags
     pub label: Option<String>,    // Display name

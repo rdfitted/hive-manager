@@ -591,28 +591,6 @@ impl SessionStorage {
         );
 
         clis.insert(
-            "gemini".to_string(),
-            CliConfig {
-                command: "gemini".to_string(),
-                auto_approve_flag: Some("-y".to_string()),
-                model_flag: Some("-m".to_string()),
-                default_model: "gemini-2.5-pro".to_string(),
-                env: None,
-            },
-        );
-        clis.insert(
-            "antigravity".to_string(),
-            CliConfig {
-                command: "agy".to_string(),
-                auto_approve_flag: Some("--dangerously-skip-permissions".to_string()),
-                // agy has no --model flag. Model lives in ~/.gemini/antigravity-cli/settings.json.
-                model_flag: None,
-                default_model: String::new(),
-                env: None,
-            },
-        );
-
-        clis.insert(
             "opencode".to_string(),
             CliConfig {
                 command: "opencode".to_string(),
@@ -1556,26 +1534,17 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_has_both_gemini_and_antigravity() {
-        // #113: gemini and antigravity are peers; both must be present in
-        // VALID_CLIS and as configured entries with their own command/flags.
+    fn test_default_config_excludes_removed_gemini_and_antigravity() {
+        // gemini and antigravity were removed as spawnable CLIs; GPT-5.6 work
+        // (sol/terra/luna) now routes through the codex entry.
         let config = SessionStorage::default_config();
 
-        let gemini = config.clis.get("gemini").expect("gemini entry present");
-        assert_eq!(gemini.command, "gemini");
-        assert_eq!(gemini.auto_approve_flag.as_deref(), Some("-y"));
-        assert_eq!(gemini.model_flag.as_deref(), Some("-m"));
+        assert!(config.clis.get("gemini").is_none());
+        assert!(config.clis.get("antigravity").is_none());
 
-        let antigravity = config
-            .clis
-            .get("antigravity")
-            .expect("antigravity entry present");
-        assert_eq!(antigravity.command, "agy");
-        assert_eq!(
-            antigravity.auto_approve_flag.as_deref(),
-            Some("--dangerously-skip-permissions")
-        );
-        assert!(antigravity.model_flag.is_none(), "agy has no model flag");
+        let codex = config.clis.get("codex").expect("codex entry present");
+        assert_eq!(codex.command, "codex");
+        assert_eq!(codex.default_model, "gpt-5.6-sol");
     }
 
     fn sample_persisted_session(session_id: &str) -> PersistedSession {

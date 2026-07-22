@@ -29,7 +29,8 @@ describe('sessions store', () => {
         taskDescription: 'test task',
         with_evaluator: true,
         evaluator_config: {
-          cli: 'antigravity',
+          cli: 'codex',
+          model: 'gpt-5.6-terra',
           flags: ['--test'],
           label: 'Test Evaluator'
         },
@@ -44,7 +45,8 @@ describe('sessions store', () => {
         config: expect.objectContaining({
           with_evaluator: true,
           evaluator_config: expect.objectContaining({
-            cli: 'antigravity',
+            cli: 'codex',
+            model: 'gpt-5.6-terra',
             label: 'Test Evaluator'
           }),
           qa_workers: expect.arrayContaining([

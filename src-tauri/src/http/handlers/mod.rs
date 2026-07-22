@@ -22,13 +22,9 @@ pub mod workers;
 use crate::http::error::ApiError;
 use std::collections::HashSet;
 
-// gemini and antigravity are peers (see adapters/mod.rs::VALID_CLIS).
-// antigravity is the worker default; gemini is retained as a selectable peer
-// until Google deprecates it on 2026-06-18.
+// Must stay in lockstep with adapters/mod.rs::VALID_CLIS.
 const VALID_CLIS: &[&str] = &[
     "claude",
-    "gemini",
-    "antigravity",
     "codex",
     "opencode",
     "cursor",
