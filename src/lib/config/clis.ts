@@ -11,8 +11,7 @@ export interface CliOption {
   /**
    * Default model for this CLI (from backend registry.rs::default_model).
    * Empty string means the CLI has no model flag and the UI should hide the
-   * model field (currently: antigravity, whose model lives in
-   * `~/.gemini/antigravity-cli/settings.json`).
+   * model field.
    */
   defaultModel: string;
 }
@@ -22,10 +21,8 @@ export interface CliOption {
  */
 export const cliOptions: CliOption[] = [
   { value: 'claude', label: 'Claude Code', description: 'Anthropic Claude', defaultModel: 'opus' },
-  { value: 'gemini', label: 'Gemini CLI', description: 'Google Gemini Pro (deprecates 2026-06-18 — use Antigravity for new work)', defaultModel: 'gemini-2.5-pro' },
-  { value: 'antigravity', label: 'Antigravity CLI', description: 'Google Antigravity (agy) mixed-model option. Model + verbosity are set globally in ~/.gemini/antigravity-cli/settings.json.', defaultModel: '' },
   { value: 'opencode', label: 'OpenCode', description: 'BigPickle, Grok, multi-model', defaultModel: 'opencode/big-pickle' },
-  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.6 Sol', defaultModel: 'gpt-5.6-sol' },
+  { value: 'codex', label: 'Codex', description: 'OpenAI GPT-5.6 (Sol / Terra / Luna)', defaultModel: 'gpt-5.6-sol' },
   { value: 'cursor', label: 'Cursor', description: 'Cursor CLI via WSL (Composer 2.5)', defaultModel: 'composer-2.5' },
   { value: 'droid', label: 'Droid', description: 'GLM 5.1 (Factory Droid CLI)', defaultModel: 'glm-5.1' },
   { value: 'qwen', label: 'Qwen', description: 'Qwen Code CLI (Qwen3-Coder)', defaultModel: 'qwen3-coder' },

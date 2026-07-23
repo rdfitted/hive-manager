@@ -103,10 +103,10 @@ describe('fetchCliHealth', () => {
       .mockReturnValueOnce(firstRequest.promise)
       .mockResolvedValueOnce(jsonResponse({
         clis: {
-          gemini: {
-            name: 'gemini',
+          droid: {
+            name: 'droid',
             resolved: true,
-            binPath: '/usr/bin/gemini',
+            binPath: '/usr/bin/droid',
             loggedIn: 'yes',
             detail: 'Refreshed',
             staleHint: false,
@@ -123,10 +123,10 @@ describe('fetchCliHealth', () => {
 
     firstRequest.resolve(jsonResponse({
       clis: {
-        gemini: {
-          name: 'gemini',
+        droid: {
+          name: 'droid',
           resolved: true,
-          binPath: '/usr/bin/gemini',
+          binPath: '/usr/bin/droid',
           loggedIn: 'yes',
           detail: 'Ready',
           staleHint: false,
@@ -136,10 +136,10 @@ describe('fetchCliHealth', () => {
 
     const [firstHealth, concurrentHealth] = await Promise.all([first, concurrent]);
     expect(firstHealth).toEqual(concurrentHealth);
-    expect(firstHealth.gemini).toEqual({
-      cli: 'gemini',
+    expect(firstHealth.droid).toEqual({
+      cli: 'droid',
       resolved: true,
-      binPath: '/usr/bin/gemini',
+      binPath: '/usr/bin/droid',
       loggedIn: 'yes',
       detail: 'Ready',
       staleHint: false,
@@ -150,7 +150,7 @@ describe('fetchCliHealth', () => {
 
     const refreshed = await fetchCliHealth(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(refreshed.gemini.detail).toBe('Refreshed');
+    expect(refreshed.droid.detail).toBe('Refreshed');
     expect(invokeMock).not.toHaveBeenCalled();
   });
 

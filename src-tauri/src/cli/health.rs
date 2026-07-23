@@ -73,10 +73,6 @@ impl CliHealthRegistry {
 
         let (logged_in, detail) = match cli {
             "codex" => probe_login(&bin_path, &["login", "status"], "Codex").await,
-            "antigravity" => (
-                LoginStatus::Unknown,
-                "agy is available; Antigravity authentication is managed out of band".to_string(),
-            ),
             _ => (
                 LoginStatus::Unknown,
                 format!(
@@ -136,7 +132,6 @@ pub async fn get_cli_health_http() -> Json<CliHealthResponse> {
 
 fn executable_for_cli(cli: &str) -> &str {
     match cli {
-        "antigravity" => "agy",
         "cursor" => "wsl",
         _ => cli,
     }
@@ -774,7 +769,6 @@ mod tests {
 
     #[test]
     fn remapped_clis_use_the_real_launch_executable() {
-        assert_eq!(executable_for_cli("antigravity"), "agy");
         assert_eq!(executable_for_cli("cursor"), "wsl");
         assert_eq!(executable_for_cli("codex"), "codex");
     }
@@ -797,10 +791,10 @@ mod tests {
         assert!(stale.stale_hint);
 
         let auth_unknown = resolved_cli_health(
-            "antigravity",
-            PathBuf::from("agy"),
+            "droid",
+            PathBuf::from("droid"),
             LoginStatus::Unknown,
-            "authentication is managed out of band".to_string(),
+            "this CLI does not expose a supported login-status probe".to_string(),
         );
         assert!(auth_unknown.resolved);
         assert_eq!(auth_unknown.logged_in, LoginStatus::Unknown);

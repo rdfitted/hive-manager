@@ -15,13 +15,13 @@ describe('routeFusionTemplateCells', () => {
   it('routes resolver cells to judge config instead of launching them as candidates', () => {
     const result = routeFusionTemplateCells([
       cell('candidate-a', 'codex', 'gpt-5.6-sol'),
-      cell('candidate-b', 'antigravity'),
+      cell('candidate-b', 'codex', 'gpt-5.6-terra'),
       cell('resolver', 'claude', 'opus'),
     ]);
 
     expect(result.variants).toEqual([
       { name: 'Variant A', cli: 'codex', model: 'gpt-5.6-sol', flags: [] },
-      { name: 'Variant B', cli: 'antigravity', model: undefined, flags: [] },
+      { name: 'Variant B', cli: 'codex', model: 'gpt-5.6-terra', flags: [] },
     ]);
     expect(result.judgeConfig).toEqual({
       cli: 'claude',

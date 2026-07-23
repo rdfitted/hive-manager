@@ -227,8 +227,10 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
                 CellTemplate {
                     role: "candidate-b".to_string(),
-                    cli: "antigravity".to_string(),
-                    model: None,
+                    // Formerly antigravity (agy). Reassigned to the balanced
+                    // GPT-5.6 tier so the two candidates still diverge.
+                    cli: "codex".to_string(),
+                    model: Some("gpt-5.6-terra".to_string()),
                     prompt_template: "fusion-worker".to_string(),
                 },
                 CellTemplate {

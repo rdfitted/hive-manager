@@ -3,12 +3,10 @@
 //! This module provides the `CliAdapter` trait for abstracting CLI-specific
 //! behavior such as command building, signal detection, and bootstrap prompts.
 
-mod antigravity;
 mod claude_code;
 mod codex;
 mod cursor;
 mod droid;
-mod gemini;
 mod opencode;
 mod qwen;
 
@@ -17,24 +15,16 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use antigravity::AntigravityAdapter;
 pub use claude_code::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use cursor::CursorAdapter;
 pub use droid::DroidAdapter;
-pub use gemini::GeminiAdapter;
 pub use opencode::OpenCodeAdapter;
 pub use qwen::QwenAdapter;
 
 /// Valid CLI names allowed in the system.
-///
-/// `gemini` and `antigravity` are both first-class CLIs. `antigravity` (`agy`)
-/// is the default for the frontend role; the legacy Gemini CLI is retained as
-/// a selectable peer until Google deprecates it on 2026-06-18.
 pub const VALID_CLIS: &[&str] = &[
     "claude",
-    "gemini",
-    "antigravity",
     "codex",
     "opencode",
     "cursor",
@@ -50,11 +40,10 @@ pub fn is_valid_cli(cli: &str) -> bool {
 /// Specification for launching an agent process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentLaunchSpec {
-    /// CLI name (e.g., "claude", "antigravity")
+    /// CLI name (e.g., "claude", "codex")
     pub cli: String,
     /// Canonical model identifier (e.g., "opus", "gpt-5.6-sol"). Ignored by adapters whose
-    /// CLI does not accept a model flag (e.g., antigravity — model lives in
-    /// `~/.gemini/antigravity-cli/settings.json`).
+    /// CLI does not accept a model flag.
     pub model: Option<String>,
     /// Additional CLI flags
     pub flags: Vec<String>,
@@ -159,14 +148,14 @@ pub struct BootstrapContext {
 
 /// Trait for CLI adapter implementations.
 ///
-/// Each AI agent CLI (Claude, Codex, Antigravity, etc.) has different:
+/// Each AI agent CLI (Claude, Codex, etc.) has different:
 /// - Command-line flags for auto-approve and model selection
 /// - Output formats and status signals
 /// - Bootstrap prompt conventions
 ///
 /// This trait normalizes these differences behind a common interface.
 pub trait CliAdapter: Send + Sync {
-    /// Returns the CLI name (e.g., "claude", "antigravity").
+    /// Returns the CLI name (e.g., "claude", "codex").
     fn cli_name(&self) -> &'static str;
 
     /// Builds the launch command for the agent.
@@ -196,17 +185,11 @@ pub trait CliAdapter: Send + Sync {
 }
 
 /// Get the appropriate adapter for a CLI name.
-///
-/// `gemini` and `antigravity` route to separate adapters and are treated as
-/// peers. The PR #112 alias (`get_adapter("gemini") -> AntigravityAdapter`)
-/// was removed in #113 once gemini became a first-class peer again.
 pub fn get_adapter(cli: &str) -> Result<Box<dyn CliAdapter>, String> {
     match cli {
         "claude" => Ok(Box::new(ClaudeCodeAdapter)),
         "codex" => Ok(Box::new(CodexAdapter)),
         "cursor" => Ok(Box::new(CursorAdapter)),
-        "gemini" => Ok(Box::new(GeminiAdapter)),
-        "antigravity" => Ok(Box::new(AntigravityAdapter)),
         "droid" => Ok(Box::new(DroidAdapter)),
         "opencode" => Ok(Box::new(OpenCodeAdapter)),
         "qwen" => Ok(Box::new(QwenAdapter)),
@@ -221,13 +204,13 @@ mod tests {
     #[test]
     fn test_valid_clis() {
         assert!(is_valid_cli("claude"));
-        assert!(is_valid_cli("gemini"));
-        assert!(is_valid_cli("antigravity"));
         assert!(is_valid_cli("codex"));
         assert!(is_valid_cli("opencode"));
         assert!(is_valid_cli("cursor"));
         assert!(is_valid_cli("droid"));
         assert!(is_valid_cli("qwen"));
+        assert!(!is_valid_cli("gemini"));
+        assert!(!is_valid_cli("antigravity"));
         assert!(!is_valid_cli("unknown"));
     }
 
@@ -252,11 +235,8 @@ mod tests {
         let claude = get_adapter("claude").unwrap();
         assert_eq!(claude.cli_name(), "claude");
 
-        let gemini = get_adapter("gemini").unwrap();
-        assert_eq!(gemini.cli_name(), "gemini");
-
-        let antigravity = get_adapter("antigravity").unwrap();
-        assert_eq!(antigravity.cli_name(), "antigravity");
+        let codex = get_adapter("codex").unwrap();
+        assert_eq!(codex.cli_name(), "codex");
 
         let cursor = get_adapter("cursor").unwrap();
         assert_eq!(cursor.cli_name(), "cursor");
@@ -266,18 +246,18 @@ mod tests {
     }
 
     #[test]
-    fn test_gemini_and_antigravity_are_distinct_adapters() {
-        // #113: gemini and antigravity are peers; one is NOT an alias for the other.
-        let gemini = get_adapter("gemini").unwrap();
-        let antigravity = get_adapter("antigravity").unwrap();
-        assert_ne!(gemini.cli_name(), antigravity.cli_name());
-    }
-
-    #[test]
     fn test_get_adapter_rejects_unknown_cli() {
         match get_adapter("unknown") {
             Ok(adapter) => panic!("Expected error, got adapter {}", adapter.cli_name()),
             Err(error) => assert_eq!(error, "Unknown CLI adapter: unknown"),
         }
+    }
+
+    #[test]
+    fn test_get_adapter_rejects_removed_gemini_and_antigravity() {
+        // gemini and antigravity were removed as spawnable CLIs; workflows now
+        // run GPT-5.6 tiers (sol/terra/luna) through the codex adapter.
+        assert!(get_adapter("gemini").is_err());
+        assert!(get_adapter("antigravity").is_err());
     }
 }

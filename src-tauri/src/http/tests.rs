@@ -3716,9 +3716,9 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
     let temp_dir = std::env::temp_dir().join("hive-test-cli-override");
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    // Create a session with default_cli = "antigravity" (not "claude")
+    // Create a session with default_cli = "codex" (not "claude")
     let mut session = make_test_session("session-override", temp_dir.to_str().unwrap());
-    session.default_cli = "antigravity".to_string();
+    session.default_cli = "codex".to_string();
     controller.read().insert_test_session(session);
 
     // POST with explicit cli: "droid" - should pass CLI validation (not 400)
@@ -3741,99 +3741,56 @@ async fn test_add_worker_explicit_cli_overrides_session_default() {
         .await
         .unwrap();
 
-    // Should NOT be 400 - "droid" is a valid CLI that overrides session default "antigravity"
+    // Should NOT be 400 - "droid" is a valid CLI that overrides session default "codex"
     assert_ne!(
         response.status(),
         StatusCode::BAD_REQUEST,
-        "Explicit CLI 'droid' should override session default 'antigravity' and pass validation"
+        "Explicit CLI 'droid' should override session default 'codex' and pass validation"
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 #[tokio::test]
-async fn test_add_worker_accepts_gemini_cli() {
-    // #113: gemini is back as a first-class CLI (peer to antigravity).
-    // antigravity is the worker default; gemini is retained for selection
-    // until Google deprecates the gemini CLI on 2026-06-18.
+async fn test_add_worker_rejects_removed_gemini_and_antigravity_clis() {
+    // gemini and antigravity were removed as spawnable CLIs (workflows now
+    // run GPT-5.6 tiers through codex). Both names must fail VALID_CLIS
+    // validation in handlers/mod.rs — the lockstep partner of adapters/mod.rs.
     let (app, controller) = setup_test_app_with_controller().await;
 
-    let temp_dir = std::env::temp_dir().join("hive-test-gemini-cli");
+    let temp_dir = std::env::temp_dir().join("hive-test-removed-clis");
     let _ = std::fs::create_dir_all(&temp_dir);
 
     controller.read().insert_test_session(make_test_session(
-        "session-gemini",
+        "session-removed-clis",
         temp_dir.to_str().unwrap(),
     ));
 
-    let body = serde_json::json!({
-        "role_type": "frontend",
-        "cli": "gemini",
-        "model": "gemini-2.5-pro"
-    });
+    for cli in ["gemini", "antigravity"] {
+        let body = serde_json::json!({
+            "role_type": "frontend",
+            "cli": cli
+        });
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/sessions/session-gemini/workers")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-removed-clis/workers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert_ne!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "POST with cli: \"gemini\" must pass VALID_CLIS validation"
-    );
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
-#[tokio::test]
-async fn test_add_worker_accepts_antigravity_cli() {
-    // Regression guard for the agy migration: the antigravity CLI name must
-    // pass VALID_CLIS validation everywhere (handlers/mod.rs and adapters/mod.rs
-    // are easy to drift apart, which is the failure mode flagged in project-dna).
-    let (app, controller) = setup_test_app_with_controller().await;
-
-    let temp_dir = std::env::temp_dir().join("hive-test-antigravity-cli");
-    let _ = std::fs::create_dir_all(&temp_dir);
-
-    controller.read().insert_test_session(make_test_session(
-        "session-antigravity",
-        temp_dir.to_str().unwrap(),
-    ));
-
-    // Model intentionally omitted — agy has no --model flag.
-    let body = serde_json::json!({
-        "role_type": "frontend",
-        "cli": "antigravity"
-    });
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/sessions/session-antigravity/workers")
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // Must not be 400 — antigravity should be a valid CLI string in the
-    // handler's allowlist. Downstream PTY failures are acceptable here; we're
-    // only proving CLI validation accepts the new name.
-    assert_ne!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "POST with cli: \"antigravity\" must pass VALID_CLIS validation"
-    );
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "POST with cli: \"{cli}\" must be rejected by VALID_CLIS validation"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -4203,8 +4160,8 @@ fn test_persisted_session_serializes_default_cli() {
         last_activity_at: None,
         agents: vec![],
         state: "Running".to_string(),
-        default_cli: "antigravity".to_string(),
-        default_model: None, // antigravity uses settings.json for model selection
+        default_cli: "codex".to_string(),
+        default_model: None, // Absent model is valid; launch falls back to the CLI default
         default_principal_cli: None,
         default_principal_model: None,
         default_principal_flags: Vec::new(),
@@ -4221,7 +4178,7 @@ fn test_persisted_session_serializes_default_cli() {
     let json = serde_json::to_string(&session).unwrap();
     let deserialized: PersistedSession = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(deserialized.default_cli, "antigravity");
+    assert_eq!(deserialized.default_cli, "codex");
     assert_eq!(deserialized.default_model, None);
     assert_eq!(deserialized.name, Some("Test Session".to_string()));
     assert_eq!(deserialized.color, Some("#7aa2f7".to_string()));

@@ -192,6 +192,14 @@
     { value: 'codex-gpt-5-6-sol-xhigh', label: 'GPT-5.6 Sol (Extra high effort)' },
     { value: 'codex-gpt-5-6-sol-max', label: 'GPT-5.6 Sol (Max effort)' },
     { value: 'codex-gpt-5-6-sol-ultra', label: 'GPT-5.6 Sol (Ultra effort)' },
+    { value: 'codex-gpt-5-6-terra', label: 'GPT-5.6 Terra' },
+    { value: 'codex-gpt-5-6-terra-low', label: 'GPT-5.6 Terra (Low effort)' },
+    { value: 'codex-gpt-5-6-terra-medium', label: 'GPT-5.6 Terra (Medium effort)' },
+    { value: 'codex-gpt-5-6-terra-high', label: 'GPT-5.6 Terra (High effort)' },
+    { value: 'codex-gpt-5-6-luna', label: 'GPT-5.6 Luna' },
+    { value: 'codex-gpt-5-6-luna-low', label: 'GPT-5.6 Luna (Low effort)' },
+    { value: 'codex-gpt-5-6-luna-medium', label: 'GPT-5.6 Luna (Medium effort)' },
+    { value: 'codex-gpt-5-6-luna-high', label: 'GPT-5.6 Luna (High effort)' },
     { value: 'codex-gpt-5-5-low', label: 'GPT-5.5 (Low effort)' },
     { value: 'codex-gpt-5-5-medium', label: 'GPT-5.5 (Medium effort)' },
     { value: 'codex-gpt-5-5-high', label: 'GPT-5.5 (High effort)' },
@@ -205,20 +213,6 @@
     { value: 'codex-gpt-5-3-high', label: 'GPT-5.3 Codex (High effort)' },
     { value: 'codex-gpt-5-3-xhigh', label: 'GPT-5.3 Codex (Extra high effort)' },
   ];
-
-  const geminiPresets: PresetOption[] = [
-    { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
-    { value: 'gemini-3-pro-preview', label: 'Gemini 3.0 Pro Preview' },
-    { value: 'gemini-3-flash-preview', label: 'Gemini 3.0 Flash Preview' },
-    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
-  ];
-
-  // Antigravity (agy) has no model-selection flag. Model is read from
-  // ~/.gemini/antigravity-cli/settings.json globally. We do not expose a
-  // preset dropdown; the UI shows a static note instead.
-  const antigravityPresets: PresetOption[] = [];
 
   const cursorPresets: PresetOption[] = [
     { value: 'composer-2.5', label: 'Composer 2.5 (latest)' },
@@ -245,8 +239,6 @@
   const presetsByCliType: Record<string, PresetOption[]> = {
     claude: claudePresets,
     codex: codexPresets,
-    gemini: geminiPresets,
-    antigravity: antigravityPresets,
     cursor: cursorPresets,
     droid: droidPresets,
     opencode: opencodePresets,
@@ -318,17 +310,15 @@
     ? 'Claude effort presets add --settings {"effortLevel":"low|high|max"}'
     : config.cli === 'codex'
       ? 'Adds -c model_reasoning_effort="low|medium|high|xhigh|max|ultra"'
-      : config.cli === 'gemini'
-        ? 'Gemini model IDs for `gemini -m`'
-        : config.cli === 'cursor'
-          ? 'Cursor Composer mode selection'
-          : config.cli === 'droid'
-            ? 'Droid GLM model selection'
-            : config.cli === 'opencode'
-              ? 'OpenCode multi-model selection'
-              : config.cli === 'qwen'
-                ? 'Qwen Code CLI model selection'
-                : '';
+      : config.cli === 'cursor'
+        ? 'Cursor Composer mode selection'
+        : config.cli === 'droid'
+          ? 'Droid GLM model selection'
+          : config.cli === 'opencode'
+            ? 'OpenCode multi-model selection'
+            : config.cli === 'qwen'
+              ? 'Qwen Code CLI model selection'
+              : '';
 
   function handleCliChange(e: Event) {
     const target = e.target as HTMLSelectElement;
@@ -342,13 +332,6 @@
       flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
     } else if (nextCli === 'codex') {
       flags.push('-c', 'model_reasoning_effort="medium"');
-    } else if (nextCli === 'gemini') {
-      // Aligns with clis.ts defaultModel, Rust storage::default_config, and
-      // CliRegistry::default_model("gemini") — single source of truth.
-      model = getDefaultModel('gemini');
-    } else if (nextCli === 'antigravity') {
-      // agy has no --model flag; model is set globally in settings.json.
-      model = undefined;
     } else if (nextCli === 'droid') {
       model = getDefaultModel('droid');
     } else if (nextCli === 'cursor') {
@@ -495,6 +478,36 @@
       case 'codex-gpt-5-6-sol':
         model = 'gpt-5.6-sol';
         break;
+      case 'codex-gpt-5-6-terra-low':
+        model = 'gpt-5.6-terra';
+        flags.push('-c', 'model_reasoning_effort="low"');
+        break;
+      case 'codex-gpt-5-6-terra-medium':
+        model = 'gpt-5.6-terra';
+        flags.push('-c', 'model_reasoning_effort="medium"');
+        break;
+      case 'codex-gpt-5-6-terra-high':
+        model = 'gpt-5.6-terra';
+        flags.push('-c', 'model_reasoning_effort="high"');
+        break;
+      case 'codex-gpt-5-6-terra':
+        model = 'gpt-5.6-terra';
+        break;
+      case 'codex-gpt-5-6-luna-low':
+        model = 'gpt-5.6-luna';
+        flags.push('-c', 'model_reasoning_effort="low"');
+        break;
+      case 'codex-gpt-5-6-luna-medium':
+        model = 'gpt-5.6-luna';
+        flags.push('-c', 'model_reasoning_effort="medium"');
+        break;
+      case 'codex-gpt-5-6-luna-high':
+        model = 'gpt-5.6-luna';
+        flags.push('-c', 'model_reasoning_effort="high"');
+        break;
+      case 'codex-gpt-5-6-luna':
+        model = 'gpt-5.6-luna';
+        break;
       case 'codex-gpt-5-5-low':
         model = 'gpt-5.5';
         flags.push('-c', 'model_reasoning_effort="low"');
@@ -542,14 +555,6 @@
       case 'codex-gpt-5-3-xhigh':
         model = 'gpt-5.3-codex';
         flags.push('-c', 'model_reasoning_effort="xhigh"');
-        break;
-      case 'gemini-3.1-pro-preview':
-      case 'gemini-3-pro-preview':
-      case 'gemini-3-flash-preview':
-      case 'gemini-2.5-pro':
-      case 'gemini-2.5-flash':
-      case 'gemini-2.5-flash-lite':
-        model = preset;
         break;
       case 'composer-2.5':
       case 'composer-2':
@@ -634,16 +639,7 @@
     </span>
   </div>
 
-  {#if config.cli === 'antigravity'}
-    <div class="field">
-      <span class="label-text" id={`${idPrefix}-model-label`}>Model</span>
-      <div class="settings-note">
-        Set globally in <code>~/.gemini/antigravity-cli/settings.json</code>
-        (<code>"model"</code> key). Per-worker override is not supported by
-        <code>agy</code>.
-      </div>
-    </div>
-  {:else if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'gemini' || config.cli === 'cursor' || config.cli === 'droid' || config.cli === 'opencode' || config.cli === 'qwen'}
+  {#if config.cli === 'claude' || config.cli === 'codex' || config.cli === 'cursor' || config.cli === 'droid' || config.cli === 'opencode' || config.cli === 'qwen'}
     <div class="field">
       <label for={`${idPrefix}-preset`}>Model &amp; Effort</label>
       <select
@@ -735,8 +731,7 @@
     line-height: 1.35;
   }
 
-  label,
-  .label-text {
+  label {
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
@@ -783,23 +778,5 @@
   .cli-select:focus {
     outline: none;
     border-color: var(--accent-cyan);
-  }
-
-  .settings-note {
-    font-size: 12px;
-    line-height: 1.5;
-    color: var(--text-secondary);
-    padding: 8px 10px;
-    background: var(--bg-void);
-    border: 1px dashed var(--border-structural);
-    border-radius: var(--radius-sm);
-  }
-
-  .settings-note code {
-    font-family: ui-monospace, SFMono-Regular, monospace;
-    font-size: 11px;
-    background: rgba(255, 255, 255, 0.05);
-    padding: 1px 4px;
-    border-radius: 3px;
   }
 </style>

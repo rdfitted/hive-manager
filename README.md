@@ -1,6 +1,6 @@
 # Hive Manager
 
-A local, operator-controlled meta-harness for AI coding sessions. Launch, supervise, and compare coordinated CLI agents (Claude, Codex, Gemini, Antigravity, and others) without handing topology decisions to an opaque control plane.
+A local, operator-controlled meta-harness for AI coding sessions. Launch, supervise, and compare coordinated CLI agents (Claude, Codex, and others) without handing topology decisions to an opaque control plane.
 
 ![Hive Manager](https://img.shields.io/badge/version-0.35.1-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
@@ -15,7 +15,7 @@ A local, operator-controlled meta-harness for AI coding sessions. Launch, superv
 - **Solo Mode**: One directly supervised coding agent for focused work
 - **Legacy Swarm Compatibility**: Existing Swarm sessions remain programmatically launchable outside the primary flow
 - **Session Persistence**: Save and resume sessions across app restarts
-- **Multi-CLI Support**: Works with Claude Code, Codex, OpenCode, Gemini CLI, Antigravity CLI (agy), and more
+- **Multi-CLI Support**: Works with Claude Code, Codex, OpenCode, and more
 - **Real-time Monitoring**: Watch all agents work simultaneously with live terminal output
 - **Git Integration**: Automatic branch management and coordination
 
@@ -93,9 +93,7 @@ When Master Planner is used, it is contract-only: it converts the objective into
 | CLI | Behavior | Notes |
 |-----|----------|-------|
 | [Claude Code](https://claude.ai/claude-code) | Action-Prone | Anthropic's official CLI. Supports native delegation; Opus is the recommended Queen model. |
-| [Antigravity CLI](https://www.antigravity.google/docs/cli-using) | Action-Prone | Google's `agy` (successor to Gemini CLI), available for operator-designed and mixed-model teams. Model + verbosity live in `~/.gemini/antigravity-cli/settings.json` — no `--model` flag. After installing `agy`, restart Hive Manager so the spawn environment picks up the new User PATH entry. ⚠️ Known upstream issue [google-antigravity/antigravity-cli#76](https://github.com/google-antigravity/antigravity-cli/issues/76) — `agy -p` silently drops stdout in non-TTY contexts; affects Solo-mode antigravity launches only. Hive worker mode is unaffected. |
-| [Gemini CLI](https://github.com/google/gemini-cli) | Action-Prone | Google's legacy CLI. Selectable but **deprecates 2026-06-18**; prefer Antigravity for new work. |
-| [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Supports native delegation; `gpt-5.6-sol` is the recommended coding-principal model. Hive task activation uses a durable polling loop. |
+| [Codex](https://github.com/openai/codex) | Explicit-Polling | OpenAI's CLI. Supports native delegation; the GPT-5.6 tiers are `gpt-5.6-sol` (flagship/deep, the recommended coding-principal model), `gpt-5.6-terra` (balanced), and `gpt-5.6-luna` (fast). Hive task activation uses a durable polling loop. |
 | [OpenCode](https://github.com/opencode-ai/opencode) | Explicit-Polling | Open-source alternative. |
 | [Qwen](https://github.com/QwenLM/qwen-agent) | Instruction-Following | Follows instructions literally, respects role boundaries naturally. |
 | [Droid](https://github.com/anthropics/droid) | Interactive | TUI mode with `/model` command for model selection. |
