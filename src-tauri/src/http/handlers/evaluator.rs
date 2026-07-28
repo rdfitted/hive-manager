@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{rejection::JsonRejection, Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -31,6 +31,51 @@ pub struct AddEvaluatorResponse {
     pub cli: String,
     pub status: String,
     pub prompt_file: String,
+}
+
+/// Body for the operator QA overrides (#176).
+///
+/// `force-pass` / `force-fail` are destructive session-level overrides that
+/// bypass the Evaluator entirely, so they must not be reachable by a bodyless
+/// POST -- which is exactly how one was tripped while an agent was enumerating
+/// the API surface.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ForceVerdictRequest {
+    /// Must be `true`. `#[serde(default)]` is load-bearing: it moves the
+    /// missing-field case out of serde's 422 and into our own 400 below, so
+    /// every rejection carries the same explanatory message.
+    #[serde(default)]
+    pub confirm: bool,
+    /// Optional operator note, recorded in the coordination audit log.
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+/// Funnel every malformed-body case -- absent `Content-Type`, `{}`,
+/// `{"confirm": false}`, malformed JSON -- into one repo-shaped 400.
+///
+/// Taking `Result<Json<T>, JsonRejection>` rather than a bare `Json<T>` is
+/// deliberate: a bare extractor answers the bodyless POST that today's UI sends
+/// with axum's plain-text 415, which is neither actionable nor in our error
+/// envelope.
+fn require_confirmation(
+    body: Result<Json<ForceVerdictRequest>, JsonRejection>,
+    action: &str,
+) -> Result<ForceVerdictRequest, ApiError> {
+    let req = match body {
+        Ok(Json(req)) => req,
+        Err(_) => ForceVerdictRequest::default(),
+    };
+
+    if !req.confirm {
+        return Err(ApiError::bad_request(format!(
+            "Refusing to {action}: this is a destructive operator override. \
+             Re-send with a JSON body {{\"confirm\": true}} (optionally with \
+             \"rationale\": \"<why>\") and Content-Type: application/json."
+        )));
+    }
+
+    Ok(req)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -367,17 +412,44 @@ fn require_qa_overridable(
         return Ok(());
     }
 
+    // #175(a): evaluator-backed sessions now sit in Running (or briefly
+    // SpawningEvaluator) until the milestone handoff, but they still cannot
+    // complete without reaching QaPassed. Without this the operator would have no
+    // way to unblock a session before its first handoff.
+    //
+    // The widening is conditioned on the session actually having an Evaluator or
+    // QA worker, which is exactly the set of sessions the timer change affects.
+    // A non-evaluator session keeps the old gate -- otherwise a swarm could be
+    // forced into QaPassed and permanently lose `add_planner`.
+    if matches!(
+        session.state,
+        SessionState::Running | SessionState::SpawningEvaluator
+    ) && SessionController::session_requires_internal_evaluator(&session)
+    {
+        return Ok(());
+    }
+
     Err(ApiError::bad_request(format!(
-        "Cannot {}: session is in {:?} state, expected QaInProgress, QaInconclusive, or PrinceRemediation",
+        "Cannot {}: session is in {:?} state, expected QaInProgress, QaInconclusive, PrinceRemediation, or an evaluator-backed Running session",
         action, session.state
     )))
 }
 
-fn append_operator_log(state: &AppState, session_id: &str, action: &str, detail: &str) {
-    let msg = crate::coordination::CoordinationMessage::system(
-        "OPERATOR",
-        &format!("[{}] Operator forced {} for session {}", action, detail, session_id),
+fn append_operator_log(
+    state: &AppState,
+    session_id: &str,
+    action: &str,
+    detail: &str,
+    rationale: Option<&str>,
+) {
+    let mut body = format!(
+        "[{}] Operator forced {} for session {}",
+        action, detail, session_id
     );
+    if let Some(rationale) = rationale.map(str::trim).filter(|r| !r.is_empty()) {
+        body.push_str(&format!(" — rationale: {}", rationale));
+    }
+    let msg = crate::coordination::CoordinationMessage::system("OPERATOR", &body);
     let _ = state.storage.append_coordination_log(session_id, &msg);
 }
 
@@ -440,6 +512,7 @@ pub(crate) fn apply_verdict(
     session_id: &str,
     verdict: &str,
     is_override: bool,
+    rationale: Option<&str>,
 ) -> Result<SessionState, ApiError> {
     let action = if is_override {
         let (action, _) = override_log_details(verdict)?;
@@ -461,7 +534,7 @@ pub(crate) fn apply_verdict(
 
     if is_override {
         let (log_action, detail) = override_log_details(verdict)?;
-        append_operator_log(state, session_id, log_action, detail);
+        append_operator_log(state, session_id, log_action, detail, rationale);
     }
 
     Ok(new_state)
@@ -485,6 +558,35 @@ pub async fn post_verdict(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // #175(a) self-heal. The QA window normally opens when the peer watcher
+    // observes milestone-ready, but that watcher does not exist when the session
+    // was launched without an app handle. Without this, such a session
+    // hard-deadlocks: the Evaluator's real verdict is rejected, and so is its
+    // documented BLOCKED fallback (this guard runs before the BLOCKED fork), while
+    // the Queen polls forever with no clock. This also rescues in-flight sessions
+    // that were launched under the old prompt.
+    {
+        let controller = state.session_controller.read();
+        let needs_window = controller.get_session(&session_id).is_some_and(|session| {
+            matches!(
+                session.state,
+                SessionState::Running | SessionState::SpawningEvaluator
+            ) && session
+                .agents
+                .iter()
+                .any(|agent| matches!(agent.role, AgentRole::Evaluator))
+        });
+        if needs_window {
+            tracing::info!(
+                session_id = %session_id,
+                "Opening a QA window from an incoming verdict: the milestone handoff was never observed"
+            );
+            controller
+                .begin_qa_window(&session_id)
+                .map_err(ApiError::internal)?;
+        }
+    }
 
     // Resolve peer identities + project path up front (needed for both BLOCKED and
     // PASS/FAIL paths). require_qa_in_progress rejects verdicts posted outside the
@@ -713,33 +815,88 @@ pub async fn post_prince_verdict(
     })))
 }
 
-pub async fn force_pass(
+/// POST /api/sessions/{id}/milestone-ready
+///
+/// #175(a): the Queen signals that a milestone is ready for QA review. This opens
+/// the QA window and arms the QA timeout. Before this, the clock was armed at
+/// session launch, so any session whose first milestone took longer than the
+/// timeout was deterministically poisoned to `QaInconclusive` with a BLOCKED
+/// verdict for work that had never been submitted.
+pub async fn post_milestone_ready(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
-    let new_state = apply_verdict(&state, &session_id, "QA_VERDICT: PASS", true)?;
+    let controller = state.session_controller.read();
+    controller
+        .get_session(&session_id)
+        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+    controller
+        .on_milestone_ready(&session_id)
+        .map_err(ApiError::internal)?;
+    let new_state = controller
+        .get_session(&session_id)
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_default();
+    drop(controller);
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "action": "milestone-ready",
+        "new_state": new_state,
+    })))
+}
+
+/// #176: the confirmation guard runs BEFORE the session lookup, so a bodyless
+/// POST to a nonexistent session answers with the confirm-400 rather than the
+/// 404 `require_qa_overridable` used to produce. That precedence is deliberate
+/// and pinned by a test.
+pub async fn force_pass(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    body: Result<Json<ForceVerdictRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+    let req = require_confirmation(body, "force-pass")?;
+
+    let new_state = apply_verdict(
+        &state,
+        &session_id,
+        "QA_VERDICT: PASS",
+        true,
+        req.rationale.as_deref(),
+    )?;
 
     Ok(Json(json!({
         "session_id": session_id,
         "action": "force-pass",
-        "new_state": format!("{:?}", new_state)
+        "new_state": format!("{:?}", new_state),
+        "rationale": req.rationale,
     })))
 }
 
 pub async fn force_fail(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    body: Result<Json<ForceVerdictRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
+    let req = require_confirmation(body, "force-fail")?;
 
-    let new_state = apply_verdict(&state, &session_id, "QA_VERDICT: FAIL", true)?;
+    let new_state = apply_verdict(
+        &state,
+        &session_id,
+        "QA_VERDICT: FAIL",
+        true,
+        req.rationale.as_deref(),
+    )?;
 
     Ok(Json(json!({
         "session_id": session_id,
         "action": "force-fail",
-        "new_state": format!("{:?}", new_state)
+        "new_state": format!("{:?}", new_state),
+        "rationale": req.rationale,
     })))
 }
 

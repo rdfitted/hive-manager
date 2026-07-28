@@ -767,10 +767,8 @@ impl SessionStorage {
         session_id: &str,
         message: &CoordinationMessage,
     ) -> Result<(), StorageError> {
-        let log_path = self
-            .session_dir(session_id)
-            .join("coordination")
-            .join("coordination.log");
+        let log_dir = self.session_dir(session_id).join("coordination");
+        let log_path = log_dir.join("coordination.log");
 
         let line = format!(
             "[{}] {} → {}: {}\n",
@@ -782,6 +780,12 @@ impl SessionStorage {
 
         use std::fs::OpenOptions;
         use std::io::Write;
+
+        // Without this the open fails whenever the directory has not been
+        // created yet, and because callers such as the operator-override audit
+        // path discard the Result, the append silently no-ops. An override that
+        // reports success while leaving no audit trail is worse than no log.
+        std::fs::create_dir_all(&log_dir)?;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -1490,6 +1494,30 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap();
         (storage, temp_dir)
+    }
+
+    /// #176. `append_coordination_log` must create its directory. Every caller in
+    /// the crate discards the returned Result -- notably the operator-override
+    /// audit path -- so without this the append silently no-ops for any session
+    /// whose directory has not been created yet, and a destructive override would
+    /// report success while leaving no audit trail.
+    #[test]
+    fn append_coordination_log_creates_its_directory() {
+        let (storage, _temp) = create_test_storage();
+        let session_id = "never-persisted-session";
+        assert!(
+            !storage.session_dir(session_id).join("coordination").exists(),
+            "precondition: the session directory must not exist yet"
+        );
+
+        let msg = CoordinationMessage::system("OPERATOR", "[FORCE-PASS] audit entry");
+        storage
+            .append_coordination_log(session_id, &msg)
+            .expect("append must succeed even when the session dir is absent");
+
+        let log = storage.read_coordination_log(session_id, None).unwrap();
+        assert_eq!(log.len(), 1, "the appended message must be readable back");
+        assert!(log[0].content.contains("[FORCE-PASS]"));
     }
 
     #[test]

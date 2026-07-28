@@ -162,6 +162,66 @@ async fn setup_test_app_with_controller_at(
     (create_router(state), session_controller, storage)
 }
 
+/// Like [`setup_test_app_with_controller_at`] but also hands back the `AppState`,
+/// so a test can reach the PTY manager and the durable queue directly (e.g. to
+/// register a live PTY, or to seed a leaked queue row).
+async fn setup_test_app_full(
+    base_dir: std::path::PathBuf,
+) -> (
+    axum::Router,
+    Arc<RwLock<SessionController>>,
+    Arc<SessionStorage>,
+    Arc<AppState>,
+) {
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
+    let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db =
+        Arc::new(crate::storage::ApplicationStateDb::open(storage.base_dir()).unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        session_controller.clone(),
+        injection_manager,
+        storage.clone(),
+        event_bus,
+        app_state_db,
+        queue_manager,
+        None,
+    ));
+    state.set_registry(Arc::new(crate::actions::build_registry()));
+
+    (
+        create_router(state.clone()),
+        session_controller,
+        storage,
+        state,
+    )
+}
+
+/// Register a live stub PTY for `agent_id` so code gated on PTY liveness is
+/// reachable from tests.
+fn register_live_pty(state: &AppState, agent_id: &str, role: AgentRole) {
+    state
+        .pty_manager
+        .write()
+        .create_session(agent_id.to_string(), role, "cmd", &[], None, 80, 24)
+        .expect("stub PTY creation should succeed");
+}
+
 async fn setup_isolated_test_app_with_controller() -> (
     TempDir,
     axum::Router,
@@ -4717,6 +4777,370 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
     }
 }
 
+/// #175(a) T14 — the headline fix. An evaluator-backed session must finish
+/// launching in `Running` with NO QA clock armed. Before this, launch went
+/// straight to `QaInProgress` and started a 300s timer, so any session whose
+/// first milestone took longer than the timeout was deterministically poisoned
+/// to `QaInconclusive` with a BLOCKED verdict for work never submitted.
+#[tokio::test]
+async fn launch_with_evaluator_stays_running_and_does_not_arm_the_qa_clock() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Ship a milestone",
+        "cli": "codex",
+        "evaluator_cli": "codex"
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Unconditional: the older evaluator-launch tests guarded their assertions
+    // behind `if status == CREATED`, and without a git fixture the launch 500s,
+    // so those assertions never actually ran.
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let launch: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let session_id = launch["session_id"].as_str().unwrap();
+
+    let session = controller.read().get_session(session_id).unwrap();
+    assert!(
+        session
+            .agents
+            .iter()
+            .any(|a| matches!(a.role, AgentRole::Evaluator)),
+        "precondition: the session must actually be evaluator-backed"
+    );
+    assert_eq!(
+        session.state,
+        SessionState::Running,
+        "an evaluator-backed launch must not enter a QA state"
+    );
+    assert!(
+        !controller.read().qa_timeout_armed(session_id),
+        "the QA clock must not be armed before a milestone is submitted"
+    );
+
+    // NB: a verdict posted now WOULD be accepted, because `post_verdict`
+    // self-heals a Running evaluator-backed session into a QA window. That is
+    // deliberate — it rescues sessions whose peer watcher never started — so it
+    // is not asserted against here. `milestone_ready_opens_the_qa_window_...`
+    // covers the normal handoff path.
+
+    controller.write().close_session(session_id).unwrap();
+}
+
+/// #175(a) T17. The milestone handoff is what opens the QA window and starts the
+/// clock.
+#[tokio::test]
+async fn milestone_ready_opens_the_qa_window_and_arms_the_clock() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Ship a milestone",
+        "cli": "codex",
+        "evaluator_cli": "codex"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let launch: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let session_id = launch["session_id"].as_str().unwrap().to_string();
+
+    assert!(!controller.read().qa_timeout_armed(&session_id));
+
+    let handoff = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/milestone-ready", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handoff.status(), StatusCode::OK);
+
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: None },
+        "the handoff must open the QA window"
+    );
+    assert!(
+        controller.read().qa_timeout_armed(&session_id),
+        "the handoff must arm the QA clock"
+    );
+
+    // Proof the window is genuinely open: a verdict is now accepted.
+    let verdict = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/verdict", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"PASS"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verdict.status(), StatusCode::OK);
+
+    controller.write().close_session(&session_id).unwrap();
+}
+
+/// #175(a) T18 — THE TRAP, plus the latent iteration-loss bug.
+///
+/// When the rostered Evaluator has no live PTY, `on_milestone_ready` takes the
+/// respawn branch and early-returns. That branch used to rely on
+/// `launch_evaluator`'s tail to transition and arm the clock; now that spawning
+/// an Evaluator no longer opens a QA window, the branch must do it itself.
+/// Without this the spurious-timeout bug is merely traded for a
+/// never-times-out bug.
+///
+/// The iteration assertion pins the second half: `launch_evaluator` writes
+/// `SpawningEvaluator` before its tail read the state back, so a respawn from
+/// `QaFailed { iteration: 2 }` used to reset the counter to `None` and defeat the
+/// max-retries ceiling.
+#[tokio::test]
+async fn milestone_ready_respawn_branch_arms_qa_and_preserves_iteration() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("respawn-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaFailed { iteration: 2 };
+    // Rostered Evaluator with NO registered PTY -> is_alive() is false -> the
+    // dead-evaluator respawn branch.
+    session.agents.push(AgentInfo {
+        id: format!("{}-evaluator", session_id),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig {
+            cli: "claude".to_string(),
+            ..AgentConfig::default()
+        },
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/milestone-ready", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) },
+        "the respawn branch must open a QA window AND carry the iteration forward"
+    );
+    assert!(
+        controller.read().qa_timeout_armed(&session_id),
+        "the respawn branch must arm the QA clock"
+    );
+}
+
+/// #175(c). `QaInconclusive` locked out worker spawning entirely, which is what
+/// made the field session permanently uncapped-at-3.
+#[tokio::test]
+async fn workers_can_be_added_while_qa_is_inconclusive() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("inconclusive-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInconclusive;
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"role_type":"backend","cli":"claude","initial_task":"fix it"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::CREATED,
+        "QaInconclusive must not lock out worker spawning"
+    );
+}
+
+/// #175(a) + #176. With the launch state now `Running`, the operator override
+/// must still be reachable for an evaluator-backed session — otherwise the fix
+/// ships a session that can never complete (completion demands QaPassed).
+#[tokio::test]
+async fn force_pass_is_allowed_before_the_milestone_handoff() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("pre-handoff-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::Running;
+    session.agents.push(AgentInfo {
+        id: format!("{}-evaluator", session_id),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaPassed
+    );
+}
+
+/// The widening above must stay conditioned on the session actually being
+/// evaluator-backed. A swarm forced into `QaPassed` permanently loses
+/// `add_planner`.
+#[tokio::test]
+async fn force_pass_still_rejected_for_a_running_session_without_an_evaluator() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("no-eval-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::Running;
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::Running
+    );
+}
+
+/// #175(b). A milestone-ready arriving while QA is inconclusive is still
+/// dropped, but it must be recorded rather than silently discarded.
+#[tokio::test]
+async fn milestone_ready_on_an_inconclusive_session_is_logged_not_silent() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("drop-log-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInconclusive;
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/milestone-ready", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // State is deliberately unchanged (re-entry is a separate follow-up)...
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInconclusive
+    );
+    // ...but the drop must be visible to the operator.
+    let log = storage.read_coordination_log(&session_id, None).unwrap();
+    assert!(
+        log.iter().any(|m| m.content.contains("milestone-ready")
+            && m.content.contains("force-pass")),
+        "the dropped signal must be recorded with the recovery path, got {:?}",
+        log.iter().map(|m| &m.content).collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn test_launch_solo_with_same_cli_evaluator_preserves_custom_session_model() {
     let (app, controller) = setup_test_app_with_controller().await;
@@ -5262,6 +5686,356 @@ impl Drop for TestPathCleanup {
     }
 }
 
+/// #176 T5. A bodyless POST to a destructive operator override must be refused.
+/// This is exactly how force-pass was tripped in the field, while an agent was
+/// enumerating the API surface.
+#[tokio::test]
+async fn force_pass_requires_explicit_confirmation() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("force-confirm-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session);
+
+    let post = |body: Option<&'static str>| {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        async move {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id));
+            let request = match body {
+                Some(json) => builder
+                    .header("content-type", "application/json")
+                    .body(Body::from(json))
+                    .unwrap(),
+                None => {
+                    builder = builder.header("x-probe", "bodyless");
+                    builder.body(Body::empty()).unwrap()
+                }
+            };
+            app.oneshot(request).await.unwrap()
+        }
+    };
+
+    // (a) bodyless, no content-type — the shape a read-only API probe sends.
+    let res = post(None).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "a bodyless force-pass must be refused"
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("confirm"),
+        "the 400 must tell the caller what is missing, got {body}"
+    );
+
+    // (b) empty object and (c) explicit false are equally refused.
+    assert_eq!(post(Some("{}")).await.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        post(Some(r#"{"confirm":false}"#)).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // (d) none of the refusals may have changed state.
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(1) },
+        "a refused override must not mutate session state"
+    );
+
+    // (e) the confirmed call still works.
+    assert_eq!(
+        post(Some(r#"{"confirm":true}"#)).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaPassed
+    );
+}
+
+/// #176 T6. force_pass / force_fail are copy-paste twins; guarding only one is a
+/// realistic half-done edit.
+#[tokio::test]
+async fn force_fail_requires_explicit_confirmation() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("force-fail-confirm-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session);
+
+    let bodyless = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-fail", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bodyless.status(), StatusCode::BAD_REQUEST);
+
+    let refused = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-fail", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(1) }
+    );
+
+    let confirmed = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-fail", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::OK);
+}
+
+/// #176 T7. Pins a deliberate precedence change: the confirmation guard runs
+/// before the session lookup, so a bodyless probe against a nonexistent session
+/// now answers 400 rather than 404.
+#[tokio::test]
+async fn force_override_confirmation_precedes_session_lookup() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, _controller, _storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/no-such-session/qa/force-pass")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "confirm is checked before the session exists"
+    );
+}
+
+/// #176 T8. The rationale must reach the durable operator audit log. Also pins
+/// the `create_dir_all` in `append_coordination_log`: without it the append
+/// silently no-ops because the caller discards the Result.
+#[tokio::test]
+async fn force_pass_rationale_is_recorded_in_the_operator_audit_log() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("force-rationale-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"confirm":true,"rationale":"UI host unavailable, verified manually"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // NB: `CoordinationMessage::system(to, content)` takes the recipient first,
+    // so operator audit entries are recorded as `SYSTEM -> OPERATOR`.
+    let log = storage.read_coordination_log(&session_id, None).unwrap();
+    let operator_line = log
+        .iter()
+        .find(|m| m.to == "OPERATOR")
+        .expect("an operator override must leave an audit entry");
+    assert!(
+        operator_line.content.contains("FORCE-PASS"),
+        "audit entry should name the action, got {}",
+        operator_line.content
+    );
+    assert!(
+        operator_line
+            .content
+            .contains("UI host unavailable, verified manually"),
+        "audit entry should carry the operator rationale, got {}",
+        operator_line.content
+    );
+}
+
+/// #176 T9. The field report's second symptom: after force-pass, `GET /workers`
+/// reported ALL workers `Completed` while one was demonstrably still running.
+///
+/// The mechanism is in the READ path, not force-pass: reaching a state that
+/// triggers `should_reload_session_info_from_storage` makes the next
+/// `GET /api/sessions/{id}` reconstruct the roster from disk, and
+/// `session_from_persisted` hardcodes `Completed` because the persisted snapshot
+/// carries no runtime status.
+#[tokio::test]
+async fn force_pass_does_not_report_running_workers_as_completed() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("overlay-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let w1 = format!("{}-worker-1", session_id);
+    let w2 = format!("{}-worker-2", session_id);
+    let mut session = make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &[&w1, &w2],
+    );
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session.clone());
+    // Persist, so the reload has a snapshot to read back.
+    controller.read().persist_test_session(&session_id);
+
+    // Both workers are genuinely alive.
+    register_live_pty(&state, &w1, AgentRole::Worker { index: 1, parent: None });
+    register_live_pty(&state, &w2, AgentRole::Worker { index: 2, parent: None });
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // LOAD-BEARING: this GET is what triggers the disk reload. Omit it and the
+    // test passes even on broken code.
+    let info = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+
+    let workers = body["workers"].as_array().expect("workers array");
+    assert_eq!(workers.len(), 2);
+    for worker in workers {
+        assert_eq!(
+            worker["status"].as_str().unwrap(),
+            "Running",
+            "a live worker must not be reported Completed after a QA state change: {body}"
+        );
+    }
+    let _ = storage;
+}
+
+/// #176 T11. The overlay must stay conditioned on PTY liveness. An unconditional
+/// overlay would report a dead session's agents as `Running` forever, since
+/// nothing in the crate writes a non-Completed status after spawn.
+#[tokio::test]
+async fn reload_reports_dead_workers_as_completed() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("overlay-dead-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let w1 = format!("{}-worker-1", session_id);
+    let mut session =
+        make_test_session_with_agents(&session_id, temp_dir.path().to_str().unwrap(), &[&w1]);
+    // A terminal state that also triggers the reload, with NO live PTY.
+    session.state = SessionState::Completed;
+    controller.write().insert_test_session(session.clone());
+    controller.read().persist_test_session(&session_id);
+
+    let info = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(
+        body["workers"][0]["status"].as_str().unwrap(),
+        "Completed",
+        "a dead worker must read Completed, not be pinned Running by the overlay"
+    );
+}
+
 #[tokio::test]
 async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
     let storage_dir = TempDir::new().unwrap();
@@ -5280,7 +6054,8 @@ async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
                 .unwrap(),
         )
         .await
@@ -7633,15 +8408,17 @@ async fn test_queue_endpoint_empty_snapshot() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+/// #175(d). A spawn that fails after winning the claim must RELEASE it.
+///
+/// This test replaces `test_add_worker_enqueues_and_claims`, whose assertions
+/// were the bug's specification: it asserted the row stayed `running` after a
+/// failed spawn and that the retry 409'd — i.e. exactly the permanent lockout
+/// reported from the field.
 #[tokio::test]
-async fn test_add_worker_enqueues_and_claims() {
-    // First POST /workers enqueues a queue row and atomically claims it (-> running). The
-    // downstream PTY/worktree spawn fails in the hermetic test env (temp dir is not a git
-    // repo), so no agent is added — but the queue row is the source of truth and is now
-    // `running`. A duplicate POST for the same worker re-enqueues (no-op), loses the claim
-    // on the already-running fresh row, and is turned away with 409.
+async fn add_worker_failure_releases_the_claimed_queue_row() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let temp_dir = std::env::temp_dir().join("hive-test-queue-claim");
+    // A NON-git temp dir, so the worktree step fails and the spawn errors out.
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-claim-release");
     let _ = std::fs::create_dir_all(&temp_dir);
     controller.read().insert_test_session(make_test_session(
         "session-queue-claim",
@@ -7649,51 +8426,491 @@ async fn test_add_worker_enqueues_and_claims() {
     ));
 
     let body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
+    let post = || {
+        let app = app.clone();
+        let body = body.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-queue-claim/workers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
 
-    // First POST: enqueue + claim succeed; spawn may fail downstream (500), never 409.
-    let first = app
+    let first = post().await;
+    assert_ne!(first.status(), StatusCode::CONFLICT);
+
+    // The claim was released, so the row is claimable again rather than stranded.
+    let snap = fetch_queue_snapshot(&app, "session-queue-claim").await;
+    assert_eq!(
+        snap["running"], 0,
+        "a failed spawn must not leave the row claimed"
+    );
+    assert_eq!(snap["queued"], 1, "the row must be returned to queued");
+    assert_eq!(snap["rows"][0]["worker_id"], "session-queue-claim-worker-1");
+
+    // And the retry is NOT turned away with a 409 — the whole point of the fix.
+    let second = post().await;
+    assert_ne!(
+        second.status(),
+        StatusCode::CONFLICT,
+        "a retry after a released claim must not 409"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+/// #175(d). Releasing without a cap would turn a 90s-bounded oscillation into an
+/// unbounded retry loop, each iteration re-running worktree creation and branch
+/// deletion against the operator's real repository.
+#[tokio::test]
+async fn add_worker_spawn_attempts_are_capped() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-claim-cap");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller.read().insert_test_session(make_test_session(
+        "session-queue-cap",
+        temp_dir.to_str().unwrap(),
+    ));
+
+    let body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
+    let post = || {
+        let app = app.clone();
+        let body = body.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-queue-cap/workers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    post().await;
+    post().await;
+    let third = post().await;
+
+    assert_eq!(
+        third.status(),
+        StatusCode::CONFLICT,
+        "the third failed spawn must retire the row instead of looping forever"
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(third.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "spawn_failed");
+    assert_eq!(body["attempts"], 3);
+
+    let snap = fetch_queue_snapshot(&app, "session-queue-cap").await;
+    assert_eq!(snap["failed"], 1, "the retired row must be terminal");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+/// #175(d). A session that cannot accept a worker must be refused BEFORE
+/// anything is written to the durable queue, with a 409 the caller can act on
+/// rather than an opaque 500.
+#[tokio::test]
+async fn add_worker_rejected_state_returns_409_and_creates_no_queue_row() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-reject");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let mut session = make_test_session("session-queue-reject", temp_dir.to_str().unwrap());
+    session.state = SessionState::Completed;
+    controller.read().insert_test_session(session);
+
+    let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/sessions/session-queue-claim/workers")
+                .uri("/api/sessions/session-queue-reject/workers")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .body(Body::from(r#"{"role_type":"backend","cli":"claude"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_ne!(
-        first.status(),
-        StatusCode::CONFLICT,
-        "first claim must not be a 409"
+
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "session_state");
+    assert!(body["current_state"].as_str().unwrap().contains("Completed"));
+
+    let snap = fetch_queue_snapshot(&app, "session-queue-reject").await;
+    assert_eq!(
+        snap["rows"].as_array().unwrap().len(),
+        0,
+        "a pre-validated rejection must not create a queue row at all"
     );
 
-    // The queue row exists and is running, even though the spawn failed.
-    let snap = fetch_queue_snapshot(&app, "session-queue-claim").await;
-    assert_eq!(snap["running"], 1, "first POST claims the row to running");
-    assert_eq!(snap["rows"][0]["worker_id"], "session-queue-claim-worker-1");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
 
-    // Second POST for the same worker loses the claim → 409.
-    let second = app
+/// #175(e). The recovery route turns a leaked claim back into a claimable row.
+#[tokio::test]
+async fn release_recovers_a_leaked_claim() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("leak-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.path().to_str().unwrap()));
+
+    // Seed the leak directly, so this test does not depend on #175(d) being broken.
+    let leaked = format!("{}-worker-2", session_id);
+    state
+        .queue_manager
+        .enqueue_worker(&leaked, &session_id, &leaked, "backend", "claude", serde_json::json!({}), None)
+        .await
+        .unwrap();
+    assert!(state
+        .queue_manager
+        .claim_and_spawn(&leaked, &session_id, &leaked)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(state.queue_manager.queue_snapshot(&session_id).unwrap().running, 1);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/workers/{}/release",
+                    session_id, leaked
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["released"], true);
+    assert_eq!(body["previous_status"], "running");
+
+    let snap = state.queue_manager.queue_snapshot(&session_id).unwrap();
+    assert_eq!(snap.running, 0);
+    assert_eq!(snap.queued, 1, "the row must be claimable again");
+    assert_eq!(snap.rows[0].attempts, 0, "the spawn budget must be reset");
+}
+
+/// The release route must refuse a worker that is genuinely on the roster —
+/// releasing it would strand the row, since the index allocator targets N+1.
+#[tokio::test]
+async fn release_refuses_a_rostered_worker() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("rostered-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let worker = format!("{}-worker-1", session_id);
+    controller.read().insert_test_session(make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &[&worker],
+    ));
+
+    state
+        .queue_manager
+        .enqueue_worker(&worker, &session_id, &worker, "backend", "claude", serde_json::json!({}), None)
+        .await
+        .unwrap();
+    state
+        .queue_manager
+        .claim_and_spawn(&worker, &session_id, &worker)
+        .await
+        .unwrap();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/workers/{}/release",
+                    session_id, worker
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // And it must not have half-acted.
+    assert_eq!(
+        state.queue_manager.queue_snapshot(&session_id).unwrap().running,
+        1,
+        "a refused release must leave the row untouched"
+    );
+}
+
+/// #175(f). A heartbeat from an id with no roster entry, no PTY and no queue row
+/// must be refused BEFORE it can finalize anything.
+#[tokio::test]
+async fn heartbeat_rejects_a_fully_unknown_agent() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("ghost-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let real = format!("{}-worker-1", session_id);
+    controller.read().insert_test_session(make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &[&real],
+    ));
+
+    let ghost = format!("{}-worker-4", session_id);
+    let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/sessions/session-queue-claim/workers")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .body(Body::from(
+                    serde_json::json!({"agent_id": ghost, "status": "completed"}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(
-        second.status(),
-        StatusCode::CONFLICT,
-        "duplicate worker POST must return 409 (lost claim)"
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a heartbeat for a nonexistent agent must not be silently accepted"
     );
 
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // A rostered agent still works.
+    let ok = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"agent_id": real, "status": "working"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+/// #175(f). The Queen's own wait loops post a BARE `queen` alias, not
+/// `{session}-queen`, and they use `curl -fsS` — so a 404 here is a hard
+/// non-zero exit that aborts the Queen's shell block while it waits for the
+/// Evaluator verdict or Prince remediation. The roster gate must canonicalize
+/// the alias before comparing.
+///
+/// The second half also pins a latent UI bug: heartbeats were stored under the
+/// raw `"queen"` key while `/api/sessions/active` looks the Queen up by
+/// `{session}-queen`, leaving its activity permanently null.
+#[tokio::test]
+async fn heartbeat_accepts_the_bare_queen_alias_and_canonicalizes_it() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = "queen-alias".to_string();
+    let temp_dir = TempDir::new().unwrap();
+
+    let queen_id = format!("{}-queen", session_id);
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.agents.push(AgentInfo {
+        id: queen_id.clone(),
+        role: AgentRole::Queen,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.read().insert_test_session(session);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agent_id": "queen",
+                        "status": "working",
+                        "summary": "Waiting for Evaluator verdict"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the Queen's bare `queen` alias must be accepted"
+    );
+
+    // ...and it must be stored under the roster id, so the UI can find it.
+    let active = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/active")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(active.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queen = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == session_id.as_str())
+        .expect("session present")["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == queen_id.as_str())
+        .expect("queen present")
+        .clone();
+    assert_eq!(queen["status"], "working");
+    assert_eq!(queen["summary"], "Waiting for Evaluator verdict");
+    assert!(
+        !queen["last_activity"].is_null(),
+        "the heartbeat must be recorded against the roster id, not the bare alias"
+    );
+}
+
+/// #175(f) regression net. Breaking heartbeating is worse than the bug it fixes,
+/// so every legitimate managed-agent id shape must still be accepted. Guards
+/// against a later "tidy-up" narrowing the gate to a role allowlist.
+#[tokio::test]
+async fn heartbeat_accepts_every_managed_agent_id_shape() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    // Short id so `{sid}-master-planner` stays under the 64-char agent-id cap.
+    let session_id = "hb-shapes".to_string();
+    let temp_dir = TempDir::new().unwrap();
+
+    let suffixes = [
+        "queen",
+        "worker-1",
+        "evaluator",
+        "prince",
+        "qa-worker-1",
+        "fusion-1",
+        "judge",
+        "debate-1-r1",
+        "master-planner",
+        "planner-1",
+    ];
+    let ids: Vec<String> = suffixes
+        .iter()
+        .map(|s| format!("{}-{}", session_id, s))
+        .collect();
+    let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    controller.read().insert_test_session(make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &refs,
+    ));
+
+    for id in &ids {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"agent_id": id, "status": "working"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "heartbeat must be accepted for rostered agent {id}"
+        );
+    }
+}
+
+/// Fail-open: every spawn path starts the PTY before pushing the roster entry,
+/// and the agents' heartbeat snippet uses `curl -fsS`, so a strict roster check
+/// would abort a healthy agent's shell block during that window.
+#[tokio::test]
+async fn heartbeat_accepts_an_agent_whose_roster_push_has_not_landed() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("prepush-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    // Roster deliberately does NOT contain the evaluator yet.
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.path().to_str().unwrap()));
+
+    let evaluator = format!("{}-evaluator", session_id);
+    register_live_pty(&state, &evaluator, AgentRole::Evaluator);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"agent_id": evaluator, "status": "working"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "a live PTY must be enough to accept a heartbeat during the roster-push window"
+    );
 }
 
 #[tokio::test]

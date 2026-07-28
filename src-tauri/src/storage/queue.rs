@@ -202,12 +202,15 @@ impl QueueRepo {
     /// non-NULL, non-stale heartbeat and matches 0 rows. The worker's own heartbeats then
     /// keep the row fresh; if its first heartbeat never arrives within `stuck_cutoff_ms`,
     /// the row legitimately becomes reclaimable again (the stuck-detection path).
+    /// Returns the claimed row's `attempts` counter on a win — the fencing epoch
+    /// for [`Self::requeue_claimed`] / [`Self::fail_claimed`] — or `None` if the
+    /// claim was lost.
     pub fn try_claim(
         &self,
         id: &str,
         stuck_cutoff_ms: i64,
         now_ms: i64,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Option<i64>, StorageError> {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
@@ -220,6 +223,74 @@ impl QueueRepo {
                         OR (status = 'running'
                             AND (heartbeat_at IS NULL OR heartbeat_at < ?3)))",
                 params![id, now_ms, stuck_cutoff_ms],
+            )?;
+            if conn.changes() != 1 {
+                return Ok(None);
+            }
+            let attempts: i64 = conn.query_row(
+                "SELECT attempts FROM agent_run_queue WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+            Ok(Some(attempts))
+        })
+    }
+
+    /// Fenced inverse of a claim: return a row we still own to `queued`.
+    ///
+    /// The `attempts = ?2` fence is required, not defensive. `status = 'running'`
+    /// alone is satisfied by ANY holder's claim and the schema has no owner
+    /// column, so this ABA is reachable: A wins (attempts=1) -> A's worktree
+    /// creation runs long -> the 30s maintenance pass reclaims the row past the
+    /// stuck cutoff -> a retry claims it (attempts=2) and spawns for real -> A
+    /// finally fails and releases, requeueing B's LIVE claim -> a third claimer
+    /// double-spawns. `attempts` is incremented exactly once per won claim, so it
+    /// is a free, already-persisted epoch.
+    pub fn requeue_claimed(
+        &self,
+        id: &str,
+        expected_attempts: i64,
+        now_ms: i64,
+    ) -> Result<bool, StorageError> {
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_run_queue
+                 SET status = 'queued', updated_at = ?3
+                 WHERE id = ?1 AND status = 'running' AND attempts = ?2",
+                params![id, expected_attempts, now_ms],
+            )?;
+            Ok(conn.changes() == 1)
+        })
+    }
+
+    /// Fenced terminal failure, used once a run has burned its spawn budget.
+    pub fn fail_claimed(
+        &self,
+        id: &str,
+        expected_attempts: i64,
+        now_ms: i64,
+    ) -> Result<bool, StorageError> {
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_run_queue
+                 SET status = 'failed', updated_at = ?3
+                 WHERE id = ?1 AND status = 'running' AND attempts = ?2",
+                params![id, expected_attempts, now_ms],
+            )?;
+            Ok(conn.changes() == 1)
+        })
+    }
+
+    /// Operator/agent recovery: force a stuck or failed row back to claimable and
+    /// reset its spawn budget. Unfenced by design — this is the documented exit
+    /// from a row that no automatic path can recover.
+    pub fn release_claim_manual(&self, id: &str, now_ms: i64) -> Result<bool, StorageError> {
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_run_queue
+                 SET status = 'queued', attempts = 0, updated_at = ?2
+                 WHERE id = ?1 AND status IN ('running', 'failed')",
+                params![id, now_ms],
             )?;
             Ok(conn.changes() == 1)
         })
@@ -445,6 +516,77 @@ mod tests {
         repo
     }
 
+    /// #175(d). The release must be fenced on the claim epoch, not just on
+    /// `status = 'running'`.
+    ///
+    /// The ABA this prevents: A wins the claim (attempts=1) -> A's worktree
+    /// creation runs long -> the maintenance pass reclaims the row past the stuck
+    /// cutoff -> a retry claims it (attempts=2) and spawns a real worker -> A
+    /// finally fails and releases, requeueing B's LIVE claim -> a third claimer
+    /// double-spawns. Without the fence there is no way to tell A's release from
+    /// B's.
+    #[test]
+    fn requeue_claimed_is_fenced_against_a_stale_epoch() {
+        let repo = repo();
+        repo.enqueue(&sample_row("r1", "s1", "s1-worker-1")).unwrap();
+
+        // A claims (epoch 1).
+        let epoch_a = repo.try_claim("r1", 0, 1_000).unwrap().expect("A wins");
+        assert_eq!(epoch_a, 1);
+
+        // Maintenance reclaims it as stale, then B claims (epoch 2).
+        repo.reclaim_stuck(5_000, 6_000).unwrap();
+        let epoch_b = repo.try_claim("r1", 5_000, 7_000).unwrap().expect("B wins");
+        assert_eq!(epoch_b, 2);
+
+        // A now fails and tries to release. It must NOT touch B's live claim.
+        assert!(
+            !repo.requeue_claimed("r1", epoch_a, 8_000).unwrap(),
+            "a stale epoch must not release a newer claim"
+        );
+        assert_eq!(
+            repo.get_row("r1").unwrap().unwrap().status,
+            QueueStatus::Running,
+            "B's claim must survive A's late release"
+        );
+
+        // B's own release still works.
+        assert!(repo.requeue_claimed("r1", epoch_b, 9_000).unwrap());
+        assert_eq!(
+            repo.get_row("r1").unwrap().unwrap().status,
+            QueueStatus::Queued
+        );
+    }
+
+    /// The release must never drag a terminal row back to claimable.
+    #[test]
+    fn requeue_claimed_is_a_noop_on_finalized_and_queued_rows() {
+        let repo = repo();
+        repo.enqueue(&sample_row("r1", "s1", "s1-worker-1")).unwrap();
+        let epoch = repo.try_claim("r1", 0, 1_000).unwrap().unwrap();
+        repo.record_heartbeat("s1", "s1-worker-1", "completed", 2_000)
+            .unwrap();
+        assert_eq!(
+            repo.get_row("r1").unwrap().unwrap().status,
+            QueueStatus::Finalized
+        );
+
+        assert!(!repo.requeue_claimed("r1", epoch, 3_000).unwrap());
+        assert_eq!(
+            repo.get_row("r1").unwrap().unwrap().status,
+            QueueStatus::Finalized,
+            "verified work must not be dragged back to queued"
+        );
+
+        // A never-claimed queued row is likewise untouched.
+        repo.enqueue(&sample_row("r2", "s1", "s1-worker-2")).unwrap();
+        assert!(!repo.requeue_claimed("r2", 1, 4_000).unwrap());
+        assert_eq!(
+            repo.get_row("r2").unwrap().unwrap().status,
+            QueueStatus::Queued
+        );
+    }
+
     fn sample_row(id: &str, session_id: &str, worker_id: &str) -> QueueRow {
         QueueRow {
             id: id.to_string(),
@@ -520,7 +662,7 @@ mod tests {
         let rb = rb.unwrap();
 
         // Exactly one claimer wins.
-        assert!(ra ^ rb, "exactly one of two concurrent claimers must win");
+        assert!(ra.is_some() ^ rb.is_some(), "exactly one of two concurrent claimers must win");
 
         let row = repo.get_row("r1").unwrap().unwrap();
         assert_eq!(row.status, QueueStatus::Running);
@@ -550,7 +692,7 @@ mod tests {
         assert_eq!(repo.get_row("fresh").unwrap().unwrap().status, QueueStatus::Running);
 
         // The reclaimed row is now claimable again.
-        assert!(repo.try_claim("stale", 1000, 10000).unwrap());
+        assert!(repo.try_claim("stale", 1000, 10000).unwrap().is_some());
     }
 
     #[test]
@@ -570,7 +712,7 @@ mod tests {
         assert_eq!(completed.last_status.as_deref(), Some("completed"));
         assert_eq!(completed.heartbeat_at, Some(200));
         assert!(repo.reclaim_stuck(1_000, 2_000).unwrap().is_empty());
-        assert!(!repo.try_claim("r1", 1_000, 2_000).unwrap());
+        assert!(repo.try_claim("r1", 1_000, 2_000).unwrap().is_none());
 
         let mut failed = sample_row("failed", "s1", "s1-worker-2");
         failed.status = QueueStatus::Failed;
@@ -593,13 +735,13 @@ mod tests {
         repo.enqueue(&stale).unwrap();
 
         // Even without an explicit reclaim pass, try_claim recovers a stale-running row.
-        assert!(repo.try_claim("stale", 1000, 2000).unwrap());
+        assert!(repo.try_claim("stale", 1000, 2000).unwrap().is_some());
         // A fresh-running row is NOT claimable.
         let mut fresh = sample_row("fresh", "s1", "s1-worker-2");
         fresh.status = QueueStatus::Running;
         fresh.heartbeat_at = Some(5000);
         repo.enqueue(&fresh).unwrap();
-        assert!(!repo.try_claim("fresh", 1000, 2000).unwrap());
+        assert!(repo.try_claim("fresh", 1000, 2000).unwrap().is_none());
     }
 
     #[test]

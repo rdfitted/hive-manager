@@ -600,8 +600,16 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
 - `rationale`: Optional. Brief explanation for the verdict.
 
 ### Override Endpoints (Operator Use)
-- `POST /api/sessions/{{session_id}}/qa/force-pass` — Force QA to PASS state.
-- `POST /api/sessions/{{session_id}}/qa/force-fail` — Force QA to FAIL state.
+These are destructive overrides and require an explicit confirmation body.
+```bash
+curl -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/force-pass" \
+  -H "Content-Type: application/json" \
+  -d '{"confirm":true,"rationale":"<why the override is warranted>"}'
+```
+- Force QA to PASS: `POST /api/sessions/{{session_id}}/qa/force-pass`
+- Force QA to FAIL: `POST /api/sessions/{{session_id}}/qa/force-fail`
+- `confirm`: Required, must be `true`. A bodyless POST is refused with 400.
+- `rationale`: Optional. Recorded in the operator audit log.
 
 ### Session Completion Preconditions
 - `POST /api/sessions/{{session_id}}/complete` returns 409 if blocked.
@@ -1404,7 +1412,9 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 - **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
   - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
 - **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
+  - Body (required): `{"confirm":true,"rationale":"<why>"}` — a bodyless POST is refused with 400
 - **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
+  - Body (required): `{"confirm":true,"rationale":"<why>"}`
 
 ### Session Completion
 - `POST /api/sessions/{{session_id}}/complete` marks the session completed.
@@ -1649,7 +1659,9 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 - **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
   - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
 - **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
+  - Body (required): `{"confirm":true,"rationale":"<why>"}` — a bodyless POST is refused with 400
 - **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
+  - Body (required): `{"confirm":true,"rationale":"<why>"}`
 
 ### Session Completion
 - `POST /api/sessions/{{session_id}}/complete` marks the session completed.
@@ -1755,7 +1767,9 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 - **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
   - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
 - **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
+  - Body (required): `{"confirm":true,"rationale":"<why>"}` — a bodyless POST is refused with 400
 - **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
+  - Body (required): `{"confirm":true,"rationale":"<why>"}`
 
 ### Session Completion
 - `POST /api/sessions/{{session_id}}/complete` marks the session completed.

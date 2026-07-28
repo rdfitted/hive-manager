@@ -193,8 +193,13 @@ impl CompletionBlockedError {
             (
                 "Session completion blocked: evaluator-backed session must be in QaPassed state".to_string(),
                 vec![
-                    format!("POST /api/sessions/{{{{id}}}}/qa/verdict with {{\"verdict\":\"PASS\"}} (Evaluator submits PASS)"),
-                    format!("POST /api/sessions/{{{{id}}}}/qa/force-pass (Operator override)"),
+                    // NB: under `format!`, `{{` renders as a single `{`. These
+                    // strings ship inside a live 409 body, so the reader must
+                    // see `{id}` -- not a doubled `{{id}}`.
+                    format!("POST /api/sessions/{{id}}/qa/verdict with {{\"verdict\":\"PASS\"}} (Evaluator submits PASS)"),
+                    format!(
+                        "POST /api/sessions/{{id}}/qa/force-pass with {{\"confirm\":true}} (Operator override)"
+                    ),
                 ],
             )
         } else {
@@ -695,6 +700,65 @@ fn is_terminal_session_state(state: &SessionState) -> bool {
             | SessionState::Completed
             | SessionState::Closed
             | SessionState::Failed(_)
+    )
+}
+
+/// Why a worker spawn was refused (#175d). Lets the HTTP layer answer with an
+/// accurate status and a machine-readable reason instead of a blanket 500.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddWorkerRejectionReason {
+    SessionTypeUnsupported,
+    ResearchSessionReadOnly,
+    ParentNotInSession,
+    ParentCannotParent,
+    StateNotAcceptingWorkers,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddWorkerRejection {
+    pub error: String,
+    pub reason: AddWorkerRejectionReason,
+    pub current_state: String,
+}
+
+#[derive(Debug)]
+pub enum AddWorkerError {
+    SessionNotFound(String),
+    Rejected(AddWorkerRejection),
+}
+
+impl std::fmt::Display for AddWorkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Byte-identical to the historical string, so existing callers that
+            // classify on the message keep working.
+            AddWorkerError::SessionNotFound(id) => write!(f, "Session not found: {}", id),
+            AddWorkerError::Rejected(rejection) => write!(f, "{}", rejection.error),
+        }
+    }
+}
+
+/// An index reserved for a spawn that has not happened yet.
+#[derive(Debug, Clone)]
+pub struct AddWorkerReservation {
+    pub index: u8,
+    pub worker_id: String,
+}
+
+/// States in which a QA review is open or already resolved. Used to stop
+/// unrelated worker progression from dragging a session back to `Running` and
+/// orphaning an in-flight review (#175a).
+fn is_qa_phase_state(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::SpawningEvaluator
+            | SessionState::QaInProgress { .. }
+            | SessionState::QaPassed
+            | SessionState::QaFailed { .. }
+            | SessionState::QaInconclusive
+            | SessionState::QaMaxRetriesExceeded
+            | SessionState::PrinceRemediation
     )
 }
 
@@ -1312,6 +1376,58 @@ impl SessionController {
         Ok(updated)
     }
 
+    /// Overlay live in-memory agent statuses onto a session reconstructed from
+    /// disk, but only for agents whose PTY is still running.
+    ///
+    /// `session_from_persisted` hardcodes `AgentStatus::Completed` for every agent
+    /// because `PersistedAgentInfo` carries no runtime status. Any read path that
+    /// inserts its output raw therefore reports still-running workers as
+    /// `Completed` -- the misleading roster observed in the field, where all three
+    /// workers read `Completed` while one kept working for another ~30 minutes.
+    ///
+    /// The PTY-liveness condition is load-bearing, not decoration. The reload is
+    /// also reached for terminal states such as `Failed(_)` and
+    /// `QaMaxRetriesExceeded`, and nothing in the crate ever writes a non-Completed
+    /// status after spawn, so an unconditional overlay would replace a wrong
+    /// "Completed" with a wrong "Running" that never converges for a dead session.
+    fn overlay_live_agent_statuses(&self, refreshed: &mut Session) {
+        // Resolve PTY liveness BEFORE taking the sessions lock, so the two locks
+        // are never held together.
+        let alive: std::collections::HashSet<String> = {
+            let pty_manager = self.pty_manager.read();
+            refreshed
+                .agents
+                .iter()
+                .filter(|a| pty_manager.is_alive(&a.id))
+                .map(|a| a.id.clone())
+                .collect()
+        };
+        if alive.is_empty() {
+            return;
+        }
+
+        let current_statuses: std::collections::HashMap<String, AgentStatus> = {
+            let sessions = self.sessions.read();
+            match sessions.get(&refreshed.id) {
+                Some(current) => current
+                    .agents
+                    .iter()
+                    .map(|a| (a.id.clone(), a.status.clone()))
+                    .collect(),
+                None => return,
+            }
+        };
+
+        for agent in refreshed.agents.iter_mut() {
+            if !alive.contains(&agent.id) {
+                continue;
+            }
+            if let Some(status) = current_statuses.get(&agent.id) {
+                agent.status = status.clone();
+            }
+        }
+    }
+
     pub fn reload_session_from_storage(&self, session_id: &str) -> Result<Session, String> {
         let storage = self
             .storage
@@ -1323,7 +1439,12 @@ impl SessionController {
         storage
             .mark_session_synced(session_id, &persisted)
             .map_err(|e| format!("Failed to track session storage state: {}", e))?;
-        let session = self.session_from_persisted(&persisted)?;
+        let mut session = self.session_from_persisted(&persisted)?;
+        // #176: without this, a GET that triggers a reload reports every live
+        // worker as Completed. `WorkerStateInfo` is built from `a.status` too, so
+        // a poisoned status also becomes durable in the workers file the Queen
+        // polls.
+        self.overlay_live_agent_statuses(&mut session);
         {
             let mut sessions = self.sessions.write();
             sessions.insert(session.id.clone(), session.clone());
@@ -1400,7 +1521,7 @@ impl SessionController {
             .collect()
     }
 
-    fn session_requires_internal_evaluator(session: &Session) -> bool {
+    pub(crate) fn session_requires_internal_evaluator(session: &Session) -> bool {
         session.agents.iter().any(|agent| {
             matches!(
                 agent.role,
@@ -1978,6 +2099,13 @@ impl SessionController {
     pub fn insert_test_session(&self, session: Session) {
         let mut sessions = self.sessions.write();
         sessions.insert(session.id.clone(), session);
+    }
+
+    /// Persist an in-memory test session to storage, so read paths that
+    /// reconstruct from disk have a snapshot to load.
+    #[cfg(test)]
+    pub fn persist_test_session(&self, session_id: &str) {
+        self.update_session_storage(session_id);
     }
 
     #[cfg(test)]
@@ -4730,7 +4858,12 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
    mv "$TMP_MILESTONE" "{milestone_ready_path}"
    ```
 
-3. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
+3. You MUST then signal the backend that the milestone is ready. This is what opens the QA review window and starts the QA clock — the clock does NOT run before this point, so there is no time pressure on the work above.
+   ```bash
+   curl -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/milestone-ready"
+   ```
+
+4. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
             completion_scope = completion_scope,
             peer_dir = peer_dir,
             milestone_ready_path = milestone_ready_path,
@@ -6800,6 +6933,30 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 }}
 ```
 
+## Error Responses
+
+A 4xx here is actionable — read `reason` before retrying.
+
+| Status | `reason` | What it means | What to do |
+|--------|----------|---------------|------------|
+| 409 | `already_claimed` | This worker index is already claimed and running | STOP. Do not retry — you would double-spawn. Check `GET /workers` |
+| 409 | `session_state` | The session cannot accept workers right now (see `current_state`) | Do not retry blindly. Resolve the state first (e.g. an unresolved QA verdict) |
+| 409 | `index_raced` | The roster moved between reservation and spawn | Re-read `GET /workers`, then retry ONCE |
+| 409 | `spawn_failed` | The spawn failed repeatedly and the queue row was retired (`attempts` included) | Call the release endpoint in `recovery`, then retry once |
+| 500 | — | Internal spawn failure; `worker_id` is included | If `GET /workers` shows no new worker, release the claim (below) and retry once |
+
+## Recovering a Stuck Worker Slot
+
+If a spawn failed and the slot appears stuck, release its durable claim:
+
+```bash
+curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/workers/{{worker_id}}/release"
+```
+
+Returns `{{"released": true|false, "previous_status": "...", "new_status": "queued"}}`. It only
+releases the queue claim — it never stops a live agent. If the worker is actually
+running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
+
 ## Notes
 
 - Workers spawn in a new Windows Terminal tab (visible window)
@@ -8422,6 +8579,8 @@ phases and do EXACTLY this, then stop:
                     &base_branch,
                 ],
             )?;
+            // #177: halt ESLint's cascade before it escapes into the parent repo.
+            crate::workspace::git::ensure_worktree_config_boundary(&project_path, &worktree_path);
             self.emit_workspace_created(
                 &session_id,
                 &variant_to_cell_id(&variant.name),
@@ -8765,6 +8924,8 @@ phases and do EXACTLY this, then stop:
                     base_branch,
                 ],
             )?;
+            // #177: halt ESLint's cascade before it escapes into the parent repo.
+            crate::workspace::git::ensure_worktree_config_boundary(project_path, &worktree_path);
             controller.emit_workspace_created(
                 session_id,
                 &variant_to_cell_id(&debater.name),
@@ -9587,6 +9748,11 @@ phases and do EXACTLY this, then stop:
                     &base_branch,
                 ],
             )?;
+            // #177: halt ESLint's cascade before it escapes into the parent repo.
+            crate::workspace::git::ensure_worktree_config_boundary(
+                &session.project_path,
+                &worktree_path,
+            );
             self.emit_workspace_created(
                 session_id,
                 &variant_to_cell_id(&variant.name),
@@ -10025,9 +10191,18 @@ phases and do EXACTLY this, then stop:
             // All workers spawned - session complete
             let changes = {
                 let mut sessions = self.sessions.write();
-                sessions
-                    .get_mut(session_id)
-                    .map(|s| self.set_session_state_with_events(s, SessionState::Running))
+                sessions.get_mut(session_id).and_then(|s| {
+                    // #175(a): do not clobber an open QA window. Now that a
+                    // session sits in `Running` until the milestone handoff, a
+                    // worker completing AFTER the handoff would otherwise drag
+                    // the session back out of QaInProgress and orphan the
+                    // Evaluator's review.
+                    if is_qa_phase_state(&s.state) {
+                        None
+                    } else {
+                        Some(self.set_session_state_with_events(s, SessionState::Running))
+                    }
+                })
             };
             if let Some(changes) = changes {
                 self.persist_then_emit_session_update(session_id, changes)
@@ -10811,6 +10986,50 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
+    /// Surface a dropped milestone-ready signal to the UI. Reuses the existing
+    /// `qa-inconclusive` event rather than introducing a new one.
+    fn emit_qa_inconclusive_event(&self, session_id: &str) {
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit(
+                "qa-inconclusive",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "action": "milestone-ready-dropped",
+                    "reason": "QA is inconclusive; resolve with qa/force-pass or qa/force-fail",
+                }),
+            );
+        }
+    }
+
+    /// Open the QA review window: move the session into `QaInProgress` and arm
+    /// the QA timeout.
+    ///
+    /// #175(a): this is the ONE place that starts the QA clock. Spawning an
+    /// Evaluator deliberately does not, because that happens at session launch,
+    /// long before there is anything to review.
+    pub(crate) fn begin_qa_window(&self, session_id: &str) -> Result<(), String> {
+        let (timeout_secs, changes) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            let next_state = qa_in_progress_state(&session.state);
+            let changes = self.set_session_state_with_events(session, next_state);
+            (session.qa_timeout_secs, changes)
+        };
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+        self.start_qa_timeout(session_id, timeout_secs);
+        Ok(())
+    }
+
+    /// Whether a QA timeout is currently armed for this session.
+    #[cfg(test)]
+    pub fn qa_timeout_armed(&self, session_id: &str) -> bool {
+        self.qa_timeout_handles.lock().contains_key(session_id)
+    }
+
     #[allow(dead_code)]
     pub fn on_milestone_ready(&self, session_id: &str) -> Result<(), String> {
         let (maybe_evaluator, config) = {
@@ -10819,10 +11038,34 @@ phases and do EXACTLY this, then stop:
                 .get(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
+            // #175(b): a milestone-ready signal arriving while the session is
+            // QaInconclusive is still dropped, but it must not be dropped
+            // SILENTLY -- that is how a Queen submitting the real milestone after
+            // a spurious timeout got no QA and no explanation. Recovery (re-entry
+            // into QaInProgress) is deliberately deferred; the operator path via
+            // force-pass / force-fail already accepts QaInconclusive.
+            if matches!(&session.state, SessionState::QaInconclusive) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "Dropping milestone-ready signal: QA is inconclusive for this session. \
+                     Operator must resolve it with qa/force-pass or qa/force-fail."
+                );
+                if let Some(storage) = self.storage.as_ref() {
+                    let msg = crate::coordination::CoordinationMessage::system(
+                        "OPERATOR",
+                        "milestone-ready was received but ignored: QA is inconclusive. \
+                         Resolve with POST /qa/force-pass or POST /qa/force-fail \
+                         (body: {\"confirm\":true}).",
+                    );
+                    let _ = storage.append_coordination_log(session_id, &msg);
+                }
+                self.emit_qa_inconclusive_event(session_id);
+                return Ok(());
+            }
+
             if matches!(
                 &session.state,
                 SessionState::PrinceRemediation
-                    | SessionState::QaInconclusive
                     | SessionState::QaPassed
                     | SessionState::QaMaxRetriesExceeded
             ) {
@@ -10879,24 +11122,17 @@ phases and do EXACTLY this, then stop:
             let result = self.launch_evaluator(session_id, config, false);
             self.finish_evaluator_respawn(session_id);
             result?;
+            // #175(a) THE TRAP: this branch used to rely on `launch_evaluator`'s
+            // tail to transition and arm the clock. Now that spawning an
+            // Evaluator no longer opens a QA window, this branch must open it
+            // itself -- otherwise the fix for a spurious-timeout bug becomes a
+            // never-times-out bug, and a real milestone would sit unreviewed
+            // forever.
+            self.begin_qa_window(session_id)?;
             return Ok(());
         }
 
-        let timeout_secs = {
-            let mut sessions = self.sessions.write();
-            let session = sessions
-                .get_mut(session_id)
-                .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            let next_state = qa_in_progress_state(&session.state);
-            let changes = self.set_session_state_with_events(session, next_state);
-            (session.qa_timeout_secs, changes)
-        };
-        self.emit_session_update(session_id);
-        self.update_session_storage(session_id);
-        self.emit_cell_status_changes(session_id, timeout_secs.1);
-        self.start_qa_timeout(session_id, timeout_secs.0);
-
-        Ok(())
+        self.begin_qa_window(session_id)
     }
 
     #[allow(dead_code)]
@@ -12747,49 +12983,56 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
-    /// Add a worker to an existing session
-    pub fn add_worker(
-        &self,
-        session_id: &str,
-        config: AgentConfig,
-        role: WorkerRole,
-        parent_id: Option<String>,
-    ) -> Result<AgentInfo, String> {
-        // Get session and validate
-        let session = {
-            let sessions = self.sessions.read();
-            sessions.get(session_id).cloned()
-        }
-        .ok_or_else(|| format!("Session not found: {}", session_id))?;
-
-        if !Self::session_allows_dynamic_principal(&session, &role, parent_id.as_deref()) {
-            return Err(format!(
-                "Cannot add a managed principal to {:?}; dynamic principals are supported only by Hive sessions",
-                session.session_type
-            ));
+    /// The single source of truth for "may a worker be added right now?".
+    ///
+    /// #175(d): the HTTP handler pre-checks this BEFORE writing anything to the
+    /// durable queue, and `add_worker` re-checks it under the write lock. Both go
+    /// through this one function so the pre-check can never drift from the real
+    /// check — a drift would either resurrect the leak or reject valid spawns.
+    pub(crate) fn check_add_worker_preconditions(
+        session: &Session,
+        role: &WorkerRole,
+        parent_id: Option<&str>,
+    ) -> Result<(), AddWorkerRejection> {
+        if !Self::session_allows_dynamic_principal(session, role, parent_id) {
+            return Err(AddWorkerRejection {
+                error: format!(
+                    "Cannot add a managed principal to {:?}; dynamic principals are supported only by Hive sessions",
+                    session.session_type
+                ),
+                reason: AddWorkerRejectionReason::SessionTypeUnsupported,
+                current_state: format!("{:?}", session.state),
+            });
         }
         if session.no_git && !role.role_type.eq_ignore_ascii_case("researcher") {
-            return Err("Research sessions accept only read-only researcher workers".to_string());
+            return Err(AddWorkerRejection {
+                error: "Research sessions accept only read-only researcher workers".to_string(),
+                reason: AddWorkerRejectionReason::ResearchSessionReadOnly,
+                current_state: format!("{:?}", session.state),
+            });
         }
-        if let Some(explicit_parent) = parent_id.as_deref() {
+        if let Some(explicit_parent) = parent_id {
             let parent = session
                 .agents
                 .iter()
                 .find(|agent| agent.id == explicit_parent)
-                .ok_or_else(|| {
-                    format!(
+                .ok_or_else(|| AddWorkerRejection {
+                    error: format!(
                         "Parent agent {} does not belong to session {}",
-                        explicit_parent, session_id
-                    )
+                        explicit_parent, session.id
+                    ),
+                    reason: AddWorkerRejectionReason::ParentNotInSession,
+                    current_state: format!("{:?}", session.state),
                 })?;
             if !matches!(
                 parent.role,
                 AgentRole::Queen | AgentRole::Planner { .. } | AgentRole::Prince
             ) {
-                return Err(format!(
-                    "Agent {} cannot parent a managed principal",
-                    explicit_parent
-                ));
+                return Err(AddWorkerRejection {
+                    error: format!("Agent {} cannot parent a managed principal", explicit_parent),
+                    reason: AddWorkerRejectionReason::ParentCannotParent,
+                    current_state: format!("{:?}", session.state),
+                });
             }
         }
 
@@ -12804,21 +13047,94 @@ phases and do EXACTLY this, then stop:
                 | SessionState::QaFailed { .. }
                 | SessionState::QaMaxRetriesExceeded
                 | SessionState::PrinceRemediation
+                // #175(c): QaInconclusive is strictly less terminal than
+                // QaMaxRetriesExceeded (which is allowed), is already accepted by
+                // is_monitorable and by the operator override gate, and excluding
+                // it stranded the Prince's fix team -- the parent-role check
+                // accepts Prince, but this state guard rejected first.
+                | SessionState::QaInconclusive
         );
         if !can_add_worker {
-            return Err(format!(
-                "Cannot add worker to session in state {:?}",
-                session.state
-            ));
+            return Err(AddWorkerRejection {
+                error: format!("Cannot add worker to session in state {:?}", session.state),
+                reason: AddWorkerRejectionReason::StateNotAcceptingWorkers,
+                current_state: format!("{:?}", session.state),
+            });
         }
 
-        // Determine worker index
-        let existing_workers = session
+        Ok(())
+    }
+
+    /// The worker index the next spawn will take. One definition, used by both
+    /// the handler's reservation and `add_worker` itself.
+    pub(crate) fn next_worker_index(session: &Session) -> u8 {
+        let existing = session
             .agents
             .iter()
             .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
             .count();
-        let worker_index = (existing_workers + 1) as u8;
+        (existing + 1) as u8
+    }
+
+    /// Read-only reservation used by the HTTP handler before it touches the
+    /// durable queue (#175d).
+    ///
+    /// Reads `self.sessions` directly rather than going through `get_session`,
+    /// which performs a mutating disk refresh.
+    pub fn reserve_add_worker(
+        &self,
+        session_id: &str,
+        role: &WorkerRole,
+        parent_id: Option<&str>,
+    ) -> Result<AddWorkerReservation, AddWorkerError> {
+        let sessions = self.sessions.read();
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| AddWorkerError::SessionNotFound(session_id.to_string()))?;
+
+        Self::check_add_worker_preconditions(session, role, parent_id)
+            .map_err(AddWorkerError::Rejected)?;
+
+        let index = Self::next_worker_index(session);
+        Ok(AddWorkerReservation {
+            index,
+            worker_id: format!("{}-worker-{}", session_id, index),
+        })
+    }
+
+    /// Add a worker to an existing session
+    pub fn add_worker(
+        &self,
+        session_id: &str,
+        config: AgentConfig,
+        role: WorkerRole,
+        parent_id: Option<String>,
+        expected_index: Option<u8>,
+    ) -> Result<AgentInfo, String> {
+        // Get session and validate
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        Self::check_add_worker_preconditions(&session, &role, parent_id.as_deref())
+            .map_err(|rejection| rejection.error)?;
+
+        // Determine worker index
+        let worker_index = Self::next_worker_index(&session);
+        // #175(d): the handler reserved an index, then released the read lock
+        // across two awaits before this call. If the roster moved in between, the
+        // durable queue row protects a different id than the one we are about to
+        // spawn — fail cleanly so the handler can release its claim.
+        if let Some(expected) = expected_index {
+            if expected != worker_index {
+                return Err(format!(
+                    "Worker index race: reserved {} but session now needs {}",
+                    expected, worker_index
+                ));
+            }
+        }
 
         // Determine parent (default to Queen)
         let actual_parent_id = parent_id.unwrap_or_else(|| format!("{}-queen", session_id));
@@ -13065,13 +13381,27 @@ phases and do EXACTLY this, then stop:
             config.label = Some("Evaluator".to_string());
         }
 
-        let spawning_changes = {
+        // #175(a): capture the state we are transitioning AWAY from, so the tail
+        // can restore it. Restoring the captured state rather than a hardcoded
+        // `Running` also fixes a latent iteration-loss bug: the tail used to read
+        // `qa_in_progress_state(&current.state)` AFTER this block had already
+        // written `SpawningEvaluator`, so a respawn from `QaFailed { iteration: 2 }`
+        // fell to the catch-all arm and reset the counter to `None`, defeating the
+        // max-retries ceiling.
+        let (previous_state, spawning_changes) = {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
+                let previous_state = current.state.clone();
                 current.agents.retain(|agent| agent.id != evaluator_id);
-                Some(self.set_session_state_with_events(current, SessionState::SpawningEvaluator))
+                (
+                    Some(previous_state),
+                    Some(self.set_session_state_with_events(
+                        current,
+                        SessionState::SpawningEvaluator,
+                    )),
+                )
             } else {
-                None
+                (None, None)
             }
         };
         self.emit_session_update(session_id);
@@ -13152,23 +13482,42 @@ phases and do EXACTLY this, then stop:
             base_commit_sha: None,
         };
 
-        let (timeout_secs, qa_changes) = {
+        // #175(a): spawning an Evaluator does NOT open a QA window. It used to
+        // transition straight to QaInProgress and arm the 300s QA timer, and
+        // because this runs at SESSION LAUNCH, every evaluator-backed session ran
+        // a live QA clock from the moment it started. Any session whose first
+        // milestone took longer than the timeout was deterministically poisoned
+        // to QaInconclusive with a spurious BLOCKED/timeout verdict for work that
+        // had never been submitted for review.
+        //
+        // The clock is now armed only by `begin_qa_window`, at milestone handoff.
+        let qa_changes = {
             let mut sessions = self.sessions.write();
             let current = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             current.agents.push(agent_info.clone());
             self.emit_agent_launched(current, &agent_info);
-            let next_state = qa_in_progress_state(&current.state);
-            let changes = self.set_session_state_with_events(current, next_state);
-            (current.qa_timeout_secs, changes)
+            // Restore the pre-spawn state, but only if we are still the ones
+            // holding SpawningEvaluator: the sessions lock is released across the
+            // PTY spawn and two file writes above, so an unguarded restore could
+            // silently revert a concurrent Failed/Closing/Closed transition.
+            match (&current.state, previous_state) {
+                (SessionState::SpawningEvaluator, Some(previous)) => {
+                    Some(self.set_session_state_with_events(current, previous))
+                }
+                _ => None,
+            }
         };
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
-        self.emit_cell_status_changes(session_id, qa_changes);
+        if let Some(changes) = qa_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
+        // The peer watcher must still exist — without it the milestone handoff is
+        // never observed.
         self.ensure_task_watcher(session_id, &session.project_path);
-        self.start_qa_timeout(session_id, timeout_secs);
 
         // #125: evaluator spawned successfully — mark the write-step Completed.
         if let Some(step_id) = evaluator_journal_step.as_deref() {
@@ -13404,24 +13753,22 @@ phases and do EXACTLY this, then stop:
             base_commit_sha: None,
         };
 
-        let qa_changes = {
+        {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.push(agent_info.clone());
                 self.emit_agent_launched(current, &agent_info);
-                let next_state = qa_in_progress_state(&current.state);
-                Some(self.set_session_state_with_events(current, next_state))
-            } else {
-                None
             }
-        };
+        }
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
-        if let Some(changes) = qa_changes {
-            self.emit_cell_status_changes(session_id, changes);
-        }
         self.ensure_task_watcher(session_id, &session.project_path);
+        // #175(a): route the QA transition through the single window-opener so
+        // this path gets a clock too. Otherwise it would be the only remaining
+        // way into QaInProgress with no timeout armed, and there is no UI
+        // escalation to compensate.
+        self.begin_qa_window(session_id)?;
 
         Ok(agent_info)
     }

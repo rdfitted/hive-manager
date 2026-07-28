@@ -21,6 +21,14 @@
   let closing = $state(false);
   let showForceFailConfirm = $state(false);
   let forceFailing = $state(false);
+  // #176: Force Pass / Skip QA are destructive one-click overrides. Server-side
+  // `confirm: true` protects nothing when the UI supplies it automatically, so
+  // the real guard for an operator misclick has to live here.
+  let showForcePassConfirm = $state(false);
+  let showSkipQaConfirm = $state(false);
+  // Operator-action failures were previously console-only: a 400 produced zero
+  // on-screen change. There is no toast system in this repo, so surface inline.
+  let opError = $state<string | null>(null);
   let cliHealthCollapsed = $state(false);
   let cliHealth = $state<CliHealthMap>({});
   let cliHealthLoading = $state(false);
@@ -166,35 +174,65 @@
   }
 
   // Operator controls — use HTTP API (Tauri commands not yet registered)
-  async function postSessionAction(path: string, errorMessage: string): Promise<boolean> {
+  // #176: force-pass / force-fail now require an explicit `{"confirm": true}`
+  // body. A bodyless POST is refused with a 400.
+  async function postSessionAction(
+    path: string,
+    errorMessage: string,
+    body?: unknown
+  ): Promise<boolean> {
     const sessionId = $activeSession?.id;
     if (!sessionId) return false;
     try {
-      const res = await fetch(apiUrl(`/api/sessions/${sessionId}${path}`), { method: 'POST' });
+      const res = await fetch(apiUrl(`/api/sessions/${sessionId}${path}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body ?? {})
+      });
       if (!res.ok) {
-        const body = await res.text();
-        console.error(errorMessage, body);
+        const raw = await res.text();
+        let detail = raw;
+        try {
+          detail = (JSON.parse(raw) as { error?: string }).error ?? raw;
+        } catch {
+          // non-JSON body — surface it verbatim
+        }
+        console.error(errorMessage, raw);
+        opError = `${errorMessage} ${detail}`;
         return false;
       }
+      opError = null;
       return true;
     } catch (err) {
       console.error(errorMessage, err);
+      opError = `${errorMessage} ${err instanceof Error ? err.message : String(err)}`;
       return false;
     }
   }
 
   async function handleSkipQa() {
-    await postSessionAction('/qa/force-pass', 'Failed to skip QA:');
+    const ok = await postSessionAction('/qa/force-pass', 'Failed to skip QA:', {
+      confirm: true,
+      rationale: 'Skip QA from the Status panel'
+    });
+    if (ok) showSkipQaConfirm = false;
   }
 
   async function handleForcePass() {
-    await postSessionAction('/qa/force-pass', 'Failed to force pass milestone:');
+    const ok = await postSessionAction('/qa/force-pass', 'Failed to force pass milestone:', {
+      confirm: true,
+      rationale: 'Force pass from the Status panel'
+    });
+    if (ok) showForcePassConfirm = false;
   }
 
   async function handleForceFail() {
     forceFailing = true;
     try {
-      const ok = await postSessionAction('/qa/force-fail', 'Failed to force fail milestone:');
+      const ok = await postSessionAction('/qa/force-fail', 'Failed to force fail milestone:', {
+        confirm: true,
+        rationale: 'Force fail from the Status panel'
+      });
       if (ok) {
         showForceFailConfirm = false;
       }
@@ -203,6 +241,8 @@
     }
   }
 
+  // Unchanged — still gates the QA Feedback panel. Deliberately NOT widened:
+  // that section should only appear once QA has actually started.
   function isQaPhase(state: Session['state']): boolean {
     const v = serdeEnumVariantName(state);
     return (
@@ -214,6 +254,21 @@
       v === 'QaMaxRetriesExceeded' ||
       (typeof state === 'object' && state !== null && 'QaFailed' in state)
     );
+  }
+
+  // #175: evaluator-backed sessions now stay in Running until the milestone
+  // handoff, but still cannot complete without reaching QaPassed — so the
+  // operator needs the override controls before QA has ever started. Mirrors the
+  // backend gate, which widens to Running/SpawningEvaluator only when the session
+  // actually has an Evaluator or QA worker.
+  function canOverrideQa(state: Session['state'], agents: Session['agents']): boolean {
+    if (isQaPhase(state)) return true;
+    const v = serdeEnumVariantName(state);
+    if (v !== 'Running' && v !== 'SpawningEvaluator') return false;
+    return (agents ?? []).some((a) => {
+      const role = serdeEnumVariantName(a.role);
+      return role === 'Evaluator' || role === 'QaWorker';
+    });
   }
 </script>
 
@@ -365,16 +420,20 @@
           <section class="section actions-section">
             <div class="operator-controls">
               {#if serdeEnumVariantName($activeSession.state) === 'QaInProgress'}
-                <button class="op-button skip" onclick={handleSkipQa}>Skip QA</button>
+                <button class="op-button skip" onclick={() => showSkipQaConfirm = true}>Skip QA</button>
               {/if}
 
-              {#if isQaPhase($activeSession.state)}
+              {#if canOverrideQa($activeSession.state, $activeSession.agents)}
                 <div class="op-group">
-                  <button class="op-button pass" onclick={handleForcePass}>Force Pass</button>
+                  <button class="op-button pass" onclick={() => showForcePassConfirm = true}>Force Pass</button>
                   <button class="op-button fail" onclick={() => showForceFailConfirm = true}>Force Fail</button>
                 </div>
               {/if}
             </div>
+
+            {#if opError}
+              <p class="op-error" role="alert">{opError}</p>
+            {/if}
 
             <button
               class="close-button"
@@ -440,6 +499,58 @@
               <button class="confirm-btn" onclick={handleForceFail} disabled={forceFailing}>
                 {forceFailing ? 'Failing...' : 'Force Fail'}
               </button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- #176: Force Pass confirmation dialog. Previously a single unguarded click. -->
+      {#if showForcePassConfirm}
+        <div
+          class="confirm-overlay"
+          onclick={() => (showForcePassConfirm = false)}
+          onkeydown={(event) => event.key === 'Escape' && (showForcePassConfirm = false)}
+          role="presentation"
+        >
+          <div
+            class="confirm-dialog"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') showForcePassConfirm = false; }}
+            role="dialog"
+            aria-modal="true"
+            tabindex="-1"
+          >
+            <h3>Force Pass Milestone?</h3>
+            <p>This bypasses the Evaluator and marks QA as passed without review. Are you sure?</p>
+            <div class="confirm-actions">
+              <button class="cancel-btn" onclick={() => (showForcePassConfirm = false)}>Cancel</button>
+              <button class="confirm-btn" onclick={handleForcePass}>Force Pass</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- #176: Skip QA confirmation dialog (same destructive force-pass endpoint). -->
+      {#if showSkipQaConfirm}
+        <div
+          class="confirm-overlay"
+          onclick={() => (showSkipQaConfirm = false)}
+          onkeydown={(event) => event.key === 'Escape' && (showSkipQaConfirm = false)}
+          role="presentation"
+        >
+          <div
+            class="confirm-dialog"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') showSkipQaConfirm = false; }}
+            role="dialog"
+            aria-modal="true"
+            tabindex="-1"
+          >
+            <h3>Skip QA?</h3>
+            <p>This force-passes the current milestone without an Evaluator review. Are you sure?</p>
+            <div class="confirm-actions">
+              <button class="cancel-btn" onclick={() => (showSkipQaConfirm = false)}>Cancel</button>
+              <button class="confirm-btn" onclick={handleSkipQa}>Skip QA</button>
             </div>
           </div>
         </div>
@@ -615,6 +726,14 @@
   .cli-health-badge.pending,
   .cli-health-detail.pending {
     color: var(--text-disabled);
+  }
+
+  /* #176: operator-action failures were console-only before this. */
+  .op-error {
+    margin: 0.5rem 0 0;
+    color: var(--status-error);
+    font-size: 0.8rem;
+    word-break: break-word;
   }
 
   .cli-health-detail,

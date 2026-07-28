@@ -239,20 +239,33 @@ impl PtySession {
             cmd.cwd(dir);
         }
 
-        let child = pty_pair
+        let mut child = pty_pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnError(e.to_string()))?;
 
-        let writer = pty_pair
-            .master
-            .take_writer()
-            .map_err(into_io_error)?;
+        // #175(d): the child is ALREADY RUNNING at this point. Returning `Err`
+        // from either step below without killing it would leave a live process
+        // that no `PtySession` owns — and the caller, seeing `Err`, releases the
+        // worker's durable queue claim so a retry can spawn a second one. Any
+        // failure past the spawn must therefore reap the child first.
+        let writer = match pty_pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(into_io_error(e));
+            }
+        };
 
-        let reader = pty_pair
-            .master
-            .try_clone_reader()
-            .map_err(into_io_error)?;
+        let reader = match pty_pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(into_io_error(e));
+            }
+        };
 
         // Keep the master alive - dropping it closes the PTY!
         let master = pty_pair.master;

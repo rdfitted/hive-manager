@@ -68,23 +68,73 @@ pub async fn post_heartbeat(
         ));
     }
 
+    // #175(f): reject heartbeats for agents that are not part of this session.
+    // A ghost id previously returned 200 and, worse, could finalize a durable
+    // queue row via `record_heartbeat` — which is how a `completed` beat for a
+    // nonexistent `worker-4` silently retired a real queue row.
+    //
+    // The gate is deliberately FAIL-OPEN across three signals (roster, live PTY,
+    // queue row). Every spawn path starts the PTY *before* pushing the roster
+    // entry, and several remove the old entry first, so a strict roster check
+    // would 404 during those windows — and the heartbeat snippet agents run uses
+    // `curl -fsS`, which turns a 404 into a hard non-zero exit that aborts the
+    // agent's shell block. Breaking heartbeating is worse than the bug.
+    //
+    // It still closes the hole: the harmful case is an id with no roster entry,
+    // no live PTY and no queue row, and this runs BEFORE `record_heartbeat`.
+    // The Queen posts a bare `queen` alias while its roster entry is
+    // `{session}-queen`, so RESOLVE the posted id rather than rewriting it: an id
+    // that is already a member wins, and only an unknown bare alias is expanded.
+    // Rewriting unconditionally would break every agent whose roster id genuinely
+    // is unqualified.
+    let qualified = super::canonical_agent_id(&session_id, &req.agent_id);
+
+    let (raw_known, qualified_known) = {
+        let controller = state.session_controller.read();
+        let session = controller.get_session(&session_id).ok_or_else(|| {
+            ApiError::not_found(format!("Session {} not found", session_id))
+        })?;
+        let pty_manager = state.pty_manager.read();
+        let known = |id: &str| {
+            session.agents.iter().any(|a| a.id == id) || pty_manager.is_alive(id)
+        };
+        (known(&req.agent_id), known(&qualified))
+    };
+
+    let agent_id = if raw_known {
+        req.agent_id.clone()
+    } else if qualified_known {
+        qualified
+    } else {
+        // Last resort: a durable queue row is proof of a real worker whose roster
+        // push has not landed yet.
+        let rows = state
+            .queue_manager
+            .repo()
+            .rows_for_session(&session_id)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if rows.iter().any(|row| row.worker_id == req.agent_id) {
+            req.agent_id.clone()
+        } else if rows.iter().any(|row| row.worker_id == qualified) {
+            qualified
+        } else {
+            tracing::warn!(
+                session_id = %session_id,
+                agent_id = %req.agent_id,
+                "rejecting heartbeat from an agent that is not a member of this session"
+            );
+            return Err(ApiError::not_found(format!(
+                "Agent {} is not a member of session {}",
+                req.agent_id, session_id
+            )));
+        }
+    };
+
     // Scope the (non-Send) parking_lot guard so it is dropped before the await below.
     {
         let controller = state.session_controller.read();
-        if controller.get_session(&session_id).is_none() {
-            return Err(ApiError::not_found(format!(
-                "Session {} not found",
-                session_id
-            )));
-        }
-
         controller
-            .update_heartbeat(
-                &session_id,
-                &req.agent_id,
-                &req.status,
-                req.summary.as_deref(),
-            )
+            .update_heartbeat(&session_id, &agent_id, &req.status, req.summary.as_deref())
             .map_err(|e| ApiError::internal(e))?;
     }
 
@@ -93,7 +143,7 @@ pub async fn post_heartbeat(
     // Queen) is simply a no-op here.
     state
         .queue_manager
-        .record_heartbeat(&session_id, &req.agent_id, &req.status)
+        .record_heartbeat(&session_id, &agent_id, &req.status)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

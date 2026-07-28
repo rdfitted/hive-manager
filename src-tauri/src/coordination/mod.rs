@@ -5,7 +5,7 @@ mod state;
 
 pub use contracts::*;
 pub use injection::*;
-pub use queue_manager::QueueManager;
+pub use queue_manager::{QueueManager, ReleaseAfterFailure, ReleaseOutcome};
 pub use state::*;
 
 use chrono::{DateTime, Utc};

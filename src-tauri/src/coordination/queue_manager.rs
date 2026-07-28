@@ -105,6 +105,32 @@ pub const MAX_NO_PROGRESS_CONTINUATIONS: i64 = NO_PROGRESS_WINDOW_SECS
     .div_ceil(HEARTBEAT_MIN_INTERVAL_SECS)
     as i64;
 
+/// How many times a single queue row may be claimed for a spawn that then fails
+/// before the row is retired as terminally `failed` (#175d). Bounds the retry
+/// loop that releasing the claim would otherwise make unbounded.
+pub const MAX_SPAWN_ATTEMPTS: i64 = 3;
+
+/// Outcome of releasing a claim after a failed spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseAfterFailure {
+    /// Row returned to `queued`; a retry may claim it.
+    Released,
+    /// Spawn budget exhausted; the row is terminally `failed` and only the
+    /// explicit release route can revive it.
+    Exhausted { attempts: i64 },
+    /// We no longer held the claim (someone else reclaimed it first).
+    NotHeld,
+}
+
+/// Outcome of an operator/agent claim release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    Released { previous: QueueStatus },
+    AlreadyQueued,
+    Terminal { status: QueueStatus },
+    NoRow,
+}
+
 /// Coordination-layer façade over the durable queue. Cheaply clonable.
 #[derive(Clone)]
 pub struct QueueManager {
@@ -166,16 +192,17 @@ impl QueueManager {
     /// Atomically claim a queued (or stale-running) row, flipping it to `running`. Returns
     /// `true` iff THIS call won the claim. Emits `WorkerClaimed` on a win and
     /// `WorkerClaimFailed` on a loss. The HTTP handler proceeds to spawn only on `true`.
+    /// Returns the claim epoch (`attempts`) on a win, `None` on a loss.
     pub async fn claim_and_spawn(
         &self,
         id: &str,
         session_id: &str,
         worker_id: &str,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Option<i64>, StorageError> {
         let now = Self::now_ms();
         let cutoff = now - STUCK_CUTOFF_MS;
-        let won = self.repo.try_claim(id, cutoff, now)?;
-        if won {
+        let epoch = self.repo.try_claim(id, cutoff, now)?;
+        if epoch.is_some() {
             self.emit(session_id, worker_id, EventType::WorkerClaimed, Severity::Info)
                 .await;
         } else {
@@ -187,7 +214,90 @@ impl QueueManager {
             )
             .await;
         }
-        Ok(won)
+        Ok(epoch)
+    }
+
+    /// Release a claim whose spawn failed (#175d).
+    ///
+    /// Without this, a spawn that failed after winning the claim left the row
+    /// `running` forever: retries inside the 90s freshness window lost the claim
+    /// (409), the 30s maintenance pass then reclaimed it, the next retry won and
+    /// failed again — a permanent 409/500 oscillation with the worker index
+    /// pinned, and no API to recover.
+    ///
+    /// Past [`MAX_SPAWN_ATTEMPTS`] the row is marked terminally `failed` instead.
+    /// Releasing without a cap converts a bounded oscillation into an unbounded
+    /// retry loop, and each iteration re-runs worktree creation and branch
+    /// deletion against the operator's real repository.
+    pub async fn release_after_failed_spawn(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        id: &str,
+        epoch: i64,
+    ) -> Result<ReleaseAfterFailure, StorageError> {
+        let now = Self::now_ms();
+        if epoch >= MAX_SPAWN_ATTEMPTS {
+            if self.repo.fail_claimed(id, epoch, now)? {
+                self.emit(
+                    session_id,
+                    worker_id,
+                    EventType::WorkerFinalized,
+                    Severity::Warning,
+                )
+                .await;
+                return Ok(ReleaseAfterFailure::Exhausted { attempts: epoch });
+            }
+            return Ok(ReleaseAfterFailure::NotHeld);
+        }
+
+        if self.repo.requeue_claimed(id, epoch, now)? {
+            // Reuse the event `reconcile` already emits for the identical repair.
+            self.emit(
+                session_id,
+                worker_id,
+                EventType::WorkerReclaimed,
+                Severity::Warning,
+            )
+            .await;
+            Ok(ReleaseAfterFailure::Released)
+        } else {
+            Ok(ReleaseAfterFailure::NotHeld)
+        }
+    }
+
+    /// Operator/agent recovery for an orphaned claim (#175e).
+    pub async fn release_claim(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+    ) -> Result<ReleaseOutcome, StorageError> {
+        let rows = self.repo.rows_for_session(session_id)?;
+        // `worker_id` has no UNIQUE constraint; `rows_for_session` orders by
+        // creation, so this deterministically takes the oldest duplicate.
+        let Some(row) = rows.into_iter().find(|r| r.worker_id == worker_id) else {
+            return Ok(ReleaseOutcome::NoRow);
+        };
+
+        match row.status {
+            QueueStatus::Running | QueueStatus::Failed => {
+                let previous = row.status;
+                if self.repo.release_claim_manual(&row.id, Self::now_ms())? {
+                    self.emit(
+                        session_id,
+                        worker_id,
+                        EventType::WorkerReclaimed,
+                        Severity::Warning,
+                    )
+                    .await;
+                    Ok(ReleaseOutcome::Released { previous })
+                } else {
+                    Ok(ReleaseOutcome::NoRow)
+                }
+            }
+            QueueStatus::Queued => Ok(ReleaseOutcome::AlreadyQueued),
+            other => Ok(ReleaseOutcome::Terminal { status: other }),
+        }
     }
 
     /// Record a heartbeat against the queue row, advancing continuation / no-progress
@@ -354,8 +464,8 @@ mod tests {
         assert_eq!(snap.queued, 1);
 
         // First claim wins, second loses (already running, fresh).
-        assert!(mgr.claim_and_spawn("s1-worker-1", "s1", "s1-worker-1").await.unwrap());
-        assert!(!mgr.claim_and_spawn("s1-worker-1", "s1", "s1-worker-1").await.unwrap());
+        assert!(mgr.claim_and_spawn("s1-worker-1", "s1", "s1-worker-1").await.unwrap().is_some());
+        assert!(mgr.claim_and_spawn("s1-worker-1", "s1", "s1-worker-1").await.unwrap().is_none());
 
         let snap = mgr.queue_snapshot("s1").unwrap();
         assert_eq!(snap.running, 1);

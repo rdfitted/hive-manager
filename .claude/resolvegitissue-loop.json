@@ -1,30 +1,38 @@
 {
-    "issue_number": 17,
-    "branch_name": "issue/17-session-scoped-learnings-api",
+    "issue_number": 175,
+    "also_resolving": [176, 177],
+    "branch_name": "issue/175-177-field-report-fixes",
     "iteration": 1,
     "max_iterations": 10,
-    "test_command": "cargo test",
+    "test_command": "cargo test --lib",
+    "test_baseline": "559 passed; 0 failed; 1 ignored",
+    "test_final": "587 passed; 0 failed; 1 ignored",
+    "pr_number": 178,
+    "chained_to_prcomments": false,
+    "partial_criteria_notes": {
+        "ac-175-untrap": "Visibility half shipped (warn + coordination-log entry + UI event). Re-entry into QaInProgress deferred: the freshness guard is broken as specified (PeerMessageRecord::timestamp has no serde default and the Queen handoff emits none). Satisfies the issue's explicit 'or at minimum log + surface' clause."
+    },
     "github": {
         "repo": "rdfitted/hive-manager",
         "fetch_on_iteration": true,
         "post_progress": true,
-        "last_fetched_at": "2026-02-05T19:15:00Z"
+        "last_fetched_at": "2026-07-28T00:00:00Z"
     },
     "acceptance_criteria": [
-        {"id": "ac-multi-hive", "text": "User can run two Hive sessions against different projects simultaneously", "status": "pending"},
-        {"id": "ac-worker-a", "text": "Workers in Session A submit learnings to Project A's .ai-docs/learnings.jsonl", "status": "pending"},
-        {"id": "ac-worker-b", "text": "Workers in Session B submit learnings to Project B's .ai-docs/learnings.jsonl", "status": "pending"},
-        {"id": "ac-queen-a", "text": "Queen in Session A reviews only Project A's learnings", "status": "pending"},
-        {"id": "ac-queen-b", "text": "Queen in Session B reviews only Project B's learnings", "status": "pending"},
-        {"id": "ac-dna-scoped", "text": "Project DNA retrieval is session-scoped", "status": "pending"},
-        {"id": "ac-backward-single", "text": "Old /api/learnings endpoints work when only one project is active", "status": "pending"},
-        {"id": "ac-backward-multi", "text": "Old endpoints return helpful error when multiple projects are active, suggesting new endpoints", "status": "pending"},
-        {"id": "ac-no-arbitrary-paths", "text": "No agent can write learnings to arbitrary filesystem paths", "status": "pending"},
-        {"id": "ac-404-invalid", "text": "Session_id validation returns 404 for non-existent sessions", "status": "pending"},
-        {"id": "ac-files-validation", "text": "File path validation in files_touched is preserved", "status": "pending"},
-        {"id": "ac-completed-sessions", "text": "Completed sessions don't interfere with active session path resolution", "status": "pending"},
-        {"id": "ac-resumption", "text": "Session resumption doesn't break learning endpoints for other active sessions", "status": "pending"},
-        {"id": "ac-concurrent", "text": "Concurrent learning submissions from multiple workers in same session work correctly", "status": "pending"}
+        {"id": "ac-175-timer", "text": "#175: Do not enter QaInProgress / arm the QA timer from the launch-time evaluator spawn; arm only on milestone handoff", "status": "verified"},
+        {"id": "ac-175-respawn", "text": "#175: on_milestone_ready dead-evaluator respawn branch still transitions+arms after arming is stripped from launch_evaluator", "status": "verified"},
+        {"id": "ac-175-noverdict", "text": "#175: No BLOCKED verdict emitted for a milestone that was never submitted", "status": "verified"},
+        {"id": "ac-175-untrap", "text": "#175: QaInconclusive un-trapped - a fresh milestone-ready is no longer silently dropped", "status": "verified"},
+        {"id": "ac-175-validate", "text": "#175: add_worker validates session state before enqueue/claim AND releases the claimed row on every post-claim failure path", "status": "verified"},
+        {"id": "ac-175-status", "text": "#175: state-validation failures map to 409/422 with the real reason, not a generic 500", "status": "verified"},
+        {"id": "ac-175-recovery", "text": "#175: recovery endpoint clears an orphaned claim; GET /workers and GET /queue agree afterwards", "status": "verified"},
+        {"id": "ac-175-heartbeat", "text": "#175: POST /heartbeat with an unrostered agent_id returns 404; every legitimate agent id shape still returns 200", "status": "verified"},
+        {"id": "ac-176-confirm", "text": "#176: force-pass/force-fail require confirm:true; empty body returns a clear 400 with no state change and no operator log entry", "status": "verified"},
+        {"id": "ac-176-rationale", "text": "#176: optional rationale accepted and included in the operator log line", "status": "verified"},
+        {"id": "ac-176-nostatus", "text": "#176: regression test pins that force-pass does not mutate individual worker AgentStatus", "status": "verified"},
+        {"id": "ac-176-callers", "text": "#176: every existing force-pass/force-fail caller (frontend, prompts, generated tool docs) updated for the new body", "status": "verified"},
+        {"id": "ac-177-lint", "text": "#177: ESLint cascade no longer escapes the worker worktree into the parent repo", "status": "verified"},
+        {"id": "ac-gate-tests", "text": "cargo test --lib passes (baseline 559) with new tests added and mutation-proven", "status": "verified"}
     ],
     "iteration_history": []
 }
