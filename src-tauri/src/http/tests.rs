@@ -8408,15 +8408,17 @@ async fn test_queue_endpoint_empty_snapshot() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+/// #175(d). A spawn that fails after winning the claim must RELEASE it.
+///
+/// This test replaces `test_add_worker_enqueues_and_claims`, whose assertions
+/// were the bug's specification: it asserted the row stayed `running` after a
+/// failed spawn and that the retry 409'd — i.e. exactly the permanent lockout
+/// reported from the field.
 #[tokio::test]
-async fn test_add_worker_enqueues_and_claims() {
-    // First POST /workers enqueues a queue row and atomically claims it (-> running). The
-    // downstream PTY/worktree spawn fails in the hermetic test env (temp dir is not a git
-    // repo), so no agent is added — but the queue row is the source of truth and is now
-    // `running`. A duplicate POST for the same worker re-enqueues (no-op), loses the claim
-    // on the already-running fresh row, and is turned away with 409.
+async fn add_worker_failure_releases_the_claimed_queue_row() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let temp_dir = std::env::temp_dir().join("hive-test-queue-claim");
+    // A NON-git temp dir, so the worktree step fails and the spawn errors out.
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-claim-release");
     let _ = std::fs::create_dir_all(&temp_dir);
     controller.read().insert_test_session(make_test_session(
         "session-queue-claim",
@@ -8424,51 +8426,342 @@ async fn test_add_worker_enqueues_and_claims() {
     ));
 
     let body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
+    let post = || {
+        let app = app.clone();
+        let body = body.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-queue-claim/workers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
 
-    // First POST: enqueue + claim succeed; spawn may fail downstream (500), never 409.
-    let first = app
+    let first = post().await;
+    assert_ne!(first.status(), StatusCode::CONFLICT);
+
+    // The claim was released, so the row is claimable again rather than stranded.
+    let snap = fetch_queue_snapshot(&app, "session-queue-claim").await;
+    assert_eq!(
+        snap["running"], 0,
+        "a failed spawn must not leave the row claimed"
+    );
+    assert_eq!(snap["queued"], 1, "the row must be returned to queued");
+    assert_eq!(snap["rows"][0]["worker_id"], "session-queue-claim-worker-1");
+
+    // And the retry is NOT turned away with a 409 — the whole point of the fix.
+    let second = post().await;
+    assert_ne!(
+        second.status(),
+        StatusCode::CONFLICT,
+        "a retry after a released claim must not 409"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+/// #175(d). Releasing without a cap would turn a 90s-bounded oscillation into an
+/// unbounded retry loop, each iteration re-running worktree creation and branch
+/// deletion against the operator's real repository.
+#[tokio::test]
+async fn add_worker_spawn_attempts_are_capped() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-claim-cap");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    controller.read().insert_test_session(make_test_session(
+        "session-queue-cap",
+        temp_dir.to_str().unwrap(),
+    ));
+
+    let body = serde_json::json!({ "role_type": "backend", "cli": "claude" });
+    let post = || {
+        let app = app.clone();
+        let body = body.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/session-queue-cap/workers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    post().await;
+    post().await;
+    let third = post().await;
+
+    assert_eq!(
+        third.status(),
+        StatusCode::CONFLICT,
+        "the third failed spawn must retire the row instead of looping forever"
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(third.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "spawn_failed");
+    assert_eq!(body["attempts"], 3);
+
+    let snap = fetch_queue_snapshot(&app, "session-queue-cap").await;
+    assert_eq!(snap["failed"], 1, "the retired row must be terminal");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+/// #175(d). A session that cannot accept a worker must be refused BEFORE
+/// anything is written to the durable queue, with a 409 the caller can act on
+/// rather than an opaque 500.
+#[tokio::test]
+async fn add_worker_rejected_state_returns_409_and_creates_no_queue_row() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = std::env::temp_dir().join("hive-test-queue-reject");
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let mut session = make_test_session("session-queue-reject", temp_dir.to_str().unwrap());
+    session.state = SessionState::Completed;
+    controller.read().insert_test_session(session);
+
+    let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/sessions/session-queue-claim/workers")
+                .uri("/api/sessions/session-queue-reject/workers")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .body(Body::from(r#"{"role_type":"backend","cli":"claude"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_ne!(
-        first.status(),
-        StatusCode::CONFLICT,
-        "first claim must not be a 409"
+
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "session_state");
+    assert!(body["current_state"].as_str().unwrap().contains("Completed"));
+
+    let snap = fetch_queue_snapshot(&app, "session-queue-reject").await;
+    assert_eq!(
+        snap["rows"].as_array().unwrap().len(),
+        0,
+        "a pre-validated rejection must not create a queue row at all"
     );
 
-    // The queue row exists and is running, even though the spawn failed.
-    let snap = fetch_queue_snapshot(&app, "session-queue-claim").await;
-    assert_eq!(snap["running"], 1, "first POST claims the row to running");
-    assert_eq!(snap["rows"][0]["worker_id"], "session-queue-claim-worker-1");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
 
-    // Second POST for the same worker loses the claim → 409.
-    let second = app
+/// #175(e). The recovery route turns a leaked claim back into a claimable row.
+#[tokio::test]
+async fn release_recovers_a_leaked_claim() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("leak-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.path().to_str().unwrap()));
+
+    // Seed the leak directly, so this test does not depend on #175(d) being broken.
+    let leaked = format!("{}-worker-2", session_id);
+    state
+        .queue_manager
+        .enqueue_worker(&leaked, &session_id, &leaked, "backend", "claude", serde_json::json!({}), None)
+        .await
+        .unwrap();
+    assert!(state
+        .queue_manager
+        .claim_and_spawn(&leaked, &session_id, &leaked)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(state.queue_manager.queue_snapshot(&session_id).unwrap().running, 1);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/workers/{}/release",
+                    session_id, leaked
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["released"], true);
+    assert_eq!(body["previous_status"], "running");
+
+    let snap = state.queue_manager.queue_snapshot(&session_id).unwrap();
+    assert_eq!(snap.running, 0);
+    assert_eq!(snap.queued, 1, "the row must be claimable again");
+    assert_eq!(snap.rows[0].attempts, 0, "the spawn budget must be reset");
+}
+
+/// The release route must refuse a worker that is genuinely on the roster —
+/// releasing it would strand the row, since the index allocator targets N+1.
+#[tokio::test]
+async fn release_refuses_a_rostered_worker() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("rostered-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let worker = format!("{}-worker-1", session_id);
+    controller.read().insert_test_session(make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &[&worker],
+    ));
+
+    state
+        .queue_manager
+        .enqueue_worker(&worker, &session_id, &worker, "backend", "claude", serde_json::json!({}), None)
+        .await
+        .unwrap();
+    state
+        .queue_manager
+        .claim_and_spawn(&worker, &session_id, &worker)
+        .await
+        .unwrap();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/workers/{}/release",
+                    session_id, worker
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    // And it must not have half-acted.
+    assert_eq!(
+        state.queue_manager.queue_snapshot(&session_id).unwrap().running,
+        1,
+        "a refused release must leave the row untouched"
+    );
+}
+
+/// #175(f). A heartbeat from an id with no roster entry, no PTY and no queue row
+/// must be refused BEFORE it can finalize anything.
+#[tokio::test]
+async fn heartbeat_rejects_a_fully_unknown_agent() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("ghost-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let real = format!("{}-worker-1", session_id);
+    controller.read().insert_test_session(make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &[&real],
+    ));
+
+    let ghost = format!("{}-worker-4", session_id);
+    let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/sessions/session-queue-claim/workers")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .body(Body::from(
+                    serde_json::json!({"agent_id": ghost, "status": "completed"}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(
-        second.status(),
-        StatusCode::CONFLICT,
-        "duplicate worker POST must return 409 (lost claim)"
+        res.status(),
+        StatusCode::NOT_FOUND,
+        "a heartbeat for a nonexistent agent must not be silently accepted"
     );
 
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // A rostered agent still works.
+    let ok = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"agent_id": real, "status": "working"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+/// Fail-open: every spawn path starts the PTY before pushing the roster entry,
+/// and the agents' heartbeat snippet uses `curl -fsS`, so a strict roster check
+/// would abort a healthy agent's shell block during that window.
+#[tokio::test]
+async fn heartbeat_accepts_an_agent_whose_roster_push_has_not_landed() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("prepush-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    // Roster deliberately does NOT contain the evaluator yet.
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, temp_dir.path().to_str().unwrap()));
+
+    let evaluator = format!("{}-evaluator", session_id);
+    register_live_pty(&state, &evaluator, AgentRole::Evaluator);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"agent_id": evaluator, "status": "working"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "a live PTY must be enough to accept a heartbeat during the roster-push window"
+    );
 }
 
 #[tokio::test]

@@ -115,6 +115,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Worker routes
         .route("/api/sessions/{id}/workers", get(workers::list_workers))
         .route("/api/sessions/{id}/workers", post(workers::add_worker))
+        // #175(e): recover a leaked durable claim. POST rather than DELETE — the
+        // object released is the queue CLAIM, not the worker; stopping an agent
+        // is already DELETE /api/sessions/{id}/agents/{agent_id}.
+        .route(
+            "/api/sessions/{id}/workers/{worker_id}/release",
+            post(workers::release_worker),
+        )
         // Read-only session artifact browser
         .route(
             "/api/sessions/{id}/files",

@@ -43,6 +43,19 @@ impl ApiError {
             details: Some(details),
         }
     }
+
+    /// Create an internal error with structured details, so a caller still gets
+    /// the identifiers it needs to recover (e.g. the worker id to release).
+    pub fn internal_with_details(
+        message: impl Into<String>,
+        details: HashMap<String, Value>,
+    ) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+            details: Some(details),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {

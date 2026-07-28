@@ -306,6 +306,9 @@ impl Action for AddWorker {
                 config,
                 request.role.clone(),
                 request.parent_id,
+                // This surface does not reserve an index up front (it also does
+                // not enqueue a queue row), so there is nothing to race against.
+                None,
             )
             .map_err(|e| ActionError::internal(e.to_string()))?;
 

@@ -10,11 +10,36 @@ use std::sync::Arc;
 
 use super::{validate_cli, validate_session_id};
 use crate::cli::CliRegistry;
-use crate::coordination::{StateManager, WorkerStateInfo};
+use crate::coordination::{ReleaseAfterFailure, ReleaseOutcome, StateManager, WorkerStateInfo};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
-use crate::session::SessionController;
+use crate::session::{AddWorkerError, AddWorkerRejectionReason, SessionController};
+
+/// Map a pre-spawn rejection to an accurate HTTP status (#175d).
+///
+/// A session that simply is not accepting workers right now is a conflict the
+/// caller can act on, not an internal error — the old blanket 500 gave the Queen
+/// nothing to work with.
+fn add_worker_error_to_api(err: AddWorkerError) -> ApiError {
+    match err {
+        AddWorkerError::SessionNotFound(id) => {
+            ApiError::not_found(format!("Session {} not found", id))
+        }
+        AddWorkerError::Rejected(rejection) => match rejection.reason {
+            AddWorkerRejectionReason::StateNotAcceptingWorkers => {
+                let mut details: HashMap<String, Value> = HashMap::new();
+                details.insert("reason".to_string(), json!("session_state"));
+                details.insert(
+                    "current_state".to_string(),
+                    json!(rejection.current_state.clone()),
+                );
+                ApiError::conflict_with_details(rejection.error, details)
+            }
+            _ => ApiError::bad_request(rejection.error),
+        },
+    }
+}
 
 fn deserialize_optional_trimmed_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -142,25 +167,27 @@ pub async fn add_worker(
         initial_prompt: initial_task.clone(),
     };
 
+    // #175(d): VALIDATE BEFORE CLAIMING. The queue row used to be enqueued and
+    // claimed before the controller checked whether the session could accept a
+    // worker at all, and no failure path released it. A single rejected spawn
+    // therefore stranded the worker index permanently.
+    //
+    // The pre-check shares one implementation with the real check inside
+    // `add_worker`, so they cannot drift, and the common rejection now creates no
+    // queue row at all.
+    let reservation = {
+        let controller = state.session_controller.read();
+        controller.reserve_add_worker(&session_id, &role, parent_id.as_deref())
+    }
+    .map_err(add_worker_error_to_api)?;
+
     // #126: enqueue + atomically claim the worker BEFORE spawning. The queue table is the
     // source of truth, so we compute the deterministic worker_id the same way the controller
     // does (`{session}-worker-{index}`, index = existing worker count + 1), enqueue a
     // `queued` row, then try to claim it. A duplicate POST for the same worker hits an
     // already-`running` row, loses the claim, and is turned away with 409 — no double spawn.
-    let predicted_index = {
-        let controller = state.session_controller.read();
-        let existing = controller
-            .get_session(&session_id)
-            .map(|s| {
-                s.agents
-                    .iter()
-                    .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
-                    .count()
-            })
-            .unwrap_or(0);
-        (existing + 1) as u8
-    };
-    let predicted_worker_id = format!("{}-worker-{}", session_id, predicted_index);
+    let predicted_index = reservation.index;
+    let predicted_worker_id = reservation.worker_id.clone();
     let queue_id = predicted_worker_id.clone();
     let payload = json!({
         "role_type": role_type,
@@ -185,40 +212,101 @@ pub async fn add_worker(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let claimed = state
+    let epoch = match state
         .queue_manager
         .claim_and_spawn(&queue_id, &session_id, &predicted_worker_id)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    if !claimed {
-        let mut details: HashMap<String, Value> = HashMap::new();
-        details.insert("worker_id".to_string(), json!(predicted_worker_id));
-        details.insert("session_id".to_string(), json!(session_id));
-        return Err(ApiError::conflict_with_details(
-            format!(
-                "Worker {} is already claimed and running",
-                predicted_worker_id
-            ),
-            details,
-        ));
-    }
+        .map_err(|e| ApiError::internal(e.to_string()))?
+    {
+        Some(epoch) => epoch,
+        None => {
+            let mut details: HashMap<String, Value> = HashMap::new();
+            details.insert("worker_id".to_string(), json!(predicted_worker_id));
+            details.insert("session_id".to_string(), json!(session_id));
+            details.insert("reason".to_string(), json!("already_claimed"));
+            return Err(ApiError::conflict_with_details(
+                format!(
+                    "Worker {} is already claimed and running",
+                    predicted_worker_id
+                ),
+                details,
+            ));
+        }
+    };
 
-    // Add worker through session controller
-    let (worker_id, worker_index) = {
+    // Add worker through session controller. The parking_lot guard is scoped out
+    // before the release await below — it is !Send and cannot cross an await.
+    let add_result = {
         let controller = state.session_controller.write();
+        controller.add_worker(
+            &session_id,
+            config,
+            role.clone(),
+            parent_id,
+            Some(reservation.index),
+        )
+    };
 
-        let agent_info = controller
-            .add_worker(&session_id, config, role.clone(), parent_id)
-            .map_err(|e| ApiError::internal(e.to_string()))?;
+    let agent_info = match add_result {
+        Ok(agent_info) => agent_info,
+        Err(err) => {
+            // #175(d): EVERY failure after a won claim must release it. Otherwise
+            // the index is stranded and no further worker can ever be spawned.
+            match state
+                .queue_manager
+                .release_after_failed_spawn(&session_id, &predicted_worker_id, &queue_id, epoch)
+                .await
+            {
+                Ok(ReleaseAfterFailure::Exhausted { attempts }) => {
+                    let mut details: HashMap<String, Value> = HashMap::new();
+                    details.insert("worker_id".to_string(), json!(predicted_worker_id));
+                    details.insert("session_id".to_string(), json!(session_id));
+                    details.insert("reason".to_string(), json!("spawn_failed"));
+                    details.insert("attempts".to_string(), json!(attempts));
+                    details.insert(
+                        "recovery".to_string(),
+                        json!(format!(
+                            "POST /api/sessions/{}/workers/{}/release",
+                            session_id, predicted_worker_id
+                        )),
+                    );
+                    return Err(ApiError::conflict_with_details(
+                        format!(
+                            "Worker {} failed to spawn {} times and has been retired: {}",
+                            predicted_worker_id, attempts, err
+                        ),
+                        details,
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    worker_id = %predicted_worker_id,
+                    error = %e,
+                    "failed to release the queue claim after a failed spawn"
+                ),
+            }
 
+            let mut details: HashMap<String, Value> = HashMap::new();
+            details.insert("worker_id".to_string(), json!(predicted_worker_id));
+            details.insert("session_id".to_string(), json!(session_id));
+            if err.starts_with("Worker index race") {
+                details.insert("reason".to_string(), json!("index_raced"));
+                return Err(ApiError::conflict_with_details(err, details));
+            }
+            return Err(ApiError::internal_with_details(err, details));
+        }
+    };
+
+    // From here to the response there must be NO fallible early return: the PTY
+    // is live, and releasing the claim past this point is a double-spawn vector.
+    let (worker_id, worker_index) = {
         // Extract worker index from ID (format: session-id-worker-N)
         let index = agent_info
             .id
             .rsplit('-')
             .next()
             .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(1);
-
+            .unwrap_or(predicted_index);
         (agent_info.id, index)
     };
 
@@ -288,6 +376,101 @@ pub async fn add_worker(
             task_file,
         }),
     ))
+}
+
+/// POST /api/sessions/{id}/workers/{worker_id}/release
+///
+/// #175(e): recover a durable queue claim whose worker never made it onto the
+/// roster. Before this there was no API at all — a leaked claim capped the
+/// session permanently and only a backend restart cleared it.
+///
+/// Deliberately narrow: it releases the CLAIM, never the worker. It does not
+/// touch the roster (which keeps the worker-index allocator monotone), does not
+/// kill a PTY, and refuses outright if the worker is actually rostered — that
+/// case belongs to `DELETE /api/sessions/{id}/agents/{agent_id}`.
+pub async fn release_worker(
+    State(state): State<Arc<AppState>>,
+    Path((session_id, worker_id)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    validate_session_id(&session_id)?;
+    super::validate_agent_id(&worker_id)?;
+
+    // Scope every !Send guard before the await below.
+    let (rostered, live_pty) = {
+        let controller = state.session_controller.read();
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+        let rostered = session.agents.iter().any(|a| a.id == worker_id);
+        let live_pty = state.pty_manager.read().is_alive(&worker_id);
+        (rostered, live_pty)
+    };
+
+    if rostered {
+        let mut details: HashMap<String, Value> = HashMap::new();
+        details.insert("reason".to_string(), json!("rostered"));
+        details.insert("worker_id".to_string(), json!(worker_id));
+        return Err(ApiError::conflict_with_details(
+            format!(
+                "Worker {} is a live member of this session. Releasing its claim would strand \
+                 the queue row. Use DELETE /api/sessions/{}/agents/{} to stop the agent instead.",
+                worker_id, session_id, worker_id
+            ),
+            details,
+        ));
+    }
+    if live_pty {
+        let mut details: HashMap<String, Value> = HashMap::new();
+        details.insert("reason".to_string(), json!("live_pty"));
+        details.insert("worker_id".to_string(), json!(worker_id));
+        return Err(ApiError::conflict_with_details(
+            format!("Worker {} still has a live PTY; refusing to release its claim", worker_id),
+            details,
+        ));
+    }
+
+    let outcome = state
+        .queue_manager
+        .release_claim(&session_id, &worker_id)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    match outcome {
+        ReleaseOutcome::Released { previous } => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "session_id": session_id,
+                "worker_id": worker_id,
+                "released": true,
+                "previous_status": previous.as_tag(),
+                "new_status": "queued",
+            })),
+        )),
+        ReleaseOutcome::AlreadyQueued => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "session_id": session_id,
+                "worker_id": worker_id,
+                "released": false,
+                "previous_status": "queued",
+                "new_status": "queued",
+            })),
+        )),
+        ReleaseOutcome::Terminal { status } => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "session_id": session_id,
+                "worker_id": worker_id,
+                "released": false,
+                "previous_status": status.as_tag(),
+                "new_status": status.as_tag(),
+            })),
+        )),
+        ReleaseOutcome::NoRow => Err(ApiError::not_found(format!(
+            "No queue row for worker {} in session {}",
+            worker_id, session_id
+        ))),
+    }
 }
 
 /// GET /api/sessions/{id}/workers - List workers in a session

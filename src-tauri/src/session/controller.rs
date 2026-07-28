@@ -703,6 +703,49 @@ fn is_terminal_session_state(state: &SessionState) -> bool {
     )
 }
 
+/// Why a worker spawn was refused (#175d). Lets the HTTP layer answer with an
+/// accurate status and a machine-readable reason instead of a blanket 500.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddWorkerRejectionReason {
+    SessionTypeUnsupported,
+    ResearchSessionReadOnly,
+    ParentNotInSession,
+    ParentCannotParent,
+    StateNotAcceptingWorkers,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AddWorkerRejection {
+    pub error: String,
+    pub reason: AddWorkerRejectionReason,
+    pub current_state: String,
+}
+
+#[derive(Debug)]
+pub enum AddWorkerError {
+    SessionNotFound(String),
+    Rejected(AddWorkerRejection),
+}
+
+impl std::fmt::Display for AddWorkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Byte-identical to the historical string, so existing callers that
+            // classify on the message keep working.
+            AddWorkerError::SessionNotFound(id) => write!(f, "Session not found: {}", id),
+            AddWorkerError::Rejected(rejection) => write!(f, "{}", rejection.error),
+        }
+    }
+}
+
+/// An index reserved for a spawn that has not happened yet.
+#[derive(Debug, Clone)]
+pub struct AddWorkerReservation {
+    pub index: u8,
+    pub worker_id: String,
+}
+
 /// States in which a QA review is open or already resolved. Used to stop
 /// unrelated worker progression from dragging a session back to `Running` and
 /// orphaning an in-flight review (#175a).
@@ -6890,6 +6933,30 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 }}
 ```
 
+## Error Responses
+
+A 4xx here is actionable — read `reason` before retrying.
+
+| Status | `reason` | What it means | What to do |
+|--------|----------|---------------|------------|
+| 409 | `already_claimed` | This worker index is already claimed and running | STOP. Do not retry — you would double-spawn. Check `GET /workers` |
+| 409 | `session_state` | The session cannot accept workers right now (see `current_state`) | Do not retry blindly. Resolve the state first (e.g. an unresolved QA verdict) |
+| 409 | `index_raced` | The roster moved between reservation and spawn | Re-read `GET /workers`, then retry ONCE |
+| 409 | `spawn_failed` | The spawn failed repeatedly and the queue row was retired (`attempts` included) | Call the release endpoint in `recovery`, then retry once |
+| 500 | — | Internal spawn failure; `worker_id` is included | If `GET /workers` shows no new worker, release the claim (below) and retry once |
+
+## Recovering a Stuck Worker Slot
+
+If a spawn failed and the slot appears stuck, release its durable claim:
+
+```bash
+curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/workers/{{worker_id}}/release"
+```
+
+Returns `{{"released": true|false, "previous_status": "...", "new_status": "queued"}}`. It only
+releases the queue claim — it never stops a live agent. If the worker is actually
+running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
+
 ## Notes
 
 - Workers spawn in a new Windows Terminal tab (visible window)
@@ -12916,49 +12983,56 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
-    /// Add a worker to an existing session
-    pub fn add_worker(
-        &self,
-        session_id: &str,
-        config: AgentConfig,
-        role: WorkerRole,
-        parent_id: Option<String>,
-    ) -> Result<AgentInfo, String> {
-        // Get session and validate
-        let session = {
-            let sessions = self.sessions.read();
-            sessions.get(session_id).cloned()
-        }
-        .ok_or_else(|| format!("Session not found: {}", session_id))?;
-
-        if !Self::session_allows_dynamic_principal(&session, &role, parent_id.as_deref()) {
-            return Err(format!(
-                "Cannot add a managed principal to {:?}; dynamic principals are supported only by Hive sessions",
-                session.session_type
-            ));
+    /// The single source of truth for "may a worker be added right now?".
+    ///
+    /// #175(d): the HTTP handler pre-checks this BEFORE writing anything to the
+    /// durable queue, and `add_worker` re-checks it under the write lock. Both go
+    /// through this one function so the pre-check can never drift from the real
+    /// check — a drift would either resurrect the leak or reject valid spawns.
+    pub(crate) fn check_add_worker_preconditions(
+        session: &Session,
+        role: &WorkerRole,
+        parent_id: Option<&str>,
+    ) -> Result<(), AddWorkerRejection> {
+        if !Self::session_allows_dynamic_principal(session, role, parent_id) {
+            return Err(AddWorkerRejection {
+                error: format!(
+                    "Cannot add a managed principal to {:?}; dynamic principals are supported only by Hive sessions",
+                    session.session_type
+                ),
+                reason: AddWorkerRejectionReason::SessionTypeUnsupported,
+                current_state: format!("{:?}", session.state),
+            });
         }
         if session.no_git && !role.role_type.eq_ignore_ascii_case("researcher") {
-            return Err("Research sessions accept only read-only researcher workers".to_string());
+            return Err(AddWorkerRejection {
+                error: "Research sessions accept only read-only researcher workers".to_string(),
+                reason: AddWorkerRejectionReason::ResearchSessionReadOnly,
+                current_state: format!("{:?}", session.state),
+            });
         }
-        if let Some(explicit_parent) = parent_id.as_deref() {
+        if let Some(explicit_parent) = parent_id {
             let parent = session
                 .agents
                 .iter()
                 .find(|agent| agent.id == explicit_parent)
-                .ok_or_else(|| {
-                    format!(
+                .ok_or_else(|| AddWorkerRejection {
+                    error: format!(
                         "Parent agent {} does not belong to session {}",
-                        explicit_parent, session_id
-                    )
+                        explicit_parent, session.id
+                    ),
+                    reason: AddWorkerRejectionReason::ParentNotInSession,
+                    current_state: format!("{:?}", session.state),
                 })?;
             if !matches!(
                 parent.role,
                 AgentRole::Queen | AgentRole::Planner { .. } | AgentRole::Prince
             ) {
-                return Err(format!(
-                    "Agent {} cannot parent a managed principal",
-                    explicit_parent
-                ));
+                return Err(AddWorkerRejection {
+                    error: format!("Agent {} cannot parent a managed principal", explicit_parent),
+                    reason: AddWorkerRejectionReason::ParentCannotParent,
+                    current_state: format!("{:?}", session.state),
+                });
             }
         }
 
@@ -12981,19 +13055,86 @@ phases and do EXACTLY this, then stop:
                 | SessionState::QaInconclusive
         );
         if !can_add_worker {
-            return Err(format!(
-                "Cannot add worker to session in state {:?}",
-                session.state
-            ));
+            return Err(AddWorkerRejection {
+                error: format!("Cannot add worker to session in state {:?}", session.state),
+                reason: AddWorkerRejectionReason::StateNotAcceptingWorkers,
+                current_state: format!("{:?}", session.state),
+            });
         }
 
-        // Determine worker index
-        let existing_workers = session
+        Ok(())
+    }
+
+    /// The worker index the next spawn will take. One definition, used by both
+    /// the handler's reservation and `add_worker` itself.
+    pub(crate) fn next_worker_index(session: &Session) -> u8 {
+        let existing = session
             .agents
             .iter()
             .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
             .count();
-        let worker_index = (existing_workers + 1) as u8;
+        (existing + 1) as u8
+    }
+
+    /// Read-only reservation used by the HTTP handler before it touches the
+    /// durable queue (#175d).
+    ///
+    /// Reads `self.sessions` directly rather than going through `get_session`,
+    /// which performs a mutating disk refresh.
+    pub fn reserve_add_worker(
+        &self,
+        session_id: &str,
+        role: &WorkerRole,
+        parent_id: Option<&str>,
+    ) -> Result<AddWorkerReservation, AddWorkerError> {
+        let sessions = self.sessions.read();
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| AddWorkerError::SessionNotFound(session_id.to_string()))?;
+
+        Self::check_add_worker_preconditions(session, role, parent_id)
+            .map_err(AddWorkerError::Rejected)?;
+
+        let index = Self::next_worker_index(session);
+        Ok(AddWorkerReservation {
+            index,
+            worker_id: format!("{}-worker-{}", session_id, index),
+        })
+    }
+
+    /// Add a worker to an existing session
+    pub fn add_worker(
+        &self,
+        session_id: &str,
+        config: AgentConfig,
+        role: WorkerRole,
+        parent_id: Option<String>,
+        expected_index: Option<u8>,
+    ) -> Result<AgentInfo, String> {
+        // Get session and validate
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        Self::check_add_worker_preconditions(&session, &role, parent_id.as_deref())
+            .map_err(|rejection| rejection.error)?;
+
+        // Determine worker index
+        let worker_index = Self::next_worker_index(&session);
+        // #175(d): the handler reserved an index, then released the read lock
+        // across two awaits before this call. If the roster moved in between, the
+        // durable queue row protects a different id than the one we are about to
+        // spawn — fail cleanly so the handler can release its claim.
+        if let Some(expected) = expected_index {
+            if expected != worker_index {
+                return Err(format!(
+                    "Worker index race: reserved {} but session now needs {}",
+                    expected, worker_index
+                ));
+            }
+        }
 
         // Determine parent (default to Queen)
         let actual_parent_id = parent_id.unwrap_or_else(|| format!("{}-queen", session_id));
