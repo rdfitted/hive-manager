@@ -8422,6 +8422,8 @@ phases and do EXACTLY this, then stop:
                     &base_branch,
                 ],
             )?;
+            // #177: halt ESLint's cascade before it escapes into the parent repo.
+            crate::workspace::git::ensure_worktree_config_boundary(&project_path, &worktree_path);
             self.emit_workspace_created(
                 &session_id,
                 &variant_to_cell_id(&variant.name),
@@ -8765,6 +8767,8 @@ phases and do EXACTLY this, then stop:
                     base_branch,
                 ],
             )?;
+            // #177: halt ESLint's cascade before it escapes into the parent repo.
+            crate::workspace::git::ensure_worktree_config_boundary(project_path, &worktree_path);
             controller.emit_workspace_created(
                 session_id,
                 &variant_to_cell_id(&debater.name),
@@ -9587,6 +9591,11 @@ phases and do EXACTLY this, then stop:
                     &base_branch,
                 ],
             )?;
+            // #177: halt ESLint's cascade before it escapes into the parent repo.
+            crate::workspace::git::ensure_worktree_config_boundary(
+                &session.project_path,
+                &worktree_path,
+            );
             self.emit_workspace_created(
                 session_id,
                 &variant_to_cell_id(&variant.name),

@@ -178,6 +178,115 @@ fn detect_main_branch(project_path: &Path) -> String {
     "main".to_string()
 }
 
+/// Hive-owned directories that may sit directly under a project root and hold
+/// generated worktrees. Only these are eligible for a lint-config boundary — see
+/// [`worktree_config_boundary_root`] for why the whitelist is load-bearing.
+const HIVE_WORKTREE_ROOTS: &[&str] = &[".hive-manager", ".hive-fusion", ".hive-debate"];
+
+/// Legacy (`.eslintrc.*`) config filenames. Flat config (`eslint.config.js`) does
+/// not cascade and is deliberately absent — see the module note on #177.
+const ESLINTRC_NAMES: &[&str] = &[
+    ".eslintrc",
+    ".eslintrc.json",
+    ".eslintrc.js",
+    ".eslintrc.cjs",
+    ".eslintrc.yml",
+    ".eslintrc.yaml",
+];
+
+/// The hive-owned directory directly under `project_path` that contains
+/// `worktree_path`, or `None` when the worktree is not under one.
+///
+/// The [`HIVE_WORKTREE_ROOTS`] whitelist — rather than "just take the first
+/// component" — is load-bearing. `actions/git/mod.rs::git.worktree_add` accepts a
+/// caller-supplied worktree path with no containment check, so a generic
+/// derivation could write a `root: true` config into an arbitrary *tracked*
+/// source directory of the operator's repo and silently disable every lint rule
+/// beneath it.
+pub(crate) fn worktree_config_boundary_root(
+    project_path: &Path,
+    worktree_path: &Path,
+) -> Option<PathBuf> {
+    let relative = worktree_path.strip_prefix(project_path).ok()?;
+    let first = relative.components().next()?;
+    let name = first.as_os_str().to_str()?;
+    if HIVE_WORKTREE_ROOTS.contains(&name) {
+        Some(project_path.join(name))
+    } else {
+        None
+    }
+}
+
+/// True iff this worktree can lint itself — it carries an eslintrc-family file,
+/// or a `package.json` with an `eslintConfig` key.
+///
+/// Gating on this matters: writing a boundary above a worktree that has no config
+/// of its own would turn a loud `exit 2` into a silent **false green** (ESLint with
+/// an empty ruleset exits 0 with no output), which is strictly worse for a
+/// QA-gated pipeline.
+fn worktree_has_eslint_config(worktree_path: &Path) -> bool {
+    if ESLINTRC_NAMES
+        .iter()
+        .any(|name| worktree_path.join(name).exists())
+    {
+        return true;
+    }
+    std::fs::read_to_string(worktree_path.join("package.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|pkg| pkg.get("eslintConfig").is_some())
+}
+
+/// Write an inert `{"root": true}` ESLint boundary into the hive-owned directory
+/// above a generated worktree (#177).
+///
+/// Worktrees live *inside* the parent repository, so ESLint 8's `.eslintrc`
+/// cascade walks up out of the worktree, finds the parent repo's config, and
+/// resolves the same plugin from two `node_modules` trees — failing with
+/// "couldn't determine the plugin ... uniquely" (exit 2) before linting a single
+/// file. A `root: true` config in an ancestor halts that upward walk.
+///
+/// Verified against ESLint 8.57.1: no boundary => exit 2; a `{}` boundary => still
+/// exit 2 (an empty object does **not** stop the cascade); `{"root": true}` => exit
+/// 0 with the worktree's own config and plugins still in force; and the parent
+/// repo's own files are unaffected (the cascade only ever walks upward).
+///
+/// Best effort by design: never returns an error and never fails a launch.
+pub(crate) fn ensure_worktree_config_boundary(project_path: &Path, worktree_path: &Path) {
+    let Some(root) = worktree_config_boundary_root(project_path, worktree_path) else {
+        // Fusion/debate paths round-trip through `to_string_lossy()` -> `PathBuf`,
+        // so a lost prefix match should be diagnosable rather than silent.
+        tracing::warn!(
+            project_path = %project_path.display(),
+            worktree_path = %worktree_path.display(),
+            "no hive-owned boundary root for worktree; skipping lint boundary"
+        );
+        return;
+    };
+
+    if !worktree_has_eslint_config(worktree_path) {
+        tracing::debug!(
+            worktree_path = %worktree_path.display(),
+            "worktree has no eslint config; not writing a lint boundary"
+        );
+        return;
+    }
+
+    let boundary = root.join(".eslintrc.json");
+    if boundary.exists() {
+        tracing::debug!(path = %boundary.display(), "lint boundary already present");
+        return;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        tracing::warn!(path = %root.display(), error = %e, "failed to create boundary dir");
+        return;
+    }
+    if let Err(e) = std::fs::write(&boundary, "{\"root\": true}\n") {
+        tracing::warn!(path = %boundary.display(), error = %e, "failed to write lint boundary");
+    }
+}
+
 pub fn create_session_worktree(
     session_id: &str,
     cell_id: &str,
@@ -210,6 +319,9 @@ pub fn create_session_worktree(
             &["worktree", "add", &worktree_str, "-b", branch, base_branch],
         )?;
     }
+
+    // #177: must run AFTER `worktree add` — the gate inspects the checked-out tree.
+    ensure_worktree_config_boundary(project_path, &worktree_path);
 
     let task_dir = worktree_path.join(".hive-manager").join("tasks");
     if let Err(e) = std::fs::create_dir_all(&task_dir) {
@@ -345,6 +457,150 @@ fn is_missing_worktree_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    /// #177 T1. The whitelist is what stops us writing a `root: true` config into
+    /// an operator's own source tree, so the `None` arms matter as much as the
+    /// `Some` ones.
+    #[test]
+    fn worktree_config_boundary_root_whitelists_hive_roots_only() {
+        let repo = Path::new("/repo");
+
+        assert_eq!(
+            worktree_config_boundary_root(repo, Path::new("/repo/.hive-manager/worktrees/sid/primary")),
+            Some(PathBuf::from("/repo/.hive-manager"))
+        );
+        // Isolated-cell layout nests one level deeper; still the same boundary.
+        assert_eq!(
+            worktree_config_boundary_root(
+                repo,
+                Path::new("/repo/.hive-manager/worktrees/isolated/sid/cell")
+            ),
+            Some(PathBuf::from("/repo/.hive-manager"))
+        );
+        assert_eq!(
+            worktree_config_boundary_root(repo, Path::new("/repo/.hive-fusion/sid/variant-a")),
+            Some(PathBuf::from("/repo/.hive-fusion"))
+        );
+        assert_eq!(
+            worktree_config_boundary_root(repo, Path::new("/repo/.hive-debate/sid/debater-a")),
+            Some(PathBuf::from("/repo/.hive-debate"))
+        );
+
+        // The worktree IS the repo root -> no component -> None. Without this the
+        // shim would land at `<repo>/.eslintrc.json` and disable the operator's
+        // own lint config.
+        assert_eq!(worktree_config_boundary_root(repo, repo), None);
+        // Outside the repo entirely.
+        assert_eq!(
+            worktree_config_boundary_root(repo, Path::new("/elsewhere/wt")),
+            None
+        );
+        // Inside the repo but NOT a hive-owned root: must be refused.
+        assert_eq!(
+            worktree_config_boundary_root(repo, Path::new("/repo/tmp/wt")),
+            None
+        );
+    }
+
+    /// #177 T2. Content equality is load-bearing: verified against ESLint 8.57.1,
+    /// a `{}` boundary does NOT stop the cascade, only `{"root": true}` does.
+    #[test]
+    fn ensure_worktree_config_boundary_writes_an_inert_root_marker() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let worktree = repo.join(".hive-manager").join("worktrees").join("sid").join("primary");
+        std::fs::create_dir_all(&worktree).unwrap();
+        // The worktree can lint itself.
+        std::fs::write(worktree.join(".eslintrc.json"), "{\"plugins\":[\"x\"]}").unwrap();
+
+        ensure_worktree_config_boundary(repo, &worktree);
+
+        let boundary = repo.join(".hive-manager").join(".eslintrc.json");
+        assert!(boundary.exists(), "boundary should be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&boundary).unwrap()).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "root": true }));
+        // It must sit ABOVE the worktree, not inside it.
+        assert!(worktree.starts_with(boundary.parent().unwrap()));
+    }
+
+    /// #177 T3 — the highest-value test here. Writing a boundary above a worktree
+    /// that has no ESLint config of its own converts a loud `exit 2` into a silent
+    /// false green (empty ruleset exits 0), which is worse for a QA gate.
+    #[test]
+    fn boundary_is_not_written_when_the_worktree_has_no_eslint_config() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let worktree = repo.join(".hive-manager").join("worktrees").join("sid").join("primary");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        ensure_worktree_config_boundary(repo, &worktree);
+
+        assert!(!repo.join(".hive-manager").join(".eslintrc.json").exists());
+    }
+
+    /// A `package.json` carrying `eslintConfig` also counts as lintable.
+    #[test]
+    fn boundary_is_written_for_package_json_eslint_config() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let worktree = repo.join(".hive-manager").join("worktrees").join("sid").join("primary");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join("package.json"),
+            "{\"name\":\"x\",\"eslintConfig\":{\"plugins\":[\"y\"]}}",
+        )
+        .unwrap();
+
+        ensure_worktree_config_boundary(repo, &worktree);
+
+        assert!(repo.join(".hive-manager").join(".eslintrc.json").exists());
+
+        // A package.json WITHOUT eslintConfig must not trigger it.
+        let temp2 = TempDir::new().unwrap();
+        let repo2 = temp2.path();
+        let wt2 = repo2.join(".hive-manager").join("worktrees").join("sid").join("primary");
+        std::fs::create_dir_all(&wt2).unwrap();
+        std::fs::write(wt2.join("package.json"), "{\"name\":\"x\"}").unwrap();
+        ensure_worktree_config_boundary(repo2, &wt2);
+        assert!(!repo2.join(".hive-manager").join(".eslintrc.json").exists());
+    }
+
+    /// #177 T4. Idempotent, and never clobbers a file the operator wrote.
+    #[test]
+    fn boundary_is_idempotent_and_never_clobbers_an_operator_file() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let hive = repo.join(".hive-manager");
+        let worktree = hive.join("worktrees").join("sid").join("primary");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".eslintrc.json"), "{}").unwrap();
+
+        let operator = "{\"root\":true,\"rules\":{\"no-debugger\":\"error\"}}";
+        std::fs::create_dir_all(&hive).unwrap();
+        std::fs::write(hive.join(".eslintrc.json"), operator).unwrap();
+
+        ensure_worktree_config_boundary(repo, &worktree);
+        let wt_b = hive.join("worktrees").join("sid").join("second");
+        std::fs::create_dir_all(&wt_b).unwrap();
+        std::fs::write(wt_b.join(".eslintrc.json"), "{}").unwrap();
+        ensure_worktree_config_boundary(repo, &wt_b);
+
+        assert_eq!(
+            std::fs::read_to_string(hive.join(".eslintrc.json")).unwrap(),
+            operator,
+            "operator content must survive untouched"
+        );
+
+        // Deleted -> recreated (no process-wide latch).
+        std::fs::remove_file(hive.join(".eslintrc.json")).unwrap();
+        ensure_worktree_config_boundary(repo, &worktree);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(hive.join(".eslintrc.json")).unwrap())
+                .unwrap();
+        assert_eq!(parsed, serde_json::json!({ "root": true }));
+    }
 
     #[test]
     fn test_generate_branch_name_hive() {

@@ -411,6 +411,13 @@ impl Action for WorktreeAdd {
             &parsed.project_path,
         )
         .map_err(git_err)?;
+        // #177: deliberately NOT wired to `ensure_worktree_config_boundary`. Unlike
+        // the four managed worktree chokepoints, `worktree_path` here is
+        // caller-supplied and unvalidated, so deriving a boundary root from it
+        // could drop a `root: true` ESLint config into an arbitrary tracked
+        // directory of the operator's repo and silently disable every rule below
+        // it. Callers wanting the boundary should go through
+        // `workspace::git::create_session_worktree`.
         Ok(Value::Null)
     }
 }
