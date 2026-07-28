@@ -162,6 +162,66 @@ async fn setup_test_app_with_controller_at(
     (create_router(state), session_controller, storage)
 }
 
+/// Like [`setup_test_app_with_controller_at`] but also hands back the `AppState`,
+/// so a test can reach the PTY manager and the durable queue directly (e.g. to
+/// register a live PTY, or to seed a leaked queue row).
+async fn setup_test_app_full(
+    base_dir: std::path::PathBuf,
+) -> (
+    axum::Router,
+    Arc<RwLock<SessionController>>,
+    Arc<SessionStorage>,
+    Arc<AppState>,
+) {
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
+    let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    session_controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db =
+        Arc::new(crate::storage::ApplicationStateDb::open(storage.base_dir()).unwrap());
+    let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().unwrap();
+    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+        queue_repo,
+        event_bus.clone(),
+    ));
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        session_controller.clone(),
+        injection_manager,
+        storage.clone(),
+        event_bus,
+        app_state_db,
+        queue_manager,
+        None,
+    ));
+    state.set_registry(Arc::new(crate::actions::build_registry()));
+
+    (
+        create_router(state.clone()),
+        session_controller,
+        storage,
+        state,
+    )
+}
+
+/// Register a live stub PTY for `agent_id` so code gated on PTY liveness is
+/// reachable from tests.
+fn register_live_pty(state: &AppState, agent_id: &str, role: AgentRole) {
+    state
+        .pty_manager
+        .write()
+        .create_session(agent_id.to_string(), role, "cmd", &[], None, 80, 24)
+        .expect("stub PTY creation should succeed");
+}
+
 async fn setup_isolated_test_app_with_controller() -> (
     TempDir,
     axum::Router,
@@ -5473,6 +5533,142 @@ async fn force_pass_rationale_is_recorded_in_the_operator_audit_log() {
             .contains("UI host unavailable, verified manually"),
         "audit entry should carry the operator rationale, got {}",
         operator_line.content
+    );
+}
+
+/// #176 T9. The field report's second symptom: after force-pass, `GET /workers`
+/// reported ALL workers `Completed` while one was demonstrably still running.
+///
+/// The mechanism is in the READ path, not force-pass: reaching a state that
+/// triggers `should_reload_session_info_from_storage` makes the next
+/// `GET /api/sessions/{id}` reconstruct the roster from disk, and
+/// `session_from_persisted` hardcodes `Completed` because the persisted snapshot
+/// carries no runtime status.
+#[tokio::test]
+async fn force_pass_does_not_report_running_workers_as_completed() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("overlay-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let w1 = format!("{}-worker-1", session_id);
+    let w2 = format!("{}-worker-2", session_id);
+    let mut session = make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &[&w1, &w2],
+    );
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session.clone());
+    // Persist, so the reload has a snapshot to read back.
+    controller.read().persist_test_session(&session_id);
+
+    // Both workers are genuinely alive.
+    register_live_pty(&state, &w1, AgentRole::Worker { index: 1, parent: None });
+    register_live_pty(&state, &w2, AgentRole::Worker { index: 2, parent: None });
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // LOAD-BEARING: this GET is what triggers the disk reload. Omit it and the
+    // test passes even on broken code.
+    let info = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+
+    let workers = body["workers"].as_array().expect("workers array");
+    assert_eq!(workers.len(), 2);
+    for worker in workers {
+        assert_eq!(
+            worker["status"].as_str().unwrap(),
+            "Running",
+            "a live worker must not be reported Completed after a QA state change: {body}"
+        );
+    }
+    let _ = storage;
+}
+
+/// #176 T11. The overlay must stay conditioned on PTY liveness. An unconditional
+/// overlay would report a dead session's agents as `Running` forever, since
+/// nothing in the crate writes a non-Completed status after spawn.
+#[tokio::test]
+async fn reload_reports_dead_workers_as_completed() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("overlay-dead-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let w1 = format!("{}-worker-1", session_id);
+    let mut session =
+        make_test_session_with_agents(&session_id, temp_dir.path().to_str().unwrap(), &[&w1]);
+    // A terminal state that also triggers the reload, with NO live PTY.
+    session.state = SessionState::Completed;
+    controller.write().insert_test_session(session.clone());
+    controller.read().persist_test_session(&session_id);
+
+    let info = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(info.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(
+        body["workers"][0]["status"].as_str().unwrap(),
+        "Completed",
+        "a dead worker must read Completed, not be pinned Running by the overlay"
     );
 }
 

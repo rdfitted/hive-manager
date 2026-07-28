@@ -1317,6 +1317,58 @@ impl SessionController {
         Ok(updated)
     }
 
+    /// Overlay live in-memory agent statuses onto a session reconstructed from
+    /// disk, but only for agents whose PTY is still running.
+    ///
+    /// `session_from_persisted` hardcodes `AgentStatus::Completed` for every agent
+    /// because `PersistedAgentInfo` carries no runtime status. Any read path that
+    /// inserts its output raw therefore reports still-running workers as
+    /// `Completed` -- the misleading roster observed in the field, where all three
+    /// workers read `Completed` while one kept working for another ~30 minutes.
+    ///
+    /// The PTY-liveness condition is load-bearing, not decoration. The reload is
+    /// also reached for terminal states such as `Failed(_)` and
+    /// `QaMaxRetriesExceeded`, and nothing in the crate ever writes a non-Completed
+    /// status after spawn, so an unconditional overlay would replace a wrong
+    /// "Completed" with a wrong "Running" that never converges for a dead session.
+    fn overlay_live_agent_statuses(&self, refreshed: &mut Session) {
+        // Resolve PTY liveness BEFORE taking the sessions lock, so the two locks
+        // are never held together.
+        let alive: std::collections::HashSet<String> = {
+            let pty_manager = self.pty_manager.read();
+            refreshed
+                .agents
+                .iter()
+                .filter(|a| pty_manager.is_alive(&a.id))
+                .map(|a| a.id.clone())
+                .collect()
+        };
+        if alive.is_empty() {
+            return;
+        }
+
+        let current_statuses: std::collections::HashMap<String, AgentStatus> = {
+            let sessions = self.sessions.read();
+            match sessions.get(&refreshed.id) {
+                Some(current) => current
+                    .agents
+                    .iter()
+                    .map(|a| (a.id.clone(), a.status.clone()))
+                    .collect(),
+                None => return,
+            }
+        };
+
+        for agent in refreshed.agents.iter_mut() {
+            if !alive.contains(&agent.id) {
+                continue;
+            }
+            if let Some(status) = current_statuses.get(&agent.id) {
+                agent.status = status.clone();
+            }
+        }
+    }
+
     pub fn reload_session_from_storage(&self, session_id: &str) -> Result<Session, String> {
         let storage = self
             .storage
@@ -1328,7 +1380,12 @@ impl SessionController {
         storage
             .mark_session_synced(session_id, &persisted)
             .map_err(|e| format!("Failed to track session storage state: {}", e))?;
-        let session = self.session_from_persisted(&persisted)?;
+        let mut session = self.session_from_persisted(&persisted)?;
+        // #176: without this, a GET that triggers a reload reports every live
+        // worker as Completed. `WorkerStateInfo` is built from `a.status` too, so
+        // a poisoned status also becomes durable in the workers file the Queen
+        // polls.
+        self.overlay_live_agent_statuses(&mut session);
         {
             let mut sessions = self.sessions.write();
             sessions.insert(session.id.clone(), session.clone());
@@ -1983,6 +2040,13 @@ impl SessionController {
     pub fn insert_test_session(&self, session: Session) {
         let mut sessions = self.sessions.write();
         sessions.insert(session.id.clone(), session);
+    }
+
+    /// Persist an in-memory test session to storage, so read paths that
+    /// reconstruct from disk have a snapshot to load.
+    #[cfg(test)]
+    pub fn persist_test_session(&self, session_id: &str) {
+        self.update_session_storage(session_id);
     }
 
     #[cfg(test)]

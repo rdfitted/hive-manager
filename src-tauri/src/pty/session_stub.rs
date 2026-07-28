@@ -212,9 +212,20 @@ impl PtySession {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    /// Mirror the real session's liveness semantics instead of hardcoding
+    /// `false`.
+    ///
+    /// The real `PtySession::is_alive` reports whether the child process is
+    /// still running. A stub that always answers `false` makes every production
+    /// path gated on PTY liveness — the evaluator/prince respawn checks and the
+    /// live-status overlay — permanently untestable on the Windows CI runner,
+    /// which is where this crate's tests actually run. Track the stubbed status
+    /// instead so those branches are reachable from tests.
     pub fn is_alive(&self) -> bool {
-        false
+        !matches!(
+            *self.status.read(),
+            AgentStatus::Completed | AgentStatus::Error(_)
+        )
     }
 
     #[allow(dead_code)]
