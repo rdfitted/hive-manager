@@ -5262,6 +5262,220 @@ impl Drop for TestPathCleanup {
     }
 }
 
+/// #176 T5. A bodyless POST to a destructive operator override must be refused.
+/// This is exactly how force-pass was tripped in the field, while an agent was
+/// enumerating the API surface.
+#[tokio::test]
+async fn force_pass_requires_explicit_confirmation() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("force-confirm-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session);
+
+    let post = |body: Option<&'static str>| {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        async move {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id));
+            let request = match body {
+                Some(json) => builder
+                    .header("content-type", "application/json")
+                    .body(Body::from(json))
+                    .unwrap(),
+                None => {
+                    builder = builder.header("x-probe", "bodyless");
+                    builder.body(Body::empty()).unwrap()
+                }
+            };
+            app.oneshot(request).await.unwrap()
+        }
+    };
+
+    // (a) bodyless, no content-type — the shape a read-only API probe sends.
+    let res = post(None).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "a bodyless force-pass must be refused"
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("confirm"),
+        "the 400 must tell the caller what is missing, got {body}"
+    );
+
+    // (b) empty object and (c) explicit false are equally refused.
+    assert_eq!(post(Some("{}")).await.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        post(Some(r#"{"confirm":false}"#)).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // (d) none of the refusals may have changed state.
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(1) },
+        "a refused override must not mutate session state"
+    );
+
+    // (e) the confirmed call still works.
+    assert_eq!(
+        post(Some(r#"{"confirm":true}"#)).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaPassed
+    );
+}
+
+/// #176 T6. force_pass / force_fail are copy-paste twins; guarding only one is a
+/// realistic half-done edit.
+#[tokio::test]
+async fn force_fail_requires_explicit_confirmation() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("force-fail-confirm-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session);
+
+    let bodyless = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-fail", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bodyless.status(), StatusCode::BAD_REQUEST);
+
+    let refused = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-fail", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(1) }
+    );
+
+    let confirmed = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-fail", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::OK);
+}
+
+/// #176 T7. Pins a deliberate precedence change: the confirmation guard runs
+/// before the session lookup, so a bodyless probe against a nonexistent session
+/// now answers 400 rather than 404.
+#[tokio::test]
+async fn force_override_confirmation_precedes_session_lookup() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, _controller, _storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/no-such-session/qa/force-pass")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "confirm is checked before the session exists"
+    );
+}
+
+/// #176 T8. The rationale must reach the durable operator audit log. Also pins
+/// the `create_dir_all` in `append_coordination_log`: without it the append
+/// silently no-ops because the caller discards the Result.
+#[tokio::test]
+async fn force_pass_rationale_is_recorded_in_the_operator_audit_log() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("force-rationale-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"confirm":true,"rationale":"UI host unavailable, verified manually"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // NB: `CoordinationMessage::system(to, content)` takes the recipient first,
+    // so operator audit entries are recorded as `SYSTEM -> OPERATOR`.
+    let log = storage.read_coordination_log(&session_id, None).unwrap();
+    let operator_line = log
+        .iter()
+        .find(|m| m.to == "OPERATOR")
+        .expect("an operator override must leave an audit entry");
+    assert!(
+        operator_line.content.contains("FORCE-PASS"),
+        "audit entry should name the action, got {}",
+        operator_line.content
+    );
+    assert!(
+        operator_line
+            .content
+            .contains("UI host unavailable, verified manually"),
+        "audit entry should carry the operator rationale, got {}",
+        operator_line.content
+    );
+}
+
 #[tokio::test]
 async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
     let storage_dir = TempDir::new().unwrap();
@@ -5280,7 +5494,8 @@ async fn test_force_pass_hot_reloads_clean_session_from_session_json() {
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
                 .unwrap(),
         )
         .await

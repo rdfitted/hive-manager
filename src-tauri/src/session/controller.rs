@@ -193,8 +193,13 @@ impl CompletionBlockedError {
             (
                 "Session completion blocked: evaluator-backed session must be in QaPassed state".to_string(),
                 vec![
-                    format!("POST /api/sessions/{{{{id}}}}/qa/verdict with {{\"verdict\":\"PASS\"}} (Evaluator submits PASS)"),
-                    format!("POST /api/sessions/{{{{id}}}}/qa/force-pass (Operator override)"),
+                    // NB: under `format!`, `{{` renders as a single `{`. These
+                    // strings ship inside a live 409 body, so the reader must
+                    // see `{id}` -- not a doubled `{{id}}`.
+                    format!("POST /api/sessions/{{id}}/qa/verdict with {{\"verdict\":\"PASS\"}} (Evaluator submits PASS)"),
+                    format!(
+                        "POST /api/sessions/{{id}}/qa/force-pass with {{\"confirm\":true}} (Operator override)"
+                    ),
                 ],
             )
         } else {
