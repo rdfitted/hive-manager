@@ -82,24 +82,42 @@ pub async fn post_heartbeat(
     //
     // It still closes the hole: the harmful case is an id with no roster entry,
     // no live PTY and no queue row, and this runs BEFORE `record_heartbeat`.
-    let known_locally = {
+    // The Queen posts a bare `queen` alias while its roster entry is
+    // `{session}-queen`, so RESOLVE the posted id rather than rewriting it: an id
+    // that is already a member wins, and only an unknown bare alias is expanded.
+    // Rewriting unconditionally would break every agent whose roster id genuinely
+    // is unqualified.
+    let qualified = super::canonical_agent_id(&session_id, &req.agent_id);
+
+    let (raw_known, qualified_known) = {
         let controller = state.session_controller.read();
         let session = controller.get_session(&session_id).ok_or_else(|| {
             ApiError::not_found(format!("Session {} not found", session_id))
         })?;
-        session.agents.iter().any(|a| a.id == req.agent_id)
-            || state.pty_manager.read().is_alive(&req.agent_id)
+        let pty_manager = state.pty_manager.read();
+        let known = |id: &str| {
+            session.agents.iter().any(|a| a.id == id) || pty_manager.is_alive(id)
+        };
+        (known(&req.agent_id), known(&qualified))
     };
 
-    if !known_locally {
-        let has_queue_row = state
+    let agent_id = if raw_known {
+        req.agent_id.clone()
+    } else if qualified_known {
+        qualified
+    } else {
+        // Last resort: a durable queue row is proof of a real worker whose roster
+        // push has not landed yet.
+        let rows = state
             .queue_manager
             .repo()
             .rows_for_session(&session_id)
-            .map_err(|e| ApiError::internal(e.to_string()))?
-            .iter()
-            .any(|row| row.worker_id == req.agent_id);
-        if !has_queue_row {
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if rows.iter().any(|row| row.worker_id == req.agent_id) {
+            req.agent_id.clone()
+        } else if rows.iter().any(|row| row.worker_id == qualified) {
+            qualified
+        } else {
             tracing::warn!(
                 session_id = %session_id,
                 agent_id = %req.agent_id,
@@ -110,18 +128,13 @@ pub async fn post_heartbeat(
                 req.agent_id, session_id
             )));
         }
-    }
+    };
 
     // Scope the (non-Send) parking_lot guard so it is dropped before the await below.
     {
         let controller = state.session_controller.read();
         controller
-            .update_heartbeat(
-                &session_id,
-                &req.agent_id,
-                &req.status,
-                req.summary.as_deref(),
-            )
+            .update_heartbeat(&session_id, &agent_id, &req.status, req.summary.as_deref())
             .map_err(|e| ApiError::internal(e))?;
     }
 
@@ -130,7 +143,7 @@ pub async fn post_heartbeat(
     // Queen) is simply a no-op here.
     state
         .queue_manager
-        .record_heartbeat(&session_id, &req.agent_id, &req.status)
+        .record_heartbeat(&session_id, &agent_id, &req.status)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

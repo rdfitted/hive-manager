@@ -8726,6 +8726,97 @@ async fn heartbeat_rejects_a_fully_unknown_agent() {
     assert_eq!(ok.status(), StatusCode::OK);
 }
 
+/// #175(f). The Queen's own wait loops post a BARE `queen` alias, not
+/// `{session}-queen`, and they use `curl -fsS` — so a 404 here is a hard
+/// non-zero exit that aborts the Queen's shell block while it waits for the
+/// Evaluator verdict or Prince remediation. The roster gate must canonicalize
+/// the alias before comparing.
+///
+/// The second half also pins a latent UI bug: heartbeats were stored under the
+/// raw `"queen"` key while `/api/sessions/active` looks the Queen up by
+/// `{session}-queen`, leaving its activity permanently null.
+#[tokio::test]
+async fn heartbeat_accepts_the_bare_queen_alias_and_canonicalizes_it() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = "queen-alias".to_string();
+    let temp_dir = TempDir::new().unwrap();
+
+    let queen_id = format!("{}-queen", session_id);
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.agents.push(AgentInfo {
+        id: queen_id.clone(),
+        role: AgentRole::Queen,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.read().insert_test_session(session);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agent_id": "queen",
+                        "status": "working",
+                        "summary": "Waiting for Evaluator verdict"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the Queen's bare `queen` alias must be accepted"
+    );
+
+    // ...and it must be stored under the roster id, so the UI can find it.
+    let active = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/active")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(active.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let queen = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == session_id.as_str())
+        .expect("session present")["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == queen_id.as_str())
+        .expect("queen present")
+        .clone();
+    assert_eq!(queen["status"], "working");
+    assert_eq!(queen["summary"], "Waiting for Evaluator verdict");
+    assert!(
+        !queen["last_activity"].is_null(),
+        "the heartbeat must be recorded against the roster id, not the bare alias"
+    );
+}
+
 /// #175(f) regression net. Breaking heartbeating is worse than the bug it fixes,
 /// so every legitimate managed-agent id shape must still be accepted. Guards
 /// against a later "tidy-up" narrowing the gate to a role allowlist.

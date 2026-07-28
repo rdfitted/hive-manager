@@ -65,6 +65,29 @@ pub fn validate_cell_id(cell_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Resolve a possibly-bare agent alias to its session-qualified roster id.
+///
+/// The Queen's own wait loops post `{"agent_id":"queen"}` — a BARE alias, not
+/// `{session}-queen` — while its roster entry is `{session}-queen`. Any check
+/// that compares the posted id against the roster must canonicalize first, or it
+/// rejects the Queen; and because those loops use `curl -fsS`, a 4xx is a hard
+/// non-zero exit that aborts the Queen's shell block mid-wait.
+///
+/// Canonicalizing (rather than merely allowing the alias) also repairs a latent
+/// UI bug: heartbeats used to be stored under the raw `"queen"` key while
+/// `GET /api/sessions/active` looks the Queen up by `{session}-queen`, so its
+/// `last_activity` / `status` / `summary` were permanently `None`.
+///
+/// Ids that are already session-qualified are returned unchanged.
+pub fn canonical_agent_id(session_id: &str, agent_id: &str) -> String {
+    let prefix = format!("{}-", session_id);
+    if agent_id.starts_with(&prefix) {
+        agent_id.to_string()
+    } else {
+        format!("{}{}", prefix, agent_id)
+    }
+}
+
 /// Validate agent_id to prevent path traversal and malformed names.
 pub fn validate_agent_id(agent_id: &str) -> Result<(), ApiError> {
     if agent_id.is_empty() || agent_id.len() > 64 {
