@@ -4777,6 +4777,370 @@ async fn test_launch_solo_with_evaluator_uses_solo_defaults() {
     }
 }
 
+/// #175(a) T14 — the headline fix. An evaluator-backed session must finish
+/// launching in `Running` with NO QA clock armed. Before this, launch went
+/// straight to `QaInProgress` and started a 300s timer, so any session whose
+/// first milestone took longer than the timeout was deterministically poisoned
+/// to `QaInconclusive` with a BLOCKED verdict for work never submitted.
+#[tokio::test]
+async fn launch_with_evaluator_stays_running_and_does_not_arm_the_qa_clock() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Ship a milestone",
+        "cli": "codex",
+        "evaluator_cli": "codex"
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Unconditional: the older evaluator-launch tests guarded their assertions
+    // behind `if status == CREATED`, and without a git fixture the launch 500s,
+    // so those assertions never actually ran.
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let launch: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let session_id = launch["session_id"].as_str().unwrap();
+
+    let session = controller.read().get_session(session_id).unwrap();
+    assert!(
+        session
+            .agents
+            .iter()
+            .any(|a| matches!(a.role, AgentRole::Evaluator)),
+        "precondition: the session must actually be evaluator-backed"
+    );
+    assert_eq!(
+        session.state,
+        SessionState::Running,
+        "an evaluator-backed launch must not enter a QA state"
+    );
+    assert!(
+        !controller.read().qa_timeout_armed(session_id),
+        "the QA clock must not be armed before a milestone is submitted"
+    );
+
+    // NB: a verdict posted now WOULD be accepted, because `post_verdict`
+    // self-heals a Running evaluator-backed session into a QA window. That is
+    // deliberate — it rescues sessions whose peer watcher never started — so it
+    // is not asserted against here. `milestone_ready_opens_the_qa_window_...`
+    // covers the normal handoff path.
+
+    controller.write().close_session(session_id).unwrap();
+}
+
+/// #175(a) T17. The milestone handoff is what opens the QA window and starts the
+/// clock.
+#[tokio::test]
+async fn milestone_ready_opens_the_qa_window_and_arms_the_clock() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let body = serde_json::json!({
+        "project_path": temp_dir.path().to_string_lossy(),
+        "task_description": "Ship a milestone",
+        "cli": "codex",
+        "evaluator_cli": "codex"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/solo")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let launch: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let session_id = launch["session_id"].as_str().unwrap().to_string();
+
+    assert!(!controller.read().qa_timeout_armed(&session_id));
+
+    let handoff = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/milestone-ready", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handoff.status(), StatusCode::OK);
+
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: None },
+        "the handoff must open the QA window"
+    );
+    assert!(
+        controller.read().qa_timeout_armed(&session_id),
+        "the handoff must arm the QA clock"
+    );
+
+    // Proof the window is genuinely open: a verdict is now accepted.
+    let verdict = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/verdict", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"PASS"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verdict.status(), StatusCode::OK);
+
+    controller.write().close_session(&session_id).unwrap();
+}
+
+/// #175(a) T18 — THE TRAP, plus the latent iteration-loss bug.
+///
+/// When the rostered Evaluator has no live PTY, `on_milestone_ready` takes the
+/// respawn branch and early-returns. That branch used to rely on
+/// `launch_evaluator`'s tail to transition and arm the clock; now that spawning
+/// an Evaluator no longer opens a QA window, the branch must do it itself.
+/// Without this the spurious-timeout bug is merely traded for a
+/// never-times-out bug.
+///
+/// The iteration assertion pins the second half: `launch_evaluator` writes
+/// `SpawningEvaluator` before its tail read the state back, so a respawn from
+/// `QaFailed { iteration: 2 }` used to reset the counter to `None` and defeat the
+/// max-retries ceiling.
+#[tokio::test]
+async fn milestone_ready_respawn_branch_arms_qa_and_preserves_iteration() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("respawn-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaFailed { iteration: 2 };
+    // Rostered Evaluator with NO registered PTY -> is_alive() is false -> the
+    // dead-evaluator respawn branch.
+    session.agents.push(AgentInfo {
+        id: format!("{}-evaluator", session_id),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig {
+            cli: "claude".to_string(),
+            ..AgentConfig::default()
+        },
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/milestone-ready", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) },
+        "the respawn branch must open a QA window AND carry the iteration forward"
+    );
+    assert!(
+        controller.read().qa_timeout_armed(&session_id),
+        "the respawn branch must arm the QA clock"
+    );
+}
+
+/// #175(c). `QaInconclusive` locked out worker spawning entirely, which is what
+/// made the field session permanently uncapped-at-3.
+#[tokio::test]
+async fn workers_can_be_added_while_qa_is_inconclusive() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("inconclusive-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    init_git_repo_for_launch_fixture(temp_dir.path());
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInconclusive;
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"role_type":"backend","cli":"claude","initial_task":"fix it"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::CREATED,
+        "QaInconclusive must not lock out worker spawning"
+    );
+}
+
+/// #175(a) + #176. With the launch state now `Running`, the operator override
+/// must still be reachable for an evaluator-backed session — otherwise the fix
+/// ships a session that can never complete (completion demands QaPassed).
+#[tokio::test]
+async fn force_pass_is_allowed_before_the_milestone_handoff() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("pre-handoff-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::Running;
+    session.agents.push(AgentInfo {
+        id: format!("{}-evaluator", session_id),
+        role: AgentRole::Evaluator,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaPassed
+    );
+}
+
+/// The widening above must stay conditioned on the session actually being
+/// evaluator-backed. A swarm forced into `QaPassed` permanently loses
+/// `add_planner`.
+#[tokio::test]
+async fn force_pass_still_rejected_for_a_running_session_without_an_evaluator() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("no-eval-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::Running;
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/qa/force-pass", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirm":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::Running
+    );
+}
+
+/// #175(b). A milestone-ready arriving while QA is inconclusive is still
+/// dropped, but it must be recorded rather than silently discarded.
+#[tokio::test]
+async fn milestone_ready_on_an_inconclusive_session_is_logged_not_silent() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("drop-log-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.state = SessionState::QaInconclusive;
+    controller.write().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/milestone-ready", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // State is deliberately unchanged (re-entry is a separate follow-up)...
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInconclusive
+    );
+    // ...but the drop must be visible to the operator.
+    let log = storage.read_coordination_log(&session_id, None).unwrap();
+    assert!(
+        log.iter().any(|m| m.content.contains("milestone-ready")
+            && m.content.contains("force-pass")),
+        "the dropped signal must be recorded with the recovery path, got {:?}",
+        log.iter().map(|m| &m.content).collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn test_launch_solo_with_same_cli_evaluator_preserves_custom_session_model() {
     let (app, controller) = setup_test_app_with_controller().await;

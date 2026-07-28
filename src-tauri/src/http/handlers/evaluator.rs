@@ -412,8 +412,25 @@ fn require_qa_overridable(
         return Ok(());
     }
 
+    // #175(a): evaluator-backed sessions now sit in Running (or briefly
+    // SpawningEvaluator) until the milestone handoff, but they still cannot
+    // complete without reaching QaPassed. Without this the operator would have no
+    // way to unblock a session before its first handoff.
+    //
+    // The widening is conditioned on the session actually having an Evaluator or
+    // QA worker, which is exactly the set of sessions the timer change affects.
+    // A non-evaluator session keeps the old gate -- otherwise a swarm could be
+    // forced into QaPassed and permanently lose `add_planner`.
+    if matches!(
+        session.state,
+        SessionState::Running | SessionState::SpawningEvaluator
+    ) && SessionController::session_requires_internal_evaluator(&session)
+    {
+        return Ok(());
+    }
+
     Err(ApiError::bad_request(format!(
-        "Cannot {}: session is in {:?} state, expected QaInProgress, QaInconclusive, or PrinceRemediation",
+        "Cannot {}: session is in {:?} state, expected QaInProgress, QaInconclusive, PrinceRemediation, or an evaluator-backed Running session",
         action, session.state
     )))
 }
@@ -541,6 +558,35 @@ pub async fn post_verdict(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // #175(a) self-heal. The QA window normally opens when the peer watcher
+    // observes milestone-ready, but that watcher does not exist when the session
+    // was launched without an app handle. Without this, such a session
+    // hard-deadlocks: the Evaluator's real verdict is rejected, and so is its
+    // documented BLOCKED fallback (this guard runs before the BLOCKED fork), while
+    // the Queen polls forever with no clock. This also rescues in-flight sessions
+    // that were launched under the old prompt.
+    {
+        let controller = state.session_controller.read();
+        let needs_window = controller.get_session(&session_id).is_some_and(|session| {
+            matches!(
+                session.state,
+                SessionState::Running | SessionState::SpawningEvaluator
+            ) && session
+                .agents
+                .iter()
+                .any(|agent| matches!(agent.role, AgentRole::Evaluator))
+        });
+        if needs_window {
+            tracing::info!(
+                session_id = %session_id,
+                "Opening a QA window from an incoming verdict: the milestone handoff was never observed"
+            );
+            controller
+                .begin_qa_window(&session_id)
+                .map_err(ApiError::internal)?;
+        }
+    }
 
     // Resolve peer identities + project path up front (needed for both BLOCKED and
     // PASS/FAIL paths). require_qa_in_progress rejects verdicts posted outside the
@@ -766,6 +812,39 @@ pub async fn post_prince_verdict(
         "rationale": rationale,
         "persisted": true,
         "peer_file_written": true,
+    })))
+}
+
+/// POST /api/sessions/{id}/milestone-ready
+///
+/// #175(a): the Queen signals that a milestone is ready for QA review. This opens
+/// the QA window and arms the QA timeout. Before this, the clock was armed at
+/// session launch, so any session whose first milestone took longer than the
+/// timeout was deterministically poisoned to `QaInconclusive` with a BLOCKED
+/// verdict for work that had never been submitted.
+pub async fn post_milestone_ready(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    validate_session_id(&session_id)?;
+
+    let controller = state.session_controller.read();
+    controller
+        .get_session(&session_id)
+        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+    controller
+        .on_milestone_ready(&session_id)
+        .map_err(ApiError::internal)?;
+    let new_state = controller
+        .get_session(&session_id)
+        .map(|s| format!("{:?}", s.state))
+        .unwrap_or_default();
+    drop(controller);
+
+    Ok(Json(json!({
+        "session_id": session_id,
+        "action": "milestone-ready",
+        "new_state": new_state,
     })))
 }
 

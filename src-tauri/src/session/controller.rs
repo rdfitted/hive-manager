@@ -703,6 +703,22 @@ fn is_terminal_session_state(state: &SessionState) -> bool {
     )
 }
 
+/// States in which a QA review is open or already resolved. Used to stop
+/// unrelated worker progression from dragging a session back to `Running` and
+/// orphaning an in-flight review (#175a).
+fn is_qa_phase_state(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::SpawningEvaluator
+            | SessionState::QaInProgress { .. }
+            | SessionState::QaPassed
+            | SessionState::QaFailed { .. }
+            | SessionState::QaInconclusive
+            | SessionState::QaMaxRetriesExceeded
+            | SessionState::PrinceRemediation
+    )
+}
+
 fn qa_in_progress_state(state: &SessionState) -> SessionState {
     match state {
         SessionState::QaFailed { iteration } => SessionState::QaInProgress {
@@ -1462,7 +1478,7 @@ impl SessionController {
             .collect()
     }
 
-    fn session_requires_internal_evaluator(session: &Session) -> bool {
+    pub(crate) fn session_requires_internal_evaluator(session: &Session) -> bool {
         session.agents.iter().any(|agent| {
             matches!(
                 agent.role,
@@ -4799,7 +4815,12 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
    mv "$TMP_MILESTONE" "{milestone_ready_path}"
    ```
 
-3. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
+3. You MUST then signal the backend that the milestone is ready. This is what opens the QA review window and starts the QA clock — the clock does NOT run before this point, so there is no time pressure on the work above.
+   ```bash
+   curl -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/milestone-ready"
+   ```
+
+4. You MUST NOT spawn an Evaluator here. The backend already launched it. After this handoff exists, continue with the Post-Workers Protocol and wait for `{qa_verdict_path}`."#,
             completion_scope = completion_scope,
             peer_dir = peer_dir,
             milestone_ready_path = milestone_ready_path,
@@ -10103,9 +10124,18 @@ phases and do EXACTLY this, then stop:
             // All workers spawned - session complete
             let changes = {
                 let mut sessions = self.sessions.write();
-                sessions
-                    .get_mut(session_id)
-                    .map(|s| self.set_session_state_with_events(s, SessionState::Running))
+                sessions.get_mut(session_id).and_then(|s| {
+                    // #175(a): do not clobber an open QA window. Now that a
+                    // session sits in `Running` until the milestone handoff, a
+                    // worker completing AFTER the handoff would otherwise drag
+                    // the session back out of QaInProgress and orphan the
+                    // Evaluator's review.
+                    if is_qa_phase_state(&s.state) {
+                        None
+                    } else {
+                        Some(self.set_session_state_with_events(s, SessionState::Running))
+                    }
+                })
             };
             if let Some(changes) = changes {
                 self.persist_then_emit_session_update(session_id, changes)
@@ -10889,6 +10919,50 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
+    /// Surface a dropped milestone-ready signal to the UI. Reuses the existing
+    /// `qa-inconclusive` event rather than introducing a new one.
+    fn emit_qa_inconclusive_event(&self, session_id: &str) {
+        if let Some(ref app_handle) = self.app_handle {
+            let _ = app_handle.emit(
+                "qa-inconclusive",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "action": "milestone-ready-dropped",
+                    "reason": "QA is inconclusive; resolve with qa/force-pass or qa/force-fail",
+                }),
+            );
+        }
+    }
+
+    /// Open the QA review window: move the session into `QaInProgress` and arm
+    /// the QA timeout.
+    ///
+    /// #175(a): this is the ONE place that starts the QA clock. Spawning an
+    /// Evaluator deliberately does not, because that happens at session launch,
+    /// long before there is anything to review.
+    pub(crate) fn begin_qa_window(&self, session_id: &str) -> Result<(), String> {
+        let (timeout_secs, changes) = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            let next_state = qa_in_progress_state(&session.state);
+            let changes = self.set_session_state_with_events(session, next_state);
+            (session.qa_timeout_secs, changes)
+        };
+        self.emit_session_update(session_id);
+        self.update_session_storage(session_id);
+        self.emit_cell_status_changes(session_id, changes);
+        self.start_qa_timeout(session_id, timeout_secs);
+        Ok(())
+    }
+
+    /// Whether a QA timeout is currently armed for this session.
+    #[cfg(test)]
+    pub fn qa_timeout_armed(&self, session_id: &str) -> bool {
+        self.qa_timeout_handles.lock().contains_key(session_id)
+    }
+
     #[allow(dead_code)]
     pub fn on_milestone_ready(&self, session_id: &str) -> Result<(), String> {
         let (maybe_evaluator, config) = {
@@ -10897,10 +10971,34 @@ phases and do EXACTLY this, then stop:
                 .get(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
+            // #175(b): a milestone-ready signal arriving while the session is
+            // QaInconclusive is still dropped, but it must not be dropped
+            // SILENTLY -- that is how a Queen submitting the real milestone after
+            // a spurious timeout got no QA and no explanation. Recovery (re-entry
+            // into QaInProgress) is deliberately deferred; the operator path via
+            // force-pass / force-fail already accepts QaInconclusive.
+            if matches!(&session.state, SessionState::QaInconclusive) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "Dropping milestone-ready signal: QA is inconclusive for this session. \
+                     Operator must resolve it with qa/force-pass or qa/force-fail."
+                );
+                if let Some(storage) = self.storage.as_ref() {
+                    let msg = crate::coordination::CoordinationMessage::system(
+                        "OPERATOR",
+                        "milestone-ready was received but ignored: QA is inconclusive. \
+                         Resolve with POST /qa/force-pass or POST /qa/force-fail \
+                         (body: {\"confirm\":true}).",
+                    );
+                    let _ = storage.append_coordination_log(session_id, &msg);
+                }
+                self.emit_qa_inconclusive_event(session_id);
+                return Ok(());
+            }
+
             if matches!(
                 &session.state,
                 SessionState::PrinceRemediation
-                    | SessionState::QaInconclusive
                     | SessionState::QaPassed
                     | SessionState::QaMaxRetriesExceeded
             ) {
@@ -10957,24 +11055,17 @@ phases and do EXACTLY this, then stop:
             let result = self.launch_evaluator(session_id, config, false);
             self.finish_evaluator_respawn(session_id);
             result?;
+            // #175(a) THE TRAP: this branch used to rely on `launch_evaluator`'s
+            // tail to transition and arm the clock. Now that spawning an
+            // Evaluator no longer opens a QA window, this branch must open it
+            // itself -- otherwise the fix for a spurious-timeout bug becomes a
+            // never-times-out bug, and a real milestone would sit unreviewed
+            // forever.
+            self.begin_qa_window(session_id)?;
             return Ok(());
         }
 
-        let timeout_secs = {
-            let mut sessions = self.sessions.write();
-            let session = sessions
-                .get_mut(session_id)
-                .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            let next_state = qa_in_progress_state(&session.state);
-            let changes = self.set_session_state_with_events(session, next_state);
-            (session.qa_timeout_secs, changes)
-        };
-        self.emit_session_update(session_id);
-        self.update_session_storage(session_id);
-        self.emit_cell_status_changes(session_id, timeout_secs.1);
-        self.start_qa_timeout(session_id, timeout_secs.0);
-
-        Ok(())
+        self.begin_qa_window(session_id)
     }
 
     #[allow(dead_code)]
@@ -12882,6 +12973,12 @@ phases and do EXACTLY this, then stop:
                 | SessionState::QaFailed { .. }
                 | SessionState::QaMaxRetriesExceeded
                 | SessionState::PrinceRemediation
+                // #175(c): QaInconclusive is strictly less terminal than
+                // QaMaxRetriesExceeded (which is allowed), is already accepted by
+                // is_monitorable and by the operator override gate, and excluding
+                // it stranded the Prince's fix team -- the parent-role check
+                // accepts Prince, but this state guard rejected first.
+                | SessionState::QaInconclusive
         );
         if !can_add_worker {
             return Err(format!(
@@ -13143,13 +13240,27 @@ phases and do EXACTLY this, then stop:
             config.label = Some("Evaluator".to_string());
         }
 
-        let spawning_changes = {
+        // #175(a): capture the state we are transitioning AWAY from, so the tail
+        // can restore it. Restoring the captured state rather than a hardcoded
+        // `Running` also fixes a latent iteration-loss bug: the tail used to read
+        // `qa_in_progress_state(&current.state)` AFTER this block had already
+        // written `SpawningEvaluator`, so a respawn from `QaFailed { iteration: 2 }`
+        // fell to the catch-all arm and reset the counter to `None`, defeating the
+        // max-retries ceiling.
+        let (previous_state, spawning_changes) = {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
+                let previous_state = current.state.clone();
                 current.agents.retain(|agent| agent.id != evaluator_id);
-                Some(self.set_session_state_with_events(current, SessionState::SpawningEvaluator))
+                (
+                    Some(previous_state),
+                    Some(self.set_session_state_with_events(
+                        current,
+                        SessionState::SpawningEvaluator,
+                    )),
+                )
             } else {
-                None
+                (None, None)
             }
         };
         self.emit_session_update(session_id);
@@ -13230,23 +13341,42 @@ phases and do EXACTLY this, then stop:
             base_commit_sha: None,
         };
 
-        let (timeout_secs, qa_changes) = {
+        // #175(a): spawning an Evaluator does NOT open a QA window. It used to
+        // transition straight to QaInProgress and arm the 300s QA timer, and
+        // because this runs at SESSION LAUNCH, every evaluator-backed session ran
+        // a live QA clock from the moment it started. Any session whose first
+        // milestone took longer than the timeout was deterministically poisoned
+        // to QaInconclusive with a spurious BLOCKED/timeout verdict for work that
+        // had never been submitted for review.
+        //
+        // The clock is now armed only by `begin_qa_window`, at milestone handoff.
+        let qa_changes = {
             let mut sessions = self.sessions.write();
             let current = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             current.agents.push(agent_info.clone());
             self.emit_agent_launched(current, &agent_info);
-            let next_state = qa_in_progress_state(&current.state);
-            let changes = self.set_session_state_with_events(current, next_state);
-            (current.qa_timeout_secs, changes)
+            // Restore the pre-spawn state, but only if we are still the ones
+            // holding SpawningEvaluator: the sessions lock is released across the
+            // PTY spawn and two file writes above, so an unguarded restore could
+            // silently revert a concurrent Failed/Closing/Closed transition.
+            match (&current.state, previous_state) {
+                (SessionState::SpawningEvaluator, Some(previous)) => {
+                    Some(self.set_session_state_with_events(current, previous))
+                }
+                _ => None,
+            }
         };
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
-        self.emit_cell_status_changes(session_id, qa_changes);
+        if let Some(changes) = qa_changes {
+            self.emit_cell_status_changes(session_id, changes);
+        }
+        // The peer watcher must still exist — without it the milestone handoff is
+        // never observed.
         self.ensure_task_watcher(session_id, &session.project_path);
-        self.start_qa_timeout(session_id, timeout_secs);
 
         // #125: evaluator spawned successfully — mark the write-step Completed.
         if let Some(step_id) = evaluator_journal_step.as_deref() {
@@ -13482,24 +13612,22 @@ phases and do EXACTLY this, then stop:
             base_commit_sha: None,
         };
 
-        let qa_changes = {
+        {
             let mut sessions = self.sessions.write();
             if let Some(current) = sessions.get_mut(session_id) {
                 current.agents.push(agent_info.clone());
                 self.emit_agent_launched(current, &agent_info);
-                let next_state = qa_in_progress_state(&current.state);
-                Some(self.set_session_state_with_events(current, next_state))
-            } else {
-                None
             }
-        };
+        }
 
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
-        if let Some(changes) = qa_changes {
-            self.emit_cell_status_changes(session_id, changes);
-        }
         self.ensure_task_watcher(session_id, &session.project_path);
+        // #175(a): route the QA transition through the single window-opener so
+        // this path gets a clock too. Otherwise it would be the only remaining
+        // way into QaInProgress with no timeout armed, and there is no UI
+        // escalation to compensate.
+        self.begin_qa_window(session_id)?;
 
         Ok(agent_info)
     }

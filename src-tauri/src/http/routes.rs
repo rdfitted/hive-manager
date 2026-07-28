@@ -147,6 +147,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{id}/qa/verdict",
             post(evaluator::post_verdict),
         )
+        // #175(a): explicit milestone handoff. This is what opens the QA review
+        // window and arms the QA clock. It is the only handoff path that survives
+        // a session launched without an app handle (where the peer file watcher
+        // never starts).
+        .route(
+            "/api/sessions/{id}/milestone-ready",
+            post(evaluator::post_milestone_ready),
+        )
         .route(
             "/api/sessions/{id}/qa/force-pass",
             post(evaluator::force_pass),

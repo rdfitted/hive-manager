@@ -241,6 +241,8 @@
     }
   }
 
+  // Unchanged — still gates the QA Feedback panel. Deliberately NOT widened:
+  // that section should only appear once QA has actually started.
   function isQaPhase(state: Session['state']): boolean {
     const v = serdeEnumVariantName(state);
     return (
@@ -252,6 +254,21 @@
       v === 'QaMaxRetriesExceeded' ||
       (typeof state === 'object' && state !== null && 'QaFailed' in state)
     );
+  }
+
+  // #175: evaluator-backed sessions now stay in Running until the milestone
+  // handoff, but still cannot complete without reaching QaPassed — so the
+  // operator needs the override controls before QA has ever started. Mirrors the
+  // backend gate, which widens to Running/SpawningEvaluator only when the session
+  // actually has an Evaluator or QA worker.
+  function canOverrideQa(state: Session['state'], agents: Session['agents']): boolean {
+    if (isQaPhase(state)) return true;
+    const v = serdeEnumVariantName(state);
+    if (v !== 'Running' && v !== 'SpawningEvaluator') return false;
+    return (agents ?? []).some((a) => {
+      const role = serdeEnumVariantName(a.role);
+      return role === 'Evaluator' || role === 'QaWorker';
+    });
   }
 </script>
 
@@ -406,7 +423,7 @@
                 <button class="op-button skip" onclick={() => showSkipQaConfirm = true}>Skip QA</button>
               {/if}
 
-              {#if isQaPhase($activeSession.state)}
+              {#if canOverrideQa($activeSession.state, $activeSession.agents)}
                 <div class="op-group">
                   <button class="op-button pass" onclick={() => showForcePassConfirm = true}>Force Pass</button>
                   <button class="op-button fail" onclick={() => showForceFailConfirm = true}>Force Fail</button>
