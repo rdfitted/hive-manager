@@ -8726,6 +8726,64 @@ async fn heartbeat_rejects_a_fully_unknown_agent() {
     assert_eq!(ok.status(), StatusCode::OK);
 }
 
+/// #175(f) regression net. Breaking heartbeating is worse than the bug it fixes,
+/// so every legitimate managed-agent id shape must still be accepted. Guards
+/// against a later "tidy-up" narrowing the gate to a role allowlist.
+#[tokio::test]
+async fn heartbeat_accepts_every_managed_agent_id_shape() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    // Short id so `{sid}-master-planner` stays under the 64-char agent-id cap.
+    let session_id = "hb-shapes".to_string();
+    let temp_dir = TempDir::new().unwrap();
+
+    let suffixes = [
+        "queen",
+        "worker-1",
+        "evaluator",
+        "prince",
+        "qa-worker-1",
+        "fusion-1",
+        "judge",
+        "debate-1-r1",
+        "master-planner",
+        "planner-1",
+    ];
+    let ids: Vec<String> = suffixes
+        .iter()
+        .map(|s| format!("{}-{}", session_id, s))
+        .collect();
+    let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    controller.read().insert_test_session(make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &refs,
+    ));
+
+    for id in &ids {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/heartbeat", session_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"agent_id": id, "status": "working"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "heartbeat must be accepted for rostered agent {id}"
+        );
+    }
+}
+
 /// Fail-open: every spawn path starts the PTY before pushing the roster entry,
 /// and the agents' heartbeat snippet uses `curl -fsS`, so a strict roster check
 /// would abort a healthy agent's shell block during that window.
