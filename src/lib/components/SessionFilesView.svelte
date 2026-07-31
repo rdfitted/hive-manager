@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { ArrowClockwise, CaretDown, CaretRight, FileText, Folder } from 'phosphor-svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import SkelBar from '$lib/components/SkelBar.svelte';
   import { activeSession } from '$lib/stores/sessions';
   import {
     SESSION_FILES_POLL_INTERVAL,
@@ -9,6 +11,14 @@
   } from '$lib/stores/sessionFiles';
 
   const FILE_WINDOW_SIZE = 200;
+  const FILE_TREE_SKELETON_ROWS = [
+    { indent: 0, nameWidth: '42%' },
+    { indent: 1, nameWidth: '58%' },
+    { indent: 1, nameWidth: '36%' },
+    { indent: 2, nameWidth: '52%' },
+    { indent: 2, nameWidth: '46%' },
+  ];
+  const FILE_CONTENT_SKELETON_WIDTHS = ['88%', '72%', '94%', '61%', '82%', '68%', '91%', '54%'];
 
   let collapsedDirectories = $state(new Set<string>());
   let windowStart = $state(0);
@@ -142,105 +152,136 @@
       </div>
       <button
         type="button"
-        class="refresh-button"
-        class:spinning={$sessionFilesStore.loading || $sessionFilesStore.refreshing}
+        class="lattice-btn lattice-btn--ghost lattice-btn--icon"
         onclick={() => void sessionFilesStore.refresh()}
         disabled={$sessionFilesStore.loading || $sessionFilesStore.refreshing}
         title="Refresh session files"
         aria-label="Refresh session files"
       >
-        <ArrowClockwise size={15} weight="light" />
+        <ArrowClockwise
+          size={15}
+          weight="light"
+          class={$sessionFilesStore.loading || $sessionFilesStore.refreshing
+            ? 'lattice-motion-spinner'
+            : ''}
+        />
       </button>
     </header>
 
     {#if $sessionFilesStore.error && $sessionFilesStore.entries.length > 0}
       <div class="inline-error" role="alert">
         <span>{$sessionFilesStore.error}</span>
-        <button type="button" onclick={() => sessionFilesStore.clearError()}>Dismiss</button>
+        <button
+          class="lattice-btn lattice-btn--secondary lattice-btn--compact"
+          type="button"
+          onclick={() => sessionFilesStore.clearError()}
+        >
+          Dismiss
+        </button>
       </div>
     {/if}
 
-    <section class="file-browser" aria-label="Session file browser">
-      {#if $sessionFilesStore.loading}
-        <div class="pane-state" aria-live="polite">
-          <span class="spinner" aria-hidden="true"></span>
-          <span>Loading session files…</span>
-        </div>
-      {:else if $sessionFilesStore.error && $sessionFilesStore.entries.length === 0}
-        <div class="pane-state error-state" role="alert">
-          <span>{$sessionFilesStore.error}</span>
-          <button type="button" onclick={() => void sessionFilesStore.refresh()}>Try again</button>
-        </div>
-      {:else if $sessionFilesStore.entries.length === 0}
-        <div class="pane-state" aria-live="polite">
-          <Folder size={30} weight="light" />
-          <span>No session files yet.</span>
-          <small>This list refreshes automatically.</small>
-        </div>
-      {:else}
-        <div id="session-files-tree" class="file-list" role="tree" aria-label="Files">
-          {#each windowEntries as entry (entry.path)}
-            {@const selected = !entry.is_dir && $sessionFilesStore.selectedPath === entry.path}
-            <button
-              type="button"
-              class="file-row"
-              class:selected
-              role="treeitem"
-              aria-selected={selected}
-              aria-expanded={entry.is_dir ? !isCollapsed(entry.path) : undefined}
-              style={`padding-left: ${8 + entryDepth(entry.path) * 14}px`}
-              title={`${normalizePath(entry.path)}\n${entry.is_dir ? 'Folder' : formatSize(entry.size)}\n${formatModified(entry.modified)}`}
-              onclick={() => handleEntryClick(entry)}
+    <section class="file-browser lattice-scroll-content" aria-label="Session file browser">
+      {#snippet fileTreeSkeleton()}
+        <div class="file-tree-skeleton-shape">
+          {#each FILE_TREE_SKELETON_ROWS as row}
+            <div
+              class="file-tree-skeleton-row"
+              style={`padding-left: ${8 + row.indent * 14}px`}
             >
-              <span class="disclosure" aria-hidden="true">
-                {#if entry.is_dir}
-                  {#if isCollapsed(entry.path)}
-                    <CaretRight size={12} weight="bold" />
-                  {:else}
-                    <CaretDown size={12} weight="bold" />
-                  {/if}
-                {/if}
-              </span>
-              {#if entry.is_dir}
-                <span class="entry-icon folder-icon">
-                  <Folder size={15} weight="light" />
-                </span>
-              {:else}
-                <span class="entry-icon">
-                  <FileText size={15} weight="light" />
-                </span>
-              {/if}
-              <span class="entry-name">{entry.name}</span>
-              {#if !entry.is_dir}
-                <span class="entry-size">{formatSize(entry.size)}</span>
-              {/if}
-            </button>
+              <SkelBar width="14px" height="14px" radius="sm" />
+              <SkelBar width={row.nameWidth} height="0.7rem" />
+              <SkelBar width="2.5rem" height="0.6rem" />
+            </div>
           {/each}
         </div>
-        {#if visibleEntries.length > FILE_WINDOW_SIZE}
-          <div class="file-window-controls" role="group" aria-label="File list navigation">
+      {/snippet}
+
+      <Skeleton loading={$sessionFilesStore.loading} skeleton={fileTreeSkeleton} class="file-tree-skeleton">
+        {#if $sessionFilesStore.error && $sessionFilesStore.entries.length === 0}
+          <div class="pane-state error-state" role="alert">
+            <span>{$sessionFilesStore.error}</span>
             <button
+              class="lattice-btn lattice-btn--secondary lattice-btn--compact"
               type="button"
-              aria-controls="session-files-tree"
-              onclick={showPreviousWindow}
-              disabled={effectiveWindowStart === 0}
+              onclick={() => void sessionFilesStore.refresh()}
             >
-              Previous files
-            </button>
-            <span class="file-window-status" aria-live="polite">
-              Showing {effectiveWindowStart + 1}–{windowEnd} of {visibleEntries.length}
-            </span>
-            <button
-              type="button"
-              aria-controls="session-files-tree"
-              onclick={showNextWindow}
-              disabled={windowEnd >= visibleEntries.length}
-            >
-              Next files
+              Try again
             </button>
           </div>
+        {:else if $sessionFilesStore.entries.length === 0}
+          <div class="pane-state" aria-live="polite">
+            <Folder size={30} weight="light" />
+            <span>No session files yet.</span>
+            <small>This list refreshes automatically.</small>
+          </div>
+        {:else}
+          <div id="session-files-tree" class="file-list" role="tree" aria-label="Files">
+            {#each windowEntries as entry (entry.path)}
+              {@const selected = !entry.is_dir && $sessionFilesStore.selectedPath === entry.path}
+              <button
+                type="button"
+                class="lattice-btn lattice-btn--row lattice-btn--compact"
+                class:selected
+                role="treeitem"
+                aria-selected={selected}
+                aria-expanded={entry.is_dir ? !isCollapsed(entry.path) : undefined}
+                style={`padding-left: ${8 + entryDepth(entry.path) * 14}px`}
+                title={`${normalizePath(entry.path)}\n${entry.is_dir ? 'Folder' : formatSize(entry.size)}\n${formatModified(entry.modified)}`}
+                onclick={() => handleEntryClick(entry)}
+              >
+                <span class="disclosure" aria-hidden="true">
+                  {#if entry.is_dir}
+                    {#if isCollapsed(entry.path)}
+                      <CaretRight size={12} weight="bold" />
+                    {:else}
+                      <CaretDown size={12} weight="bold" />
+                    {/if}
+                  {/if}
+                </span>
+                {#if entry.is_dir}
+                  <span class="entry-icon folder-icon">
+                    <Folder size={15} weight="light" />
+                  </span>
+                {:else}
+                  <span class="entry-icon">
+                    <FileText size={15} weight="light" />
+                  </span>
+                {/if}
+                <span class="entry-name">{entry.name}</span>
+                {#if !entry.is_dir}
+                  <span class="entry-size">{formatSize(entry.size)}</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+          {#if visibleEntries.length > FILE_WINDOW_SIZE}
+            <div class="file-window-controls" role="group" aria-label="File list navigation">
+              <button
+                class="lattice-btn lattice-btn--secondary lattice-btn--compact"
+                type="button"
+                aria-controls="session-files-tree"
+                onclick={showPreviousWindow}
+                disabled={effectiveWindowStart === 0}
+              >
+                Previous files
+              </button>
+              <span class="file-window-status" aria-live="polite">
+                Showing {effectiveWindowStart + 1}–{windowEnd} of {visibleEntries.length}
+              </span>
+              <button
+                class="lattice-btn lattice-btn--secondary lattice-btn--compact"
+                type="button"
+                aria-controls="session-files-tree"
+                onclick={showNextWindow}
+                disabled={windowEnd >= visibleEntries.length}
+              >
+                Next files
+              </button>
+            </div>
+          {/if}
         {/if}
-      {/if}
+      </Skeleton>
     </section>
 
     <section class="content-viewer" aria-label="File content">
@@ -255,31 +296,37 @@
       {/if}
 
       <div class="content-body">
-        {#if $sessionFilesStore.contentLoading}
-          <div class="pane-state" aria-live="polite">
-            <span class="spinner" aria-hidden="true"></span>
-            <span>Loading file…</span>
+        {#snippet fileContentSkeleton()}
+          <div class="file-content-skeleton-shape">
+            {#each FILE_CONTENT_SKELETON_WIDTHS as width}
+              <SkelBar {width} height="0.65rem" radius="none" />
+            {/each}
           </div>
-        {:else if $sessionFilesStore.contentError}
-          <div class="pane-state error-state" role="alert">
-            <span>{$sessionFilesStore.contentError}</span>
-            {#if $sessionFilesStore.selectedPath}
-              <button
-                type="button"
-                onclick={() => void sessionFilesStore.selectFile($sessionFilesStore.selectedPath!)}
-              >
-                Try again
-              </button>
-            {/if}
-          </div>
-        {:else if $sessionFilesStore.content}
-          <pre class="file-content">{$sessionFilesStore.content.content}</pre>
-        {:else}
-          <div class="pane-state content-empty" aria-live="polite">
-            <FileText size={30} weight="light" />
-            <span>Select a file to view its contents.</span>
-          </div>
-        {/if}
+        {/snippet}
+
+        <Skeleton loading={$sessionFilesStore.contentLoading} skeleton={fileContentSkeleton} class="file-content-skeleton">
+          {#if $sessionFilesStore.contentError}
+            <div class="pane-state error-state" role="alert">
+              <span>{$sessionFilesStore.contentError}</span>
+              {#if $sessionFilesStore.selectedPath}
+                <button
+                  class="lattice-btn lattice-btn--secondary lattice-btn--compact"
+                  type="button"
+                  onclick={() => void sessionFilesStore.selectFile($sessionFilesStore.selectedPath!)}
+                >
+                  Try again
+                </button>
+              {/if}
+            </div>
+          {:else if $sessionFilesStore.content}
+            <pre class="file-content lattice-scroll-content">{$sessionFilesStore.content.content}</pre>
+          {:else}
+            <div class="pane-state content-empty" aria-live="polite">
+              <FileText size={30} weight="light" />
+              <span>Select a file to view its contents.</span>
+            </div>
+          {/if}
+        </Skeleton>
       </div>
     </section>
   {/if}
@@ -301,6 +348,7 @@
     justify-content: space-between;
     gap: 8px;
     padding: 9px 10px;
+    /* Dense section header, not a standalone panel surface. */
     background: var(--bg-surface);
     border-bottom: 1px solid var(--border-structural);
   }
@@ -329,36 +377,6 @@
     text-transform: uppercase;
   }
 
-  .refresh-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 27px;
-    height: 27px;
-    padding: 0;
-    flex-shrink: 0;
-    color: var(--text-secondary);
-    background: none;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-
-  .refresh-button:hover:not(:disabled) {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-    border-color: var(--border-structural);
-  }
-
-  .refresh-button:disabled {
-    opacity: 0.65;
-    cursor: default;
-  }
-
-  .refresh-button.spinning :global(svg) {
-    animation: spin 0.8s linear infinite;
-  }
-
   .inline-error {
     display: flex;
     align-items: center;
@@ -366,6 +384,7 @@
     gap: 8px;
     padding: 7px 10px;
     color: var(--status-error);
+    /* Semantic inline error strip, not a structural panel. */
     background: var(--bg-surface);
     border-bottom: 1px solid var(--status-error);
     font-size: 11px;
@@ -376,17 +395,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .inline-error button,
-  .error-state button {
-    padding: 4px 8px;
-    color: var(--text-primary);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    font-size: 10px;
-    cursor: pointer;
   }
 
   .file-browser {
@@ -402,6 +410,37 @@
     padding: 4px 0;
   }
 
+  .file-browser :global(.file-tree-skeleton),
+  .content-body :global(.file-content-skeleton) {
+    width: 100%;
+    min-height: 100%;
+  }
+
+  .file-tree-skeleton-shape,
+  .file-content-skeleton-shape {
+    box-sizing: border-box;
+    width: 100%;
+    padding: var(--space-3);
+  }
+
+  .file-tree-skeleton-shape,
+  .file-content-skeleton-shape {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .file-tree-skeleton-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 28px;
+  }
+
+  .file-tree-skeleton-row :global(.lattice-skel-bar:last-child) {
+    margin-left: auto;
+  }
+
   .file-window-controls {
     position: sticky;
     bottom: 0;
@@ -411,71 +450,15 @@
     min-width: max-content;
     padding: 6px 8px;
     gap: 8px;
+    /* Sticky pagination controls remain a control strip, not a panel. */
     background: var(--bg-surface);
     border-top: 1px solid var(--border-structural);
-  }
-
-  .file-window-controls button {
-    padding: 4px 8px;
-    color: var(--text-secondary);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    font-size: 10px;
-    cursor: pointer;
-  }
-
-  .file-window-controls button:hover:not(:disabled) {
-    color: var(--accent-cyan);
-  }
-
-  .file-window-controls button:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 
   .file-window-status {
     color: var(--text-muted);
     font-size: 10px;
     white-space: nowrap;
-  }
-
-  .file-row {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    min-width: 100%;
-    height: 28px;
-    padding-top: 0;
-    padding-right: 8px;
-    padding-bottom: 0;
-    gap: 5px;
-    color: var(--text-secondary);
-    background: none;
-    border: none;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .file-row:hover {
-    color: var(--text-primary);
-    background: var(--bg-elevated);
-  }
-
-  .file-row.selected {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-  }
-
-  .file-row:focus-visible,
-  .refresh-button:focus-visible,
-  .file-window-controls button:focus-visible,
-  .inline-error button:focus-visible,
-  .error-state button:focus-visible {
-    outline: 1px solid var(--accent-cyan);
-    outline-offset: -1px;
   }
 
   .disclosure {
@@ -523,6 +506,7 @@
     justify-content: space-between;
     gap: 8px;
     padding: 8px 10px;
+    /* File metadata header, not a standalone panel surface. */
     background: var(--bg-surface);
     border-bottom: 1px solid var(--border-structural);
     font-family: var(--font-mono);
@@ -603,26 +587,4 @@
     font-size: 13px;
   }
 
-  .spinner {
-    width: 14px;
-    height: 14px;
-    box-sizing: border-box;
-    border: 2px solid var(--border-structural);
-    border-top-color: var(--accent-cyan);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .refresh-button.spinning :global(svg),
-    .spinner {
-      animation: none;
-    }
-  }
 </style>

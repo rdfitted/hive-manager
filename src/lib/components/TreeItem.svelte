@@ -129,7 +129,11 @@
     <span class="indent" style="width: {depth * 16}px"></span>
 
     {#if hasChildren}
-      <button class="chevron" on:click={toggleExpand} aria-label={expanded ? 'Collapse' : 'Expand'}>
+      <button
+        class="lattice-btn lattice-btn--ghost lattice-btn--icon"
+        on:click={toggleExpand}
+        aria-label={expanded ? 'Collapse' : 'Expand'}
+      >
         {#if expanded}
           <CaretDown size={12} weight="light" />
         {:else}
@@ -195,8 +199,8 @@
     gap: 6px;
     padding: 6px 8px;
     cursor: pointer;
-    border-radius: var(--radius-sm);
-    transition: background 0.15s ease;
+    border-radius: var(--radius-md);
+    transition: background-color var(--motion-duration-fast) ease;
   }
 
   .tree-row:hover {
@@ -207,34 +211,13 @@
     background: color-mix(in srgb, var(--accent-cyan) 15%, transparent);
   }
 
-  .tree-row:focus {
+  .tree-row:focus-visible {
     outline: none;
     box-shadow: inset 0 0 0 1px var(--accent-cyan);
   }
 
   .indent {
     flex-shrink: 0;
-  }
-
-  .chevron {
-    width: 16px;
-    height: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 8px;
-    padding: 0;
-    flex-shrink: 0;
-    border-radius: var(--radius-sm);
-  }
-
-  .chevron:hover {
-    background: var(--border-structural);
-    color: var(--text-primary);
   }
 
   .chevron-spacer {
@@ -288,16 +271,6 @@
     font-size: 10px;
     flex-shrink: 0;
     text-shadow: 0 0 4px currentColor;
-  }
-
-  .status-indicator.pulse-error {
-    animation: pulse-error 1.5s infinite;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .status-indicator.pulse-error {
-      animation: none;
-    }
   }
 
   .children {

@@ -35,16 +35,19 @@
     if (sortKey !== key) return 'none';
     return sortDirection === 'asc' ? 'ascending' : 'descending';
   }
-
 </script>
 
-<div class="table-scroll">
+<div class="table-scroll lattice-scroll-content">
   <table class="lattice-table knowledge-table">
     <thead>
       <tr>
         {#each columns as column (column.key)}
           <th aria-sort={ariaSort(column.key)}>
-            <button type="button" onclick={() => setSort(column.key)}>
+            <button
+              class="lattice-btn lattice-btn--row lattice-btn--link"
+              type="button"
+              onclick={() => setSort(column.key)}
+            >
               {column.label}
               <span class="sort-mark" class:active={sortKey === column.key} aria-hidden="true">
                 {sortKey === column.key ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}
@@ -56,13 +59,11 @@
     </thead>
     <tbody>
       {#each sortedNodes as node (node.id)}
-        <tr
-          class:selected={node.id === selectedId}
-        >
+        <tr class:selected={node.id === selectedId}>
           <td>
             <button
               type="button"
-              class="title"
+              class="title lattice-btn lattice-btn--link"
               aria-label={`Open ${node.title}`}
               onclick={(event) => onSelect(node.id, event.currentTarget)}
             >
@@ -100,27 +101,6 @@
     position: sticky;
     top: 0;
     z-index: 1;
-    background: var(--bg-surface);
-  }
-
-  th button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    letter-spacing: inherit;
-    text-transform: inherit;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  th button:hover {
-    color: var(--accent-cyan);
   }
 
   .sort-mark {
@@ -131,6 +111,7 @@
     color: var(--accent-cyan);
   }
 
+  /* Selected-record tint, not a structural panel surface. */
   tbody tr.selected td {
     background: color-mix(in srgb, var(--accent-cyan) 7%, var(--bg-surface));
   }
@@ -143,32 +124,9 @@
     width: 48%;
   }
 
-  .title,
   .path,
   .degree span {
     display: block;
-  }
-
-  .title {
-    width: 100%;
-    padding: 0;
-    border: 0;
-    outline: none;
-    background: transparent;
-    color: var(--text-primary);
-    font-family: var(--font-body);
-    font-size: var(--text-base);
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .title:hover,
-  .title:focus-visible {
-    color: var(--accent-cyan);
-  }
-
-  .title:focus-visible {
-    box-shadow: inset 2px 0 var(--accent-cyan);
   }
 
   .path,
