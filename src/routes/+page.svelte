@@ -204,30 +204,30 @@
 
   <main class="main-content">
     {#if !$activeSession}
-      <div class="welcome">
+      <div class="welcome lattice-scroll-content">
         <div class="welcome-content">
           <h1>Hive Manager</h1>
           <p>Orchestrate and monitor Claude Code multi-agent workflows</p>
           <div class="features">
-            <div class="feature">
+            <div class="feature lattice-panel">
               <span class="feature-icon">
                 <Crown size={24} weight="light" />
               </span>
               <span class="feature-text">Launch principal-led Hive or comparative Fusion sessions</span>
             </div>
-            <div class="feature">
+            <div class="feature lattice-panel">
               <span class="feature-icon">
                 <GearSix size={24} weight="light" />
               </span>
               <span class="feature-text">Configure each agent with different commands</span>
             </div>
-            <div class="feature">
+            <div class="feature lattice-panel">
               <span class="feature-icon">
                 <ChartBar size={24} weight="light" />
               </span>
               <span class="feature-text">Monitor agent status in real-time</span>
             </div>
-            <div class="feature">
+            <div class="feature lattice-panel">
               <span class="feature-icon">
                 <ChatCenteredText size={24} weight="light" />
               </span>
@@ -265,39 +265,14 @@
 <UpdateChecker />
 
 <style>
-  :global(*) {
-    box-sizing: border-box;
-  }
-
-  :global(body) {
-    margin: 0;
-    padding: 0;
-    overflow: hidden;
-  }
-
-  .app {
-    display: flex;
-    width: 100vw;
-    height: 100vh;
-    background: var(--color-bg);
-    color: var(--color-text);
-    font-family: var(--font-body);
-  }
-
-  .main-content {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    overflow: hidden;
-  }
-
   .welcome {
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
+    min-height: 0;
     padding: 40px;
+    overflow-y: auto;
   }
 
   .welcome-content {
@@ -330,8 +305,6 @@
     align-items: center;
     gap: 12px;
     padding: 16px 20px;
-    background: var(--color-surface);
-    border-radius: 8px;
     text-align: left;
   }
 
