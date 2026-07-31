@@ -3,24 +3,43 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 .lattice-btn {
+  --lattice-btn-tone: var(--accent-cyan);
+  --lattice-btn-tone-rgb: var(--rgb-running);
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
   font-family: var(--font-mono);
   font-size: var(--text-small);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
   padding: var(--space-2) var(--space-4);
-  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    text-shadow var(--transition-fast),
+    opacity var(--transition-fast);
   background: transparent;
 }
 
 .lattice-btn--primary {
+  --lattice-btn-tone: var(--accent-cyan);
+  --lattice-btn-tone-rgb: var(--rgb-running);
   border: 1px solid var(--accent-cyan);
   color: var(--accent-cyan);
   background-color: rgba(var(--rgb-running), 0.1);
 }
 
-.lattice-btn--primary:hover {
+.lattice-btn--primary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-running), 0.2);
   box-shadow: 0 0 8px rgba(var(--rgb-running), 0.3), inset 0 0 4px rgba(var(--rgb-running), 0.2);
   text-shadow: 0 0 4px var(--accent-cyan);
@@ -31,7 +50,7 @@
   color: var(--text-primary);
 }
 
-.lattice-btn--secondary:hover {
+.lattice-btn--secondary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   border-color: var(--accent-chrome);
 }
 
@@ -40,18 +59,227 @@
   color: var(--text-secondary);
 }
 
-.lattice-btn--ghost:hover {
+.lattice-btn--ghost:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   color: var(--text-primary);
+  background-color: var(--bg-elevated);
 }
 
 .lattice-btn--danger {
+  --lattice-btn-tone: var(--status-error);
+  --lattice-btn-tone-rgb: var(--rgb-error);
   border: 1px solid var(--status-error);
   color: var(--status-error);
 }
 
-.lattice-btn--danger:hover {
+.lattice-btn--danger:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-error), 0.1);
   box-shadow: 0 0 8px rgba(var(--rgb-error), 0.2);
+}
+
+.lattice-btn--ghost.lattice-btn--danger {
+  border-color: transparent;
+  background-color: transparent;
+}
+
+.lattice-btn--ghost.lattice-btn--danger:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  color: var(--status-error);
+  background-color: rgba(var(--rgb-error), 0.1);
+  box-shadow: none;
+}
+
+.lattice-btn--success {
+  --lattice-btn-tone: var(--status-success);
+  --lattice-btn-tone-rgb: var(--rgb-success);
+  border: 1px solid var(--status-success);
+  color: var(--status-success);
+  background-color: rgba(var(--rgb-success), 0.1);
+}
+
+.lattice-btn--success:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  background-color: rgba(var(--rgb-success), 0.2);
+  box-shadow: 0 0 8px rgba(var(--rgb-success), 0.2);
+}
+
+.lattice-btn--warning {
+  --lattice-btn-tone: var(--status-warning);
+  --lattice-btn-tone-rgb: var(--rgb-warning);
+  border: 1px solid var(--status-warning);
+  color: var(--status-warning);
+  background-color: rgba(var(--rgb-warning), 0.1);
+}
+
+.lattice-btn--warning:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  background-color: rgba(var(--rgb-warning), 0.2);
+  box-shadow: 0 0 8px rgba(var(--rgb-warning), 0.2);
+}
+
+.lattice-btn--filled {
+  color: var(--bg-void);
+  border-color: var(--lattice-btn-tone);
+  background-color: var(--lattice-btn-tone);
+}
+
+.lattice-btn--filled:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  opacity: 0.9;
+  background-color: var(--lattice-btn-tone);
+}
+
+/* ── Composable affordance and size modifiers ───────────────────── */
+
+.lattice-btn--dashed {
+  border-style: dashed;
+  background-color: transparent;
+}
+
+.lattice-btn--compact {
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-micro);
+}
+
+.lattice-btn--icon {
+  width: var(--space-6);
+  height: var(--space-6);
+  padding: 0;
+  flex: 0 0 var(--space-6);
+}
+
+.lattice-btn--link {
+  justify-content: flex-start;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+}
+
+.lattice-btn--link:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  color: var(--accent-cyan);
+  background-color: transparent;
+}
+
+/* ── Layout-safe menu, row, card, and chip controls ─────────────── */
+
+.lattice-btn--menu-item,
+.lattice-btn--row,
+.lattice-btn--card {
+  justify-content: flex-start;
+  width: 100%;
+  min-width: 0;
+  color: var(--text-primary);
+  text-align: left;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+}
+
+.lattice-btn--menu-item {
+  padding: var(--space-2) var(--space-3);
+  border-color: transparent;
+  background-color: transparent;
+}
+
+.lattice-btn--menu-item:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  background-color: var(--bg-elevated);
+}
+
+.lattice-btn--row {
+  padding: var(--space-1) var(--space-2);
+  border-color: transparent;
+  background-color: transparent;
+}
+
+.lattice-btn--row:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  color: var(--text-primary);
+  background-color: var(--bg-elevated);
+}
+
+.lattice-btn--card {
+  align-items: flex-start;
+  padding: var(--space-3);
+  border-color: var(--border-structural);
+  background-color: var(--bg-surface);
+}
+
+.lattice-btn--card:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  border-color: var(--accent-chrome);
+  background-color: var(--bg-elevated);
+}
+
+.lattice-btn--chip {
+  padding: 2px var(--space-2);
+  border-color: var(--border-structural);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.lattice-btn--chip:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  color: var(--text-primary);
+  border-color: var(--accent-chrome);
+}
+
+.lattice-btn--menu-item.lattice-btn--compact,
+.lattice-btn--row.lattice-btn--compact {
+  padding: var(--space-1) var(--space-2);
+}
+
+.lattice-btn--card.lattice-btn--compact {
+  padding: var(--space-2);
+}
+
+/* ── Persistent selection state ─────────────────────────────────── */
+
+.lattice-btn.lattice-btn--selected,
+.lattice-btn[aria-pressed="true"],
+.lattice-btn[aria-selected="true"],
+.lattice-btn[aria-current="true"],
+.lattice-btn[aria-current="page"] {
+  color: var(--lattice-btn-tone);
+  border-color: var(--lattice-btn-tone);
+  background-color: rgba(var(--lattice-btn-tone-rgb), 0.1);
+  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.25);
+}
+
+.lattice-btn.lattice-btn--selected:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
+.lattice-btn[aria-pressed="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
+.lattice-btn[aria-selected="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
+.lattice-btn[aria-current="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
+.lattice-btn[aria-current="page"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
+  color: var(--lattice-btn-tone);
+  border-color: var(--lattice-btn-tone);
+  background-color: rgba(var(--lattice-btn-tone-rgb), 0.16);
+  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.25);
+}
+
+/* Labels and role-controls can share selection/focus without button layout. */
+.lattice-selectable {
+  border: 1px solid var(--border-structural);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+.lattice-selectable:hover:where(:not(:disabled):not(:has(:disabled)):not([aria-disabled="true"]):not([aria-busy="true"])) {
+  border-color: var(--accent-chrome);
+}
+
+.lattice-selectable.lattice-selectable--selected,
+.lattice-selectable[aria-pressed="true"],
+.lattice-selectable[aria-selected="true"],
+.lattice-selectable[aria-checked="true"] {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  background-color: rgba(var(--rgb-running), 0.1);
+  box-shadow: inset 0 0 0 1px rgba(var(--rgb-running), 0.25);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -64,9 +292,14 @@
   background-color: var(--bg-void);
   color: var(--text-primary);
   border: 1px solid var(--border-structural);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   padding: var(--space-2);
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    opacity var(--transition-fast);
 }
 
 .lattice-input:focus {
@@ -75,11 +308,62 @@
   box-shadow: 0 0 4px rgba(var(--rgb-running), 0.2);
 }
 
+/* ── Keyboard focus and unavailable/wait semantics ──────────────── */
+
+.lattice-btn:focus-visible,
+.lattice-input:focus-visible,
+.lattice-tab:focus-visible,
+.lattice-selectable:focus-visible,
+.lattice-selectable:has(:focus-visible) {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+.lattice-btn--menu-item:focus-visible,
+.lattice-btn--row:focus-visible {
+  outline-offset: -2px;
+}
+
+.lattice-btn:disabled,
+.lattice-input:disabled,
+.lattice-tab:disabled,
+.lattice-selectable:disabled,
+.lattice-selectable:has(:disabled) {
+  opacity: 0.45;
+  cursor: default;
+  box-shadow: none;
+  text-shadow: none;
+}
+
+.lattice-btn[aria-disabled="true"],
+.lattice-input[aria-disabled="true"],
+.lattice-tab[aria-disabled="true"],
+.lattice-selectable[aria-disabled="true"] {
+  /* ARIA-disabled controls remain focusable; handlers must suppress activation. */
+  opacity: 0.45;
+  cursor: default;
+  box-shadow: none;
+  text-shadow: none;
+}
+
+.lattice-btn.lattice-btn--waiting,
+.lattice-btn[aria-busy="true"],
+.lattice-input[aria-busy="true"],
+.lattice-tab[aria-busy="true"],
+.lattice-selectable[aria-busy="true"] {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    NAVIGATION / TABS
    ═══════════════════════════════════════════════════════════════════ */
 
 .lattice-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
   font-family: var(--font-mono);
   font-size: var(--text-small);
   text-transform: uppercase;
@@ -88,16 +372,34 @@
   padding: var(--space-2) var(--space-4);
   border: none;
   border-bottom: 2px solid transparent;
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    opacity var(--transition-fast);
 }
 
-.lattice-tab:hover {
+.lattice-tab:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])) {
   color: var(--text-primary);
+  background-color: var(--bg-elevated);
 }
 
-.lattice-tab--active {
+.lattice-tab--active,
+.lattice-tab[aria-selected="true"],
+.lattice-tab[aria-pressed="true"] {
   color: var(--accent-cyan);
   border-bottom-color: var(--accent-cyan);
+  background-color: var(--bg-surface);
+}
+
+.lattice-tab--active:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])),
+.lattice-tab[aria-selected="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])),
+.lattice-tab[aria-pressed="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"])) {
+  color: var(--accent-cyan);
+  border-bottom-color: var(--accent-cyan);
+  background-color: var(--bg-surface);
 }

@@ -62,9 +62,3 @@
   background-color: transparent;
   text-decoration: line-through;
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .status-blocked {
-    animation: none;
-  }
-}

@@ -19,10 +19,10 @@
   --accent-chrome: #A3B8CC;
 
   /* ── ANSI extension (terminal only, #190) ──────────────────────── */
-  --ansi-blue:           /* derived — WS-6 supplies, WS-1 commits */;
-  --ansi-blue-bright:    /* derived */;
-  --ansi-magenta:        /* derived */;
-  --ansi-magenta-bright: /* derived */;
+  --ansi-blue:           #658FEC;
+  --ansi-blue-bright:    #B3CCFF;
+  --ansi-magenta:        #CA67C7;
+  --ansi-magenta-bright: #F18BEE;
 
   /* ── Status (Hex) ──────────────────────────────────────────────── */
   --status-success: #00FF66;
