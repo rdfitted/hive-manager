@@ -158,12 +158,12 @@
 
 {#if open}
   <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-  <div class="dialog-overlay" on:click={close} role="presentation">
+  <div class="dialog-overlay lattice-modal-backdrop" on:click={close} role="presentation">
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-    <div class="dialog" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
+    <div class="dialog lattice-modal lattice-scroll-chrome" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
       <div class="dialog-header">
         <h2>Add Managed Principal</h2>
-        <button class="close-btn" on:click={close}>&times;</button>
+        <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={close} aria-label="Close add principal dialog">&times;</button>
       </div>
 
       <form on:submit|preventDefault={handleSubmit}>
@@ -176,8 +176,9 @@
               {#each predefinedRoles.filter(r => r.category === 'dev') as role}
                 <button
                   type="button"
-                  class="role-option"
-                  class:selected={selectedRoleType === role.type}
+                  class="lattice-btn lattice-btn--card role-choice"
+                  class:lattice-btn--selected={selectedRoleType === role.type}
+                  aria-pressed={selectedRoleType === role.type}
                   on:click={() => (selectedRoleType = role.type)}
                 >
                   <span class="role-name">{role.label}</span>
@@ -193,8 +194,9 @@
               {#each predefinedRoles.filter(r => r.category === 'review') as role}
                 <button
                   type="button"
-                  class="role-option"
-                  class:selected={selectedRoleType === role.type}
+                  class="lattice-btn lattice-btn--card role-choice"
+                  class:lattice-btn--selected={selectedRoleType === role.type}
+                  aria-pressed={selectedRoleType === role.type}
                   on:click={() => (selectedRoleType = role.type)}
                 >
                   <span class="role-name">{role.label}</span>
@@ -209,7 +211,7 @@
               type="text"
               placeholder="Custom role name..."
               bind:value={customRoleName}
-              class="custom-role-input"
+              class="custom-role-input lattice-input"
             />
           {/if}
         </div>
@@ -229,7 +231,7 @@
         {#if parentOptions.length > 1}
           <div class="form-section">
             <label class="section-label" for="parent-select">Parent (optional)</label>
-            <select id="parent-select" bind:value={selectedParent} class="select-input">
+            <select id="parent-select" bind:value={selectedParent} class="select-input lattice-input">
               <option value={null}>Default (Queen)</option>
               {#each parentOptions as parent}
                 <option value={parent.id}>
@@ -247,7 +249,7 @@
             type="text"
             placeholder="Worker 2 (Frontend)"
             bind:value={workerName}
-            class="custom-role-input"
+            class="custom-role-input lattice-input"
           />
         </div>
 
@@ -258,7 +260,7 @@
             type="text"
             placeholder="One-line task summary"
             bind:value={workerDescription}
-            class="custom-role-input"
+            class="custom-role-input lattice-input"
           />
         </div>
 
@@ -279,8 +281,8 @@
         {/if}
 
         <div class="dialog-actions">
-          <button type="button" class="btn-secondary" on:click={close}>Cancel</button>
-          <button type="submit" class="btn-primary" disabled={loading}>
+          <button type="button" class="lattice-btn lattice-btn--secondary" on:click={close}>Cancel</button>
+          <button type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled" disabled={loading} aria-busy={loading}>
             {#if loading}
               Adding principal...
             {:else}
@@ -297,7 +299,6 @@
   .dialog-overlay {
     position: fixed;
     inset: 0;
-    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -305,9 +306,7 @@
   }
 
   .dialog {
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     width: 480px;
     max-width: 90vw;
     max-height: 90vh;
@@ -326,20 +325,6 @@
     margin: 0;
     font-size: 18px;
     font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .close-btn {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: 24px;
-    cursor: pointer;
-    padding: 0;
-    line-height: 1;
-  }
-
-  .close-btn:hover {
     color: var(--text-primary);
   }
 
@@ -384,26 +369,8 @@
     gap: 8px;
   }
 
-  .role-option {
-    display: flex;
+  .role-choice {
     flex-direction: column;
-    align-items: flex-start;
-    padding: 12px;
-    background: var(--bg-surface);
-    border: 2px solid transparent;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    text-align: left;
-    transition: border-color 0.15s;
-  }
-
-  .role-option:hover {
-    border-color: var(--border-structural);
-  }
-
-  .role-option.selected {
-    border-color: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
 
   .role-name {
@@ -421,18 +388,7 @@
   .custom-role-input,
   .select-input {
     width: 100%;
-    padding: 10px 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
     font-size: 14px;
-  }
-
-  .custom-role-input:focus,
-  .select-input:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
   }
 
   .custom-role-input {
@@ -444,8 +400,10 @@
   }
 
   .error-message {
+    /* Semantic validation alert, not a reusable structural surface. */
     padding: 10px 12px;
-    background: var(--bg-elevated);
+    background: rgba(var(--rgb-error), 0.1);
+    border: 1px solid rgba(var(--rgb-error), 0.4);
     color: var(--status-error);
     border-radius: var(--radius-sm);
     font-size: 13px;
@@ -459,38 +417,4 @@
     padding-top: 8px;
   }
 
-  .btn-primary,
-  .btn-secondary {
-    padding: 10px 20px;
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    border: none;
-    transition: opacity 0.15s;
-  }
-
-  .btn-primary {
-    background: var(--accent-cyan);
-    color: white;
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    opacity: 0.9;
-  }
-
-  .btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-structural);
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-elevated);
-  }
 </style>
