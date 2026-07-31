@@ -1,1 +1,44 @@
-/* scrollbars.css — owned by WS-3. Placeholder created by WS-1; do not add rules here. */
+/* Lattice-owned scrollbars. Keep scrollbar-color and non-auto scrollbar-width unset:
+   either standard property makes Blink ignore the legacy pseudo-element styling path. */
+.lattice-scroll-chrome::-webkit-scrollbar,
+.lattice-scroll-content::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.lattice-scroll-chrome::-webkit-scrollbar-track,
+.lattice-scroll-content::-webkit-scrollbar-track,
+.lattice-scroll-chrome::-webkit-scrollbar-corner,
+.lattice-scroll-content::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.lattice-scroll-chrome::-webkit-scrollbar-thumb,
+.lattice-scroll-content::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--radius-full);
+  background-clip: content-box;
+}
+
+.lattice-scroll-chrome::-webkit-scrollbar-thumb {
+  background-color: transparent;
+}
+
+.lattice-scroll-chrome:hover::-webkit-scrollbar-thumb,
+.lattice-scroll-content::-webkit-scrollbar-thumb {
+  background-color: var(--text-disabled);
+}
+
+.lattice-scroll-chrome::-webkit-scrollbar-thumb:hover,
+.lattice-scroll-content::-webkit-scrollbar-thumb:hover {
+  background-color: var(--text-secondary);
+}
+
+.lattice-scroll-chrome::-webkit-scrollbar-thumb:active,
+.lattice-scroll-content::-webkit-scrollbar-thumb:active {
+  background-color: var(--accent-cyan);
+}
+
+.lattice-scroll-content {
+  scrollbar-gutter: stable;
+}
