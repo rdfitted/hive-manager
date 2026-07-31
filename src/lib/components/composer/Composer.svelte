@@ -339,7 +339,7 @@
 <div class="composer-wrap" class:disabled>
   <div
     bind:this={editor}
-    class="composer"
+    class="composer lattice-input lattice-scroll-chrome"
     data-composer
     contenteditable="true"
     role="textbox"
@@ -384,21 +384,9 @@
     min-height: 34px;
     max-height: 160px;
     overflow-y: auto;
-    padding: 7px 10px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 12px;
-    font-family: var(--font-mono);
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
-    outline: none;
-  }
-
-  .composer:focus {
-    border-color: var(--accent-cyan);
   }
 
   .composer :global(.composer-token) {

@@ -46,10 +46,15 @@
     {/if}
   </div>
   <div class="approval-actions">
-    <button class="approve-btn" data-testid="approve" onclick={approve}>
+    <button
+      type="button"
+      class="lattice-btn lattice-btn--compact lattice-btn--filled {approval.destructive ? 'lattice-btn--danger' : 'lattice-btn--success'}"
+      data-testid="approve"
+      onclick={approve}
+    >
       Approve
     </button>
-    <button class="reject-btn" data-testid="reject" onclick={reject}>
+    <button type="button" class="lattice-btn lattice-btn--compact lattice-btn--danger" data-testid="reject" onclick={reject}>
       Reject
     </button>
   </div>
@@ -60,10 +65,11 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+    /* Tool results are nested work products, so their body uses the shared sunken tone. */
+    background: var(--bg-sunken);
     border: 1px solid var(--border-structural);
     border-left: 3px solid var(--accent-cyan);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     padding: 12px;
   }
 
@@ -89,37 +95,4 @@
     gap: 8px;
   }
 
-  .approve-btn,
-  .reject-btn {
-    padding: 5px 14px;
-    font-size: 12px;
-    font-weight: 600;
-    border: none;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-
-  .approve-btn {
-    background: var(--status-success);
-    color: white;
-  }
-
-  .destructive .approve-btn {
-    background: var(--status-error);
-  }
-
-  .reject-btn {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    color: var(--text-secondary);
-  }
-
-  .approve-btn:hover {
-    opacity: 0.9;
-  }
-
-  .reject-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--text-secondary);
-  }
 </style>

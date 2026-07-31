@@ -34,19 +34,33 @@
         sessionStatus: serdeEnumVariantName($activeSession?.state) || 'unknown'
     } as ReplayedState);
 
-    function getStatusColor(status: string) {
+    function getStatusClass(status: string): string {
         switch (status?.toLowerCase()) {
-            case 'running': return 'var(--color-running)';
-            case 'completed': return 'var(--color-success)';
-            case 'failed': return 'var(--color-error)';
-            default: return 'var(--color-text-muted)';
+            case 'running':
+            case 'active':
+            case 'in_progress':
+                return 'status-running';
+            case 'completed':
+            case 'complete':
+            case 'succeeded':
+                return 'status-success';
+            case 'failed':
+            case 'error':
+                return 'status-error';
+            case 'blocked':
+                return 'status-blocked';
+            case 'canceled':
+            case 'cancelled':
+                return 'status-canceled';
+            default:
+                return 'status-queued';
         }
     }
 </script>
 
-<div class="replay-view">
+<div class="replay-view lattice-scroll-content">
     <div class="state-header">
-        Session Status: <span style="color: {getStatusColor(state.sessionStatus)}">{state.sessionStatus}</span>
+        Session Status: <span class="status-badge {getStatusClass(state.sessionStatus)}">{state.sessionStatus}</span>
     </div>
 
     <div class="state-grid">
@@ -55,9 +69,8 @@
             <div class="grid">
                 {#each Object.entries(state.cells) as [id, status]}
                     <div class="state-chip">
-                        <span class="dot" style="background: {getStatusColor(status)}"></span>
                         <span class="label">{id.substring(0, 8)}</span>
-                        <span class="status">{status}</span>
+                        <span class="status-badge {getStatusClass(status)}">{status}</span>
                     </div>
                 {/each}
             </div>
@@ -68,9 +81,8 @@
             <div class="grid">
                 {#each Object.entries(state.agents) as [id, status]}
                     <div class="state-chip">
-                        <span class="dot" style="background: {getStatusColor(status)}"></span>
                         <span class="label">{id.substring(0, 8)}</span>
-                        <span class="status">{status}</span>
+                        <span class="status-badge {getStatusClass(status)}">{status}</span>
                     </div>
                 {/each}
             </div>
@@ -81,7 +93,7 @@
 <style>
     .replay-view {
         padding: 16px;
-        background: var(--color-bg);
+        background: var(--bg-void);
         height: 100%;
         overflow-y: auto;
         font-family: var(--font-mono);
@@ -91,7 +103,7 @@
         font-size: 1.1rem;
         font-weight: bold;
         margin-bottom: 20px;
-        color: var(--color-text);
+        color: var(--text-primary);
     }
 
     .state-grid {
@@ -102,10 +114,10 @@
 
     .state-section h4 {
         margin: 0 0 12px 0;
-        color: var(--color-text-muted);
+        color: var(--text-secondary);
         text-transform: uppercase;
         font-size: 0.75rem;
-        border-bottom: 1px solid var(--color-border);
+        border-bottom: 1px solid var(--border-structural);
         padding-bottom: 4px;
     }
 
@@ -120,27 +132,19 @@
         align-items: center;
         gap: 8px;
         padding: 6px 12px;
-        background: var(--color-surface);
-        border: 1px solid var(--color-border);
+        /* Replay entity rows are compact state records, not structural panels. */
+        background: var(--bg-surface);
+        border: 1px solid var(--border-structural);
         border-radius: var(--radius-sm);
         font-size: 0.85rem;
     }
 
-    .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        box-shadow: 0 0 6px currentColor;
-    }
-
     .label {
-        color: var(--color-accent);
+        color: var(--accent-cyan);
         font-weight: bold;
     }
 
-    .status {
+    .state-chip :global(.status-badge) {
         margin-left: auto;
-        color: var(--color-text-muted);
-        font-size: 0.75rem;
     }
 </style>

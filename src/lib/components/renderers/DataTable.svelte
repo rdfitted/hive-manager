@@ -80,13 +80,13 @@
   {#if columns.length === 0}
     <div class="empty">No tabular data.</div>
   {:else}
-    <div class="table-scroll">
-      <table>
+    <div class="table-scroll lattice-scroll-content">
+      <table class="lattice-table">
         <thead>
           <tr>
             {#each columns as col (col)}
               <th>
-                <button class="th-btn" onclick={() => cycleSort(col)}>
+                <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--compact lattice-btn--row" onclick={() => cycleSort(col)}>
                   <span>{col}</span>
                   {#if sortKey === col}
                     <span class="sort-arrow">{sortDir === 'asc' ? '▲' : '▼'}</span>
@@ -112,9 +112,10 @@
 
 <style>
   .data-table-widget {
-    background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+    /* Tool results are nested work products, so their body uses the shared sunken tone. */
+    background: var(--bg-sunken);
     border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     overflow: hidden;
   }
 
@@ -139,41 +140,13 @@
     overflow-y: auto;
   }
 
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-family: var(--font-mono);
-    font-size: 11px;
-  }
-
   th {
     position: sticky;
     top: 0;
+    /* Sticky renderer headers need an opaque table-chrome backing while content scrolls. */
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-structural);
-    text-align: left;
     padding: 0;
     z-index: 1;
-  }
-
-  .th-btn {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    width: 100%;
-    padding: 6px 8px;
-    background: none;
-    border: none;
-    color: var(--accent-cyan);
-    font-family: inherit;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .th-btn:hover {
-    color: var(--text-primary);
   }
 
   .sort-arrow {

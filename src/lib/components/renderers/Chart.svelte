@@ -274,9 +274,10 @@
 
 <style>
   .chart-widget {
-    background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+    /* Tool results are nested work products, so their body uses the shared sunken tone. */
+    background: var(--bg-sunken);
     border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     overflow: hidden;
   }
 
@@ -285,6 +286,7 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--text-primary);
+    /* The opaque title strip remains table-like renderer chrome, not a structural panel. */
     background: var(--bg-surface);
     border-bottom: 1px solid var(--border-structural);
   }
