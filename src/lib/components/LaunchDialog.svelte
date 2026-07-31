@@ -720,6 +720,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 class="lattice-btn lattice-btn--icon lattice-btn--secondary color-circle clear"
                 on:click={() => sessionColor = ''}
                 title="Clear color"
+                aria-label="Clear color"
               >×</button>
             </div>
           </div>

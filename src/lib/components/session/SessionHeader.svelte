@@ -27,6 +27,10 @@
     let previewOpen = false;
     let previewDocked = false;
     let previewCurrentUrl = '';
+    // The preview skeleton must resolve on the STATUS request settling, not on the
+    // URL being non-empty: an open preview with no URL yet is a legitimate terminal
+    // state, and gating on emptiness alone leaves the skeleton spinning forever.
+    let previewStatusResolved = false;
     let previewBusy = '';
     // Identity token for `previewBusy`, same shape as the poll guard in PR #154.
     // Neither an ungated nor a request-gated clear is correct on its own: ungated
@@ -51,6 +55,7 @@
         previewOpen = status.open;
         previewDocked = status.docked;
         previewCurrentUrl = status.url ?? '';
+        previewStatusResolved = true;
         if (sessionId && status.session_url) {
             rememberedPreviewUrls.set(sessionId, status.session_url);
             if (!previewUrl) previewUrl = status.session_url;
@@ -72,12 +77,14 @@
                 if (!event.payload?.url) return;
                 previewCurrentUrl = event.payload.url;
                 previewOpen = true;
+                previewStatusResolved = true;
             }),
             listen<PreviewStatus>('preview-status', (event) => {
                 if (!event.payload) return;
                 previewOpen = event.payload.open;
                 previewDocked = event.payload.docked;
                 previewCurrentUrl = event.payload.url ?? '';
+                previewStatusResolved = true;
             })
         ])
             .then((fns) => {
@@ -355,12 +362,12 @@
                     <div class="preview-live" aria-live="polite">
                         <span class="preview-live-mode">{previewDocked ? 'Docked' : 'Popped out'}</span>
                         <div class="preview-live-url" title={previewCurrentUrl}>
-                            <Skeleton loading={!previewCurrentUrl && !previewUrlCopied} layout="inline">
+                            <Skeleton loading={!previewStatusResolved && !previewUrlCopied} layout="inline">
                                 {#snippet skeleton()}
                                     <SkelBar width="12rem" height="1em" />
                                 {/snippet}
                                 {#snippet children()}
-                                    {previewUrlCopied ? 'Copied' : previewCurrentUrl}
+                                    {previewUrlCopied ? 'Copied' : (previewCurrentUrl || 'No preview URL')}
                                 {/snippet}
                             </Skeleton>
                         </div>

@@ -108,7 +108,7 @@
         class="search-input lattice-input"
       />
       {#if !autoScroll}
-        <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={scrollToBottom} title="Scroll to bottom">
+        <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={scrollToBottom} title="Scroll to bottom" aria-label="Scroll to bottom">
           \u2193
         </button>
       {/if}

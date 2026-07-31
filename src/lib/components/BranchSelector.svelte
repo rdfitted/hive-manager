@@ -104,7 +104,7 @@
   <Skeleton loading={loading} skeleton={branchSkeleton} layout="inline" class="branch-loading">
     {#if error}
       <span class="error" title={error}>{error.slice(0, 30)}{error.length > 30 ? '...' : ''}</span>
-      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={loadBranches} title="Retry">↻</button>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={loadBranches} title="Retry" aria-label="Retry">↻</button>
     {:else if !projectPath}
       <span class="branch-state">No session</span>
     {:else if managedWorkspace}
@@ -117,8 +117,8 @@
           </option>
         {/each}
       </select>
-      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={loadBranches} title="Refresh branches" disabled={loading || pulling}>↻</button>
-      <button class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--icon" class:lattice-btn--waiting={pulling} aria-busy={pulling} onclick={handlePull} title="Pull from remote" disabled={loading || pulling}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={loadBranches} title="Refresh branches" aria-label="Refresh branches" disabled={loading || pulling}>↻</button>
+      <button class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--icon" class:lattice-btn--waiting={pulling} aria-busy={pulling} onclick={handlePull} title="Pull from remote" aria-label="Pull from remote" disabled={loading || pulling}>
         {#if pulling}
           <!-- Pull feedback is an action state, so it keeps the shared spinner. -->
           <span class="lattice-motion-spinner">↻</span>

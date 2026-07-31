@@ -483,6 +483,7 @@
                                 style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; font-size: 12px; color: var(--text-secondary); background: var(--bg-void);"
                                 onclick={() => { editColor = null; showColorPicker = false; }}
                                 title="Clear Color"
+                                aria-label="Clear Color"
                                 type="button"
                               >×</button>
                             </div>

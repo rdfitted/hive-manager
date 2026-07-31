@@ -268,7 +268,7 @@
   .welcome {
     flex: 1;
     display: flex;
-    align-items: center;
+    align-items: safe center;
     justify-content: center;
     min-height: 0;
     padding: 40px;
