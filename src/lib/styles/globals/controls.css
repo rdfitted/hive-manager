@@ -231,6 +231,18 @@
   padding: var(--space-2);
 }
 
+/* Flush row: full-width, left-aligned, zero-padding. --link supplies the zero
+   padding but not the width; --row supplies the width but is declared later and
+   so wins the padding. Their union is a real need (a table-header sort control
+   whose whole cell is the hit target), so the composition is defined rather than
+   patched locally in the component. */
+.lattice-btn--row.lattice-btn--link,
+.lattice-btn--menu-item.lattice-btn--link {
+  padding: 0;
+  border-color: transparent;
+  background-color: transparent;
+}
+
 /* ── Persistent selection state ─────────────────────────────────── */
 
 .lattice-btn.lattice-btn--selected,
