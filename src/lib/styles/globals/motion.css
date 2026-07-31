@@ -105,6 +105,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .lattice-skeleton-placeholder,
+  .lattice-skeleton-content {
+    filter: none !important;
+  }
+
   *,
   *::before,
   *::after {

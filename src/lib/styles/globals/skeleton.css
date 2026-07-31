@@ -104,16 +104,3 @@
     opacity: var(--lattice-skeleton-pulse-opacity);
   }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .lattice-skeleton-placeholder,
-  .lattice-skeleton-content {
-    filter: none;
-    transition: none;
-  }
-
-  .lattice-skeleton-placeholder,
-  .lattice-skel-bar {
-    animation: none;
-  }
-}

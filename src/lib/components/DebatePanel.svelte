@@ -594,7 +594,7 @@
     /* Captured-PR banner intentionally uses a success-state surface. */
     background: color-mix(in srgb, var(--status-success) 10%, var(--bg-surface));
     border: 1px solid color-mix(in srgb, var(--status-success) 20%, transparent);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     padding: 16px;
     gap: 16px;
   }

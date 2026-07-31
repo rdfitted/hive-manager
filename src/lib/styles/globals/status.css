@@ -47,7 +47,6 @@
   color: var(--text-primary);
   border-color: var(--status-blocked);
   background-color: rgba(var(--rgb-blocked), 0.15);
-  animation: pulse-blocked 1s infinite alternate ease-in-out;
 }
 
 .status-queued {
