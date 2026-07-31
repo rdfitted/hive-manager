@@ -86,18 +86,18 @@
     <div class="form-section">
         <div class="form-group">
             <label for="template-name">Template Name</label>
-            <input id="template-name" type="text" bind:value={name} placeholder="e.g. My Custom Hive" />
+            <input class="lattice-input" id="template-name" type="text" bind:value={name} placeholder="e.g. My Custom Hive" />
         </div>
 
         <div class="form-group">
             <label for="template-desc">Description</label>
-            <textarea id="template-desc" bind:value={description} placeholder="What is this template for?" rows="2"></textarea>
+            <textarea class="lattice-input" id="template-desc" bind:value={description} placeholder="What is this template for?" rows="2"></textarea>
         </div>
 
         <div class="form-row">
             <div class="form-group">
                 <label for="template-mode">Session Mode</label>
-                <select id="template-mode" bind:value={mode}>
+                <select class="lattice-input" id="template-mode" bind:value={mode}>
                     <option value="hive">Hive</option>
                     <option value="fusion">Fusion</option>
                     <option value="debate">Debate</option>
@@ -106,7 +106,7 @@
             <div class="form-group">
                 <label for="template-strategy">Workspace Strategy</label>
                 {#if mode === 'hive'}
-                    <select id="template-strategy" bind:value={workspace_strategy}>
+                    <select class="lattice-input" id="template-strategy" bind:value={workspace_strategy}>
                         <option value="shared_cell">Shared Cell</option>
                         <option value="isolated_cell">Isolated Cell</option>
                     </select>
@@ -122,36 +122,36 @@
     <div class="cells-section">
         <div class="section-header">
             <h4>Cells ({cells.length})</h4>
-            <button type="button" class="add-btn" on:click={addCell}>+ Add Cell</button>
+            <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact" on:click={addCell}>+ Add Cell</button>
         </div>
 
-        <div class="cells-list">
+        <div class="cells-list lattice-scroll-chrome">
             {#each cells as cell, i}
                 <div class="cell-editor-card">
                     <div class="card-header">
                         <span class="cell-num">Cell {i + 1}</span>
-                        <button type="button" class="remove-btn" on:click={() => removeCell(i)}>Remove</button>
+                        <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--compact" on:click={() => removeCell(i)}>Remove</button>
                     </div>
                     
                     <div class="form-row">
                         <div class="form-group">
                             <label for="cell-role-{i}">Role</label>
-                            <input id="cell-role-{i}" type="text" bind:value={cell.role} placeholder="e.g. backend" />
+                            <input class="lattice-input" id="cell-role-{i}" type="text" bind:value={cell.role} placeholder="e.g. backend" />
                         </div>
                         <div class="form-group">
                             <label for="cell-cli-{i}">CLI</label>
-                            <input id="cell-cli-{i}" type="text" bind:value={cell.cli} placeholder="e.g. claude" />
+                            <input class="lattice-input" id="cell-cli-{i}" type="text" bind:value={cell.cli} placeholder="e.g. claude" />
                         </div>
                     </div>
 
                     <div class="form-group">
                         <label for="cell-model-{i}">Model (optional)</label>
-                        <input id="cell-model-{i}" type="text" bind:value={cell.model} placeholder="e.g. opus" />
+                        <input class="lattice-input" id="cell-model-{i}" type="text" bind:value={cell.model} placeholder="e.g. opus" />
                     </div>
 
                     <div class="form-group">
                         <label for="cell-prompt-{i}">Prompt Template Key</label>
-                        <input id="cell-prompt-{i}" type="text" bind:value={cell.prompt_template} placeholder="e.g. backend" />
+                        <input class="lattice-input" id="cell-prompt-{i}" type="text" bind:value={cell.prompt_template} placeholder="e.g. backend" />
                     </div>
                 </div>
             {/each}
@@ -159,8 +159,8 @@
     </div>
 
     <div class="actions">
-        <button type="button" class="cancel-btn" on:click={handleCancel}>Cancel</button>
-        <button type="button" class="save-btn" on:click={handleSave} disabled={!name}>Save Template</button>
+        <button type="button" class="lattice-btn lattice-btn--secondary" on:click={handleCancel}>Cancel</button>
+        <button type="button" class="lattice-btn lattice-btn--primary" on:click={handleSave} disabled={!name}>Save Template</button>
     </div>
 </div>
 
@@ -222,18 +222,7 @@
     }
 
     input, textarea, select {
-        background: color-mix(in srgb, var(--bg-void) 70%, transparent);
-        border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-        border-radius: var(--radius-sm);
-        padding: 8px 12px;
-        color: var(--text-primary);
-        font-size: 14px;
-        font-family: inherit;
-    }
-
-    input:focus, textarea:focus, select:focus {
-        outline: none;
-        border-color: var(--accent-cyan);
+        width: 100%;
     }
 
     .cells-section {
@@ -254,16 +243,6 @@
         color: var(--text-primary);
     }
 
-    .add-btn {
-        padding: 4px 12px;
-        background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
-        border: 1px solid color-mix(in srgb, var(--accent-cyan) 30%, transparent);
-        border-radius: var(--radius-sm);
-        color: var(--accent-cyan);
-        font-size: 12px;
-        cursor: pointer;
-    }
-
     .cells-list {
         display: flex;
         flex-direction: column;
@@ -276,7 +255,7 @@
     .cell-editor-card {
         background: color-mix(in srgb, var(--text-primary) 3%, transparent);
         border: 1px solid color-mix(in srgb, var(--text-primary) 8%, transparent);
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-md);
         padding: 12px;
         display: flex;
         flex-direction: column;
@@ -296,20 +275,6 @@
         color: var(--text-disabled);
     }
 
-    .remove-btn {
-        font-size: 11px;
-        color: var(--status-error);
-        background: transparent;
-        border: none;
-        cursor: pointer;
-        padding: 2px 6px;
-    }
-
-    .remove-btn:hover {
-        background: color-mix(in srgb, var(--status-error) 10%, transparent);
-        border-radius: var(--radius-sm);
-    }
-
     .actions {
         display: flex;
         justify-content: flex-end;
@@ -319,27 +284,4 @@
         border-top: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
     }
 
-    .cancel-btn, .save-btn {
-        padding: 8px 20px;
-        border-radius: var(--radius-sm);
-        font-size: 14px;
-        font-weight: 600;
-        cursor: pointer;
-        border: none;
-    }
-
-    .cancel-btn {
-        background: color-mix(in srgb, var(--text-primary) 5%, transparent);
-        color: var(--text-primary);
-    }
-
-    .save-btn {
-        background: var(--accent-cyan);
-        color: var(--bg-void);
-    }
-
-    .save-btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
 </style>

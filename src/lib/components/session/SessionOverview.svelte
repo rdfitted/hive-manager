@@ -110,12 +110,12 @@
                 <p>ID: {sessionId}</p>
             </div>
         {:else}
-            <div class="terminal-section">
+            <div class="terminal-section lattice-panel">
                 <div class="terminal-controls">
-                    <div class="tab-bar">
-                        <button class="tab-btn" class:active={activeView === 'terminal'} onclick={() => activeView = 'terminal'}>Terminal</button>
-                        <button class="tab-btn" class:active={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
-                        <button class="tab-btn" class:active={activeView === 'artifacts'} onclick={() => activeView = 'artifacts'}>Artifacts</button>
+                    <div class="tab-bar" role="tablist" aria-label="Session view">
+                        <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'terminal'} aria-selected={activeView === 'terminal'} onclick={() => activeView = 'terminal'}>Terminal</button>
+                        <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'observability'} aria-selected={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
+                        <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'artifacts'} aria-selected={activeView === 'artifacts'} onclick={() => activeView = 'artifacts'}>Artifacts</button>
                     </div>
                 </div>
                 <div class="terminal-wrapper">
@@ -152,8 +152,8 @@
         display: flex;
         flex-direction: column;
         height: 100%;
-        background: var(--color-bg);
-        color: var(--color-text);
+        background: var(--bg-void);
+        color: var(--text-primary);
     }
 
     header {
@@ -173,64 +173,40 @@
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        background: var(--color-bg);
-        color: var(--color-text);
+        background: var(--bg-void);
+        color: var(--text-primary);
         text-align: center;
         padding: 2rem;
     }
 
     .session-not-found h2 {
-        color: var(--color-error, #ff4444);
+        color: var(--status-error);
         margin-bottom: 1rem;
     }
 
     .session-not-found p {
-        color: var(--color-text-muted);
+        color: var(--text-secondary);
         margin-bottom: 0.5rem;
     }
 
     .terminal-section {
         flex: 1;
         min-height: 0;
-        background: var(--color-surface);
         display: flex;
         flex-direction: column;
     }
 
     .terminal-controls {
         padding: 0 12px;
-        background: var(--color-surface);
         display: flex;
         justify-content: space-between;
         align-items: center;
-        border-bottom: 1px solid var(--color-border);
+        border-bottom: 1px solid var(--border-structural);
     }
 
     .tab-bar {
         display: flex;
         gap: 2px;
-    }
-
-    .tab-btn {
-        padding: 8px 16px;
-        background: transparent;
-        border: none;
-        border-bottom: 2px solid transparent;
-        color: var(--color-text-muted);
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: uppercase;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-
-    .tab-btn:hover {
-        color: var(--color-text);
-    }
-
-    .tab-btn.active {
-        color: var(--color-accent);
-        border-bottom-color: var(--color-accent);
     }
 
     .terminal-wrapper {
@@ -251,7 +227,7 @@
         display: flex;
         flex-direction: column;
         height: 100%;
-        background: var(--color-bg);
+        background: var(--bg-void);
     }
 
     .obs-main {
@@ -263,6 +239,6 @@
 
     .obs-timeline, .obs-replay {
         overflow: hidden;
-        border-right: 1px solid var(--color-border);
+        border-right: 1px solid var(--border-structural);
     }
 </style>

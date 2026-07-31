@@ -30,23 +30,23 @@
     }
 </script>
 
-<div class="replay-controls">
+<div class="replay-controls lattice-panel">
     <div class="main-row">
-        <button class="control-btn" on:click={() => step(-1)} disabled={currentEventIndex <= 0}>
+        <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--compact" on:click={() => step(-1)} disabled={currentEventIndex <= 0}>
             Step Back
         </button>
 
-        <button class="control-btn play-pause" on:click={togglePlay}>
+        <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled lattice-btn--compact" on:click={togglePlay}>
             {$replay.isPlaying ? 'Pause' : 'Play'}
         </button>
 
-        <button class="control-btn" on:click={() => step(1)} disabled={currentEventIndex >= $chronologicalEvents.length - 1}>
+        <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--compact" on:click={() => step(1)} disabled={currentEventIndex >= $chronologicalEvents.length - 1}>
             Step Forward
         </button>
 
         <div class="speed-selector">
             <span class="label">Speed:</span>
-            <select value={$replay.playbackSpeed} on:change={(e) => replay.setSpeed(parseFloat(e.currentTarget.value))}>
+            <select class="lattice-input" value={$replay.playbackSpeed} on:change={(e) => replay.setSpeed(parseFloat(e.currentTarget.value))}>
                 <option value={0.5}>0.5x</option>
                 <option value={1}>1x</option>
                 <option value={2}>2x</option>
@@ -73,8 +73,6 @@
 <style>
     .replay-controls {
         padding: 12px;
-        background: var(--color-surface);
-        border-top: 1px solid var(--color-border);
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -88,28 +86,6 @@
         justify-content: center;
     }
 
-    .control-btn {
-        padding: 6px 12px;
-        background: var(--color-bg);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text);
-        cursor: pointer;
-        font-size: 0.8rem;
-    }
-
-    .control-btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
-
-    .control-btn.play-pause {
-        background: var(--color-accent);
-        color: var(--color-bg);
-        font-weight: bold;
-        min-width: 80px;
-    }
-
     .speed-selector {
         display: flex;
         align-items: center;
@@ -117,19 +93,9 @@
         margin-left: 16px;
     }
 
-    .speed-selector select {
-        padding: 4px;
-        background: var(--color-bg);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text);
-        font-family: inherit;
-        font-size: 0.7rem;
-    }
-
     .label {
         font-size: 0.7rem;
-        color: var(--color-text-muted);
+        color: var(--text-secondary);
         text-transform: uppercase;
     }
 
@@ -141,12 +107,12 @@
 
     .seek-bar {
         flex: 1;
-        accent-color: var(--color-accent);
+        accent-color: var(--accent-cyan);
     }
 
     .timestamp-display {
         font-size: 0.75rem;
-        color: var(--color-text-muted);
+        color: var(--text-secondary);
         min-width: 180px;
         text-align: right;
     }

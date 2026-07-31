@@ -24,21 +24,23 @@
     $: agents = $activeSession?.agents ?? [];
 </script>
 
-<div class="filter-panel">
+<div class="filter-panel lattice-panel lattice-scroll-chrome">
     <div class="filter-row">
         <input 
             type="text" 
             placeholder="Search payload..." 
             value={$filters.searchText}
             on:input={(e) => filters.setSearchText(e.currentTarget.value)}
-            class="search-input"
+            class="lattice-input search-input"
         />
 
         <div class="filter-group">
             <span class="label">Severity:</span>
             {#each SEVERITIES as s}
-                <button 
-                    class="filter-chip {s} {$filters.severities.includes(s) ? 'active' : ''}"
+                <button
+                    type="button"
+                    class="lattice-btn lattice-btn--chip {$filters.severities.includes(s) ? 'lattice-btn--selected' : ''}"
+                    aria-pressed={$filters.severities.includes(s)}
                     on:click={() => filters.toggleSeverity(s)}
                 >
                     {s}
@@ -46,7 +48,7 @@
             {/each}
         </div>
 
-        <button class="clear-btn" on:click={() => filters.reset()}>Clear</button>
+        <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--compact" on:click={() => filters.reset()}>Clear</button>
     </div>
 
     <div class="filter-row wrap">
@@ -54,8 +56,10 @@
             <span class="label">Type:</span>
             <div class="chip-container">
                 {#each EVENT_TYPES as t}
-                    <button 
-                        class="filter-chip type {$filters.types.includes(t) ? 'active' : ''}"
+                    <button
+                        type="button"
+                        class="lattice-btn lattice-btn--chip {$filters.types.includes(t) ? 'lattice-btn--selected' : ''}"
+                        aria-pressed={$filters.types.includes(t)}
                         on:click={() => filters.toggleType(t)}
                     >
                         {t.replace(/_/g, ' ')}
@@ -71,7 +75,7 @@
             <select 
                 value={$filters.cellId || ''} 
                 on:change={(e) => filters.setCellId(e.currentTarget.value || null)}
-                class="filter-select"
+                class="lattice-input filter-select"
             >
                 <option value="">All Cells</option>
                 {#each cells as cell}
@@ -85,7 +89,7 @@
             <select 
                 value={$filters.agentId || ''} 
                 on:change={(e) => filters.setAgentId(e.currentTarget.value || null)}
-                class="filter-select"
+                class="lattice-input filter-select"
             >
                 <option value="">All Agents</option>
                 {#each agents as agent}
@@ -102,8 +106,6 @@
         flex-direction: column;
         gap: 8px;
         padding: 12px;
-        background: var(--color-surface);
-        border-bottom: 1px solid var(--color-border);
         font-family: var(--font-mono);
         font-size: 0.8rem;
     }
@@ -133,40 +135,7 @@
 
     .search-input {
         flex: 1;
-        padding: 4px 8px;
-        background: var(--color-bg);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text);
-        font-family: inherit;
-        font-size: inherit;
     }
-
-    .search-input:focus {
-        border-color: var(--color-accent);
-        outline: none;
-    }
-
-    .filter-chip {
-        padding: 2px 8px;
-        background: var(--color-bg);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text-muted);
-        cursor: pointer;
-        font-size: 0.7rem;
-        transition: all 0.2s;
-    }
-
-    .filter-chip.active {
-        color: var(--color-bg);
-        font-weight: 600;
-    }
-
-    .filter-chip.info.active { background: var(--color-accent); border-color: var(--color-accent); }
-    .filter-chip.warning.active { background: var(--color-warning); border-color: var(--color-warning); }
-    .filter-chip.error.active { background: var(--color-error); border-color: var(--color-error); }
-    .filter-chip.type.active { background: var(--color-text); border-color: var(--color-text); }
 
     .chip-container {
         display: flex;
@@ -174,28 +143,4 @@
         gap: 4px;
     }
 
-    .filter-select {
-        padding: 4px;
-        background: var(--color-bg);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text);
-        font-family: inherit;
-        font-size: 0.7rem;
-    }
-
-    .clear-btn {
-        padding: 4px 12px;
-        background: transparent;
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text-muted);
-        cursor: pointer;
-        font-size: 0.7rem;
-    }
-
-    .clear-btn:hover {
-        border-color: var(--color-error);
-        color: var(--color-error);
-    }
 </style>

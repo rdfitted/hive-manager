@@ -18,7 +18,6 @@
     { id: 'timeline', label: 'Timeline', icon: ClockCounterClockwise },
   ];
 
-  let resizing = $state(false);
   let collapsed = $derived($layout.rightCollapsed);
   let activeTab = $derived($layout.rightTab);
   let panelWidth = $derived(collapsed ? RAIL_WIDTH : $layout.rightWidth);
@@ -31,7 +30,6 @@
 <aside
   class="right-panel"
   class:collapsed
-  class:resizing
   style:width={`${panelWidth}px`}
   style:min-width={`${panelWidth}px`}
 >
@@ -39,7 +37,7 @@
     <div class="rail">
       <button
         type="button"
-        class="rail-button expand"
+        class="rail-control expand lattice-btn lattice-btn--ghost lattice-btn--icon"
         onclick={() => layout.toggleRight()}
         title="Expand panel (Ctrl+J)"
         aria-label="Expand panel"
@@ -50,8 +48,7 @@
         {@const Icon = tab.icon}
         <button
           type="button"
-          class="rail-button"
-          class:active={activeTab === tab.id}
+          class={`rail-control lattice-btn lattice-btn--icon ${activeTab === tab.id ? 'lattice-btn--primary' : 'lattice-btn--ghost'}`}
           onclick={() => layout.setRightTab(tab.id)}
           title={tab.label}
           aria-label={tab.label}
@@ -67,8 +64,7 @@
           {@const Icon = tab.icon}
           <button
             type="button"
-            class="tab"
-            class:active={activeTab === tab.id}
+            class={`panel-tab lattice-tab${activeTab === tab.id ? ' lattice-tab--active' : ''}`}
             onclick={() => layout.setRightTab(tab.id)}
             title={tab.label}
           >
@@ -79,7 +75,7 @@
       </nav>
       <button
         type="button"
-        class="collapse-chevron"
+        class="panel-collapse lattice-btn lattice-btn--ghost lattice-btn--icon"
         onclick={() => layout.toggleRight()}
         title="Collapse panel (Ctrl+J)"
         aria-label="Collapse panel"
@@ -107,7 +103,6 @@
     <ResizeHandle
       label="Resize panel"
       onResize={handleResize}
-      onDragChange={(d) => resizing = d}
     />
   {/if}
 </aside>
@@ -118,13 +113,9 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg-surface);
+    /* Shell chrome intentionally remains outside the content-card surface primitive. */
+    background: var(--bg-void);
     border-left: 1px solid var(--border-structural);
-    transition: width 0.2s ease, min-width 0.2s ease;
-  }
-
-  .right-panel.resizing {
-    transition: none;
   }
 
   .right-panel :global(.resize-handle) {
@@ -139,35 +130,19 @@
     padding: 8px 0;
   }
 
-  .rail-button {
+  .rail-control {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 32px;
     height: 32px;
-    background: none;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+    padding: 0;
   }
 
-  .rail-button:hover {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-  }
-
-  .rail-button.active {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-    border-color: var(--border-structural);
-  }
-
-  .rail-button.expand {
+  .rail-control.expand {
     margin-bottom: 6px;
     border-bottom: 1px solid var(--border-structural);
-    border-radius: 0;
+    border-radius: var(--radius-none);
     width: 100%;
     padding-bottom: 12px;
   }
@@ -185,55 +160,30 @@
     flex: 1;
     min-width: 0;
     overflow-x: auto;
+    /* Deliberately chromeless horizontal tab strip; ruling R9 excludes lattice scrollbars. */
     scrollbar-width: none;
   }
 
-  .tab {
+  .panel-tab {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 8px 10px;
-    font-size: 12px;
     font-weight: 500;
-    color: var(--text-secondary);
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    cursor: pointer;
     white-space: nowrap;
-    transition: color 0.15s, border-color 0.15s;
-  }
-
-  .tab:hover {
-    color: var(--text-primary);
-  }
-
-  .tab.active {
-    color: var(--accent-cyan);
-    border-bottom-color: var(--accent-cyan);
   }
 
   .tab-label {
     display: inline;
   }
 
-  .collapse-chevron {
+  .panel-collapse {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 28px;
     height: 28px;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
+    padding: 0;
     flex-shrink: 0;
-  }
-
-  .collapse-chevron:hover {
-    background: var(--bg-elevated);
-    color: var(--accent-cyan);
   }
 
   .tab-content {

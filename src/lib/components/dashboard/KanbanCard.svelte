@@ -39,7 +39,7 @@
   }
 </script>
 
-<article class="card" aria-label={title} style:--session-color={session.color || 'var(--color-border)'}>
+<article class="card lattice-panel" aria-label={title} style:--session-color={session.color || 'var(--color-border)'}>
   <header class="card-head">
     <div class="title-wrap">
       <div class="status-icon" title={status} aria-hidden="true">
@@ -47,7 +47,7 @@
       </div>
       <h3 class="title" title={title}>{title}</h3>
     </div>
-    <button class="eye" aria-label="Open session" title="Open session" onclick={openSession}>
+    <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" aria-label="Open session" title="Open session" onclick={openSession}>
       <Eye size={16} weight="light" />
     </button>
   </header>
@@ -64,15 +64,12 @@
 
 <style>
   .card {
-    background: var(--bg-elevated);
-    border: 1px solid var(--color-border);
     border-left: 3px solid var(--session-color);
-    border-radius: var(--radius-sm);
     padding: var(--space-3);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--motion-duration-fast);
   }
   .card:hover {
     border-top-color: var(--accent-cyan);
@@ -114,20 +111,6 @@
     text-overflow: ellipsis;
     min-width: 0;
     flex: 1;
-  }
-  .eye {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: var(--space-1);
-    display: inline-flex;
-    align-items: center;
-    border-radius: var(--radius-sm);
-  }
-  .eye:hover {
-    color: var(--accent-cyan);
-    background: rgba(0, 229, 255, 0.08);
   }
   .meta {
     display: flex;

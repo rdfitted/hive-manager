@@ -51,13 +51,13 @@
 
 {#if open}
   <div
-    class="modal-backdrop"
+    class="modal-backdrop lattice-modal-backdrop"
     role="presentation"
     on:click={cancel}
     on:keydown={(e) => e.key === 'Escape' && cancel()}
   >
     <div
-      class="modal"
+      class="modal lattice-modal"
       role="dialog"
       tabindex="-1"
       aria-modal="true"
@@ -69,7 +69,7 @@
         <h2>Resume {sessionName ?? 'session'}</h2>
       </header>
 
-      <div class="modal-body">
+      <div class="modal-body lattice-scroll-chrome">
         {#if loading}
           <p class="muted">Reading run journal...</p>
         {:else if error}
@@ -83,7 +83,7 @@
               <p class="muted">These write-steps already finished and will not be re-run.</p>
               <ul>
                 {#each skipped as step (step.step_id)}
-                  <li><span class="badge done">done</span> {kindLabel(step)}</li>
+                  <li><span class="status-badge status-success resume-status">done</span> {kindLabel(step)}</li>
                 {/each}
               </ul>
             </section>
@@ -96,7 +96,7 @@
               <ul>
                 {#each interrupted as step (step.step_id)}
                   <li class="warn-row">
-                    <span class="badge warn">interrupted</span> {kindLabel(step)}
+                    <span class="status-badge status-warning resume-status">interrupted</span> {kindLabel(step)}
                   </li>
                 {/each}
               </ul>
@@ -112,7 +112,7 @@
               <ul>
                 {#each uncertain as effect (effect.step_id)}
                   <li class="warn-row">
-                    <span class="badge warn">{effect.confidence}</span> {effectLabel(effect)}
+                    <span class="status-badge status-warning resume-status">{effect.confidence}</span> {effectLabel(effect)}
                   </li>
                 {/each}
               </ul>
@@ -131,10 +131,10 @@
       </div>
 
       <footer class="modal-footer">
-        <button type="button" class="secondary" on:click={cancel} disabled={confirming}>
+        <button type="button" class="lattice-btn lattice-btn--secondary" on:click={cancel} disabled={confirming}>
           Cancel
         </button>
-        <button type="button" class="primary" on:click={confirm} disabled={loading || confirming}>
+        <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled" on:click={confirm} disabled={loading || confirming} aria-busy={confirming}>
           {confirming ? 'Resuming...' : 'Resume'}
         </button>
       </footer>
@@ -146,7 +146,6 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -154,10 +153,8 @@
   }
 
   .modal {
-    background: var(--bg-elevated, #1a1b26);
-    color: var(--text-primary, #c0caf5);
-    border: 1px solid var(--border, #2a2e42);
-    border-radius: 8px;
+    color: var(--text-primary);
+    border-radius: var(--radius-lg);
     width: min(560px, 92vw);
     max-height: 86vh;
     display: flex;
@@ -167,7 +164,7 @@
 
   .modal-header {
     padding: 1rem 1.25rem;
-    border-bottom: 1px solid var(--border, #2a2e42);
+    border-bottom: 1px solid var(--border-structural);
   }
 
   .modal-header h2 {
@@ -204,23 +201,8 @@
     color: var(--text-warning, #e0af68);
   }
 
-  .badge {
-    display: inline-block;
-    font-size: 0.7rem;
-    padding: 0.05rem 0.4rem;
-    border-radius: 4px;
+  .resume-status {
     margin-right: 0.4rem;
-    text-transform: uppercase;
-  }
-
-  .badge.done {
-    background: rgba(158, 206, 106, 0.18);
-    color: var(--text-success, #9ece6a);
-  }
-
-  .badge.warn {
-    background: rgba(224, 175, 104, 0.18);
-    color: var(--text-warning, #e0af68);
   }
 
   .muted {
@@ -245,33 +227,10 @@
 
   .modal-footer {
     padding: 0.85rem 1.25rem;
-    border-top: 1px solid var(--border, #2a2e42);
+    border-top: 1px solid var(--border-structural);
     display: flex;
     justify-content: flex-end;
     gap: 0.5rem;
   }
 
-  button {
-    padding: 0.4rem 0.9rem;
-    border-radius: 6px;
-    border: 1px solid var(--border, #2a2e42);
-    cursor: pointer;
-    font-size: 0.85rem;
-  }
-
-  button:disabled {
-    cursor: default;
-    opacity: 0.55;
-  }
-
-  button.primary {
-    background: var(--accent, #7aa2f7);
-    color: #0b0c14;
-    border-color: var(--accent, #7aa2f7);
-  }
-
-  button.secondary {
-    background: transparent;
-    color: var(--text-primary, #c0caf5);
-  }
 </style>

@@ -28,7 +28,7 @@
 </script>
 
 <div class="board">
-  <div class="columns">
+  <div class="columns lattice-scroll-content">
     {#each PRIMARY_COLUMNS as col (col.status)}
       <KanbanColumn
         label={col.label}

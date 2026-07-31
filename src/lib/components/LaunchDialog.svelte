@@ -610,10 +610,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
 {#if show}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="dialog-overlay" on:click={handleOverlayClick} role="presentation">
+  <div class="dialog-overlay lattice-modal-backdrop" on:click={handleOverlayClick} role="presentation">
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div
-      class="dialog"
+      class="dialog lattice-modal lattice-scroll-chrome"
       on:click|stopPropagation
       role="dialog"
       aria-modal="true"
@@ -624,24 +624,27 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
       <div class="mode-tabs">
         <button
-          class="mode-tab"
-          class:active={mode === 'templates'}
+          class="lattice-tab launch-mode-tab"
+          class:lattice-tab--active={mode === 'templates'}
+          aria-pressed={mode === 'templates'}
           on:click={() => (mode = 'templates')}
           type="button"
         >
           Templates
         </button>
         <button
-          class="mode-tab"
-          class:active={mode === 'hive'}
+          class="lattice-tab launch-mode-tab"
+          class:lattice-tab--active={mode === 'hive'}
+          aria-pressed={mode === 'hive'}
           on:click={() => (mode = 'hive')}
           type="button"
         >
           Hive
         </button>
         <button
-          class="mode-tab"
-          class:active={mode === 'fusion'}
+          class="lattice-tab launch-mode-tab"
+          class:lattice-tab--active={mode === 'fusion'}
+          aria-pressed={mode === 'fusion'}
           on:click={() => {
             mode = 'fusion';
             fusionTemplateError = '';
@@ -652,24 +655,27 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           Fusion
         </button>
         <button
-          class="mode-tab"
-          class:active={mode === 'debate'}
+          class="lattice-tab launch-mode-tab"
+          class:lattice-tab--active={mode === 'debate'}
+          aria-pressed={mode === 'debate'}
           on:click={() => (mode = 'debate')}
           type="button"
         >
           Debate
         </button>
         <button
-          class="mode-tab"
-          class:active={mode === 'research'}
+          class="lattice-tab launch-mode-tab"
+          class:lattice-tab--active={mode === 'research'}
+          aria-pressed={mode === 'research'}
           on:click={() => (mode = 'research')}
           type="button"
         >
           Research
         </button>
         <button
-          class="mode-tab"
-          class:active={mode === 'solo'}
+          class="lattice-tab launch-mode-tab"
+          class:lattice-tab--active={mode === 'solo'}
+          aria-pressed={mode === 'solo'}
           on:click={() => (mode = 'solo')}
           type="button"
         >
@@ -690,6 +696,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <input
               id="sessionName"
               type="text"
+              class="lattice-input"
               bind:value={sessionName}
               placeholder="e.g. Refactor API"
             />
@@ -700,9 +707,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               {#each COLORS as color}
                 <button
                   type="button"
-                  class="color-circle"
+                  class="lattice-btn lattice-btn--icon color-circle"
                   style:background={color.value}
-                  class:selected={sessionColor === color.value}
+                  aria-pressed={sessionColor === color.value}
                   on:click={() => sessionColor = color.value}
                   title={color.name}
                 >
@@ -710,9 +717,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               {/each}
               <button
                 type="button"
-                class="color-circle clear"
+                class="lattice-btn lattice-btn--icon lattice-btn--secondary color-circle clear"
                 on:click={() => sessionColor = ''}
                 title="Clear color"
+                aria-label="Clear color"
               >×</button>
             </div>
           </div>
@@ -724,12 +732,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <input
               id="projectPath"
               type="text"
+              class="lattice-input"
               bind:value={projectPath}
               placeholder="Select a project folder..."
               readonly
               required
             />
-            <button type="button" class="browse-button" on:click={browseForFolder}>
+            <button type="button" class="lattice-btn lattice-btn--secondary" on:click={browseForFolder}>
               Browse
             </button>
           </div>
@@ -762,12 +771,18 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <fieldset class="policy-fieldset">
               <legend>Workspace strategy</legend>
               <div class="choice-grid">
-                <label class="choice-card" class:selected={workspaceStrategy === 'shared_cell'}>
+                <label
+                  class="choice-card lattice-panel lattice-selectable"
+                  class:lattice-selectable--selected={workspaceStrategy === 'shared_cell'}
+                >
                   <input type="radio" name="workspace-strategy" bind:group={workspaceStrategy} value="shared_cell" />
                   <span class="choice-title">Shared cell</span>
                   <span class="choice-description">Queen and principals collaborate in one workspace.</span>
                 </label>
-                <label class="choice-card" class:selected={workspaceStrategy === 'isolated_cell'}>
+                <label
+                  class="choice-card lattice-panel lattice-selectable"
+                  class:lattice-selectable--selected={workspaceStrategy === 'isolated_cell'}
+                >
                   <input type="radio" name="workspace-strategy" bind:group={workspaceStrategy} value="isolated_cell" />
                   <span class="choice-title">Per-principal worktrees</span>
                   <span class="choice-description">Queen and each visible principal get isolated managed worktrees.</span>
@@ -778,7 +793,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <div class="delegation-grid">
               <div class="field">
                 <label for="queen-delegation">Queen delegation</label>
-                <select id="queen-delegation" bind:value={queenDelegationMode} class="role-select">
+                <select id="queen-delegation" bind:value={queenDelegationMode} class="role-select lattice-input">
                   <option value="disabled">Disabled</option>
                   <option value="auto">Automatic when useful</option>
                   <option value="encouraged">Encouraged</option>
@@ -787,7 +802,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
               <div class="field">
                 <label for="principal-delegation">Principal delegation</label>
-                <select id="principal-delegation" bind:value={principalDelegationMode} class="role-select">
+                <select id="principal-delegation" bind:value={principalDelegationMode} class="role-select lattice-input">
                   <option value="disabled">Disabled</option>
                   <option value="auto">Automatic when useful</option>
                   <option value="encouraged">Encouraged</option>
@@ -801,18 +816,18 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 <h4>Coding Principals ({codingPrincipals.length})</h4>
                 <p class="section-description">Each principal owns a coherent lane and may delegate according to policy.</p>
               </div>
-              <button type="button" class="add-button" on:click={addCodingPrincipal} disabled={codingPrincipals.length >= 3}>
+              <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addCodingPrincipal} disabled={codingPrincipals.length >= 3}>
                 + Add principal
               </button>
             </div>
             <div class="workers-list principal-list">
               {#each codingPrincipals as principal, i (i)}
-                <div class="worker-card principal-card">
+                <div class="worker-card principal-card lattice-panel">
                   <div class="card-header">
                     <span class="card-title">{principal.label || `Coding Principal ${i + 1}`}</span>
                     <button
                       type="button"
-                      class="remove-button"
+                      class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--compact"
                       on:click={() => removeCodingPrincipal(i)}
                       disabled={codingPrincipals.length <= 1}
                     >
@@ -824,7 +839,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                     <select
                       id={`launch-principal-${i}-role`}
                       bind:value={principal.selectedRole}
-                      class="role-select"
+                      class="role-select lattice-input"
                     >
                       {#each predefinedRoles as role}
                         <option value={role.type}>{role.label}</option>
@@ -851,7 +866,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
             <button
               type="button"
-              class="advanced-toggle"
+              class="lattice-btn lattice-btn--ghost lattice-btn--link advanced-disclosure"
               on:click={() => showHiveAdvanced = !showHiveAdvanced}
               aria-expanded={showHiveAdvanced}
               aria-controls="hive-delegation-limits"
@@ -860,10 +875,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             </button>
             {#if showHiveAdvanced}
               <div class="advanced-grid" id="hive-delegation-limits">
-                <label>Queen target max children <input type="number" min="1" max="8" bind:value={queenMaxChildren} /></label>
-                <label>Queen target max depth <input type="number" min="1" max="4" bind:value={queenMaxDepth} /></label>
-                <label>Principal target max children <input type="number" min="1" max="8" bind:value={principalMaxChildren} /></label>
-                <label>Principal target max depth <input type="number" min="1" max="4" bind:value={principalMaxDepth} /></label>
+                <label>Queen target max children <input class="lattice-input" type="number" min="1" max="8" bind:value={queenMaxChildren} /></label>
+                <label>Queen target max depth <input class="lattice-input" type="number" min="1" max="4" bind:value={queenMaxDepth} /></label>
+                <label>Principal target max children <input class="lattice-input" type="number" min="1" max="8" bind:value={principalMaxChildren} /></label>
+                <label>Principal target max depth <input class="lattice-input" type="number" min="1" max="4" bind:value={principalMaxDepth} /></label>
                 <p class="policy-note">These values guide assignments; native harness settings own hard concurrency limits.</p>
               </div>
             {/if}
@@ -875,7 +890,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <h3>Orchestration Options</h3>
             {#if mode === 'hive' || mode === 'debate'}
               <div class="checkbox-group">
-                <label class="checkbox-label">
+                <label class="checkbox-label lattice-selectable">
                   <input type="checkbox" bind:checked={withPlanning} />
                   <div class="checkbox-text">
                     <span class="checkbox-title">Enable Planning Phase</span>
@@ -889,7 +904,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
             {#if mode === 'hive' || mode === 'solo'}
               <div class="checkbox-group">
-                <label class="checkbox-label">
+                <label class="checkbox-label lattice-selectable">
                   {#if mode === 'solo'}
                     <input type="checkbox" bind:checked={withSoloEvaluator} />
                   {:else}
@@ -917,23 +932,23 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 <div class="qa-workers-config subsection">
                   <div class="section-header">
                     <h4>QA Workers ({qaWorkers.length})</h4>
-                    <button type="button" class="add-button small" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>+ Add</button>
+                    <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>+ Add</button>
                   </div>
                   <div class="workers-list">
                     {#each qaWorkers as worker, i (i)}
-                      <div class="worker-card qa-worker-card">
+                      <div class="worker-card qa-worker-card lattice-panel">
                         <div class="card-header">
                           <span class="card-title">QA Worker {i + 1}</span>
                           <button
                             type="button"
-                            class="remove-button small"
+                            class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--compact"
                             on:click={() => removeQaWorker(i)}
                             disabled={qaWorkers.length <= 1}
                           >Remove</button>
                         </div>
                         <div class="role-selector small">
                           <label for="qa-spec-{i}">Specialization</label>
-                          <select id="qa-spec-{i}" bind:value={worker.specialization} class="role-select">
+                          <select id="qa-spec-{i}" bind:value={worker.specialization} class="role-select lattice-input">
                             <option value="ui">UI Tester</option>
                             <option value="api">API Tester</option>
                             <option value="a11y">A11Y Tester</option>
@@ -961,19 +976,19 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           <div class="form-section">
             <div class="section-header">
               <h3>Researcher Roster ({researchWorkers.length})</h3>
-              <button type="button" class="add-button" on:click={addResearchWorker} disabled={researchWorkers.length >= 6}>
+              <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addResearchWorker} disabled={researchWorkers.length >= 6}>
                 + Add
               </button>
             </div>
             <p class="section-description">A roster the Queen spawns from on demand — none launch up front. Each runs with its own selectable model; the Queen decides how many to spawn based on the objective.</p>
             <div class="workers-list">
               {#each researchWorkers as worker, i (i)}
-                <div class="worker-card">
+                <div class="worker-card lattice-panel">
                   <div class="card-header">
                     <span class="card-title">Researcher {i + 1}</span>
                     <button
                       type="button"
-                      class="remove-button"
+                      class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--compact"
                       on:click={() => removeResearchWorker(i)}
                       disabled={researchWorkers.length <= 1}
                     >
@@ -999,7 +1014,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
             <div class="field">
               <label for="variant-count">Number of Variants</label>
-              <select id="variant-count" bind:value={variantCount} class="role-select">
+              <select id="variant-count" bind:value={variantCount} class="role-select lattice-input">
                 <option value={2}>2 Variants</option>
                 <option value={3}>3 Variants</option>
                 <option value={4}>4 Variants</option>
@@ -1010,11 +1025,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               <h4>Variant Configurations</h4>
               <div class="workers-list">
                 {#each activeFusionVariants as variant, i (i)}
-                  <div class="worker-card">
+                  <div class="worker-card lattice-panel">
                     <div class="card-header">
                       <input
                         type="text"
-                        class="card-title-input"
+                        class="card-title-input lattice-input"
                         bind:value={fusionVariants[i].name}
                         placeholder="Variant {String.fromCharCode(65 + i)}"
                       />
@@ -1036,7 +1051,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <div class="subsection">
               <h4>Judge Configuration</h4>
               <p class="section-description">Evaluates variant outputs and recommends a winner.</p>
-              <div class="worker-card">
+              <div class="worker-card lattice-panel">
                 <AgentConfigEditor
                   config={judgeAgentConfig}
                   showLabel={false}
@@ -1057,7 +1072,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <div class="form-row">
               <div class="field">
                 <label for="debater-count">Number of Debaters</label>
-                <select id="debater-count" bind:value={debaterCount} class="role-select">
+                <select id="debater-count" bind:value={debaterCount} class="role-select lattice-input">
                   <option value={2}>2 Debaters</option>
                   <option value={3}>3 Debaters</option>
                   <option value={4}>4 Debaters</option>
@@ -1066,7 +1081,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
               <div class="field">
                 <label for="debate-rounds">Number of Rounds</label>
-                <select id="debate-rounds" bind:value={debateRounds} class="role-select">
+                <select id="debate-rounds" bind:value={debateRounds} class="role-select lattice-input">
                   <option value={1}>1 Round</option>
                   <option value={2}>2 Rounds</option>
                   <option value={3}>3 Rounds</option>
@@ -1080,18 +1095,18 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               <h4>Debater Configurations</h4>
               <div class="workers-list">
                 {#each activeDebaters as debater, i (i)}
-                  <div class="worker-card">
+                  <div class="worker-card lattice-panel">
                     <div class="card-header" style="display: flex; gap: 8px; flex-direction: column; align-items: stretch; border: none; padding: 0; margin-bottom: 8px;">
                       <input
                         type="text"
-                        class="card-title-input"
+                        class="card-title-input lattice-input"
                         bind:value={debateDebaters[i].name}
                         placeholder="Debater {String.fromCharCode(65 + i)}"
                         style="width: 100%;"
                       />
                       <input
                         type="text"
-                        class="card-title-input"
+                        class="card-title-input lattice-input"
                         style="font-size: 12px; opacity: 0.8; font-weight: normal; width: 100%; border-bottom: 1px dashed color-mix(in srgb, var(--text-primary) 10%, transparent);"
                         bind:value={debateDebaters[i].stance}
                         placeholder="Stance (optional, e.g. Pro / Con)"
@@ -1114,7 +1129,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <div class="subsection">
               <h4>Judge Configuration</h4>
               <p class="section-description">Evaluates the debate and renders the verdict.</p>
-              <div class="worker-card">
+              <div class="worker-card lattice-panel">
                 <AgentConfigEditor
                   config={debateJudgeAgentConfig}
                   showLabel={false}
@@ -1143,8 +1158,9 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
             <div class="form-group">
               <label for="solo-task">Task Description</label>
-              <textarea
-                id="solo-task"
+            <textarea
+              id="solo-task"
+              class="lattice-input"
                 bind:value={soloTask}
                 placeholder="What should the agent do? (Leave empty for interactive mode)"
                 rows="5"
@@ -1175,7 +1191,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         <div class="launch-preview-section">
           <button
             type="button"
-            class="preview-toggle"
+            class="lattice-btn lattice-btn--ghost lattice-btn--link"
             on:click={() => showPreview = !showPreview}
             aria-expanded={showPreview}
             aria-controls="launch-preview-content"
@@ -1192,21 +1208,21 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             <div class="preview-content" id="launch-preview-content">
               <div class="topology-viz">
                 {#if mode === 'solo'}
-                  <div class="node solo">
+                  <div class="node solo lattice-panel">
                     <span class="node-label">Solo</span>
                     <span class="node-cli">{soloConfig.cli} · {soloConfig.model || 'default'}</span>
                   </div>
                   {#if withSoloEvaluator}
                     <div class="connector"></div>
                     <div class="worker-nodes">
-                      <div class="node worker">
+                      <div class="node worker lattice-panel">
                         <span class="node-label">Evaluator + Prince</span>
                         <span class="node-cli">verification control plane and QA on demand</span>
                       </div>
                     </div>
                   {/if}
                 {:else}
-                  <div class="node queen">
+                  <div class="node queen lattice-panel">
                     <span class="node-icon">
                       <Crown size={16} weight="light" />
                     </span>
@@ -1218,21 +1234,21 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                     <div class="worker-nodes">
                       {#if mode === 'hive'}
                         {#each codingPrincipals as principal}
-                          <div class="node worker">
+                          <div class="node worker lattice-panel">
                             <span class="node-label">{principal.label || 'Coding Principal'}</span>
                             <span class="node-cli">{principal.cli} · {principal.model || 'default'}</span>
                           </div>
                         {/each}
                       {:else if mode === 'fusion'}
                         {#each activeFusionVariants as variant}
-                          <div class="node fusion">
+                          <div class="node fusion lattice-panel">
                             <span class="node-label">{variant.name}</span>
                             <span class="node-cli">{variant.cli}</span>
                           </div>
                         {/each}
                       {:else if mode === 'debate'}
                         {#each activeDebaters as debater}
-                          <div class="node debate">
+                          <div class="node debate lattice-panel">
                             <span class="node-label">{debater.name}</span>
                             <span class="node-cli">{debater.cli}</span>
                           </div>
@@ -1269,13 +1285,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         {/if}
 
         <div class="dialog-actions">
-          <button type="button" class="cancel-button" on:click={handleClose} disabled={launching}>
+          <button type="button" class="lattice-btn lattice-btn--secondary" on:click={handleClose} disabled={launching}>
             Cancel
           </button>
           {#if mode === 'hive' || mode === 'research'}
           <button
             type="button"
-            class="smoke-test-button"
+            class="lattice-btn lattice-btn--warning lattice-btn--dashed"
             on:click={handleSmokeTest}
             disabled={launching || !projectPath.trim()}
             title={mode === 'research'
@@ -1285,7 +1301,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             Smoke Test
           </button>
           {/if}
-          <button type="submit" class="submit-button" disabled={launching || !projectPath.trim() || mode === 'templates'}>
+          <button type="submit" class="lattice-btn lattice-btn--primary lattice-btn--filled" disabled={launching || !projectPath.trim() || mode === 'templates'} aria-busy={launching}>
             {launching ? 'Launching...' : 'Launch'}
           </button>
         </div>
@@ -1298,7 +1314,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .dialog-overlay {
     position: fixed;
     inset: 0;
-    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1306,9 +1321,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .dialog {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     padding: 24px;
     width: 520px;
     max-width: 90vw;
@@ -1328,30 +1341,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     margin-bottom: 20px;
     background: var(--bg-void);
     padding: 4px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
   }
 
-  .mode-tab {
+  .launch-mode-tab {
     flex: 1;
-    padding: 8px 16px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .mode-tab:hover {
-    color: var(--text-primary);
-  }
-
-  .mode-tab.active {
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    box-shadow: 0 1px 3px color-mix(in srgb, var(--bg-void) 20%, transparent);
   }
 
   .form-group {
@@ -1388,16 +1382,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     padding: 6px;
     background: var(--bg-void);
     border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
   }
 
   .color-circle {
     width: 20px;
     height: 20px;
     border-radius: 50%;
-    border: 2px solid transparent;
-    cursor: pointer;
-    transition: transform 0.15s ease;
+    transition: transform var(--motion-duration-fast) var(--motion-ease-standard);
     padding: 0;
   }
 
@@ -1405,37 +1397,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     transform: scale(1.2);
   }
 
-  .color-circle.selected {
-    border-color: var(--text-primary);
-    transform: scale(1.1);
-  }
-
   .color-circle.clear {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--bg-elevated);
-    color: var(--text-secondary);
     font-size: 14px;
-    border: 1px solid var(--border-structural);
   }
 
-  .form-group input,
-  .form-group textarea {
+  .form-group > .lattice-input {
     width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-void);
-    color: var(--text-primary);
-    font-size: 14px;
     font-family: inherit;
-  }
-
-  .form-group input:focus,
-  .form-group textarea:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
   }
 
   .path-picker {
@@ -1443,38 +1411,16 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     gap: 8px;
   }
 
-  .path-picker input {
+  .path-picker .lattice-input {
     flex: 1;
     cursor: pointer;
-  }
-
-  .path-picker input:read-only {
-    background: var(--bg-surface);
-  }
-
-  .browse-button {
-    padding: 10px 16px;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.15s ease;
-  }
-
-  .browse-button:hover {
-    background: var(--border-structural);
-    border-color: var(--accent-cyan);
   }
 
   .form-section {
     margin-bottom: 20px;
     padding: 16px;
     background: var(--bg-void);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
   }
 
   .form-section h3 {
@@ -1520,6 +1466,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .hive-policy-section {
+    /* Semantic policy emphasis, not a reusable structural surface. */
     border: 1px solid color-mix(in srgb, var(--accent-cyan) 26%, var(--border-structural));
     background: color-mix(in srgb, var(--accent-cyan) 4%, var(--bg-void));
   }
@@ -1552,15 +1499,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     display: grid;
     gap: 4px;
     padding: 11px 12px 11px 34px;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-surface);
-    cursor: pointer;
-  }
-
-  .choice-card.selected {
-    border-color: var(--accent-cyan);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 25%, transparent);
   }
 
   .choice-card input {
@@ -1598,14 +1536,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     border-left: 3px solid var(--accent-cyan);
   }
 
-  .advanced-toggle {
+  .advanced-disclosure {
     margin-top: 12px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    color: var(--accent-cyan);
-    font-size: 11px;
-    cursor: pointer;
   }
 
   .advanced-grid {
@@ -1623,11 +1555,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .advanced-grid input {
     width: 100%;
-    padding: 7px 9px;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-surface);
-    color: var(--text-primary);
   }
 
   .advanced-grid .policy-note {
@@ -1664,32 +1591,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     margin: 0;
   }
 
-  .add-button {
-    padding: 6px 12px;
-    border: 1px dashed var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 12px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .add-button:hover:not(:disabled) {
-    border-color: var(--accent-cyan);
-    color: var(--accent-cyan);
-  }
-
-  .add-button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .add-button.small {
-    padding: 4px 8px;
-    font-size: 11px;
-  }
-
   .workers-list {
     display: flex;
     flex-direction: column;
@@ -1698,9 +1599,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .worker-card {
     padding: 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
   }
 
   .qa-worker-card {
@@ -1724,41 +1623,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 12px;
     font-weight: 600;
     color: var(--text-primary);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    padding: 4px 8px;
     width: 150px;
-  }
-
-  .card-title-input:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
-  }
-
-  .remove-button {
-    padding: 4px 10px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--status-error);
-    font-size: 11px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .remove-button:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-error) 15%, transparent);
-  }
-
-  .remove-button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .remove-button.small {
-    padding: 2px 8px;
-    font-size: 10px;
   }
 
   .field {
@@ -1781,55 +1646,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     margin-top: 24px;
   }
 
-  .cancel-button,
-  .submit-button,
-  .smoke-test-button {
-    padding: 10px 20px;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .cancel-button {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-  }
-
-  .cancel-button:hover:not(:disabled) {
-    background: var(--border-structural);
-  }
-
-  .smoke-test-button {
-    background: transparent;
-    border: 1px dashed var(--status-warning);
-    color: var(--status-warning);
-  }
-
-  .smoke-test-button:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--status-warning) 10%, transparent);
-    border-style: solid;
-  }
-
-  .submit-button {
-    background: var(--accent-cyan);
-    color: var(--bg-void);
-  }
-
-  .submit-button:hover:not(:disabled) {
-    filter: brightness(1.1);
-  }
-
-  .submit-button:disabled,
-  .cancel-button:disabled,
-  .smoke-test-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   .error-message {
+    /* Semantic validation alert, not a reusable structural surface. */
     padding: 12px;
     margin-bottom: 16px;
     background: color-mix(in srgb, var(--status-error) 15%, transparent);
@@ -1863,18 +1681,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .role-select {
     width: 100%;
-    padding: 8px 10px;
     font-size: 13px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
     cursor: pointer;
-  }
-
-  .role-select:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
   }
 
   .role-selector.small .role-select {
@@ -1893,13 +1701,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     cursor: pointer;
     padding: 12px;
     background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    transition: all 0.15s ease;
-  }
-
-  .checkbox-label:hover {
-    border-color: var(--accent-cyan);
   }
 
   .checkbox-label input[type="checkbox"] {
@@ -1934,23 +1735,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     padding-top: 16px;
   }
 
-  .preview-toggle {
-    background: transparent;
-    border: none;
-    color: var(--accent-cyan);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0;
-  }
-
   .preview-content {
     margin-top: 16px;
+    /* Preview tint distinguishes generated topology from editable controls. */
     background: color-mix(in srgb, var(--bg-void) 20%, transparent);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     padding: 16px;
   }
 
@@ -1964,8 +1753,6 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .node {
     padding: 8px 12px;
     border-radius: var(--radius-sm);
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1973,6 +1760,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .node.queen {
+    /* Topology role tones are semantic node states, not structural surfaces. */
     border-color: var(--accent-amber);
     background: color-mix(in srgb, var(--accent-amber) 10%, transparent);
   }

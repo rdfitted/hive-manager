@@ -5,6 +5,8 @@
     import { onDestroy, onMount, tick } from 'svelte';
     import { ArrowClockwise, ArrowSquareOut, Browser, Columns, Copy, GitBranch, X } from 'phosphor-svelte';
     import { activeSession, serdeEnumVariantName } from '../../stores/sessions';
+    import Skeleton from '../Skeleton.svelte';
+    import SkelBar from '../SkelBar.svelte';
 
     /** Mirrors `PreviewStatus` in src-tauri/src/preview/mod.rs. */
     type PreviewStatus = {
@@ -25,6 +27,10 @@
     let previewOpen = false;
     let previewDocked = false;
     let previewCurrentUrl = '';
+    // The preview skeleton must resolve on the STATUS request settling, not on the
+    // URL being non-empty: an open preview with no URL yet is a legitimate terminal
+    // state, and gating on emptiness alone leaves the skeleton spinning forever.
+    let previewStatusResolved = false;
     let previewBusy = '';
     // Identity token for `previewBusy`, same shape as the poll guard in PR #154.
     // Neither an ungated nor a request-gated clear is correct on its own: ungated
@@ -49,6 +55,7 @@
         previewOpen = status.open;
         previewDocked = status.docked;
         previewCurrentUrl = status.url ?? '';
+        previewStatusResolved = true;
         if (sessionId && status.session_url) {
             rememberedPreviewUrls.set(sessionId, status.session_url);
             if (!previewUrl) previewUrl = status.session_url;
@@ -70,12 +77,14 @@
                 if (!event.payload?.url) return;
                 previewCurrentUrl = event.payload.url;
                 previewOpen = true;
+                previewStatusResolved = true;
             }),
             listen<PreviewStatus>('preview-status', (event) => {
                 if (!event.payload) return;
                 previewOpen = event.payload.open;
                 previewDocked = event.payload.docked;
                 previewCurrentUrl = event.payload.url ?? '';
+                previewStatusResolved = true;
             })
         ])
             .then((fns) => {
@@ -98,6 +107,31 @@
     $: session = $activeSession;
     $: mode = session ? serdeEnumVariantName(session.session_type)?.toLowerCase() ?? 'session' : 'session';
     $: status = session ? serdeEnumVariantName(session.state)?.toLowerCase() ?? 'unknown' : 'unknown';
+
+    function getStatusClass(value: string): string {
+        switch (value) {
+            case 'running':
+            case 'active':
+            case 'starting':
+            case 'initializing':
+                return 'status-running';
+            case 'completed':
+            case 'closed':
+                return 'status-success';
+            case 'failed':
+            case 'error':
+                return 'status-error';
+            case 'blocked':
+                return 'status-blocked';
+            case 'canceled':
+            case 'cancelled':
+                return 'status-canceled';
+            case 'closing':
+                return 'status-warning';
+            default:
+                return 'status-queued';
+        }
+    }
 
     function truncatePath(path: string, maxLen = 44): string {
         const p = path.trim();
@@ -264,7 +298,7 @@
             <div class="top-row">
                 <span class="mode-badge {mode}">{mode}</span>
                 <h1 class="session-name">{session.name || session.id}</h1>
-                <span class="status-badge {status}">{status.replaceAll('_', ' ')}</span>
+                <span class="status-badge {getStatusClass(status)}">{status.replaceAll('_', ' ')}</span>
                 {#if showWorktreeChip}
                     <span class="worktree-chip" title={worktreeTooltip}>
                         <GitBranch size={14} weight="light" aria-hidden="true" />
@@ -288,6 +322,7 @@
                             and autofill behaviour.
                         -->
                         <input
+                            class="preview-url-input lattice-input"
                             id="session-preview-url"
                             bind:this={previewInput}
                             bind:value={previewUrl}
@@ -301,7 +336,7 @@
                             aria-describedby={previewError ? 'session-preview-error' : undefined}
                         />
                         <button
-                            class="preview-open"
+                            class="preview-open lattice-btn lattice-btn--secondary lattice-btn--compact"
                             type="submit"
                             disabled={openingPreview || !previewUrl.trim()}
                         >
@@ -311,7 +346,7 @@
                     </form>
                 {:else}
                     <button
-                        class="preview-toggle"
+                        class="preview-toggle lattice-btn lattice-btn--ghost lattice-btn--compact"
                         type="button"
                         onclick={expandPreview}
                         aria-expanded="false"
@@ -326,11 +361,18 @@
                 {#if previewOpen}
                     <div class="preview-live" aria-live="polite">
                         <span class="preview-live-mode">{previewDocked ? 'Docked' : 'Popped out'}</span>
-                        <span class="preview-live-url" title={previewCurrentUrl}>
-                            {previewUrlCopied ? 'Copied' : previewCurrentUrl || 'Loading…'}
-                        </span>
+                        <div class="preview-live-url" title={previewCurrentUrl}>
+                            <Skeleton loading={!previewStatusResolved && !previewUrlCopied} layout="inline">
+                                {#snippet skeleton()}
+                                    <SkelBar width="12rem" height="1em" />
+                                {/snippet}
+                                {#snippet children()}
+                                    {previewUrlCopied ? 'Copied' : (previewCurrentUrl || 'No preview URL')}
+                                {/snippet}
+                            </Skeleton>
+                        </div>
                         <button
-                            class="preview-action"
+                            class="preview-action lattice-btn lattice-btn--ghost lattice-btn--icon"
                             type="button"
                             onclick={copyPreviewUrl}
                             disabled={!previewCurrentUrl}
@@ -340,7 +382,7 @@
                             <Copy size={13} weight="light" aria-hidden="true" />
                         </button>
                         <button
-                            class="preview-action"
+                            class="preview-action lattice-btn lattice-btn--ghost lattice-btn--icon"
                             type="button"
                             onclick={reloadPreview}
                             disabled={Boolean(previewBusy)}
@@ -350,7 +392,7 @@
                             <ArrowClockwise size={13} weight="light" aria-hidden="true" />
                         </button>
                         <button
-                            class="preview-action"
+                            class="preview-action lattice-btn lattice-btn--ghost lattice-btn--icon"
                             type="button"
                             onclick={togglePreviewDock}
                             disabled={Boolean(previewBusy)}
@@ -368,7 +410,7 @@
                             {/if}
                         </button>
                         <button
-                            class="preview-action"
+                            class="preview-action lattice-btn lattice-btn--ghost lattice-btn--icon"
                             type="button"
                             onclick={closePreview}
                             disabled={Boolean(previewBusy)}
@@ -436,6 +478,7 @@
         padding: 2px 6px;
         border-radius: var(--radius-sm);
         letter-spacing: 0.1em;
+        /* A compact mode badge uses a neutral semantic backing, not a panel surface. */
         background: var(--bg-surface);
         color: var(--text-primary);
         border: 1px solid var(--border-structural);
@@ -446,18 +489,6 @@
     .mode-badge.swarm { background: var(--status-success); color: var(--bg-void); }
     .mode-badge.solo { background: var(--status-error); color: var(--bg-void); }
 
-    .status-badge {
-        font-size: 10px;
-        padding: 2px 8px;
-        border-radius: 999px;
-        background: var(--bg-surface);
-        color: var(--text-secondary);
-        border: 1px solid var(--border-structural);
-        text-transform: capitalize;
-    }
-
-    .status-badge.running { color: var(--status-running); border-color: var(--status-running); background: color-mix(in srgb, var(--status-running) 5%, transparent); }
-
     .worktree-chip {
         display: inline-flex;
         align-items: center;
@@ -466,6 +497,7 @@
         padding: 2px 8px;
         border-radius: var(--radius-sm);
         border: 1px solid var(--border-structural);
+        /* Worktree metadata is a compact chip, not a structural panel. */
         background: var(--bg-elevated);
         color: var(--text-muted);
         font-size: 11px;
@@ -511,57 +543,13 @@
         gap: 6px;
     }
 
-    .preview-form input {
+    .preview-url-input {
         width: clamp(190px, 22vw, 320px);
         height: 30px;
-        padding: 0 9px;
-        border: 1px solid var(--border-structural);
-        border-radius: var(--radius-sm);
-        background: var(--bg-elevated);
-        color: var(--text-primary);
-        font-family: var(--font-mono);
-        font-size: 11px;
     }
 
-    .preview-form input::placeholder {
+    .preview-url-input::placeholder {
         color: var(--text-disabled);
-    }
-
-    .preview-form input:focus-visible {
-        border-color: var(--accent-cyan);
-        outline: 1px solid var(--accent-cyan);
-        outline-offset: 1px;
-    }
-
-    .preview-toggle,
-    .preview-open {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 6px;
-        height: 30px;
-        padding: 0 10px;
-        border: 1px solid var(--border-structural);
-        border-radius: var(--radius-sm);
-        background: var(--bg-elevated);
-        color: var(--text-secondary);
-        font-size: 11px;
-        font-weight: 600;
-        cursor: pointer;
-    }
-
-    .preview-toggle:hover,
-    .preview-toggle:focus-visible,
-    .preview-open:hover:not(:disabled),
-    .preview-open:focus-visible {
-        border-color: var(--accent-cyan);
-        color: var(--accent-cyan);
-        outline: none;
-    }
-
-    .preview-open:disabled {
-        cursor: not-allowed;
-        opacity: 0.5;
     }
 
     .preview-live {
@@ -573,6 +561,7 @@
         padding: 0 4px 0 8px;
         border: 1px solid var(--border-structural);
         border-radius: var(--radius-sm);
+        /* Live preview metadata is a compact control chip, not a structural panel. */
         background: var(--bg-elevated);
     }
 
@@ -594,33 +583,6 @@
         font-family: var(--font-mono);
         font-size: 10px;
         color: var(--text-secondary);
-    }
-
-    .preview-action {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        flex-shrink: 0;
-        width: 20px;
-        height: 20px;
-        padding: 0;
-        border: none;
-        border-radius: var(--radius-sm);
-        background: transparent;
-        color: var(--text-muted);
-        cursor: pointer;
-    }
-
-    .preview-action:hover:not(:disabled),
-    .preview-action:focus-visible {
-        color: var(--accent-cyan);
-        background: var(--bg-surface);
-        outline: none;
-    }
-
-    .preview-action:disabled {
-        cursor: not-allowed;
-        opacity: 0.4;
     }
 
     .preview-error {

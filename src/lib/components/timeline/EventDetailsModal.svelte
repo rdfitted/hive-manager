@@ -41,16 +41,18 @@
 
 <svelte:window on:keydown={handleWindowKeydown} />
 
-<div class="modal-backdrop">
+<div class="modal-backdrop lattice-modal-backdrop">
+    <!-- Structural backdrop hit target; Escape and the visible close button provide keyboard dismissal. -->
     <button
         type="button"
         class="modal-dismiss"
+        tabindex="-1"
         aria-label="Close event details"
         on:click={closeModal}
         on:keydown={handleBackdropKeydown}
     ></button>
     <div
-        class="modal-content"
+        class="modal-content lattice-modal"
         role="dialog"
         aria-modal="true"
         aria-label="Event details"
@@ -59,12 +61,12 @@
         <div class="modal-header">
             <h3>Event Details</h3>
             <div class="header-actions">
-                <button on:click={copyToClipboard}>Copy JSON</button>
-                <button class="close-btn" on:click={closeModal} aria-label="Close event details">&times;</button>
+                <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact" on:click={copyToClipboard}>Copy JSON</button>
+                <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={closeModal} aria-label="Close event details">&times;</button>
             </div>
         </div>
 
-        <div class="modal-body">
+        <div class="modal-body lattice-scroll-content">
             {#if copyFeedback}
                 <p class="copy-feedback">{copyFeedback}</p>
             {/if}
@@ -79,7 +81,7 @@
 
             <div class="payload-section">
                 <h4>Payload</h4>
-                <pre>{formatJSON(event.payload)}</pre>
+                <pre class="lattice-scroll-content">{formatJSON(event.payload)}</pre>
             </div>
         </div>
     </div>
@@ -92,7 +94,6 @@
         left: 0;
         width: 100vw;
         height: 100vh;
-        background: rgba(0, 0, 0, 0.7);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -114,12 +115,8 @@
         width: 80%;
         max-width: 800px;
         max-height: 80%;
-        background: var(--color-bg);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
-        box-shadow: var(--shadow-lg);
     }
 
     .modal-header {
@@ -138,20 +135,6 @@
     .header-actions {
         display: flex;
         gap: 8px;
-    }
-
-    .header-actions button {
-        padding: 4px 12px;
-        background: var(--color-surface);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text);
-        cursor: pointer;
-    }
-
-    .close-btn {
-        font-size: 1.5rem;
-        line-height: 1;
     }
 
     .modal-body {
@@ -193,7 +176,7 @@
         margin: 0;
         padding: 12px;
         background: var(--bg-void);
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-md);
         color: var(--status-success);
         font-size: 0.85rem;
         overflow-x: auto;

@@ -1,0 +1,120 @@
+/* ═══════════════════════════════════════════════════════════════════
+   MOTION TOKENS & SEMANTIC PRIMITIVES
+
+   Sweep-lane contract:
+   - cell/agent mount: .lattice-motion-cell-mount / .lattice-motion-agent-mount
+   - panel slide-in:   .lattice-motion-panel-slide-in
+   - status pulse:     .lattice-motion-status-pulse
+   - radar sweep:      .lattice-motion-radar-sweep
+   - spinner:          .lattice-motion-spinner
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  --motion-duration-instant:  120ms;
+  --motion-duration-fast:     160ms;
+  --motion-duration-standard: 200ms;
+  --motion-duration-arrival:  320ms;
+  --motion-duration-spin:     1s;
+  --motion-duration-pulse:    1.5s;
+  --motion-duration-sweep:    2s;
+  --motion-ease-standard: ease-out;
+  --motion-ease-arrival:  cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-distance-arrival: 0.75rem;
+  --motion-blur-arrival: 2px;
+}
+
+.lattice-motion-cell-mount,
+.lattice-motion-agent-mount {
+  animation: lattice-motion-mount var(--motion-duration-arrival)
+    var(--motion-ease-arrival) both;
+}
+
+.lattice-motion-panel-slide-in {
+  animation: lattice-motion-panel-slide-in var(--motion-duration-standard)
+    var(--motion-ease-arrival) both;
+}
+
+.lattice-motion-status-pulse,
+.pulse-blocked,
+.pulse-error,
+.status-blocked {
+  animation-duration: var(--motion-duration-pulse);
+  animation-timing-function: var(--motion-ease-standard);
+  animation-iteration-count: infinite;
+}
+
+.lattice-motion-status-pulse {
+  animation-name: lattice-motion-status-pulse;
+}
+
+.pulse-blocked,
+.status-blocked {
+  animation-name: pulse-blocked;
+  animation-direction: alternate;
+}
+
+.pulse-error {
+  animation-name: pulse-error;
+  animation-direction: alternate;
+}
+
+.lattice-motion-radar-sweep {
+  animation: lattice-motion-radar-sweep var(--motion-duration-sweep) linear infinite;
+}
+
+.lattice-motion-spinner {
+  animation: spin var(--motion-duration-spin) linear infinite;
+}
+
+@keyframes lattice-motion-mount {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance-arrival));
+    filter: blur(var(--motion-blur-arrival));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes lattice-motion-panel-slide-in {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes lattice-motion-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes lattice-motion-radar-sweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lattice-skeleton-placeholder,
+  .lattice-skeleton-content {
+    filter: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

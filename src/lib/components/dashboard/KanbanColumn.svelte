@@ -12,13 +12,13 @@
   let { label, sessions: items, status = 'queued', accent = 'var(--text-secondary)' }: Props = $props();
 </script>
 
-<section class="column" style="--col-accent: {accent};" aria-label={label}>
+<section class="column lattice-panel" style="--col-accent: {accent};" aria-label={label}>
   <header class="col-head">
     <span class="dot" aria-hidden="true"></span>
     <span class="label">{label}</span>
     <span class="count">{items.length}</span>
   </header>
-  <div class="col-body">
+  <div class="col-body lattice-scroll-content">
     {#each items as s (s.id)}
       <KanbanCard session={s} status={status} />
     {/each}
@@ -34,9 +34,6 @@
     flex-direction: column;
     min-width: 220px;
     width: 220px;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
     max-height: 100%;
   }
   .col-head {

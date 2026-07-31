@@ -69,11 +69,11 @@
     <svelte:boundary>
       <Widget data={widgetData} onapprove={forwardApprove} onreject={forwardReject} />
       {#snippet failed()}
-        <pre class="tool-render-fallback">{fallbackJson}</pre>
+        <pre class="tool-render-fallback lattice-scroll-content">{fallbackJson}</pre>
       {/snippet}
     </svelte:boundary>
   {:else}
-    <pre class="tool-render-fallback">{fallbackJson}</pre>
+    <pre class="tool-render-fallback lattice-scroll-content">{fallbackJson}</pre>
   {/if}
 </div>
 
@@ -88,7 +88,8 @@
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--text-secondary);
-    background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+    /* Raw tool output is a nested code work product, not a structural panel. */
+    background: var(--bg-sunken);
     border: 1px solid var(--border-structural);
     border-radius: var(--radius-sm);
     overflow-x: auto;

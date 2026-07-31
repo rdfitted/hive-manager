@@ -46,7 +46,7 @@
 </script>
 
 {#if contract}
-  <div class="contract-viewer">
+  <div class="contract-viewer lattice-panel">
     <div class="contract-header">
       <div class="header-info">
         <h3>Sprint Contract</h3>
@@ -57,7 +57,7 @@
       </div>
     </div>
 
-    <div class="contract-content-wrapper">
+    <div class="contract-content-wrapper lattice-scroll-content">
       {#if contract.passed !== null}
         <div class="status-overlay" class:passed={contract.passed}>
           <div class="overlay-icon">
@@ -83,7 +83,7 @@
         <h4>Grading Weights</h4>
         <div class="weights-grid">
           {#each Object.entries(contract.grading_weights) as [key, weight]}
-            <div class="weight-item">
+            <div class="weight-item lattice-panel">
               <span class="weight-key">{key}</span>
               <span class="weight-value">{weight}%</span>
             </div>
@@ -96,9 +96,6 @@
 
 <style>
   .contract-viewer {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -226,10 +223,7 @@
   .weight-item {
     display: flex;
     justify-content: space-between;
-    background: var(--bg-surface);
     padding: 4px 8px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border-structural);
   }
 
   .weight-key {

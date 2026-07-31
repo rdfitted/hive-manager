@@ -273,28 +273,33 @@
 </script>
 
 <div class="status-content">
-      <div class="panel-content">
+      <div class="panel-content lattice-scroll-chrome">
         <section class="section">
           <div class="cli-health-heading">
+            <div class="cli-health-disclosure">
+              <button
+                class="lattice-btn lattice-btn--ghost lattice-btn--menu-item lattice-btn--compact"
+                aria-expanded={!cliHealthCollapsed}
+                aria-controls="cli-health-list"
+                onclick={() => cliHealthCollapsed = !cliHealthCollapsed}
+              >
+                <span class="chevron" class:collapsed={cliHealthCollapsed}>
+                  {#if cliHealthCollapsed}
+                    <CaretRight size={12} weight="light" />
+                  {:else}
+                    <CaretDown size={12} weight="light" />
+                  {/if}
+                </span>
+                <h3 class="section-title">CLI Health</h3>
+              </button>
+            </div>
+            <!-- Indeterminate CLI health-check action affordance, not content loading. -->
             <button
-              class="section-header"
-              aria-expanded={!cliHealthCollapsed}
-              aria-controls="cli-health-list"
-              onclick={() => cliHealthCollapsed = !cliHealthCollapsed}
-            >
-              <span class="chevron" class:collapsed={cliHealthCollapsed}>
-                {#if cliHealthCollapsed}
-                  <CaretRight size={12} weight="light" />
-                {:else}
-                  <CaretDown size={12} weight="light" />
-                {/if}
-              </span>
-              <h3>CLI Health</h3>
-            </button>
-            <button
-              class="cli-health-refresh"
+              class="lattice-btn lattice-btn--secondary lattice-btn--compact"
+              class:lattice-btn--waiting={cliHealthLoading}
               onclick={() => void loadCliHealth(true)}
               disabled={cliHealthLoading}
+              aria-busy={cliHealthLoading}
               title="Refresh CLI launch and authentication checks"
             >
               {cliHealthLoading ? 'Checking…' : 'Refresh'}
@@ -304,7 +309,7 @@
             <div id="cli-health-list" class="cli-health-list" aria-live="polite">
               {#each cliOptions as cli}
                 {@const health = cliHealth[cli.value]}
-                <div class="cli-health-item">
+                <div class="cli-health-item lattice-panel">
                   <div class="cli-health-row">
                     <span class="cli-health-name">{cli.label}</span>
                     <span
@@ -342,7 +347,7 @@
         {/if}
 
         <section class="section">
-          <button class="section-header" onclick={() => alertsCollapsed = !alertsCollapsed}>
+          <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item lattice-btn--compact" onclick={() => alertsCollapsed = !alertsCollapsed}>
             <span class="chevron" class:collapsed={alertsCollapsed}>
               {#if alertsCollapsed}
                 <CaretRight size={12} weight="light" />
@@ -350,24 +355,26 @@
                 <CaretDown size={12} weight="light" />
               {/if}
             </span>
-            <h3>Alerts</h3>
+            <h3 class="section-title">Alerts</h3>
           </button>
           {#if !alertsCollapsed}
             <div class="alerts">
               {#each $activeAgents.filter(a => typeof a.status === 'object' && 'WaitingForInput' in a.status) as agent}
                 {@const lastLine = typeof agent.status === 'object' && 'WaitingForInput' in agent.status ? agent.status.WaitingForInput : ''}
-                <button class="alert warning clickable" onclick={() => handleAlertClick(agent.id)}>
-                  <div class="alert-header">
-                    <span class="alert-icon">
-                      <Warning size={14} weight="fill" />
+                <button class="lattice-btn lattice-btn--warning lattice-btn--card lattice-btn--selected" onclick={() => handleAlertClick(agent.id)}>
+                  <span class="alert-content">
+                    <span class="alert-header">
+                      <span class="alert-icon">
+                        <Warning size={14} weight="fill" />
+                      </span>
+                      <span class="alert-title">{getAgentLabel(agent)} needs input</span>
                     </span>
-                    <span class="alert-title">{getAgentLabel(agent)} needs input</span>
-                  </div>
-                  {#if lastLine}
-                    <div class="alert-body">
-                      <p class="last-line">{lastLine}</p>
-                    </div>
-                  {/if}
+                    {#if lastLine}
+                      <span class="alert-body">
+                        <span class="last-line">{lastLine}</span>
+                      </span>
+                    {/if}
+                  </span>
                 </button>
               {:else}
                 <p class="no-alerts">No alerts</p>
@@ -377,7 +384,7 @@
         </section>
 
         <section class="section">
-          <button class="section-header" onclick={() => infoCollapsed = !infoCollapsed}>
+          <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item lattice-btn--compact" onclick={() => infoCollapsed = !infoCollapsed}>
             <span class="chevron" class:collapsed={infoCollapsed}>
               {#if infoCollapsed}
                 <CaretRight size={12} weight="light" />
@@ -385,7 +392,7 @@
                 <CaretDown size={12} weight="light" />
               {/if}
             </span>
-            <h3>Session Info</h3>
+            <h3 class="section-title">Session Info</h3>
           </button>
           {#if !infoCollapsed}
             <div class="info-grid">
@@ -420,13 +427,13 @@
           <section class="section actions-section">
             <div class="operator-controls">
               {#if serdeEnumVariantName($activeSession.state) === 'QaInProgress'}
-                <button class="op-button skip" onclick={() => showSkipQaConfirm = true}>Skip QA</button>
+                <button class="lattice-btn lattice-btn--secondary lattice-btn--compact" onclick={() => showSkipQaConfirm = true}>Skip QA</button>
               {/if}
 
               {#if canOverrideQa($activeSession.state, $activeSession.agents)}
                 <div class="op-group">
-                  <button class="op-button pass" onclick={() => showForcePassConfirm = true}>Force Pass</button>
-                  <button class="op-button fail" onclick={() => showForceFailConfirm = true}>Force Fail</button>
+                  <button class="lattice-btn lattice-btn--success lattice-btn--compact" onclick={() => showForcePassConfirm = true}>Force Pass</button>
+                  <button class="lattice-btn lattice-btn--danger lattice-btn--compact" onclick={() => showForceFailConfirm = true}>Force Fail</button>
                 </div>
               {/if}
             </div>
@@ -435,13 +442,15 @@
               <p class="op-error" role="alert">{opError}</p>
             {/if}
 
-            <button
-              class="close-button"
-              onclick={() => showCloseConfirm = $activeSession?.id ?? null}
-              title="Close this session (kills all agents and marks as closed)"
-            >
-              Close Session
-            </button>
+            <div class="close-session-action">
+              <button
+                class="lattice-btn lattice-btn--danger"
+                onclick={() => showCloseConfirm = $activeSession?.id ?? null}
+                title="Close this session (kills all agents and marks as closed)"
+              >
+                Close Session
+              </button>
+            </div>
           </section>
         {/if}
         {/if}
@@ -451,13 +460,13 @@
       <!-- Close confirmation dialog -->
       {#if showCloseConfirm}
         <div
-          class="confirm-overlay"
+          class="confirm-overlay lattice-modal-backdrop"
           onclick={dismissCloseConfirm}
           onkeydown={(event) => event.key === 'Escape' && dismissCloseConfirm()}
           role="presentation"
         >
           <div
-            class="confirm-dialog"
+            class="confirm-dialog lattice-modal"
             onclick={(e) => e.stopPropagation()}
             onkeydown={handleCloseDialogKeydown}
             role="dialog"
@@ -467,8 +476,8 @@
             <h3>Close Session?</h3>
             <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
             <div class="confirm-actions">
-              <button class="cancel-btn" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
-              <button class="confirm-btn" onclick={handleCloseSession} disabled={closing}>
+              <button class="lattice-btn lattice-btn--secondary" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
+              <button class="lattice-btn lattice-btn--danger" onclick={handleCloseSession} disabled={closing}>
                 {closing ? 'Closing...' : 'Close Session'}
               </button>
             </div>
@@ -479,13 +488,13 @@
       <!-- Force Fail confirmation dialog -->
       {#if showForceFailConfirm}
         <div
-          class="confirm-overlay"
+          class="confirm-overlay lattice-modal-backdrop"
           onclick={dismissForceFailConfirm}
           onkeydown={(event) => event.key === 'Escape' && dismissForceFailConfirm()}
           role="presentation"
         >
           <div
-            class="confirm-dialog"
+            class="confirm-dialog lattice-modal"
             onclick={(e) => e.stopPropagation()}
             onkeydown={handleForceFailDialogKeydown}
             role="dialog"
@@ -495,8 +504,8 @@
             <h3>Force Fail Milestone?</h3>
             <p>This will immediately fail the current milestone and trigger a retry or termination. Are you sure?</p>
             <div class="confirm-actions">
-              <button class="cancel-btn" onclick={dismissForceFailConfirm} disabled={forceFailing}>Cancel</button>
-              <button class="confirm-btn" onclick={handleForceFail} disabled={forceFailing}>
+              <button class="lattice-btn lattice-btn--secondary" onclick={dismissForceFailConfirm} disabled={forceFailing}>Cancel</button>
+              <button class="lattice-btn lattice-btn--danger" onclick={handleForceFail} disabled={forceFailing}>
                 {forceFailing ? 'Failing...' : 'Force Fail'}
               </button>
             </div>
@@ -507,13 +516,13 @@
       <!-- #176: Force Pass confirmation dialog. Previously a single unguarded click. -->
       {#if showForcePassConfirm}
         <div
-          class="confirm-overlay"
+          class="confirm-overlay lattice-modal-backdrop"
           onclick={() => (showForcePassConfirm = false)}
           onkeydown={(event) => event.key === 'Escape' && (showForcePassConfirm = false)}
           role="presentation"
         >
           <div
-            class="confirm-dialog"
+            class="confirm-dialog lattice-modal"
             onclick={(e) => e.stopPropagation()}
             onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') showForcePassConfirm = false; }}
             role="dialog"
@@ -523,8 +532,8 @@
             <h3>Force Pass Milestone?</h3>
             <p>This bypasses the Evaluator and marks QA as passed without review. Are you sure?</p>
             <div class="confirm-actions">
-              <button class="cancel-btn" onclick={() => (showForcePassConfirm = false)}>Cancel</button>
-              <button class="confirm-btn" onclick={handleForcePass}>Force Pass</button>
+              <button class="lattice-btn lattice-btn--secondary" onclick={() => (showForcePassConfirm = false)}>Cancel</button>
+              <button class="lattice-btn lattice-btn--success" onclick={handleForcePass}>Force Pass</button>
             </div>
           </div>
         </div>
@@ -533,13 +542,13 @@
       <!-- #176: Skip QA confirmation dialog (same destructive force-pass endpoint). -->
       {#if showSkipQaConfirm}
         <div
-          class="confirm-overlay"
+          class="confirm-overlay lattice-modal-backdrop"
           onclick={() => (showSkipQaConfirm = false)}
           onkeydown={(event) => event.key === 'Escape' && (showSkipQaConfirm = false)}
           role="presentation"
         >
           <div
-            class="confirm-dialog"
+            class="confirm-dialog lattice-modal"
             onclick={(e) => e.stopPropagation()}
             onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') showSkipQaConfirm = false; }}
             role="dialog"
@@ -549,8 +558,8 @@
             <h3>Skip QA?</h3>
             <p>This force-passes the current milestone without an Evaluator review. Are you sure?</p>
             <div class="confirm-actions">
-              <button class="cancel-btn" onclick={() => (showSkipQaConfirm = false)}>Cancel</button>
-              <button class="confirm-btn" onclick={handleSkipQa}>Skip QA</button>
+              <button class="lattice-btn lattice-btn--secondary" onclick={() => (showSkipQaConfirm = false)}>Cancel</button>
+              <button class="lattice-btn lattice-btn--warning" onclick={handleSkipQa}>Skip QA</button>
             </div>
           </div>
         </div>
@@ -600,28 +609,11 @@
     padding: 8px 16px;
   }
 
-  .section-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 4px 0;
-    margin-bottom: 8px;
-    background: none;
-    border: none;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .section-header:hover h3 {
-    color: var(--text-primary);
-  }
-
-  .section-header h3 {
+  .section-title {
     margin: 0;
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: inherit;
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
@@ -632,30 +624,9 @@
     gap: 8px;
   }
 
-  .cli-health-heading .section-header {
+  .cli-health-disclosure {
     flex: 1;
-    width: auto;
     min-width: 0;
-  }
-
-  .cli-health-refresh {
-    padding: 3px 7px;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-    font-size: 10px;
-    cursor: pointer;
-  }
-
-  .cli-health-refresh:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--accent-cyan);
-  }
-
-  .cli-health-refresh:disabled {
-    opacity: 0.6;
-    cursor: wait;
   }
 
   .cli-health-list {
@@ -669,9 +640,6 @@
     flex-direction: column;
     gap: 3px;
     padding: 7px 8px;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    background: var(--bg-surface);
   }
 
   .cli-health-row {
@@ -689,13 +657,14 @@
   }
 
   .cli-health-badge {
+    /* Executable-health pill is distinct from the session status-badge contract. */
     display: inline-flex;
     align-items: center;
     gap: 5px;
     flex: 0 0 auto;
     padding: 2px 6px;
     border: 1px solid currentColor;
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     font-size: 9px;
     font-weight: 600;
     line-height: 1.2;
@@ -754,7 +723,7 @@
   .chevron {
     font-size: 8px;
     color: var(--text-secondary);
-    transition: transform 0.2s ease;
+    transition: transform var(--motion-duration-standard) var(--motion-ease-standard);
   }
 
   .chevron.collapsed {
@@ -767,31 +736,11 @@
     gap: 8px;
   }
 
-  .alert {
+  .alert-content {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 10px 12px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-  }
-
-  .alert.warning {
-    background: color-mix(in srgb, var(--status-warning) 15%, transparent);
-    color: var(--status-warning);
-  }
-
-  .alert.clickable {
-    cursor: pointer;
-    border: 1px solid transparent;
     width: 100%;
-    text-align: left;
-    transition: all 0.2s;
-  }
-
-  .alert.clickable:hover {
-    background: color-mix(in srgb, var(--status-warning) 25%, transparent);
-    border-color: var(--status-warning);
+    gap: var(--space-1);
   }
 
   .alert-header {
@@ -810,7 +759,7 @@
   }
 
   .last-line {
-    margin: 0;
+    display: block;
     font-size: 11px;
     font-family: var(--font-mono);
     opacity: 0.8;
@@ -880,28 +829,13 @@
     border-top: 1px solid var(--border-structural);
   }
 
-  .close-button {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--status-error);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--status-error);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .close-button:hover {
-    background: var(--status-error);
-    color: var(--bg-void);
+  .close-session-action {
+    display: grid;
   }
 
   .confirm-overlay {
     position: absolute;
     inset: 0;
-    background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -909,9 +843,6 @@
   }
 
   .confirm-dialog {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     padding: 20px;
     width: 220px;
     max-width: 90%;
@@ -936,38 +867,4 @@
     justify-content: flex-end;
   }
 
-  .cancel-btn,
-  .confirm-btn {
-    padding: 8px 16px;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .cancel-btn {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-  }
-
-  .cancel-btn:hover:not(:disabled) {
-    background: var(--border-structural);
-  }
-
-  .confirm-btn {
-    background: var(--status-error);
-    color: var(--bg-void);
-  }
-
-  .confirm-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
-  }
-
-  .cancel-btn:disabled,
-  .confirm-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
 </style>

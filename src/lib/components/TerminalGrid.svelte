@@ -297,14 +297,14 @@
     <div class="scratch-controls">
       <label class="shell-picker">
         <span class="sr-only">Scratch terminal shell</span>
-        <select bind:value={selectedShell} disabled={!scratchSessionAvailable || openingScratch}>
+        <select class="lattice-input" bind:value={selectedShell} disabled={!scratchSessionAvailable || openingScratch}>
           <option value="powershell">PowerShell</option>
           <option value="cmd">Command Prompt</option>
         </select>
       </label>
       <button
         type="button"
-        class="open-terminal-button"
+        class="open-terminal-button lattice-btn lattice-btn--secondary lattice-btn--compact"
         disabled={!scratchSessionAvailable || openingScratch}
         onclick={openScratchTerminal}
       >
@@ -315,11 +315,11 @@
   </div>
 
   {#if scratchError}
-    <div class="scratch-error" role="alert">Could not update scratch terminal: {scratchError}</div>
+    <div class="scratch-error status-badge status-error" role="alert">Could not update scratch terminal: {scratchError}</div>
   {/if}
 
   <div
-    class="terminal-grid"
+    class="terminal-grid lattice-scroll-content"
     style="--cols: {cols}; --rows: {rows}"
     class:scrollable={panes.length > 9}
     class:has-maximized={maximizedTerminalId !== null}
@@ -331,8 +331,7 @@
            accessible focus semantics without wrapping the terminal or other controls. -->
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
       <div
-        class="terminal-item"
-        class:focused
+        class={`terminal-item lattice-panel${focused ? ' lattice-panel--active' : ''}`}
         class:maximized={pane.id === maximizedTerminalId}
         class:hidden-by-maximize={maximizedTerminalId !== null && pane.id !== maximizedTerminalId}
         onclick={() => focusPane(pane)}
@@ -344,7 +343,7 @@
         >
           <button
             type="button"
-            class="terminal-focus-button"
+            class="terminal-pane-focus lattice-btn lattice-btn--ghost"
             aria-label={`Focus ${pane.title}`}
             onclick={(event) => {
               event.stopPropagation();
@@ -356,19 +355,20 @@
           <div class="terminal-meta">
             {#if pane.kind === 'agent'}
               {@const status = serdeEnumVariantName(pane.agent.status)}
+              {@const waiting = typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status}
+              {@const failed = status === 'Error'}
               <span class="cli-badge">{pane.agent.config?.cli || 'unknown'}</span>
               <span
-                class="status-indicator"
-                class:waiting={typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status}
-                class:running={status === 'Running'}
-                class:completed={status === 'Completed'}
+                class={`status-indicator status-badge ${waiting ? 'status-warning lattice-motion-status-pulse' : failed ? 'status-error pulse-error' : status === 'Running' ? 'status-running' : status === 'Completed' ? 'status-success' : 'status-queued'}`}
               >
                 {#if status === 'Running'}
                   █
-                {:else if typeof pane.agent.status === 'object' && 'WaitingForInput' in pane.agent.status}
+                {:else if waiting}
                   <Hourglass size={10} weight="light" />
                 {:else if status === 'Completed'}
                   <Check size={10} weight="light" />
+                {:else if failed}
+                  <X size={10} weight="light" />
                 {:else}
                   <Circle size={10} weight="light" />
                 {/if}
@@ -378,7 +378,7 @@
               <span class="cwd-label" title={`${pane.cwd} · opened ${pane.createdAt}`}>{pane.cwd}</span>
               <button
                 type="button"
-                class="pane-action close-button"
+                class="pane-control lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon"
                 aria-label={`Close ${pane.title}`}
                 title="Close scratch terminal"
                 disabled={openingScratchId === pane.id}
@@ -389,7 +389,7 @@
             {/if}
             <button
               type="button"
-              class="pane-action maximize-button"
+              class="pane-control lattice-btn lattice-btn--ghost lattice-btn--icon"
               aria-label={pane.id === maximizedTerminalId ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
               title={pane.id === maximizedTerminalId ? 'Restore terminal (Esc)' : 'Maximize terminal'}
               onclick={(event) => toggleMaximized(event, pane)}
@@ -456,48 +456,18 @@
     gap: 6px;
   }
 
-  .shell-picker select,
-  .open-terminal-button {
+  .shell-picker :global(.lattice-input) {
     height: 28px;
-    color: var(--text-secondary);
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    padding: 0 24px 0 8px;
     font-size: 10px;
   }
 
-  .shell-picker select {
-    padding: 0 24px 0 8px;
-  }
-
-  .open-terminal-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 0 10px;
-    cursor: pointer;
-  }
-
-  .open-terminal-button:hover:not(:disabled),
-  .open-terminal-button:focus-visible {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-    outline: none;
-  }
-
-  .open-terminal-button:disabled,
   .shell-picker select:disabled {
-    cursor: not-allowed;
     opacity: 0.5;
   }
 
   .scratch-error {
     margin: 0 4px 6px;
-    padding: 5px 8px;
-    color: var(--status-error);
-    background: color-mix(in srgb, var(--status-error) 8%, var(--bg-surface));
-    border: 1px solid color-mix(in srgb, var(--status-error) 30%, var(--border-structural));
-    border-radius: var(--radius-sm);
     font-size: 10px;
   }
 
@@ -532,17 +502,11 @@
   .terminal-item {
     display: flex;
     flex-direction: column;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
-    transition: border-color 0.2s, box-shadow 0.2s;
+    transition:
+      border-color var(--motion-duration-standard) var(--motion-ease-standard),
+      box-shadow var(--motion-duration-standard) var(--motion-ease-standard);
     min-height: 0;
-  }
-
-  .terminal-item.focused {
-    border-color: var(--accent-cyan);
-    box-shadow: 0 0 0 1px var(--accent-cyan);
   }
 
   .terminal-item.maximized {
@@ -564,7 +528,6 @@
     justify-content: space-between;
     gap: 8px;
     padding: 6px 10px;
-    background: var(--bg-surface);
     border-bottom: 1px solid var(--border-structural);
     user-select: none;
   }
@@ -588,53 +551,22 @@
     gap: 6px;
   }
 
-  .terminal-focus-button {
+  .terminal-pane-focus {
     display: flex;
     flex: 1;
     min-width: 0;
     padding: 0;
     color: inherit;
     text-align: left;
-    background: transparent;
-    border: 0;
-    cursor: pointer;
   }
 
-  .terminal-focus-button:focus-visible {
-    outline: 1px solid var(--accent-cyan);
-    outline-offset: 2px;
-  }
-
-  .pane-action {
+  .pane-control {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 22px;
     height: 22px;
     padding: 0;
-    color: var(--text-secondary);
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-
-  .pane-action:hover,
-  .pane-action:focus-visible {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-    border-color: var(--border-structural);
-    outline: none;
-  }
-
-  .pane-action:disabled {
-    cursor: wait;
-    opacity: 0.45;
-  }
-
-  .close-button:hover,
-  .close-button:focus-visible {
-    color: var(--status-error);
   }
 
   .cli-badge {
@@ -656,27 +588,13 @@
     white-space: nowrap;
   }
 
-  .status-indicator {
+  .status-indicator.status-badge {
+    gap: 0;
+    min-width: 18px;
+    min-height: 18px;
+    justify-content: center;
+    padding: 1px 3px;
     font-size: 10px;
-  }
-
-  .status-indicator.running {
-    color: var(--accent-cyan);
-  }
-
-  .status-indicator.waiting {
-    color: var(--status-warning);
-    animation: pulse 2s infinite;
-  }
-
-  .status-indicator.completed {
-    color: var(--status-success);
-  }
-
-  @keyframes pulse {
-    0% { opacity: 1; }
-    50% { opacity: 0.5; }
-    100% { opacity: 1; }
   }
 
   .terminal-container {

@@ -6,6 +6,8 @@
   import AgentStatusBar from './AgentStatusBar.svelte';
   import ToolRenderHost from './renderers/ToolRenderHost.svelte';
   import Composer from './composer/Composer.svelte';
+  import Skeleton from './Skeleton.svelte';
+  import SkelBar from './SkelBar.svelte';
 
   let messageContainer: HTMLDivElement;
   let autoScroll = true;
@@ -167,15 +169,29 @@
     : $conversationStore.messages;
 </script>
 
+{#snippet conversationSkeleton()}
+  <div class="conversation-skeleton">
+    {#each [0, 1, 2] as _}
+      <div class="skeleton-message">
+        <SkelBar width="4.25rem" height="0.65rem" />
+        <SkelBar width="5rem" height="0.65rem" />
+        <SkelBar width="min(65%, 26rem)" height="0.65rem" />
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
 <div class="conversation-viewer">
   <AgentStatusBar />
 
   <!-- Agent tabs -->
-  <div class="agent-tabs">
+  <div class="agent-tabs lattice-scroll-chrome" role="tablist">
     {#each agentTabs as tab (tab.id)}
       <button
-        class="agent-tab"
-        class:active={selectedAgent === tab.id}
+        class="lattice-tab"
+        class:lattice-tab--active={selectedAgent === tab.id}
+        aria-selected={selectedAgent === tab.id}
+        role="tab"
         onclick={() => selectTab(tab.id)}
       >
         {tab.label}
@@ -189,47 +205,49 @@
       type="text"
       placeholder="Search messages..."
       bind:value={searchQuery}
-      class="search-input"
+      class="search-input lattice-input"
     />
     {#if !autoScroll}
-      <button class="scroll-btn" onclick={scrollToBottom} title="Scroll to bottom">
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={scrollToBottom} title="Scroll to bottom" aria-label="Scroll to bottom">
         &#8595;
       </button>
     {/if}
   </div>
 
   <!-- Messages -->
-  <div class="messages" bind:this={messageContainer} onscroll={handleScroll}>
+  <div class="messages lattice-scroll-content" bind:this={messageContainer} onscroll={handleScroll}>
     {#if !selectedAgent}
       <div class="empty">Select an agent tab to view conversation.</div>
-    {:else if $conversationStore.loading}
-      <div class="empty">Loading...</div>
-    {:else if filteredMessages.length === 0}
-      <div class="empty">
-        {#if searchQuery}
-          No messages matching "{searchQuery}"
-        {:else}
-          No messages yet.
-        {/if}
-      </div>
     {:else}
-      {#each filteredMessages as msg, i (i)}
-        <div class="message">
-          <span class="msg-time">{formatTimestamp(msg.timestamp)}</span>
-          <span class="msg-sender" style="color: {getSenderColor(msg.from)}">{msg.from}</span>
-          {#if msg.renderer || msg.data}
-            <div class="msg-content msg-widget">
-              <ToolRenderHost
-                message={msg}
-                onapprove={handleApprove}
-                onreject={handleReject}
-              />
+      <Skeleton loading={$conversationStore.loading} skeleton={conversationSkeleton} class="conversation-loading">
+        {#if filteredMessages.length === 0}
+          <div class="empty">
+            {#if searchQuery}
+              No messages matching "{searchQuery}"
+            {:else}
+              No messages yet.
+            {/if}
+          </div>
+        {:else}
+          {#each filteredMessages as msg, i (i)}
+            <div class="message">
+              <span class="msg-time">{formatTimestamp(msg.timestamp)}</span>
+              <span class="msg-sender" style="color: {getSenderColor(msg.from)}">{msg.from}</span>
+              {#if msg.renderer || msg.data}
+                <div class="msg-content msg-widget">
+                  <ToolRenderHost
+                    message={msg}
+                    onapprove={handleApprove}
+                    onreject={handleReject}
+                  />
+                </div>
+              {:else}
+                <span class="msg-content">{msg.content}</span>
+              {/if}
             </div>
-          {:else}
-            <span class="msg-content">{msg.content}</span>
-          {/if}
-        </div>
-      {/each}
+          {/each}
+        {/if}
+      </Skeleton>
     {/if}
   </div>
 
@@ -249,14 +267,14 @@
   {#if $conversationStore.error}
     <div class="error">
       {$conversationStore.error}
-      <button class="dismiss-btn" onclick={() => conversationStore.clearError()}>&#10005;</button>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => conversationStore.clearError()} aria-label="Dismiss conversation error">&#10005;</button>
     </div>
   {/if}
 
   {#if approvalError}
     <div class="error">
       {approvalError}
-      <button class="dismiss-btn" onclick={() => approvalError = ''}>&#10005;</button>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => approvalError = ''} aria-label="Dismiss approval error">&#10005;</button>
     </div>
   {/if}
 </div>
@@ -273,32 +291,9 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0;
-    background: var(--bg-surface);
     border-bottom: 1px solid var(--border-structural);
     padding: 0 4px;
     overflow-x: auto;
-  }
-
-  .agent-tab {
-    padding: 8px 12px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: color 0.15s, border-color 0.15s;
-  }
-
-  .agent-tab:hover {
-    color: var(--text-primary);
-  }
-
-  .agent-tab.active {
-    color: var(--accent-cyan);
-    border-bottom-color: var(--accent-cyan);
   }
 
   .controls {
@@ -310,27 +305,6 @@
 
   .search-input {
     flex: 1;
-    padding: 4px 8px;
-    font-size: 12px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-  }
-
-  .search-input:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
-  }
-
-  .scroll-btn {
-    padding: 4px 8px;
-    font-size: 12px;
-    background: var(--accent-cyan);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: white;
-    cursor: pointer;
   }
 
   .messages {
@@ -347,6 +321,20 @@
     text-align: center;
     padding: 24px;
     font-style: italic;
+  }
+
+  .conversation-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .skeleton-message {
+    display: grid;
+    grid-template-columns: 4.25rem 5rem minmax(8rem, 1fr);
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
   }
 
   .message {
@@ -386,6 +374,7 @@
     gap: 8px;
     padding: 8px 12px;
     border-top: 1px solid var(--border-structural);
+    /* Composer dock remains a distinct full-width input surface. */
     background: var(--bg-surface);
   }
 
@@ -394,17 +383,11 @@
     justify-content: space-between;
     align-items: center;
     padding: 8px 12px;
+    /* Full-width semantic error strip intentionally remains state-adjacent chrome. */
     background: var(--bg-surface);
     color: var(--status-error);
     font-size: 12px;
     border: 1px solid var(--status-error);
   }
 
-  .dismiss-btn {
-    background: none;
-    border: none;
-    color: var(--status-error);
-    cursor: pointer;
-    padding: 2px 6px;
-  }
 </style>

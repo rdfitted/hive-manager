@@ -70,25 +70,27 @@
 </script>
 
 {#if verdict}
-  <div class="qa-feedback-panel" class:collapsed>
-    <button class="panel-header" onclick={() => collapsed = !collapsed}>
-      <div class="header-left">
-        <span class="status-icon {stateClass}">
-          {#if verdict.passed}
-            <Check size={14} weight="fill" />
+  <div class="qa-feedback-panel lattice-panel" class:collapsed>
+    <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={() => collapsed = !collapsed}>
+      <span class="header-content">
+        <span class="header-left">
+          <span class="status-icon {stateClass}">
+            {#if verdict.passed}
+              <Check size={14} weight="fill" />
+            {:else}
+              <X size={14} weight="fill" />
+            {/if}
+          </span>
+          <h3>QA Feedback</h3>
+          <span class="iteration-badge status-badge status-queued">Attempt {verdict.iteration}</span>
+        </span>
+        <span class="chevron">
+          {#if collapsed}
+            <CaretDown size={10} weight="light" />
           {:else}
-            <X size={14} weight="fill" />
+            <CaretUp size={10} weight="light" />
           {/if}
         </span>
-        <h3>QA Feedback</h3>
-        <span class="iteration-badge">Attempt {verdict.iteration}</span>
-      </div>
-      <span class="chevron">
-        {#if collapsed}
-          <CaretDown size={10} weight="light" />
-        {:else}
-          <CaretUp size={10} weight="light" />
-        {/if}
       </span>
     </button>
 
@@ -128,23 +130,15 @@
 
 <style>
   .qa-feedback-panel {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     margin-bottom: 12px;
     overflow: hidden;
   }
 
-  .panel-header {
+  .header-content {
     width: 100%;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 10px 14px;
-    background: var(--bg-void);
-    border: none;
-    cursor: pointer;
-    text-align: left;
   }
 
   .header-left {
@@ -175,11 +169,7 @@
   }
 
   .iteration-badge {
-    font-size: 10px;
-    padding: 2px 6px;
-    background: var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
+    flex: 0 0 auto;
   }
 
   .chevron {

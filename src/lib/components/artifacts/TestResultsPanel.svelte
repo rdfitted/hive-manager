@@ -37,7 +37,7 @@
                         {failure.name || 'Unknown test'}
                     </div>
                     {#if failure.message}
-                        <pre class="error-message">{failure.message}</pre>
+                        <pre class="error-message lattice-scroll-content">{failure.message}</pre>
                     {/if}
                 </div>
             {/each}
@@ -60,8 +60,9 @@
     .summary-item {
         flex: 1;
         padding: 8px;
-        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
-        border-radius: var(--radius-sm);
+        /* Semantic result tile: the mandated sunken tone is not a structural panel surface. */
+        background: var(--bg-sunken);
+        border-radius: var(--radius-lg);
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -110,7 +111,7 @@
     .failure-item {
         background: color-mix(in srgb, var(--status-error) 5%, transparent);
         border: 1px solid color-mix(in srgb, var(--status-error) 10%, transparent);
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-lg);
         padding: 8px;
     }
 
@@ -129,9 +130,10 @@
         font-family: var(--font-mono);
         font-size: 11px;
         color: var(--text-secondary);
-        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+        /* Inset failure output remains sunken inside the error-detail surface. */
+        background: var(--bg-sunken);
         padding: 6px;
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-md);
         overflow-x: auto;
     }
 </style>

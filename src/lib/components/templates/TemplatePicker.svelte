@@ -3,6 +3,8 @@
     import { templates, selectedTemplate } from '../../stores/templates';
     import type { SessionTemplate } from '../../types/domain';
     import { MagnifyingGlass, Hexagon, TestTube, Scales } from 'phosphor-svelte';
+    import Skeleton from '../Skeleton.svelte';
+    import SkelBar from '../SkelBar.svelte';
 
     let searchQuery = '';
 
@@ -20,60 +22,83 @@
     }
 </script>
 
+{#snippet templateGridSkeleton()}
+    <div class="templates-grid lattice-scroll-chrome">
+        {#each [0, 1, 2] as _}
+            <div class="template-skeleton-card">
+                <SkelBar width="44px" height="44px" radius="md" />
+                <div class="template-skeleton-info">
+                    <SkelBar width="62%" height="1rem" />
+                    <div class="template-skeleton-description">
+                        <SkelBar width="100%" height="0.65rem" />
+                        <SkelBar width="78%" height="0.65rem" />
+                    </div>
+                    <div class="template-skeleton-meta">
+                        <SkelBar width="3.5rem" height="0.55rem" />
+                        <SkelBar width="4.5rem" height="0.55rem" />
+                    </div>
+                </div>
+            </div>
+        {/each}
+    </div>
+{/snippet}
+
 <div class="template-picker">
     <div class="picker-header">
         <div class="search-box">
             <MagnifyingGlass size={14} weight="light" class="search-icon" />
-            <input 
+            <input
+                class="lattice-input"
                 type="text" 
                 placeholder="Search templates..." 
                 bind:value={searchQuery}
             />
         </div>
-        <button type="button" class="new-btn" on:click={() => {/* Open editor for new */}}>
+        <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--dashed" on:click={() => {/* Open editor for new */}}>
             + New Template
         </button>
     </div>
 
-    {#if $templates.loading}
-        <div class="loading-state">Loading templates...</div>
-    {:else if filteredTemplates.length === 0}
-        <div class="empty-state">No templates found.</div>
-    {:else}
-        <div class="templates-grid">
-            {#each filteredTemplates as template (template.id)}
-                <button
-                    type="button"
-                    class="template-card" 
-                    on:click={() => selectTemplate(template)}
-                    title={template.description}
-                >
-                    <div class="card-icon" class:builtin={template.is_builtin}>
-                        {#if template.mode === 'hive'}
-                            <Hexagon size={24} weight="light" />
-                        {:else if template.mode === 'debate'}
-                            <Scales size={24} weight="light" />
-                        {:else}
-                            <TestTube size={24} weight="light" />
-                        {/if}
-                    </div>
-                    <div class="card-info">
-                        <div class="name-row">
-                            <span class="name">{template.name}</span>
-                            {#if template.is_builtin}
-                                <span class="badge">Built-in</span>
+    <Skeleton loading={$templates.loading} skeleton={templateGridSkeleton}>
+        {#if filteredTemplates.length === 0}
+            <div class="empty-state">No templates found.</div>
+        {:else}
+            <div class="templates-grid lattice-scroll-chrome">
+                {#each filteredTemplates as template (template.id)}
+                    <button
+                        type="button"
+                        class="lattice-btn lattice-btn--card"
+                        aria-pressed={$selectedTemplate?.id === template.id}
+                        on:click={() => selectTemplate(template)}
+                        title={template.description}
+                    >
+                        <div class="card-icon" class:builtin={template.is_builtin}>
+                            {#if template.mode === 'hive'}
+                                <Hexagon size={24} weight="light" />
+                            {:else if template.mode === 'debate'}
+                                <Scales size={24} weight="light" />
+                            {:else}
+                                <TestTube size={24} weight="light" />
                             {/if}
                         </div>
-                        <div class="description">{template.description}</div>
-                        <div class="meta">
-                            <span class="mode-tag">{template.mode}</span>
-                            <span class="cells-tag">{template.cells.length} cells</span>
+                        <div class="card-info">
+                            <div class="name-row">
+                                <span class="name">{template.name}</span>
+                                {#if template.is_builtin}
+                                    <span class="badge">Built-in</span>
+                                {/if}
+                            </div>
+                            <div class="description">{template.description}</div>
+                            <div class="meta">
+                                <span class="mode-tag">{template.mode}</span>
+                                <span class="cells-tag">{template.cells.length} cells</span>
+                            </div>
                         </div>
-                    </div>
-                </button>
-            {/each}
-        </div>
-    {/if}
+                    </button>
+                {/each}
+            </div>
+        {/if}
+    </Skeleton>
 </div>
 
 <style>
@@ -96,7 +121,7 @@
         align-items: center;
     }
 
-    :global(.search-icon) {
+    .search-box :global(.search-icon) {
         position: absolute;
         left: 12px;
         color: var(--text-secondary);
@@ -107,27 +132,6 @@
     .search-box input {
         width: 100%;
         padding: 8px 12px 8px 36px;
-        background: color-mix(in srgb, var(--bg-void) 70%, transparent);
-        border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-        border-radius: var(--radius-sm);
-        color: var(--text-primary);
-        font-size: 14px;
-    }
-
-    .new-btn {
-        padding: 8px 16px;
-        background: transparent;
-        border: 1px dashed color-mix(in srgb, var(--text-primary) 20%, transparent);
-        border-radius: var(--radius-sm);
-        color: var(--text-primary);
-        font-size: 13px;
-        cursor: pointer;
-        white-space: nowrap;
-    }
-
-    .new-btn:hover {
-        border-color: var(--accent-cyan);
-        color: var(--accent-cyan);
     }
 
     .templates-grid {
@@ -139,22 +143,27 @@
         padding-right: 4px;
     }
 
-    .template-card {
-        background: color-mix(in srgb, var(--text-primary) 3%, transparent);
-        border: 1px solid color-mix(in srgb, var(--text-primary) 8%, transparent);
-        border-radius: var(--radius-sm);
+    .template-skeleton-card {
         padding: 12px;
         display: flex;
         gap: 12px;
-        text-align: left;
-        cursor: pointer;
-        transition: all 0.2s;
+        border: 1px solid var(--border-structural);
+        border-radius: var(--radius-md);
     }
 
-    .template-card:hover {
-        background: color-mix(in srgb, var(--text-primary) 6%, transparent);
-        border-color: color-mix(in srgb, var(--text-primary) 15%, transparent);
-        transform: translateY(-2px);
+    .template-skeleton-info,
+    .template-skeleton-description {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 0;
+    }
+
+    .template-skeleton-meta {
+        display: flex;
+        gap: 8px;
+        margin-top: 4px;
     }
 
     .card-icon {
@@ -231,7 +240,7 @@
         font-family: var(--font-mono);
     }
 
-    .loading-state, .empty-state {
+    .empty-state {
         padding: 40px;
         text-align: center;
         color: var(--text-secondary);

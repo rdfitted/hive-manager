@@ -31,7 +31,7 @@
       <h1>Dashboard</h1>
       <p class="subtitle">All sessions grouped by status</p>
     </div>
-    <a href="/" class="home-link" title="Back to session view">
+    <a href="/" class="home-link lattice-btn lattice-btn--secondary lattice-btn--compact" title="Back to session view">
       <House size={16} weight="light" />
       Session View
     </a>
@@ -77,23 +77,10 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
-    color: var(--text-secondary);
     text-decoration: none;
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    font-size: var(--text-small);
-  }
-  .home-link:hover {
-    color: var(--accent-cyan);
-    border-color: var(--accent-cyan);
   }
   .board-wrap {
     flex: 1;
     min-height: 0;
-  }
-  :global(body) {
-    margin: 0;
-    padding: 0;
   }
 </style>

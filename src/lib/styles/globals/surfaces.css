@@ -1,0 +1,26 @@
+/* ═══════════════════════════════════════════════════════════════════
+   STRUCTURAL COMPONENTS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-panel {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-structural);
+  border-radius: var(--radius-lg);
+}
+
+.lattice-panel--active {
+  border-color: var(--border-active);
+}
+
+.lattice-modal {
+  background-color: var(--bg-elevated);
+  border: 1px solid var(--accent-chrome);
+  border-top: 2px solid var(--accent-cyan);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.8);
+}
+
+.lattice-modal-backdrop {
+  backdrop-filter: blur(4px);
+  background-color: rgba(6, 7, 9, 0.7);
+}

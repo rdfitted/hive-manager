@@ -282,8 +282,20 @@
 <div class="graph-host" bind:this={host}>
   <div class="graph-controls" aria-label="Graph layout controls">
     <span class="pin-count">{pinnedCount} pinned</span>
-    <button type="button" onclick={unpinAll} disabled={pinnedCount === 0}>Unpin all</button>
-    <button type="button" onclick={() => resetVersion += 1} title="Reset graph layout">
+    <button
+      class="lattice-btn lattice-btn--secondary lattice-btn--compact"
+      type="button"
+      onclick={unpinAll}
+      disabled={pinnedCount === 0}
+    >
+      Unpin all
+    </button>
+    <button
+      class="lattice-btn lattice-btn--secondary lattice-btn--compact"
+      type="button"
+      onclick={() => resetVersion += 1}
+      title="Reset graph layout"
+    >
       <ArrowClockwise size={13} weight="light" />
       Reset
     </button>
@@ -420,7 +432,7 @@
   .edges line {
     stroke-width: 1;
     stroke-opacity: 0.38;
-    transition: stroke-opacity 160ms ease;
+    transition: stroke-opacity var(--motion-duration-fast) ease;
   }
 
   .edges line.related {
@@ -435,7 +447,7 @@
     cursor: grab;
     outline: none;
     opacity: 0.9;
-    transition: opacity 160ms ease;
+    transition: opacity var(--motion-duration-fast) ease;
   }
 
   .node:active {
@@ -500,31 +512,9 @@
     gap: var(--space-1);
     padding: var(--space-1);
     border: 1px solid var(--border-structural);
+    /* Floating graph-control scrim, not a structural panel surface. */
     background: color-mix(in srgb, var(--bg-surface) 91%, transparent);
     backdrop-filter: blur(8px);
-  }
-
-  .graph-controls button {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border: 0;
-    padding: 5px 7px;
-    background: transparent;
-    color: var(--text-secondary);
-    font: 10px var(--font-mono);
-    text-transform: uppercase;
-    cursor: pointer;
-  }
-
-  .graph-controls button:hover:not(:disabled) {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-  }
-
-  .graph-controls button:disabled {
-    opacity: 0.4;
-    cursor: default;
   }
 
   .pin-count {
@@ -544,6 +534,7 @@
     pointer-events: none;
   }
 
+  /* Keep: the paired JS media query also stops the force simulation's RAF loop. */
   @media (prefers-reduced-motion: reduce) {
     .node,
     .edges line {

@@ -17,8 +17,10 @@
 <div class="agent-list">
     {#each cellAgents as agent (agent.id)}
         <button 
-            class="agent-item" 
-            class:selected={$ui.selectedAgentId === agent.id}
+            type="button"
+            class="agent-item lattice-btn lattice-btn--row lattice-btn--ghost"
+            class:lattice-btn--selected={$ui.selectedAgentId === agent.id}
+            aria-pressed={$ui.selectedAgentId === agent.id}
             on:click={() => selectAgent(agent.id)}
         >
             <div class="role-icon" title={agent.role}>
@@ -49,29 +51,6 @@
         display: flex;
         flex-direction: column;
         gap: 4px;
-    }
-
-    .agent-item {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 6px 8px;
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid transparent;
-        border-radius: var(--radius-sm);
-        text-align: left;
-        cursor: pointer;
-        transition: all 0.2s;
-        color: inherit;
-    }
-
-    .agent-item:hover {
-        background: rgba(255, 255, 255, 0.08);
-    }
-
-    .agent-item.selected {
-        background: rgba(59, 130, 246, 0.15);
-        border-color: rgba(59, 130, 246, 0.5);
     }
 
     .role-icon {

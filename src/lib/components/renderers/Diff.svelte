@@ -112,7 +112,7 @@
 
 <div class="diff-widget">
   {#if renderable}
-    <div class="diff-body">
+    <div class="diff-body lattice-scroll-content">
       {#each lines as line, i (i)}
         <div class="diff-line {line.kind}">
           <span class="gutter">{prefix(line.kind)}</span>
@@ -121,15 +121,16 @@
       {/each}
     </div>
   {:else}
-    <pre class="diff-raw">{rawText}</pre>
+    <pre class="diff-raw lattice-scroll-content">{rawText}</pre>
   {/if}
 </div>
 
 <style>
   .diff-widget {
-    background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+    /* Tool results are nested work products, so their body uses the shared sunken tone. */
+    background: var(--bg-sunken);
     border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     overflow: hidden;
   }
 
@@ -183,6 +184,7 @@
   }
 
   .diff-line.meta {
+    /* Diff metadata is an opaque separator row, not a structural panel. */
     background: var(--bg-surface);
   }
 

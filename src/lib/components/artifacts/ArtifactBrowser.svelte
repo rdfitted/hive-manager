@@ -27,8 +27,10 @@
         <div class="cell-filters">
             <span class="label">Filter Cells:</span>
             {#each cellsWithArtifacts as cell}
-                <button 
-                    class="cell-chip {selectedCellIds.includes(cell.id) ? 'active' : ''}"
+                <button
+                    type="button"
+                    class="lattice-btn lattice-btn--chip {selectedCellIds.includes(cell.id) ? 'lattice-btn--selected' : ''}"
+                    aria-pressed={selectedCellIds.includes(cell.id)}
                     on:click={() => toggleCellSelection(cell.id)}
                 >
                     {cell.id.substring(0, 8)}
@@ -37,16 +39,16 @@
         </div>
     </div>
 
-    <div class="artifacts-grid" class:comparison={selectedCellIds.length > 1}>
+    <div class="artifacts-grid lattice-scroll-content" class:comparison={selectedCellIds.length > 1}>
         {#if displayedCells.length === 0}
             <div class="empty-state">No artifacts available for the selected cells.</div>
         {:else}
             {#each displayedCells as cell}
-                <div class="cell-column">
+                <div class="cell-column lattice-panel">
                     <div class="column-header">
                         Cell: {cell.id.substring(0, 8)}
                     </div>
-                    <div class="column-content">
+                    <div class="column-content lattice-scroll-content">
                         {#if cell.artifacts}
                             <ArtifactSummary artifact={cell.artifacts} />
                         {:else}
@@ -71,6 +73,7 @@
 
     .browser-header {
         padding: 16px;
+        /* Workspace control strip, not a standalone structural panel. */
         background: var(--color-surface);
         border-bottom: 1px solid var(--color-border);
         display: flex;
@@ -97,24 +100,6 @@
         font-weight: bold;
     }
 
-    .cell-chip {
-        padding: 2px 8px;
-        background: var(--color-bg);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
-        color: var(--color-text-muted);
-        font-size: 0.75rem;
-        cursor: pointer;
-        transition: all 0.2s;
-    }
-
-    .cell-chip.active {
-        background: var(--color-accent);
-        color: var(--color-bg);
-        border-color: var(--color-accent);
-        font-weight: bold;
-    }
-
     .artifacts-grid {
         flex: 1;
         display: flex;
@@ -133,9 +118,6 @@
         max-width: 500px;
         display: flex;
         flex-direction: column;
-        background: var(--color-surface);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-sm);
         height: 100%;
     }
 

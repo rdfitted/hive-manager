@@ -46,13 +46,13 @@
 
 {#if open}
   <div
-    class="overlay"
+    class="overlay lattice-modal-backdrop"
     role="presentation"
     onclick={onClose}
     onkeydown={(e) => e.key === 'Escape' && onClose()}
   >
     <div
-      class="dialog"
+      class="dialog lattice-modal"
       role="dialog"
       aria-modal="true"
       aria-label="Keyboard shortcuts"
@@ -63,11 +63,17 @@
       <div class="dialog-header">
         <span class="dialog-icon"><Keyboard size={18} weight="light" /></span>
         <h2>Keyboard Shortcuts</h2>
-        <button class="close-btn" onclick={onClose} title="Close (Esc)" aria-label="Close" type="button">
+        <button
+          class="lattice-btn lattice-btn--ghost lattice-btn--icon"
+          onclick={onClose}
+          title="Close (Esc)"
+          aria-label="Close"
+          type="button"
+        >
           <X size={16} weight="light" />
         </button>
       </div>
-      <div class="dialog-body">
+      <div class="dialog-body lattice-scroll-content">
         {#each GROUPS as group (group.title)}
           <section class="group">
             <h3>{group.title}</h3>
@@ -108,10 +114,6 @@
     max-height: 80vh;
     display: flex;
     flex-direction: column;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    box-shadow: var(--shadow-lg);
   }
 
   .dialog-header {
@@ -136,24 +138,6 @@
     color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-  }
-
-  .close-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    background: none;
-    border: none;
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
-    cursor: pointer;
-  }
-
-  .close-btn:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
   }
 
   .dialog-body {

@@ -5,6 +5,8 @@
   import Terminal from './Terminal.svelte';
   import { Keyboard, ChartBar, Crown, Scales, MagnifyingGlass, GitBranch, GitPullRequest, Warning } from 'phosphor-svelte';
   import { apiUrl } from '$lib/config';
+  import Skeleton from './Skeleton.svelte';
+  import SkelBar from './SkelBar.svelte';
 
   // Interfaces for Debate API
   interface DebateDebaterStatus {
@@ -134,7 +136,17 @@
   }
 </script>
 
-<div class="debate-panel">
+{#snippet verdictSkeleton()}
+  <div class="verdict-skeleton">
+    <SkelBar width="34%" height="0.8rem" />
+    <SkelBar width="100%" height="0.7rem" />
+    <SkelBar width="92%" height="0.7rem" />
+    <SkelBar width="86%" height="0.7rem" />
+    <SkelBar width="68%" height="0.7rem" />
+  </div>
+{/snippet}
+
+<div class="debate-panel lattice-scroll-content">
   <!-- Debate Header Bar -->
   <div class="debate-header-bar">
     <div class="info-group">
@@ -152,13 +164,13 @@
     
     <div class="panel-controls">
       <div class="view-tabs">
-        <button class="tab-button" class:active={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
+        <button class="lattice-tab" class:lattice-tab--active={viewMode === 'terminals'} aria-pressed={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
           <Keyboard size={18} weight="light" /> Terminals
         </button>
-        <button class="tab-button" class:active={viewMode === 'comparison'} onclick={() => viewMode = 'comparison'}>
+        <button class="lattice-tab" class:lattice-tab--active={viewMode === 'comparison'} aria-pressed={viewMode === 'comparison'} onclick={() => viewMode = 'comparison'}>
           <ChartBar size={18} weight="light" /> Debaters
         </button>
-        <button class="tab-button" class:active={viewMode === 'verdict'} onclick={() => viewMode = 'verdict'}>
+        <button class="lattice-tab" class:lattice-tab--active={viewMode === 'verdict'} aria-pressed={viewMode === 'verdict'} onclick={() => viewMode = 'verdict'}>
           <Scales size={18} weight="light" /> Judge Verdict
         </button>
       </div>
@@ -176,7 +188,7 @@
     <!-- TERMINALS VIEW -->
     <div class="terminals-layout">
       {#if queenAgent}
-        <div class="orchestrator-section">
+        <div class="orchestrator-section lattice-panel">
           <div class="section-header">
             <Crown size={20} weight="light" class="icon-queen" />
             <h3>Orchestrator Queen</h3>
@@ -190,7 +202,7 @@
 
       <div class="debaters-terminals-grid">
         {#each debaterAgents as agent (agent.id)}
-          <div class="variant-card">
+          <div class="variant-card lattice-panel">
             <div class="variant-header">
               <span class="variant-name">{agent.config?.label || 'Debater'}</span>
               <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
@@ -203,7 +215,7 @@
       </div>
 
       {#if judgeAgent}
-        <div class="orchestrator-section">
+        <div class="orchestrator-section lattice-panel">
           <div class="section-header">
             <Scales size={20} weight="light" class="icon-judge" />
             <h3>Debate Judge</h3>
@@ -221,7 +233,7 @@
     <div class="comparison-layout">
       <div class="debaters-grid">
         {#each debaters as debater (debater.index)}
-          <div class="debater-status-card" class:completed={debater.status === 'Completed'}>
+          <div class="debater-status-card lattice-panel" class:completed={debater.status === 'Completed'}>
             <div class="debater-card-header">
               <div class="status-indicator">
                 <span class="status-dot {getDebaterStatusClass(debater.status)}"></span>
@@ -269,13 +281,13 @@
             <h4>Captured Pull Request</h4>
             <p>The judge has successfully proposed and opened a GitHub PR containing the winning adjustments.</p>
           </div>
-          <a href={prUrl} target="_blank" rel="noopener noreferrer" class="pr-link-button">
+          <a href={prUrl} target="_blank" rel="noopener noreferrer" class="lattice-btn lattice-btn--secondary">
             View Pull Request
           </a>
         </div>
       {/if}
 
-      <div class="verdict-card">
+      <div class="verdict-card lattice-panel">
         <div class="verdict-header">
           <Scales size={22} weight="light" />
           <h3>Structured Verdict</h3>
@@ -285,20 +297,15 @@
         </div>
         
         <div class="verdict-body">
-          {#if judgeReport}
-            <pre class="verdict-report">{judgeReport}</pre>
-          {:else}
-            <div class="verdict-empty">
-              <div class="spinner"></div>
-              <span>The judge is currently reviewing arguments and compiling the final verdict...</span>
-            </div>
-          {/if}
+          <Skeleton loading={!judgeReport} skeleton={verdictSkeleton} class="verdict-loading">
+            <pre class="verdict-report">{judgeReport ?? ''}</pre>
+          </Skeleton>
         </div>
       </div>
 
       {#if evaluationReady}
         <div class="verdict-actions-bar">
-          <button class="close-session-btn" onclick={handleCloseSession} disabled={endingSession}>
+          <button class="lattice-btn lattice-btn--danger" class:lattice-btn--waiting={endingSession} aria-busy={endingSession} onclick={handleCloseSession} disabled={endingSession}>
             {endingSession ? 'Closing...' : 'Close Session'}
           </button>
         </div>
@@ -355,37 +362,12 @@
 
   .view-tabs {
     display: flex;
+    /* Tab-group well remains distinct from the surrounding panel chrome. */
     background: color-mix(in srgb, var(--text-primary) 3%, var(--bg-surface));
     padding: 4px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-structural);
     gap: 4px;
-  }
-
-  .tab-button {
-    padding: 6px 14px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    border: none;
-    background: transparent;
-    color: var(--text-secondary);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    transition: all 0.2s;
-  }
-
-  .tab-button:hover {
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--text-primary) 4%, transparent);
-  }
-
-  .tab-button.active {
-    background: var(--bg-surface);
-    color: var(--accent-cyan);
-    box-shadow: 0 1px 3px color-mix(in srgb, var(--bg-void) 20%, transparent);
   }
 
   .error-banner {
@@ -408,9 +390,6 @@
   }
 
   .orchestrator-section {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -419,6 +398,7 @@
     align-items: center;
     gap: 8px;
     padding: 10px 14px;
+    /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
     border-bottom: 1px solid var(--border-structural);
   }
@@ -430,11 +410,11 @@
     flex: 1;
   }
 
-  :global(.icon-queen) {
+  .section-header :global(.icon-queen) {
     color: var(--status-warning);
   }
 
-  :global(.icon-judge) {
+  .section-header :global(.icon-judge) {
     color: var(--accent-cyan);
   }
 
@@ -452,9 +432,6 @@
   .variant-card {
     display: flex;
     flex-direction: column;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -463,6 +440,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 10px 14px;
+    /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
     border-bottom: 1px solid var(--border-structural);
   }
@@ -501,14 +479,14 @@
   }
 
   .debater-status-card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
-    transition: all 0.2s ease;
+    transition:
+      background-color var(--motion-duration-standard) var(--motion-ease-standard),
+      border-color var(--motion-duration-standard) var(--motion-ease-standard);
   }
 
   .debater-status-card.completed {
+    /* Completed-card tint is semantic state layered over the structural panel. */
     border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
     background: color-mix(in srgb, var(--status-success) 2%, var(--bg-surface));
   }
@@ -518,6 +496,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
+    /* Fixed comparison header keeps a subtle chrome tint above card content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
     border-bottom: 1px solid var(--border-structural);
   }
@@ -612,9 +591,10 @@
   .pr-banner {
     display: flex;
     align-items: center;
+    /* Captured-PR banner intentionally uses a success-state surface. */
     background: color-mix(in srgb, var(--status-success) 10%, var(--bg-surface));
     border: 1px solid color-mix(in srgb, var(--status-success) 20%, transparent);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     padding: 16px;
     gap: 16px;
   }
@@ -643,25 +623,7 @@
     color: var(--text-secondary);
   }
 
-  .pr-link-button {
-    padding: 8px 16px;
-    background: var(--status-success);
-    color: var(--bg-void);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 600;
-    text-decoration: none;
-    transition: filter 0.2s;
-  }
-
-  .pr-link-button:hover {
-    filter: brightness(1.1);
-  }
-
   .verdict-card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -670,6 +632,7 @@
     align-items: center;
     gap: 10px;
     padding: 12px 16px;
+    /* Fixed verdict header keeps a subtle chrome tint above report content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
     border-bottom: 1px solid var(--border-structural);
   }
@@ -708,29 +671,12 @@
     color: var(--text-primary);
   }
 
-  .verdict-empty {
+  .verdict-skeleton {
     display: flex;
     flex-direction: column;
-    align-items: center;
+    gap: 12px;
+    min-height: 200px;
     justify-content: center;
-    gap: 16px;
-    height: 200px;
-    color: var(--text-disabled);
-    font-size: 13px;
-    text-align: center;
-  }
-
-  .spinner {
-    width: 28px;
-    height: 28px;
-    border: 2px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-    border-top-color: var(--accent-cyan);
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
   }
 
   .verdict-actions-bar {
@@ -739,25 +685,4 @@
     margin-top: 8px;
   }
 
-  .close-session-btn {
-    padding: 10px 20px;
-    background: var(--border-structural);
-    color: var(--text-primary);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .close-session-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--text-primary) 8%, var(--bg-surface));
-    border-color: color-mix(in srgb, var(--text-primary) 12%, var(--bg-surface));
-  }
-
-  .close-session-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
 </style>

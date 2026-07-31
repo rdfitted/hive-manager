@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { coordination, type CoordinationMessage } from '$lib/stores/coordination';
   import { activeSession } from '$lib/stores/sessions';
+  import Skeleton from './Skeleton.svelte';
+  import SkelBar from './SkelBar.svelte';
 
   let logContainer: HTMLDivElement;
   let autoScroll = true;
@@ -83,6 +85,18 @@
   $: displayMessages = filteredMessages($coordination.log, searchQuery);
 </script>
 
+{#snippet coordinationSkeleton()}
+  <div class="coordination-skeleton">
+    {#each [0, 1, 2, 3] as _}
+      <div class="skeleton-log-row">
+        <SkelBar width="4.25rem" height="0.65rem" />
+        <SkelBar width="8rem" height="0.65rem" />
+        <SkelBar width="min(58%, 24rem)" height="0.65rem" />
+      </div>
+    {/each}
+  </div>
+{/snippet}
+
 <div class="coordination-panel">
   <div class="panel-header">
     <h3>Coordination Log</h3>
@@ -91,48 +105,48 @@
         type="text"
         placeholder="Search..."
         bind:value={searchQuery}
-        class="search-input"
+        class="search-input lattice-input"
       />
       {#if !autoScroll}
-        <button class="scroll-btn" on:click={scrollToBottom} title="Scroll to bottom">
+        <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={scrollToBottom} title="Scroll to bottom" aria-label="Scroll to bottom">
           \u2193
         </button>
       {/if}
     </div>
   </div>
 
-  <div class="log-container" bind:this={logContainer} on:scroll={handleScroll}>
-    {#if $coordination.loading}
-      <div class="loading">Loading coordination log...</div>
-    {:else if displayMessages.length === 0}
-      <div class="empty">
-        {#if searchQuery}
-          No messages matching "{searchQuery}"
-        {:else}
-          No coordination messages yet.
-        {/if}
-      </div>
-    {:else}
-      {#each displayMessages as message (message.id)}
-        <div class="message">
-          <span class="timestamp">{formatTimestamp(message.timestamp)}</span>
-          <span class="sender {getSenderColor(message.from)}">
-            <span class="sender-icon">{getSenderIcon(message.from)}</span>
-            {message.from}
-          </span>
-          <span class="arrow">\u2192</span>
-          <span class="recipient">{message.to}</span>
-          <span class="colon">:</span>
-          <span class="content">{message.content}</span>
+  <div class="log-container lattice-scroll-content" bind:this={logContainer} on:scroll={handleScroll}>
+    <Skeleton loading={$coordination.loading} skeleton={coordinationSkeleton} class="coordination-loading">
+      {#if displayMessages.length === 0}
+        <div class="empty">
+          {#if searchQuery}
+            No messages matching "{searchQuery}"
+          {:else}
+            No coordination messages yet.
+          {/if}
         </div>
-      {/each}
-    {/if}
+      {:else}
+        {#each displayMessages as message (message.id)}
+          <div class="message">
+            <span class="timestamp">{formatTimestamp(message.timestamp)}</span>
+            <span class="sender {getSenderColor(message.from)}">
+              <span class="sender-icon">{getSenderIcon(message.from)}</span>
+              {message.from}
+            </span>
+            <span class="arrow">\u2192</span>
+            <span class="recipient">{message.to}</span>
+            <span class="colon">:</span>
+            <span class="content">{message.content}</span>
+          </div>
+        {/each}
+      {/if}
+    </Skeleton>
   </div>
 
   {#if $coordination.error}
     <div class="error">
       {$coordination.error}
-      <button class="dismiss-btn" on:click={() => coordination.clearError()}>\u2715</button>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" on:click={() => coordination.clearError()} aria-label="Dismiss coordination error">\u2715</button>
     </div>
   {/if}
 </div>
@@ -143,7 +157,7 @@
     flex-direction: column;
     height: 100%;
     background: var(--bg-void);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     overflow: hidden;
   }
 
@@ -152,6 +166,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
+    /* The fixed log header remains visually distinct from scrolling content. */
     background: var(--bg-surface);
     border-bottom: 1px solid var(--border-structural);
   }
@@ -170,32 +185,7 @@
   }
 
   .search-input {
-    padding: 4px 8px;
-    font-size: 12px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
     width: 120px;
-  }
-
-  .search-input:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
-  }
-
-  .scroll-btn {
-    padding: 4px 8px;
-    font-size: 12px;
-    background: var(--accent-cyan);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: white;
-    cursor: pointer;
-  }
-
-  .scroll-btn:hover {
-    opacity: 0.9;
   }
 
   .log-container {
@@ -207,12 +197,25 @@
     line-height: 1.6;
   }
 
-  .loading,
   .empty {
     color: var(--text-secondary);
     text-align: center;
     padding: 24px;
     font-style: italic;
+  }
+
+  .coordination-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .skeleton-log-row {
+    display: grid;
+    grid-template-columns: 4.25rem 8rem minmax(8rem, 1fr);
+    align-items: center;
+    gap: 4px;
+    padding: 4px 0;
   }
 
   .message {
@@ -284,20 +287,10 @@
     justify-content: space-between;
     align-items: center;
     padding: 8px 12px;
+    /* Full-width semantic error strip is not a compact status badge. */
     background: var(--bg-elevated);
     color: var(--status-error);
     font-size: 12px;
   }
 
-  .dismiss-btn {
-    background: none;
-    border: none;
-    color: var(--status-error);
-    cursor: pointer;
-    padding: 2px 6px;
-  }
-
-  .dismiss-btn:hover {
-    opacity: 0.8;
-  }
 </style>

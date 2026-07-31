@@ -1,0 +1,31 @@
+/* ═══════════════════════════════════════════════════════════════════
+   KEYFRAME ANIMATIONS
+   ═══════════════════════════════════════════════════════════════════ */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse-blocked {
+  0% {
+    box-shadow: 0 0 2px rgba(var(--rgb-blocked), 0.4),
+                0 0 4px rgba(var(--rgb-blocked), 0.2);
+  }
+  100% {
+    box-shadow: 0 0 6px rgba(var(--rgb-blocked), 0.8),
+                0 0 12px rgba(var(--rgb-blocked), 0.4);
+  }
+}
+
+@keyframes pulse-error {
+  0% {
+    box-shadow: 0 0 2px rgba(var(--rgb-error), 0.4),
+                0 0 4px rgba(var(--rgb-error), 0.2);
+  }
+  100% {
+    box-shadow: 0 0 6px rgba(var(--rgb-error), 0.8),
+                0 0 12px rgba(var(--rgb-error), 0.4);
+  }
+}

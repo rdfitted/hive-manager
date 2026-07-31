@@ -12,6 +12,8 @@
   import KnowledgeGraph from '$lib/components/knowledge/KnowledgeGraph.svelte';
   import KnowledgePagePreview from '$lib/components/knowledge/KnowledgePagePreview.svelte';
   import KnowledgeTable from '$lib/components/knowledge/KnowledgeTable.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import SkelBar from '$lib/components/SkelBar.svelte';
   import {
     describeOmission,
     EDGE_COLORS,
@@ -63,6 +65,7 @@
   });
   let filteredGraph = $derived(filterKnowledgeGraph($knowledgeStore.graph, query, folder));
   let omissions = $derived($knowledgeStore.graph.omissions ?? []);
+  let initialLoading = $derived($knowledgeStore.loading && $knowledgeStore.graph.nodes.length === 0);
 
   $effect(() => {
     const currentSessionId = sessionId;
@@ -100,8 +103,8 @@
     </div>
 
     <nav class="page-nav" aria-label="Main views">
-      <a href="/" title="Session view"><House size={16} weight="light" /><span>Sessions</span></a>
-      <a href="/dashboard" title="Dashboard"><Kanban size={16} weight="light" /><span>Dashboard</span></a>
+      <a href="/" class="lattice-btn lattice-btn--ghost lattice-btn--compact" title="Session view"><House size={16} weight="light" /><span>Sessions</span></a>
+      <a href="/dashboard" class="lattice-btn lattice-btn--ghost lattice-btn--compact" title="Dashboard"><Kanban size={16} weight="light" /><span>Dashboard</span></a>
     </nav>
   </header>
 
@@ -115,7 +118,7 @@
 
     <label class="folder-field">
       <span class="sr-only">Filter by folder</span>
-      <select bind:value={folder} aria-label="Filter by folder">
+      <select class="lattice-input" bind:value={folder} aria-label="Filter by folder">
         <option value={null}>All folders ({$knowledgeStore.graph.nodes.length})</option>
         {#each folders as name (name)}
           <option value={name}>{name} ({folderCount(name)})</option>
@@ -126,7 +129,7 @@
     <div class="view-switch" aria-label="Knowledge view">
       <button
         type="button"
-        class:active={view === 'graph'}
+        class={`lattice-tab${view === 'graph' ? ' lattice-tab--active' : ''}`}
         aria-pressed={view === 'graph'}
         onclick={() => view = 'graph'}
       >
@@ -134,7 +137,7 @@
       </button>
       <button
         type="button"
-        class:active={view === 'table'}
+        class={`lattice-tab${view === 'table' ? ' lattice-tab--active' : ''}`}
         aria-pressed={view === 'table'}
         onclick={() => view = 'table'}
       >
@@ -144,14 +147,15 @@
 
     <button
       type="button"
-      class="refresh"
-      class:spinning={$knowledgeStore.refreshing}
+      class="refresh lattice-btn lattice-btn--ghost lattice-btn--icon"
       onclick={() => knowledgeStore.loadGraph(sessionId)}
       disabled={$knowledgeStore.loading || $knowledgeStore.refreshing}
       aria-label="Refresh knowledge graph"
       title="Refresh knowledge graph"
     >
-      <ArrowClockwise size={15} weight="light" />
+      <span class="refresh-icon" class:lattice-motion-spinner={$knowledgeStore.refreshing}>
+        <ArrowClockwise size={15} weight="light" />
+      </span>
     </button>
   </section>
 
@@ -178,84 +182,93 @@
 
   <div class="workspace" class:preview-open={$knowledgeStore.selectedId !== null}>
     <main class="atlas-panel" aria-live="polite">
-      {#if $knowledgeStore.loading && $knowledgeStore.graph.nodes.length === 0}
-        <div class="full-state loading-state">
-          <div class="radar" aria-hidden="true"><span></span></div>
-          <strong>Mapping the corpus</strong>
-          <p>Scanning the safe wiki folders and project knowledge…</p>
-        </div>
-      {:else if $knowledgeStore.error && $knowledgeStore.graph.nodes.length === 0}
-        <div class="full-state error-state" role="alert">
-          <Brain size={32} weight="light" />
-          <strong>Knowledge map unavailable</strong>
-          <p>{$knowledgeStore.error}</p>
-          <button type="button" onclick={() => knowledgeStore.loadGraph(sessionId)}>Try again</button>
-        </div>
-      {:else if $knowledgeStore.graph.nodes.length === 0}
-        <div class="full-state empty-state">
-          <Brain size={32} weight="light" />
-          <strong>No knowledge pages found</strong>
-          <p>
-            Add markdown anywhere under the wiki root — every top-level folder is scanned, plus
-            loose pages at the root itself — or in the project’s .ai-docs folder.
-          </p>
-          <button type="button" onclick={() => knowledgeStore.loadGraph(sessionId)}>Scan again</button>
-        </div>
-      {:else if filteredGraph.nodes.length === 0}
-        <div class="full-state empty-state">
-          <MagnifyingGlass size={30} weight="light" />
-          <strong>No matching pages</strong>
-          <p>Try a broader search or choose another folder.</p>
-          <button type="button" onclick={() => { query = ''; folder = null; }}>Clear filters</button>
-        </div>
-      {:else}
-        <div class="view-frame">
-          <div class="result-strip">
-            <span>{filteredGraph.nodes.length} of {$knowledgeStore.graph.nodes.length} pages</span>
-            <span>{filteredGraph.edges.length} visible relationships</span>
+      {#snippet atlasSkeleton()}
+        <div class="full-state atlas-loading-shape">
+          <SkelBar width="48px" height="48px" radius="full" />
+          <SkelBar width="13rem" height="1.25rem" radius="md" />
+          <SkelBar width="min(26rem, 72%)" height="0.75rem" />
+          <div class="atlas-loading-rows">
+            <SkelBar width="100%" height="2.25rem" radius="md" />
+            <SkelBar width="86%" height="2.25rem" radius="md" />
+            <SkelBar width="94%" height="2.25rem" radius="md" />
           </div>
-          <div class="view-body">
-            {#if view === 'graph'}
-              <KnowledgeGraph
-                nodes={filteredGraph.nodes}
-                edges={filteredGraph.edges}
-                selectedId={$knowledgeStore.selectedId}
-                onSelect={selectNode}
-              />
-            {:else}
-              <KnowledgeTable
-                nodes={filteredGraph.nodes}
-                selectedId={$knowledgeStore.selectedId}
-                onSelect={selectNode}
-              />
-            {/if}
+        </div>
+      {/snippet}
+
+      <Skeleton loading={initialLoading} skeleton={atlasSkeleton} class="atlas-skeleton">
+        {#if $knowledgeStore.error && $knowledgeStore.graph.nodes.length === 0}
+          <div class="full-state error-state" role="alert">
+            <Brain size={32} weight="light" />
+            <strong>Knowledge map unavailable</strong>
+            <p>{$knowledgeStore.error}</p>
+            <button class="state-action lattice-btn lattice-btn--primary" type="button" onclick={() => knowledgeStore.loadGraph(sessionId)}>Try again</button>
           </div>
-          <footer class="legend">
-            <div class="legend-group" aria-label="Folder colors and shapes">
-              {#each folders as name (name)}
-                <span>
-                  <i
-                    class:diamond={isRelationshipFolder(name)}
-                    style:background={folderColor(name)}
-                  ></i>
-                  <span class="sr-only">{folderKindLabel(name)}:</span>{name}
-                </span>
-              {/each}
+        {:else if $knowledgeStore.graph.nodes.length === 0}
+          <div class="full-state empty-state">
+            <Brain size={32} weight="light" />
+            <strong>No knowledge pages found</strong>
+            <p>
+              Add markdown anywhere under the wiki root — every top-level folder is scanned, plus
+              loose pages at the root itself — or in the project’s .ai-docs folder.
+            </p>
+            <button class="state-action lattice-btn lattice-btn--primary" type="button" onclick={() => knowledgeStore.loadGraph(sessionId)}>Scan again</button>
+          </div>
+        {:else if filteredGraph.nodes.length === 0}
+          <div class="full-state empty-state">
+            <MagnifyingGlass size={30} weight="light" />
+            <strong>No matching pages</strong>
+            <p>Try a broader search or choose another folder.</p>
+            <button class="state-action lattice-btn lattice-btn--primary" type="button" onclick={() => { query = ''; folder = null; }}>Clear filters</button>
+          </div>
+        {:else}
+          <div class="view-frame">
+            <div class="result-strip">
+              <span>{filteredGraph.nodes.length} of {$knowledgeStore.graph.nodes.length} pages</span>
+              <span>{filteredGraph.edges.length} visible relationships</span>
             </div>
-            {#if view === 'graph'}
-              <div class="legend-group" aria-label="Node shape key">
-                <span><i class="shape-key diamond"></i>Diamond · relationship entity</span>
-                <span><i class="shape-key circle"></i>Circle · operational knowledge</span>
-              </div>
-              <div class="legend-group edge-legend" aria-label="Relationship types">
-                {#each KNOWLEDGE_EDGE_KINDS as kind (kind)}
-                  <span><i style:background={EDGE_COLORS[kind]}></i>{EDGE_LABELS[kind]}</span>
+            <div class="view-body">
+              {#if view === 'graph'}
+                <KnowledgeGraph
+                  nodes={filteredGraph.nodes}
+                  edges={filteredGraph.edges}
+                  selectedId={$knowledgeStore.selectedId}
+                  onSelect={selectNode}
+                />
+              {:else}
+                <KnowledgeTable
+                  nodes={filteredGraph.nodes}
+                  selectedId={$knowledgeStore.selectedId}
+                  onSelect={selectNode}
+                />
+              {/if}
+            </div>
+            <footer class="legend lattice-scroll-chrome">
+              <div class="legend-group" aria-label="Folder colors and shapes">
+                {#each folders as name (name)}
+                  <span>
+                    <i
+                      class:diamond={isRelationshipFolder(name)}
+                      style:background={folderColor(name)}
+                    ></i>
+                    <span class="sr-only">{folderKindLabel(name)}:</span>{name}
+                  </span>
                 {/each}
               </div>
-            {/if}
-          </footer>
-        </div>
-      {/if}
+              {#if view === 'graph'}
+                <div class="legend-group" aria-label="Node shape key">
+                  <span><i class="shape-key diamond"></i>Diamond · relationship entity</span>
+                  <span><i class="shape-key circle"></i>Circle · operational knowledge</span>
+                </div>
+                <div class="legend-group edge-legend" aria-label="Relationship types">
+                  {#each KNOWLEDGE_EDGE_KINDS as kind (kind)}
+                    <span><i style:background={EDGE_COLORS[kind]}></i>{EDGE_LABELS[kind]}</span>
+                  {/each}
+                </div>
+              {/if}
+            </footer>
+          </div>
+        {/if}
+      </Skeleton>
     </main>
 
     {#if $knowledgeStore.selectedId}
@@ -273,9 +286,6 @@
 </div>
 
 <style>
-  :global(*) { box-sizing: border-box; }
-  :global(body) { overflow: hidden; }
-
   .knowledge-page {
     display: flex;
     flex-direction: column;
@@ -298,6 +308,8 @@
       linear-gradient(90deg, color-mix(in srgb, var(--accent-cyan) 4%, transparent), transparent 34%),
       var(--bg-surface);
   }
+
+  /* Full-bleed route chrome and its hover tones cannot adopt bordered panel primitives. */
 
   .identity {
     display: flex;
@@ -358,21 +370,9 @@
     gap: var(--space-2);
   }
 
-  .page-nav a {
-    display: inline-flex;
-    align-items: center;
+  .page-nav :global(.lattice-btn) {
     gap: 6px;
-    padding: 7px 9px;
-    border: 1px solid transparent;
-    color: var(--text-secondary);
-    font: var(--text-small) var(--font-mono);
     text-decoration: none;
-  }
-
-  .page-nav a:hover {
-    border-color: var(--border-structural);
-    background: var(--bg-elevated);
-    color: var(--accent-cyan);
   }
 
   .toolbar {
@@ -382,6 +382,7 @@
     min-height: 52px;
     padding: var(--space-2) var(--space-4);
     border-bottom: 1px solid var(--border-structural);
+    /* Fixed workspace controls form a toolbar strip, not a standalone panel. */
     background: var(--bg-surface);
   }
 
@@ -419,16 +420,9 @@
     height: 34px;
     min-width: 170px;
     padding: 0 28px 0 var(--space-3);
-    border: 1px solid var(--border-structural);
-    border-radius: 0;
     outline: 0;
-    background: var(--bg-void);
-    color: var(--text-secondary);
-    font: var(--text-small) var(--font-mono);
     text-transform: capitalize;
   }
-
-  .folder-field select:focus { border-color: var(--accent-cyan); }
 
   .view-switch {
     display: flex;
@@ -436,41 +430,31 @@
     border: 1px solid var(--border-structural);
   }
 
-  .view-switch button,
+  .view-switch :global(.lattice-tab) {
+    height: 32px;
+    border-right: 1px solid var(--border-structural);
+  }
+
+  .view-switch :global(.lattice-tab:last-child) { border-right: 0; }
+
   .refresh {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    height: 32px;
-    padding: 0 var(--space-3);
-    border: 0;
-    border-right: 1px solid var(--border-structural);
-    background: var(--bg-void);
-    color: var(--text-secondary);
-    font: var(--text-micro) var(--font-mono);
-    text-transform: uppercase;
-    cursor: pointer;
-  }
-
-  .view-switch button:last-child { border-right: 0; }
-  .view-switch button:hover, .view-switch button.active { color: var(--accent-cyan); background: var(--bg-elevated); }
-  .view-switch button.active { box-shadow: inset 0 -2px var(--accent-cyan); }
-
-  .refresh {
     width: 34px;
+    height: 32px;
     padding: 0;
-    border: 1px solid var(--border-structural);
   }
 
-  .refresh:hover:not(:disabled) { color: var(--accent-cyan); background: var(--bg-elevated); }
-  .refresh:disabled { opacity: 0.45; cursor: wait; }
-  .refresh.spinning :global(svg) { animation: spin 0.8s linear infinite; }
+  .refresh-icon {
+    display: inline-flex;
+  }
 
   .notice {
     padding: 5px var(--space-4);
     border-bottom: 1px solid var(--border-structural);
     color: var(--text-secondary);
+    /* Full-width query/cap feedback is a semantic notice strip, not a modal or panel. */
     background: var(--bg-elevated);
     font: var(--text-micro) var(--font-mono);
   }
@@ -505,6 +489,25 @@
     overflow: hidden;
   }
 
+  .atlas-panel :global(.atlas-skeleton),
+  .atlas-panel :global(.lattice-skeleton-content) {
+    width: 100%;
+    height: 100%;
+  }
+
+  .atlas-loading-shape {
+    gap: var(--space-3);
+  }
+
+  .atlas-loading-rows {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    width: min(34rem, 78%);
+    margin-top: var(--space-3);
+  }
+
   .view-frame {
     display: flex;
     flex-direction: column;
@@ -534,6 +537,7 @@
     min-height: 34px;
     padding: 0 var(--space-3);
     border-top: 1px solid var(--border-structural);
+    /* Persistent graph keys form a footer legend strip, not a standalone panel. */
     background: var(--bg-surface);
     overflow-x: auto;
   }
@@ -579,33 +583,12 @@
   .full-state > * { position: relative; }
   .full-state strong { margin-top: var(--space-3); color: var(--text-primary); font: 18px var(--font-display); }
   .full-state p { max-width: 430px; margin: var(--space-2) 0 0; font-size: var(--text-small); }
-  .full-state button {
+  .state-action {
     margin-top: var(--space-4);
-    padding: var(--space-2) var(--space-4);
-    border: 1px solid var(--accent-cyan);
-    background: var(--bg-void);
-    color: var(--accent-cyan);
-    font: var(--text-small) var(--font-mono);
-    cursor: pointer;
   }
 
   .error-state > :global(svg) { color: var(--status-error); }
   .empty-state > :global(svg) { color: var(--text-disabled); }
-
-  .radar {
-    position: relative;
-    width: 48px;
-    height: 48px;
-    border: 1px solid var(--border-structural);
-    border-radius: 50%;
-    background: radial-gradient(circle, var(--accent-cyan) 0 2px, transparent 3px);
-    overflow: hidden;
-  }
-
-  .radar::before, .radar::after { content: ''; position: absolute; background: var(--border-structural); }
-  .radar::before { left: 50%; top: 0; width: 1px; height: 100%; }
-  .radar::after { top: 50%; left: 0; height: 1px; width: 100%; }
-  .radar span { position: absolute; inset: 50% 50% 0 0; background: linear-gradient(45deg, transparent, color-mix(in srgb, var(--accent-cyan) 28%, transparent)); transform-origin: 100% 0; animation: radar 1.5s linear infinite; }
 
   .sr-only {
     position: absolute;
@@ -618,9 +601,6 @@
     white-space: nowrap;
     border: 0;
   }
-
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @keyframes radar { to { transform: rotate(360deg); } }
 
   @media (max-width: 920px) {
     .page-header { grid-template-columns: 1fr auto; }
@@ -643,7 +623,4 @@
     .legend { display: none; }
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .refresh.spinning :global(svg), .radar span { animation: none; }
-  }
 </style>

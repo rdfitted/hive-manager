@@ -1,6 +1,8 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { currentBranch, availableBranches, activeSession } from '$lib/stores/sessions';
+  import Skeleton from './Skeleton.svelte';
+  import SkelBar from './SkelBar.svelte';
 
   interface BranchInfo {
     name: string;
@@ -91,34 +93,41 @@
   }
 </script>
 
+{#snippet branchSkeleton()}
+  <div class="branch-skeleton">
+    <SkelBar width="7rem" height="1.5rem" radius="md" />
+  </div>
+{/snippet}
+
 <div class="branch-selector">
   <label for="branch-select">Branch:</label>
-  {#if loading}
-    <span class="loading">Loading...</span>
-  {:else if error}
-    <span class="error" title={error}>{error.slice(0, 30)}{error.length > 30 ? '...' : ''}</span>
-    <button class="action-btn refresh-btn" onclick={loadBranches} title="Retry">↻</button>
-  {:else if !projectPath}
-    <span class="loading">No session</span>
-  {:else if managedWorkspace}
-    <span class="managed-branch" title={projectPath}>{managedBranch}</span>
-  {:else}
-    <select id="branch-select" value={$currentBranch} onchange={handleBranchChange}>
-      {#each $availableBranches as branch}
-        <option value={branch.name}>
-          {branch.name} ({branch.short_hash})
-        </option>
-      {/each}
-    </select>
-    <button class="action-btn refresh-btn" onclick={loadBranches} title="Refresh branches" disabled={loading || pulling}>↻</button>
-    <button class="action-btn pull-btn" onclick={handlePull} title="Pull from remote" disabled={loading || pulling}>
-      {#if pulling}
-        <span class="spinner">↻</span>
-      {:else}
-        ↓
-      {/if}
-    </button>
-  {/if}
+  <Skeleton loading={loading} skeleton={branchSkeleton} layout="inline" class="branch-loading">
+    {#if error}
+      <span class="error" title={error}>{error.slice(0, 30)}{error.length > 30 ? '...' : ''}</span>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={loadBranches} title="Retry" aria-label="Retry">↻</button>
+    {:else if !projectPath}
+      <span class="branch-state">No session</span>
+    {:else if managedWorkspace}
+      <span class="managed-branch" title={projectPath}>{managedBranch}</span>
+    {:else}
+      <select class="lattice-input" id="branch-select" value={$currentBranch} onchange={handleBranchChange}>
+        {#each $availableBranches as branch}
+          <option value={branch.name}>
+            {branch.name} ({branch.short_hash})
+          </option>
+        {/each}
+      </select>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={loadBranches} title="Refresh branches" aria-label="Refresh branches" disabled={loading || pulling}>↻</button>
+      <button class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--icon" class:lattice-btn--waiting={pulling} aria-busy={pulling} onclick={handlePull} title="Pull from remote" aria-label="Pull from remote" disabled={loading || pulling}>
+        {#if pulling}
+          <!-- Pull feedback is an action state, so it keeps the shared spinner. -->
+          <span class="lattice-motion-spinner">↻</span>
+        {:else}
+          ↓
+        {/if}
+      </button>
+    {/if}
+  </Skeleton>
 </div>
 
 <style>
@@ -136,16 +145,26 @@
     white-space: nowrap;
   }
 
+  .branch-skeleton {
+    display: flex;
+    align-items: center;
+  }
+
+  .branch-selector :global(.branch-loading) {
+    flex: 1;
+  }
+
+  .branch-selector :global(.branch-loading .lattice-skeleton-content) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .branch-selector select {
     flex: 1;
     min-width: 120px;
     max-width: 200px;
-    padding: 4px 8px;
-    font-size: 11px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
     cursor: pointer;
     /* Fix dropdown appearance */
     appearance: none;
@@ -157,11 +176,7 @@
     padding-right: 24px;
   }
 
-  .branch-selector select:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
-  }
-
+  /* Native option popovers cannot inherit the select control's shared surface. */
   .branch-selector select option {
     background: var(--bg-surface);
     color: var(--text-primary);
@@ -175,47 +190,7 @@
     color: white;
   }
 
-  .action-btn {
-    padding: 4px 8px;
-    font-size: 14px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    cursor: pointer;
-    transition: all 0.2s;
-    min-width: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .action-btn:hover:not(:disabled) {
-    background: var(--bg-void);
-    border-color: var(--accent-cyan);
-    color: var(--accent-cyan);
-  }
-
-  .action-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .pull-btn:hover:not(:disabled) {
-    border-color: var(--status-success);
-    color: var(--status-success);
-  }
-
-  .spinner {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  .loading {
+  .branch-state {
     font-size: 11px;
     color: var(--text-secondary);
   }

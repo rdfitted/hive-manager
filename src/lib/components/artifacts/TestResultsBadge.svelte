@@ -8,7 +8,7 @@
     $: status = failed > 0 ? 'fail' : (passed > 0 ? 'pass' : 'unknown');
 </script>
 
-<div class="test-badge" class:pass={status === 'pass'} class:fail={status === 'fail'} class:unknown={status === 'unknown'}>
+<div class="status-badge {status === 'pass' ? 'status-success' : status === 'fail' ? 'status-error' : 'status-queued'}">
     {#if status === 'pass'}
         <Check size={12} weight="light" />
         <span class="text">Tests Passed</span>
@@ -21,34 +21,3 @@
     {/if}
 </div>
 
-<style>
-    .test-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 2px 8px;
-        border-radius: var(--radius-sm);
-        font-size: 10px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-
-    .test-badge.pass {
-        background: color-mix(in srgb, var(--status-success) 10%, transparent);
-        color: var(--status-success);
-        border: 1px solid color-mix(in srgb, var(--status-success) 20%, transparent);
-    }
-
-    .test-badge.fail {
-        background: color-mix(in srgb, var(--status-error) 10%, transparent);
-        color: var(--status-error);
-        border: 1px solid color-mix(in srgb, var(--status-error) 20%, transparent);
-    }
-
-    .test-badge.unknown {
-        background: color-mix(in srgb, var(--text-primary) 5%, transparent);
-        color: var(--text-disabled);
-        border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-    }
-</style>
