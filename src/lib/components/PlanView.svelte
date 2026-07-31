@@ -4,6 +4,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
+  import Skeleton from './Skeleton.svelte';
+  import SkelBar from './SkelBar.svelte';
 
   interface PlanTask {
     id: string;
@@ -221,23 +223,39 @@
     }
   }
 
-  function getPriorityColor(priority?: PlanTask['priority']): string {
+  function getPriorityStatusClass(priority?: PlanTask['priority']): string {
     switch (priority) {
-      case 'high': return 'var(--status-error)';
-      case 'medium': return 'var(--status-warning)';
-      case 'low': return 'var(--text-secondary)';
-      default: return 'transparent';
+      case 'high': return 'status-error';
+      case 'medium': return 'status-warning';
+      default: return 'status-queued';
     }
   }
 </script>
 
-<div class="plan-view">
-  {#if loading}
-    <div class="loading">
-      <span class="spinner">◐</span>
-      Loading plan...
+{#snippet planSkeleton()}
+  <div class="plan-skeleton-shape">
+    <div class="plan-skeleton-header">
+      <SkelBar width="42%" height="1rem" radius="md" />
+      <SkelBar width="76%" height="0.75rem" />
+      <SkelBar width="30%" height="0.6rem" />
     </div>
-  {:else if !$activeSession}
+    <div class="plan-skeleton-tasks">
+      {#each ['68%', '82%', '57%'] as titleWidth}
+        <div class="plan-skeleton-task">
+          <SkelBar width="1.25rem" height="1.25rem" radius="sm" />
+          <div class="plan-skeleton-task-copy">
+            <SkelBar width={titleWidth} height="0.75rem" />
+            <SkelBar width="92%" height="0.65rem" />
+          </div>
+        </div>
+      {/each}
+    </div>
+  </div>
+{/snippet}
+
+<div class="plan-view lattice-scroll-content">
+  <Skeleton {loading} skeleton={planSkeleton} class="plan-skeleton">
+  {#if !$activeSession}
     <div class="empty-state">
       <span class="icon">
         <ClipboardText size={48} weight="light" />
@@ -255,8 +273,8 @@
       <p class="planning-description">
         The Master Planner is analyzing your project and creating a detailed implementation plan...
       </p>
-      <div class="planning-progress">
-        <span class="spinner large">◐</span>
+      <div class="planning-progress lattice-panel">
+        <span class="spinner large lattice-motion-spinner">◐</span>
         <span>Generating plan.md</span>
       </div>
     </div>
@@ -286,7 +304,7 @@
       <div class="tasks-list">
         {#each plan.tasks as task (task.id)}
           {@const StatusIcon = getStatusIcon(task.status)}
-          <div class="task-item" class:completed={task.status === 'completed'}>
+          <div class="task-item lattice-panel" class:completed={task.status === 'completed'}>
             <span
               class="task-status"
               class:pulse-blocked={task.status === 'blocked'}
@@ -298,7 +316,7 @@
               <div class="task-header">
                 <span class="task-title">{task.title}</span>
                 {#if task.priority}
-                  <span class="priority-badge" style="background: {getPriorityColor(task.priority)}">
+                  <span class="priority-badge status-badge {getPriorityStatusClass(task.priority)}">
                     {getPriorityBadge(task.priority)}
                   </span>
                 {/if}
@@ -323,12 +341,12 @@
           <span class="raw-label">Plan Content</span>
           {#if isPlanning()}
             <span class="writing-indicator">
-              <span class="spinner">◐</span>
+              <span class="spinner lattice-motion-spinner">◐</span>
               Writing...
             </span>
           {/if}
         </div>
-        <pre class="raw-markdown">{plan.rawContent}</pre>
+        <pre class="raw-markdown lattice-scroll-content">{plan.rawContent}</pre>
       </div>
     {/if}
 
@@ -342,19 +360,21 @@
             <div class="refinement-input-group">
               <input
                 type="text"
-                class="refinement-input"
+                class="refinement-input lattice-input"
                 placeholder="e.g., Focus more on the backend API..."
                 bind:value={refinementInput}
                 onkeydown={handleKeydown}
                 disabled={sendingRefinement}
               />
               <button
-                class="refinement-button"
+                class="lattice-btn lattice-btn--secondary"
+                class:lattice-btn--waiting={sendingRefinement}
                 onclick={handleRefinement}
                 disabled={sendingRefinement || !refinementInput.trim()}
+                aria-busy={sendingRefinement}
               >
                 {#if sendingRefinement}
-                  <span class="spinner">◐</span>
+                  <span class="spinner lattice-motion-spinner">◐</span>
                 {:else}
                   Refine
                 {/if}
@@ -372,12 +392,14 @@
             {/if}
           </p>
           <button
-            class="continue-button"
+            class="lattice-btn lattice-btn--primary"
+            class:lattice-btn--waiting={continuing}
             onclick={handleContinue}
             disabled={continuing}
+            aria-busy={continuing}
           >
             {#if continuing}
-              <span class="spinner">◐</span>
+              <span class="spinner lattice-motion-spinner">◐</span>
               Launching...
             {:else}
               Approve & Continue
@@ -387,6 +409,7 @@
       </div>
     {/if}
   {/if}
+  </Skeleton>
 
   {#if error}
     <div class="error">{error}</div>
@@ -402,22 +425,30 @@
     overflow-y: auto;
   }
 
-  .loading {
+  .plan-skeleton-shape {
     display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 32px;
-    color: var(--text-secondary);
+    flex-direction: column;
+    gap: var(--space-5);
   }
 
-  .spinner {
-    animation: spin 1s linear infinite;
+  .plan-skeleton-header,
+  .plan-skeleton-tasks,
+  .plan-skeleton-task-copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+  .plan-skeleton-task {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3);
+  }
+
+  .plan-skeleton-task-copy {
+    flex: 1;
+    min-width: 0;
   }
 
   .empty-state {
@@ -503,9 +534,7 @@
     display: flex;
     gap: 10px;
     padding: 12px;
-    background: var(--bg-surface);
-    border-radius: var(--radius-sm);
-    transition: opacity 0.15s;
+    transition: opacity var(--motion-duration-fast) var(--motion-ease-standard);
   }
 
   .task-item.completed {
@@ -520,16 +549,6 @@
     width: 20px;
     text-align: center;
     text-shadow: 0 0 4px currentColor;
-  }
-
-  .task-status.pulse-blocked {
-    animation: pulse-blocked 1.5s infinite;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .task-status.pulse-blocked {
-      animation: none;
-    }
   }
 
   .task-content {
@@ -550,14 +569,6 @@
     color: var(--text-primary);
   }
 
-  .priority-badge {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 1px 5px;
-    border-radius: var(--radius-sm);
-    color: white;
-  }
-
   .task-description {
     margin: 0;
     font-size: 12px;
@@ -574,7 +585,8 @@
 
   .error {
     padding: 12px;
-    background: var(--bg-surface);
+    /* Semantic error feedback, not a structural surface. */
+    background: color-mix(in srgb, var(--status-error) 10%, transparent);
     color: var(--status-error);
     border-radius: var(--radius-sm);
     font-size: 12px;
@@ -621,7 +633,8 @@
   .raw-markdown {
     margin: 0;
     padding: 16px;
-    background: var(--bg-surface);
+    /* Plan document well, not a structural panel. */
+    background: var(--bg-sunken);
     border-radius: var(--radius-sm);
     font-size: 12px;
     font-family: var(--font-mono);
@@ -676,8 +689,6 @@
     align-items: center;
     gap: 10px;
     padding: 12px 20px;
-    background: var(--bg-surface);
-    border-radius: var(--radius-sm);
     color: var(--accent-cyan);
     font-size: 13px;
   }
@@ -715,52 +726,10 @@
 
   .refinement-input {
     flex: 1;
-    padding: 10px 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 13px;
-  }
-
-  .refinement-input:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
   }
 
   .refinement-input::placeholder {
     color: var(--text-secondary);
-  }
-
-  .refinement-input:disabled {
-    opacity: 0.6;
-  }
-
-  .refinement-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 10px 16px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-    white-space: nowrap;
-  }
-
-  .refinement-button:hover:not(:disabled) {
-    border-color: var(--accent-cyan);
-    background: var(--bg-elevated);
-  }
-
-  .refinement-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   .approve-section {
@@ -781,28 +750,4 @@
     line-height: 1.5;
   }
 
-  .continue-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 12px 28px;
-    background: var(--status-success);
-    color: var(--bg-void);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s, opacity 0.15s;
-  }
-
-  .continue-button:hover:not(:disabled) {
-    filter: brightness(1.1);
-  }
-
-  .continue-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
 </style>

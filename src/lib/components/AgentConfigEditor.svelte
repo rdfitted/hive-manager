@@ -597,6 +597,7 @@
     <div class="field">
       <label for={`${idPrefix}-label`}>Label</label>
       <input
+        class="lattice-input"
         id={`${idPrefix}-label`}
         type="text"
         placeholder="Optional display name"
@@ -609,10 +610,12 @@
   <div class="field">
     <div class="cli-label-row">
       <label for={`${idPrefix}-cli`}>CLI</label>
+      <!-- Indeterminate CLI health-check action affordance, not content loading. -->
       <span
         class="cli-health-badge {cliHealthTone(selectedCliHealth, cliHealthError)}"
         title={cliHealthTitle(selectedCliHealth, cliHealthLoading, cliHealthError)}
         aria-label={`CLI health: ${cliHealthLabel(selectedCliHealth, cliHealthLoading, cliHealthError)}`}
+        aria-busy={cliHealthLoading}
       >
         <span class="health-dot" aria-hidden="true"></span>
         {cliHealthLabel(selectedCliHealth, cliHealthLoading, cliHealthError)}
@@ -622,7 +625,7 @@
       id={`${idPrefix}-cli`}
       value={config.cli}
       on:change={handleCliChange}
-      class="cli-select"
+      class="cli-select lattice-input"
       aria-describedby={`${idPrefix}-cli-description`}
     >
       {#each cliOptions as cli}
@@ -646,7 +649,7 @@
         id={`${idPrefix}-preset`}
         value={selectedPreset}
         on:change={handlePresetChange}
-        class="cli-select"
+        class="cli-select lattice-input"
         aria-describedby={`${idPrefix}-preset-description ${idPrefix}-effective-model`}
       >
         <option value="custom">Custom (keep current model)</option>
@@ -685,13 +688,14 @@
   }
 
   .cli-health-badge {
+    /* Executable-health pill is distinct from the session status-badge contract. */
     display: inline-flex;
     align-items: center;
     gap: 5px;
     max-width: 70%;
     padding: 2px 7px;
     border: 1px solid currentColor;
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     font-size: 10px;
     font-weight: 600;
     line-height: 1.2;
@@ -737,15 +741,8 @@
     color: var(--text-secondary);
   }
 
-  input,
-  .cli-select {
+  .lattice-input {
     width: 100%;
-    padding: 8px 10px;
-    font-size: 13px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
   }
 
   .cli-select {
@@ -774,9 +771,4 @@
     opacity: 0.6;
   }
 
-  input:focus,
-  .cli-select:focus {
-    outline: none;
-    border-color: var(--accent-cyan);
-  }
 </style>

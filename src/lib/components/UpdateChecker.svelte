@@ -61,7 +61,7 @@
 </script>
 
 {#if updateAvailable}
-  <div class="update-banner">
+  <div class="update-banner lattice-panel">
     <div class="update-content">
       <ArrowUp size={16} weight="light" />
       <span class="update-text">
@@ -79,10 +79,10 @@
 
     <div class="update-actions">
       {#if !downloading}
-        <button class="btn-update" on:click={downloadAndInstall}>
+        <button class="lattice-btn lattice-btn--primary" on:click={downloadAndInstall}>
           Update Now
         </button>
-        <button class="btn-dismiss" on:click={dismiss}>
+        <button class="lattice-btn lattice-btn--secondary" on:click={dismiss}>
           Later
         </button>
       {/if}
@@ -95,9 +95,6 @@
     position: fixed;
     bottom: 16px;
     right: 16px;
-    background: var(--bg-void);
-    border: 1px solid var(--accent-cyan);
-    border-radius: var(--radius-sm);
     padding: 12px 16px;
     display: flex;
     flex-direction: column;
@@ -128,32 +125,4 @@
     gap: 8px;
   }
 
-  .btn-update {
-    padding: 6px 12px;
-    font-size: 12px;
-    background: var(--accent-cyan);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: var(--bg-void);
-    cursor: pointer;
-    font-weight: 500;
-  }
-
-  .btn-update:hover {
-    opacity: 0.9;
-  }
-
-  .btn-dismiss {
-    padding: 6px 12px;
-    font-size: 12px;
-    background: transparent;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
-    cursor: pointer;
-  }
-
-  .btn-dismiss:hover {
-    background: var(--bg-surface);
-  }
 </style>
