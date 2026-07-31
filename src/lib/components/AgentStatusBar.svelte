@@ -59,7 +59,7 @@
 </script>
 
 {#if agents.length > 0}
-  <div class="agent-status-bar">
+  <div class="agent-status-bar lattice-panel">
     {#each agents as agent (agent.id)}
       {@const statusStr = typeof agent.status === 'string' ? agent.status : 'Unknown'}
       {@const hb = getHeartbeat(agent.id)}
@@ -87,8 +87,6 @@
     flex-wrap: wrap;
     gap: 6px;
     padding: 8px 12px;
-    background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-structural);
   }
 
   .agent-chip {
@@ -112,13 +110,7 @@
   }
 
   .status-dot.pulse-error {
-    animation: pulse-error 1.5s infinite;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .status-dot.pulse-error {
-      animation: none;
-    }
+    animation: pulse-error var(--motion-duration-pulse) infinite;
   }
 
   .agent-name {

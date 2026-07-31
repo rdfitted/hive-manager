@@ -11,6 +11,8 @@
   import QueenControls from './QueenControls.svelte';
   import ResizeHandle from './ResizeHandle.svelte';
   import ResumeConfirmModal from './ResumeConfirmModal.svelte';
+  import Skeleton from './Skeleton.svelte';
+  import SkelBar from './SkelBar.svelte';
 
   let closingSessionId = $state<string | null>(null);
   let showCloseConfirm = $state<string | null>(null);
@@ -364,7 +366,7 @@
 </script>
 
 <aside
-  class="sidebar"
+  class="sidebar lattice-panel"
   class:collapsed
   class:resizing
   style:width={`${sidebarWidth}px`}
@@ -379,8 +381,7 @@
       ] as { path, href, icon: Icon, label } (path)}
         <a
           {href}
-          class="view-link"
-          class:active={$page.url.pathname === path}
+          class="lattice-btn lattice-btn--ghost lattice-btn--icon"
           aria-label={label}
           aria-current={$page.url.pathname === path ? 'page' : undefined}
           title={label}
@@ -391,7 +392,7 @@
     </nav>
     <button
       type="button"
-      class="collapse-chevron"
+      class="lattice-btn lattice-btn--ghost lattice-btn--icon"
       onclick={() => layout.toggleLeft()}
       title={collapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
       aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -405,9 +406,9 @@
   </div>
 
   {#if !collapsed}
-  <div class="sidebar-content">
+  <div class="sidebar-content lattice-scroll-chrome">
     <section class="section">
-      <button class="section-header" onclick={() => layout.toggleSection('sessionsCollapsed')}>
+      <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.sessionsCollapsed} onclick={() => layout.toggleSection('sessionsCollapsed')}>
         <span class="chevron" class:collapsed={$layout.sessionsCollapsed}>
           {#if $layout.sessionsCollapsed}
             <CaretRight size={12} weight="light" />
@@ -415,7 +416,7 @@
             <CaretDown size={12} weight="light" />
           {/if}
         </span>
-        <h3>Active</h3>
+        <h3 class="section-title">Active</h3>
       </button>
       {#if !$layout.sessionsCollapsed}
         {#if $sessions.sessions.filter(s => isActiveState(s.state)).length === 0}
@@ -423,15 +424,17 @@
         {:else}
           <ul class="session-list">
             {#each $sessions.sessions.filter(s => isActiveState(s.state)) as session}
-              <li class="session-item" class:active={$activeSession?.id === session.id} style:--session-color={session.color || 'transparent'}>
+              <li class="session-item" style:--session-color={session.color || 'transparent'}>
                 <div class="session-row">
                   <div
-                    class="session-button"
+                    class="session-button lattice-btn lattice-btn--row"
                     role="button"
                     tabindex="0"
+                    aria-current={$activeSession?.id === session.id ? 'true' : undefined}
                     onclick={() => selectSession(session.id)}
                     onkeydown={(event) => handleSessionButtonKeydown(event, session.id)}
                   >
+                    <div class="session-copy">
                     {#if editingSessionId === session.id}
                       <div
                         class="edit-container"
@@ -440,6 +443,7 @@
                         onkeydown={e => e.stopPropagation()}
                       >
                         <input
+                          class="session-name-input lattice-input"
                           type="text"
                           bind:value={editName}
                           onkeydown={handleKeydown}
@@ -449,20 +453,20 @@
                         />
                         <div class="edit-actions">
                           <button
-                            class="color-toggle"
+                            class="color-toggle lattice-btn lattice-btn--ghost lattice-btn--icon"
                             onclick={() => showColorPicker = !showColorPicker}
                             title="Choose Color"
-                            style:background={editColor || 'var(--bg-void)'}
+                            style="width: 18px; height: 18px; flex-basis: 18px; border-radius: 50%; background: {editColor || 'var(--bg-void)'};"
                             type="button"
                           >
                           </button>
                           {#if showColorPicker}
-                            <div class="color-picker">
+                            <div class="color-picker lattice-panel">
                               {#each COLORS as color}
                                 <button
-                                  class="color-option"
-                                  style:background={color.value}
-                                  class:selected={editColor === color.value}
+                                  class="color-option lattice-btn lattice-btn--ghost lattice-btn--icon"
+                                  style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; border: 1px solid color-mix(in srgb, var(--bg-void) 20%, transparent); background: {color.value};"
+                                  aria-pressed={editColor === color.value}
                                   onclick={() => { editColor = color.value; showColorPicker = false; }}
                                   title={color.name}
                                   type="button"
@@ -470,24 +474,26 @@
                                 </button>
                               {/each}
                               <button
-                                class="color-option clear"
+                                class="color-option clear lattice-btn lattice-btn--ghost lattice-btn--icon"
+                                aria-pressed={editColor === null}
+                                style="width: 16px; height: 16px; flex-basis: 16px; border-radius: 50%; padding: 0; font-size: 12px; color: var(--text-secondary); background: var(--bg-void);"
                                 onclick={() => { editColor = null; showColorPicker = false; }}
                                 title="Clear Color"
                                 type="button"
                               >×</button>
                             </div>
                           {/if}
-                          <button class="save-btn" onclick={saveMetadata} title="Save" aria-label="Save session metadata" type="button">
+                          <button class="lattice-btn lattice-btn--primary lattice-btn--icon" onclick={saveMetadata} title="Save" aria-label="Save session metadata" type="button">
                             <Check size={14} weight="light" />
                           </button>
-                          <button class="cancel-btn-inline" onclick={cancelEdit} title="Cancel" aria-label="Cancel edit" type="button">×</button>
+                          <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={cancelEdit} title="Cancel" aria-label="Cancel edit" type="button">×</button>
                         </div>
                       </div>
                     {:else}
                       <span class="session-path">
                         {session.name || session.project_path.split(/[/\\]/).pop()}
                         <button
-                          class="edit-btn"
+                          class="lattice-btn lattice-btn--ghost lattice-btn--icon"
                           onclick={(e) => { e.stopPropagation(); startEdit(session); }}
                           title="Rename Session"
                           aria-label="Rename session"
@@ -503,9 +509,11 @@
                         {formatTimestamp(session.last_activity_at ?? session.created_at)}
                       </span>
                     {/if}
+                    </div>
                   </div>
                   <button
-                    class="close-session-button"
+                    class="close-session-button lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon"
+                    class:lattice-btn--waiting={closingSessionId === session.id}
                     onclick={(e) => handleCloseSession(e, session.id)}
                     title="Close Session"
                     aria-label="Close Session"
@@ -523,7 +531,7 @@
     </section>
 
     <section class="section">
-      <button class="section-header" onclick={() => layout.toggleSection('recentCollapsed')}>
+      <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.recentCollapsed} onclick={() => layout.toggleSection('recentCollapsed')}>
         <span class="chevron" class:collapsed={$layout.recentCollapsed}>
           {#if $layout.recentCollapsed}
             <CaretRight size={12} weight="light" />
@@ -531,39 +539,54 @@
             <CaretDown size={12} weight="light" />
           {/if}
         </span>
-        <h3>Recent</h3>
+        <h3 class="section-title">Recent</h3>
       </button>
       {#if !$layout.recentCollapsed}
-        {#if loadingPersisted}
-          <p class="empty-state">Loading...</p>
-        {:else if persistedSessions.length === 0}
-          <p class="empty-state">No recent sessions</p>
-        {:else}
-          <ul class="session-list">
-            {#each persistedSessions.slice(0, 5) as session}
-              <li class="session-item recent">
-                <div class="session-info">
-                  <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
-                  <span class="session-meta">
-                    {#if session.session_type.startsWith('Solo') || (session.session_type === 'Hive (1)' && session.agent_count === 1)}
-                      <span class="type-tag solo">Solo</span>
-                    {/if}
-                    {formatTimestamp(session.last_activity_at ?? session.created_at)}
-                  </span>
+        <Skeleton loading={loadingPersisted}>
+          {#snippet skeleton()}
+            <div class="recent-session-skeleton">
+              {#each [0, 1, 2] as row (row)}
+                <div class="recent-session-skeleton-row">
+                  <div class="recent-session-skeleton-copy">
+                    <SkelBar width={row === 1 ? '68%' : '82%'} height="var(--space-3)" />
+                    <SkelBar width={row === 2 ? '42%' : '54%'} height="var(--space-2)" />
+                  </div>
+                  <SkelBar width="var(--space-6)" height="var(--space-6)" radius="md" />
                 </div>
-                <button class="load-button" onclick={() => handleResumeSession(session)} title="Load Session" aria-label="Load session" type="button">
-                  <CaretRight size={14} weight="light" />
-                </button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
+              {/each}
+            </div>
+          {/snippet}
+          {#snippet children()}
+            {#if persistedSessions.length === 0}
+              <p class="empty-state">No recent sessions</p>
+            {:else}
+              <ul class="session-list">
+                {#each persistedSessions.slice(0, 5) as session}
+                  <li class="session-item recent">
+                    <div class="session-info">
+                      <span class="session-path">{session.project_path.split(/[/\\]/).pop()}</span>
+                      <span class="session-meta">
+                        {#if session.session_type.startsWith('Solo') || (session.session_type === 'Hive (1)' && session.agent_count === 1)}
+                          <span class="type-tag solo">Solo</span>
+                        {/if}
+                        {formatTimestamp(session.last_activity_at ?? session.created_at)}
+                      </span>
+                    </div>
+                    <button class="lattice-btn lattice-btn--secondary lattice-btn--icon" onclick={() => handleResumeSession(session)} title="Load Session" aria-label="Load session" type="button">
+                      <CaretRight size={14} weight="light" />
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          {/snippet}
+        </Skeleton>
       {/if}
     </section>
 
     {#if $activeSession}
       <section class="section">
-        <button class="section-header" onclick={() => layout.toggleSection('agentsCollapsed')}>
+        <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.agentsCollapsed} onclick={() => layout.toggleSection('agentsCollapsed')}>
           <span class="chevron" class:collapsed={$layout.agentsCollapsed}>
             {#if $layout.agentsCollapsed}
               <CaretRight size={12} weight="light" />
@@ -571,7 +594,7 @@
               <CaretDown size={12} weight="light" />
             {/if}
           </span>
-          <h3>Agents ({$activeAgents.length})</h3>
+          <h3 class="section-title">Agents ({$activeAgents.length})</h3>
         </button>
         {#if !$layout.agentsCollapsed}
           <AgentTree
@@ -589,7 +612,7 @@
   {/if}
 
   <div class="sidebar-footer">
-    <button class="launch-button" onclick={() => { launchError = ''; showLaunchDialog = true; }} title="New Session">
+    <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled lattice-btn--row" onclick={() => { launchError = ''; showLaunchDialog = true; }} title="New Session">
       <span class="icon">+</span>
       {#if !collapsed}
         New Session
@@ -638,7 +661,7 @@
     role="presentation"
   >
     <div
-      class="confirm-dialog"
+      class="confirm-dialog lattice-modal"
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') dismissCloseConfirm(); }}
       role="dialog"
@@ -648,8 +671,8 @@
       <h3>Close Session?</h3>
       <p>This will terminate all agents and mark the session as closed. This action cannot be undone.</p>
       <div class="confirm-actions">
-        <button class="cancel-btn" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
-        <button class="confirm-btn" onclick={confirmCloseSession} disabled={closing}>
+        <button type="button" class="lattice-btn lattice-btn--secondary" onclick={dismissCloseConfirm} disabled={closing}>Cancel</button>
+        <button type="button" class="lattice-btn lattice-btn--danger lattice-btn--filled" onclick={confirmCloseSession} disabled={closing}>
           {closing ? 'Closing...' : 'Close Session'}
         </button>
       </div>
@@ -663,9 +686,6 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg-surface);
-    border-right: 1px solid var(--border-structural);
-    transition: width 0.2s ease, min-width 0.2s ease;
   }
 
   .sidebar.resizing {
@@ -703,48 +723,6 @@
     flex: none;
   }
 
-  .view-link {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-sm, 2px);
-    color: var(--text-muted);
-    text-decoration: none;
-    border: 1px solid transparent;
-    transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
-  }
-
-  .view-link:hover {
-    color: var(--accent-cyan);
-  }
-
-  .view-link.active {
-    color: var(--accent-cyan);
-    background: var(--bg-elevated);
-    border-color: var(--border-structural);
-  }
-
-  .collapse-chevron {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: var(--radius-sm, 2px);
-    flex-shrink: 0;
-  }
-
-  .collapse-chevron:hover {
-    background: var(--bg-elevated);
-    color: var(--accent-cyan);
-  }
-
   .sidebar-content {
     flex: 1;
     overflow-y: auto;
@@ -756,28 +734,11 @@
     margin-bottom: 16px;
   }
 
-  .section-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 4px 0;
-    margin-bottom: 8px;
-    background: none;
-    border: none;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .section-header:hover h3 {
-    color: var(--text-primary);
-  }
-
-  .section-header h3 {
+  .section-title {
     margin: 0;
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: inherit;
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
@@ -785,7 +746,7 @@
   .chevron {
     font-size: 8px;
     color: var(--text-secondary);
-    transition: transform 0.2s ease;
+    transition: transform var(--motion-duration-standard) var(--motion-ease-standard);
   }
 
   .empty-state {
@@ -793,6 +754,27 @@
     color: var(--text-secondary);
     padding: 8px 4px;
     margin: 0;
+  }
+
+  .recent-session-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .recent-session-skeleton-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 40px;
+    padding: var(--space-2);
+  }
+
+  .recent-session-skeleton-copy {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--space-1);
   }
 
   .session-list {
@@ -804,59 +786,15 @@
   .session-item {
     margin-bottom: 4px;
     border-left: 3px solid var(--session-color);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
   }
 
-  .session-item.active .session-button {
-    background: var(--bg-elevated);
-    border-color: var(--accent-cyan);
-  }
-
-  .session-button {
-    width: 100%;
+  .session-copy {
     display: flex;
+    width: 100%;
+    min-width: 0;
     flex-direction: column;
     align-items: flex-start;
-    padding: 8px 10px;
-    border: 1px solid transparent;
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-    background: transparent;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .edit-btn {
-    opacity: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-secondary);
-    padding: 2px 4px;
-    margin-left: 4px;
-    transition: all 0.15s ease;
-  }
-
-  .session-path:hover .edit-btn {
-    opacity: 1;
-  }
-
-  .session-path:focus-within .edit-btn,
-  .edit-btn:focus-visible {
-    opacity: 1;
-  }
-
-  .edit-btn:hover {
-    color: var(--accent-cyan);
-    background: var(--bg-void);
-    border-radius: var(--radius-sm);
-  }
-
-  .edit-btn:focus-visible {
-    outline: 2px solid var(--accent-cyan);
-    outline-offset: 2px;
   }
 
   .edit-container {
@@ -866,14 +804,8 @@
     gap: 8px;
   }
 
-  .edit-container input {
+  .session-name-input {
     width: 100%;
-    background: var(--bg-void);
-    border: 1px solid var(--accent-cyan);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    padding: 4px 8px;
-    font-size: 13px;
   }
 
   .edit-actions {
@@ -883,21 +815,10 @@
     position: relative;
   }
 
-  .color-toggle {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    border: 1px solid var(--border-structural);
-    cursor: pointer;
-  }
-
   .color-picker {
     position: absolute;
     top: 24px;
     left: 0;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     padding: 6px;
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -906,91 +827,10 @@
     box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-void) 30%, transparent);
   }
 
-  .color-option {
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    border: 1px solid color-mix(in srgb, var(--bg-void) 20%, transparent);
-    cursor: pointer;
-    padding: 0;
-  }
-
-  .color-option.selected {
-    border: 2px solid var(--text-primary);
-  }
-
-  .color-option.clear {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    color: var(--text-secondary);
-    background: var(--bg-void);
-  }
-
-  .save-btn, .cancel-btn-inline {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 14px;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-  }
-
-  .save-btn {
-    color: var(--status-success);
-  }
-
-  .save-btn:hover {
-    background: color-mix(in srgb, var(--status-success) 10%, transparent);
-  }
-
-  .cancel-btn-inline {
-    color: var(--status-error);
-  }
-
-  .cancel-btn-inline:hover {
-    background: color-mix(in srgb, var(--status-error) 10%, transparent);
-  }
-
-  .session-button:hover {
-    background: var(--bg-elevated);
-  }
-
   .session-row {
     display: flex;
     align-items: stretch;
     gap: 6px;
-  }
-
-  .session-row .session-button {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .close-session-button {
-    width: 28px;
-    min-width: 28px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .close-session-button:hover:not(:disabled) {
-    background: var(--bg-elevated);
-    border-color: var(--border-structural);
-    color: var(--text-primary);
-  }
-
-  .close-session-button:disabled {
-    cursor: wait;
-    opacity: 0.7;
   }
 
   .session-path {
@@ -1035,34 +875,7 @@
     border-top: 1px solid var(--border-structural);
   }
 
-  .launch-button {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 10px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: var(--accent-cyan);
-    color: var(--bg-void);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    white-space: nowrap;
-    overflow: hidden;
-  }
-
-  .sidebar.collapsed .launch-button {
-    padding: 10px 8px;
-  }
-
-  .launch-button:hover {
-    background: var(--accent-cyan);
-  }
-
-  .launch-button .icon {
+  .sidebar-footer .icon {
     font-size: 16px;
     font-weight: 400;
     flex-shrink: 0;
@@ -1074,11 +887,12 @@
     gap: 8px;
     padding: 8px 10px;
     border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    transition: all 0.15s ease;
+    border-radius: var(--radius-md);
+    transition: background-color var(--motion-duration-fast) var(--motion-ease-standard);
   }
 
   .session-item.recent:hover {
+    /* Recent-session hover is a row state, not a structural panel. */
     background: var(--bg-elevated);
   }
 
@@ -1089,28 +903,10 @@
     align-items: flex-start;
   }
 
-  .load-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px 8px;
-    border: 1px solid var(--accent-cyan);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--accent-cyan);
-    cursor: pointer;
-    transition: all 0.15s ease;
-    flex-shrink: 0;
-  }
-
-  .load-button:hover {
-    background: var(--accent-cyan);
-    color: var(--bg-void);
-  }
-
   .confirm-overlay {
     position: fixed;
     inset: 0;
+    /* Standalone modal scrim preserved per the Wave 3 scrim invariant. */
     background: color-mix(in srgb, var(--bg-void) 60%, transparent);
     display: flex;
     align-items: center;
@@ -1119,9 +915,6 @@
   }
 
   .confirm-dialog {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     padding: 20px;
     width: 220px;
   }
@@ -1146,38 +939,4 @@
     justify-content: flex-end;
   }
 
-  .cancel-btn,
-  .confirm-btn {
-    padding: 8px 16px;
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .cancel-btn {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-  }
-
-  .cancel-btn:hover:not(:disabled) {
-    background: var(--border-structural);
-  }
-
-  .confirm-btn {
-    background: var(--status-error);
-    color: var(--bg-void);
-  }
-
-  .confirm-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
-  }
-
-  .cancel-btn:disabled,
-  .confirm-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
 </style>

@@ -20,7 +20,7 @@
     {#if canAddPrincipal}
       <button
         type="button"
-        class="add-worker-btn"
+        class="lattice-btn lattice-btn--primary lattice-btn--compact"
         on:click={() => dispatch('openAddWorker')}
         title="Add managed principal"
       >
@@ -44,7 +44,7 @@
   .queen-controls {
     padding: 12px;
     background: var(--bg-void);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
   }
 
   .controls-header {
@@ -59,21 +59,6 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
-  }
-
-  .add-worker-btn {
-    padding: 4px 10px;
-    font-size: 11px;
-    background: var(--accent-cyan);
-    border: none;
-    border-radius: var(--radius-sm);
-    color: white;
-    cursor: pointer;
-    font-weight: 500;
-  }
-
-  .add-worker-btn:hover {
-    opacity: 0.9;
   }
 
   .no-session {

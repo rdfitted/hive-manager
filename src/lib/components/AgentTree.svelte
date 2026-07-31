@@ -28,7 +28,7 @@
   $: rootAgents = childrenMap.get(null) || [];
 </script>
 
-<div class="agent-tree" role="tree" aria-label="Agent hierarchy">
+<div class="agent-tree lattice-scroll-chrome" role="tree" aria-label="Agent hierarchy">
   {#if rootAgents.length === 0}
     <p class="empty">No agents</p>
   {:else}
