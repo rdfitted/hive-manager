@@ -1,1 +1,119 @@
-/* skeleton.css — owned by WS-4. Placeholder created by WS-1; do not add rules here. */
+/* Skeleton primitives: content-shaped placeholders with a quiet Lattice pulse. */
+
+.lattice-skeleton {
+  --lattice-skeleton-pulse-opacity: 0.5;
+
+  position: relative;
+  min-width: 0;
+}
+
+.lattice-skeleton[data-layout='flow'] {
+  display: grid;
+}
+
+.lattice-skeleton[data-layout='inline'] {
+  display: inline-grid;
+}
+
+.lattice-skeleton[data-layout='flow'] > .lattice-skeleton-placeholder,
+.lattice-skeleton[data-layout='flow'] > .lattice-skeleton-content,
+.lattice-skeleton[data-layout='inline'] > .lattice-skeleton-placeholder,
+.lattice-skeleton[data-layout='inline'] > .lattice-skeleton-content {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.lattice-skeleton-placeholder,
+.lattice-skeleton-content {
+  transition:
+    opacity var(--motion-duration-standard) var(--motion-ease-standard),
+    filter var(--motion-duration-standard) var(--motion-ease-standard);
+}
+
+.lattice-skeleton-placeholder {
+  opacity: 1;
+  filter: blur(0);
+  pointer-events: none;
+}
+
+.lattice-skeleton-content {
+  opacity: 0;
+  filter: blur(var(--motion-blur-arrival));
+  pointer-events: none;
+}
+
+.lattice-skeleton.is-revealed > .lattice-skeleton-placeholder {
+  opacity: 0;
+  filter: blur(var(--motion-blur-arrival));
+  pointer-events: none;
+}
+
+.lattice-skeleton.is-revealed > .lattice-skeleton-content {
+  opacity: 1;
+  filter: blur(0);
+  pointer-events: auto;
+}
+
+.lattice-skeleton.is-resetting > .lattice-skeleton-placeholder,
+.lattice-skeleton.is-resetting > .lattice-skeleton-content {
+  transition: none;
+}
+
+.lattice-skel-bar {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  background: var(--bg-elevated);
+}
+
+.lattice-skel-bar[data-radius='none'] {
+  border-radius: var(--radius-none);
+}
+
+.lattice-skel-bar[data-radius='sm'] {
+  border-radius: var(--radius-sm);
+}
+
+.lattice-skel-bar[data-radius='md'] {
+  border-radius: var(--radius-md);
+}
+
+.lattice-skel-bar[data-radius='lg'] {
+  border-radius: var(--radius-lg);
+}
+
+.lattice-skel-bar[data-radius='full'] {
+  border-radius: var(--radius-full);
+}
+
+/*
+ * WebView2 150 supports :has() (Chromium 105+). If the app ever supports an
+ * enterprise-frozen runtime below 105, emit `.has-bars` on the placeholder and
+ * mirror this guard with `.lattice-skeleton-placeholder:not(.has-bars)`.
+ */
+.lattice-skeleton:not(.is-revealed)
+  > .lattice-skeleton-placeholder:not(:has(.lattice-skel-bar)),
+.lattice-skeleton:not(.is-revealed) .lattice-skel-bar {
+  animation: lattice-skeleton-pulse var(--motion-duration-pulse) var(--motion-ease-standard)
+    infinite alternate;
+}
+
+/* Opacity only: no sweeping gradient, translating pseudo-element, or shimmer. */
+@keyframes lattice-skeleton-pulse {
+  to {
+    opacity: var(--lattice-skeleton-pulse-opacity);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lattice-skeleton-placeholder,
+  .lattice-skeleton-content {
+    filter: none;
+    transition: none;
+  }
+
+  .lattice-skeleton-placeholder,
+  .lattice-skel-bar {
+    animation: none;
+  }
+}
