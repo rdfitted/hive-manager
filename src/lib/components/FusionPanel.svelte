@@ -55,13 +55,13 @@
   }
 </script>
 
-<div class="fusion-panel">
+<div class="fusion-panel lattice-scroll-content">
   <div class="panel-controls">
     <div class="view-tabs">
-      <button class="tab-button" class:active={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
+      <button class="lattice-tab" class:lattice-tab--active={viewMode === 'terminals'} aria-pressed={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
         <Keyboard size={20} weight="light" /> Terminals
       </button>
-      <button class="tab-button" class:active={viewMode === 'comparison'} onclick={() => viewMode = 'comparison'}>
+      <button class="lattice-tab" class:lattice-tab--active={viewMode === 'comparison'} aria-pressed={viewMode === 'comparison'} onclick={() => viewMode = 'comparison'}>
         <ChartBar size={20} weight="light" /> Comparison
       </button>
     </div>
@@ -69,7 +69,7 @@
 
   {#if viewMode === 'terminals'}
     {#if queenAgent}
-      <div class="orchestrator-section">
+      <div class="orchestrator-section lattice-panel">
         <div class="orchestrator-header">
           <Crown size={24} weight="light" />
           <h3>Fusion Queen</h3>
@@ -85,10 +85,10 @@
       {#each fusionAgents as agent (agent.id)}
         {@const variantName = typeof agent.role === 'object' && 'Fusion' in agent.role ? agent.role.Fusion.variant : ''}
         {@const status = getVariantStatus(variantName)}
-        <div class="variant-card">
+        <div class="variant-card lattice-panel">
           <div class="variant-header">
             <span class="variant-name">{variantName}</span>
-            <span class="status-badge" class:running={status === 'Running'} class:completed={status === 'Completed'} class:failed={status === 'Failed'}>
+            <span class="status-badge" class:status-running={status === 'Running'} class:status-success={status === 'Completed'} class:status-error={status === 'Failed'}>
               {status}
             </span>
           </div>
@@ -98,7 +98,7 @@
           {#if evaluationReady}
             <div class="variant-actions">
               <button 
-                class="apply-button" 
+                class="lattice-btn lattice-btn--primary"
                 onclick={() => handleApplyWinner(variantName)}
                 disabled={applyingWinner !== null}
               >
@@ -111,7 +111,7 @@
     </div>
 
     {#if judgeAgent}
-      <div class="orchestrator-section">
+      <div class="orchestrator-section lattice-panel">
         <div class="orchestrator-header">
           <Scales size={24} weight="light" />
           <h3>Judge</h3>
@@ -131,7 +131,7 @@
   {/if}
 
   {#if isResolvingOrCompleted}
-    <div class="resolver-section">
+    <div class="resolver-section lattice-panel lattice-panel--active">
       <div class="section-header">
         <MagnifyingGlass size={24} weight="light" />
         <h3>Resolver Analysis</h3>
@@ -143,12 +143,12 @@
   {/if}
 
   {#if evaluationReady && judgeReport}
-    <div class="judge-section">
+    <div class="judge-section lattice-panel">
       <div class="section-header">
         <Scales size={24} weight="light" />
         <h3>Judge Evaluation Report</h3>
       </div>
-      <div class="report-content">
+      <div class="report-content lattice-scroll-content">
         <pre>{judgeReport}</pre>
       </div>
     </div>
@@ -160,12 +160,12 @@
 
   {#if showCleanupConfirm}
     <div class="modal-overlay">
-      <div class="modal">
+      <div class="modal lattice-modal">
         <h3>Winner Applied</h3>
         <p>The changes from the selected variant have been applied to the project. Would you like to close this session now?</p>
         <div class="modal-actions">
-          <button class="secondary" onclick={() => showCleanupConfirm = false}>Keep Open</button>
-          <button class="primary" onclick={handleCleanup}>Close Session</button>
+          <button class="lattice-btn lattice-btn--secondary" onclick={() => showCleanupConfirm = false}>Keep Open</button>
+          <button class="lattice-btn lattice-btn--primary" onclick={handleCleanup}>Close Session</button>
         </div>
       </div>
     </div>
@@ -192,35 +192,9 @@
     display: flex;
     background: var(--bg-void);
     padding: 4px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-structural);
     gap: 4px;
-  }
-
-  .tab-button {
-    padding: 6px 16px;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    border: none;
-    background: transparent;
-    color: var(--text-secondary);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    transition: all 0.2s;
-  }
-
-  .tab-button:hover {
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--text-primary) 5%, transparent);
-  }
-
-  .tab-button.active {
-    background: var(--bg-surface);
-    color: var(--accent-cyan);
-    box-shadow: 0 2px 4px color-mix(in srgb, var(--bg-void) 20%, transparent);
   }
 
   .comparison-container {
@@ -229,17 +203,10 @@
   }
 
   .resolver-section {
-    background: var(--bg-surface);
-    border: 1px solid var(--accent-cyan);
-    border-radius: var(--radius-sm);
     overflow: hidden;
-    box-shadow: 0 4px 20px color-mix(in srgb, var(--bg-void) 30%, transparent);
   }
 
   .orchestrator-section {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -287,9 +254,6 @@
   .variant-card {
     display: flex;
     flex-direction: column;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -308,28 +272,6 @@
     color: var(--text-primary);
   }
 
-  .status-badge {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-  }
-
-  .status-badge.running {
-    background: var(--accent-cyan);
-    color: var(--bg-void);
-  }
-
-  .status-badge.completed {
-    background: color-mix(in srgb, var(--status-success) 15%, transparent);
-    color: var(--status-success);
-  }
-
-  .status-badge.failed {
-    background: color-mix(in srgb, var(--status-error) 15%, transparent);
-    color: var(--status-error);
-  }
-
   .terminal-container {
     flex: 1;
     min-height: 250px;
@@ -344,31 +286,7 @@
     justify-content: center;
   }
 
-  .apply-button {
-    padding: 8px 16px;
-    background: var(--status-success);
-    color: var(--bg-void);
-    border: none;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: filter 0.15s;
-  }
-
-  .apply-button:hover:not(:disabled) {
-    filter: brightness(1.1);
-  }
-
-  .apply-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   .judge-section {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -404,6 +322,7 @@
 
   .error-banner {
     padding: 12px;
+    /* Full-width semantic error banner intentionally remains state-tinted. */
     background: color-mix(in srgb, var(--status-error) 15%, transparent);
     color: var(--status-error);
     border: 1px solid var(--status-error);
@@ -422,9 +341,6 @@
   }
 
   .modal {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
     padding: 24px;
     max-width: 400px;
     text-align: center;
@@ -447,21 +363,4 @@
     gap: 12px;
   }
 
-  .modal-actions button {
-    padding: 8px 16px;
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    cursor: pointer;
-    border: none;
-  }
-
-  .modal-actions button.primary {
-    background: var(--accent-cyan);
-    color: var(--bg-void);
-  }
-
-  .modal-actions button.secondary {
-    background: var(--border-structural);
-    color: var(--text-primary);
-  }
 </style>

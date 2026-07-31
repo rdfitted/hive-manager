@@ -1,6 +1,8 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { artifacts } from '../../stores/artifacts';
+    import Skeleton from '../Skeleton.svelte';
+    import SkelBar from '../SkelBar.svelte';
 
     export let sessionId: string;
 
@@ -15,61 +17,67 @@
     });
 </script>
 
-<div class="resolver-panel">
-    {#if output}
-        <div class="output-card">
-            <div class="card-header">
-                <span class="label">Resolver Decision</span>
-                <div class="selected-badge">
-                    Selected: <span class="candidate-name">{output.selected_candidate}</span>
-                </div>
-            </div>
+{#snippet resolverSkeleton()}
+    <div class="resolver-skeleton">
+        <SkelBar width="42%" height="0.8rem" />
+        <SkelBar width="100%" height="0.7rem" />
+        <SkelBar width="88%" height="0.7rem" />
+        <SkelBar width="100%" height="3.25rem" radius="md" />
+    </div>
+{/snippet}
 
-            <div class="section">
-                <h4>Rationale</h4>
-                <p class="rationale">{output.rationale}</p>
-            </div>
-
-            {#if output.tradeoffs && output.tradeoffs.length > 0}
-                <div class="section">
-                    <h4>Trade-offs</h4>
-                    <ul class="tradeoffs">
-                        {#each output.tradeoffs as tradeoff}
-                            <li>{tradeoff}</li>
-                        {/each}
-                    </ul>
-                </div>
-            {/if}
-
-            {#if output.hybrid_integration_plan}
-                <div class="section hybrid">
-                    <h4>Hybrid Integration Plan</h4>
-                    <div class="plan-content">
-                        {output.hybrid_integration_plan}
+<div class="resolver-panel lattice-scroll-content">
+    <Skeleton loading={loading} skeleton={resolverSkeleton} class="resolver-loading">
+        {#if output}
+            <div class="output-card lattice-panel">
+                <div class="card-header">
+                    <span class="label">Resolver Decision</span>
+                    <div class="selected-badge">
+                        Selected: <span class="candidate-name status-badge status-success">{output.selected_candidate}</span>
                     </div>
                 </div>
-            {/if}
 
-            {#if output.final_recommendation}
-                <div class="recommendation">
-                    <div class="rec-label">Final Recommendation</div>
-                    <div class="rec-text">{output.final_recommendation}</div>
+                <div class="section">
+                    <h4>Rationale</h4>
+                    <p class="rationale">{output.rationale}</p>
                 </div>
-            {/if}
-        </div>
-    {:else if loading}
-        <div class="empty-state">
-            <div class="spinner"></div>
-            <span>Waiting for resolver output...</span>
-        </div>
-    {:else if error}
-        <div class="error-state" role="alert">{error}</div>
-    {:else}
-        <div class="empty-state">
-            <div class="icon" aria-hidden="true">Resolver</div>
-            <span>Resolver has not run yet. Once all candidates complete, the Resolver will analyze and recommend the best variant.</span>
-        </div>
-    {/if}
+
+                {#if output.tradeoffs && output.tradeoffs.length > 0}
+                    <div class="section">
+                        <h4>Trade-offs</h4>
+                        <ul class="tradeoffs">
+                            {#each output.tradeoffs as tradeoff}
+                                <li>{tradeoff}</li>
+                            {/each}
+                        </ul>
+                    </div>
+                {/if}
+
+                {#if output.hybrid_integration_plan}
+                    <div class="section hybrid lattice-panel">
+                        <h4>Hybrid Integration Plan</h4>
+                        <div class="plan-content">
+                            {output.hybrid_integration_plan}
+                        </div>
+                    </div>
+                {/if}
+
+                {#if output.final_recommendation}
+                    <div class="recommendation">
+                        <div class="rec-label">Final Recommendation</div>
+                        <div class="rec-text">{output.final_recommendation}</div>
+                    </div>
+                {/if}
+            </div>
+        {:else if error}
+            <div class="error-state" role="alert">{error}</div>
+        {:else}
+            <div class="empty-state">
+                <div class="icon" aria-hidden="true">Resolver</div>
+                <span>Resolver has not run yet. Once all candidates complete, the Resolver will analyze and recommend the best variant.</span>
+            </div>
+        {/if}
+    </Skeleton>
 </div>
 
 <style>
@@ -80,13 +88,17 @@
     }
 
     .output-card {
-        background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-surface));
-        border: 1px solid color-mix(in srgb, var(--accent-cyan) 20%, transparent);
-        border-radius: var(--radius-sm);
         padding: 20px;
         display: flex;
         flex-direction: column;
         gap: 20px;
+    }
+
+    .resolver-skeleton {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 20px;
     }
 
     .card-header {
@@ -111,11 +123,6 @@
     }
 
     .candidate-name {
-        font-weight: 700;
-        color: var(--text-primary);
-        background: color-mix(in srgb, var(--status-success) 20%, transparent);
-        padding: 2px 8px;
-        border-radius: var(--radius-sm);
         margin-left: 4px;
     }
 
@@ -145,9 +152,8 @@
     }
 
     .hybrid {
-        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+        background: var(--bg-sunken);
         padding: 12px;
-        border-radius: var(--radius-sm);
         border-left: 3px solid var(--status-warning);
     }
 
@@ -160,6 +166,7 @@
 
     .recommendation {
         margin-top: 12px;
+        /* Semantic recommendation treatment intentionally remains accent-filled. */
         background: var(--accent-cyan);
         color: var(--bg-void);
         padding: 16px;
@@ -198,6 +205,7 @@
         max-width: 480px;
         padding: 14px 16px;
         border-radius: var(--radius-sm);
+        /* Semantic error treatment intentionally remains state-tinted. */
         background: color-mix(in srgb, var(--status-error) 12%, transparent);
         border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
         color: var(--status-error);
@@ -212,16 +220,4 @@
         opacity: 0.3;
     }
 
-    .spinner {
-        width: 32px;
-        height: 32px;
-        border: 2px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-        border-top-color: var(--accent-cyan);
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
-
-    @keyframes spin {
-        to { transform: rotate(360deg); }
-    }
 </style>

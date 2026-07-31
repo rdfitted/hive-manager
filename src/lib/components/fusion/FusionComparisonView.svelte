@@ -1,6 +1,8 @@
 <script lang="ts">
     import { cells } from '../../stores/cells';
     import ArtifactSummary from '../artifacts/ArtifactSummary.svelte';
+    import Skeleton from '../Skeleton.svelte';
+    import SkelBar from '../SkelBar.svelte';
     import { Hourglass, Wrench, Rocket, Lightning, NotePencil, CheckCircle, Question, XCircle, Skull } from 'phosphor-svelte';
     export let sessionId: string;
 
@@ -18,15 +20,33 @@
         'failed': XCircle,
         'killed': Skull
     };
+
+    function getStatusClass(status: string): string {
+        if (status === 'completed') return 'status-success';
+        if (status === 'failed') return 'status-error';
+        if (status === 'waiting_input') return 'status-warning';
+        if (status === 'killed') return 'status-canceled';
+        if (status === 'queued') return 'status-queued';
+        return 'status-running';
+    }
 </script>
 
-<div class="fusion-comparison-view">
+{#snippet artifactSkeleton()}
+    <div class="artifact-skeleton">
+        <SkelBar width="38%" height="0.7rem" />
+        <SkelBar width="100%" height="0.65rem" />
+        <SkelBar width="82%" height="0.65rem" />
+        <SkelBar width="64%" height="0.65rem" />
+    </div>
+{/snippet}
+
+<div class="fusion-comparison-view lattice-panel lattice-scroll-content">
     <div class="grid" style="grid-template-columns: repeat({Math.max(1, candidates.length)}, 1fr);">
         {#each candidates as cell (cell.id)}
-            <div class="candidate-card" class:completed={cell.status === 'completed'} class:failed={cell.status === 'failed'}>
+            <div class="candidate-card lattice-panel" class:completed={cell.status === 'completed'} class:failed={cell.status === 'failed'}>
                 <div class="card-header">
                     <div class="status-row">
-                        <span class="status-badge" title={cell.status}>
+                        <span class="status-badge {getStatusClass(cell.status)}" title={cell.status}>
                             <svelte:component 
                                 this={statusIcons[cell.status] || Question} 
                                 size={12} 
@@ -45,18 +65,19 @@
                 </div>
 
                 <div class="card-content">
-                    {#if cell.artifacts}
-                        <ArtifactSummary artifact={cell.artifacts} />
-                    {:else if cell.status === 'running' || cell.status === 'summarizing'}
-                        <div class="loading-state">
-                            <div class="spinner"></div>
-                            <span>Collecting artifacts...</span>
-                        </div>
-                    {:else}
-                        <div class="empty-state">
-                            No artifacts available.
-                        </div>
-                    {/if}
+                    <Skeleton
+                        loading={!cell.artifacts && (cell.status === 'running' || cell.status === 'summarizing')}
+                        skeleton={artifactSkeleton}
+                        class="artifact-loading"
+                    >
+                        {#if cell.artifacts}
+                            <ArtifactSummary artifact={cell.artifacts} />
+                        {:else}
+                            <div class="empty-state">
+                                No artifacts available.
+                            </div>
+                        {/if}
+                    </Skeleton>
                 </div>
             </div>
         {/each}
@@ -69,7 +90,7 @@
         height: 100%;
         overflow-x: auto;
         padding: 16px;
-        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+        background: var(--bg-sunken);
     }
 
     .grid {
@@ -79,22 +100,23 @@
     }
 
     .candidate-card {
-        background: color-mix(in srgb, var(--text-primary) 3%, var(--bg-surface));
-        border: 1px solid color-mix(in srgb, var(--text-primary) 8%, transparent);
-        border-radius: var(--radius-sm);
         display: flex;
         flex-direction: column;
         min-width: 320px;
         max-width: 500px;
-        transition: all 0.2s ease;
+        transition:
+            background-color var(--motion-duration-standard) var(--motion-ease-standard),
+            border-color var(--motion-duration-standard) var(--motion-ease-standard);
     }
 
     .candidate-card.completed {
+        /* Candidate outcome tint is semantic state, layered over the structural panel. */
         border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
         background: color-mix(in srgb, var(--status-success) 4%, var(--bg-surface));
     }
 
     .candidate-card.failed {
+        /* Candidate outcome tint is semantic state, layered over the structural panel. */
         border-color: color-mix(in srgb, var(--status-error) 20%, transparent);
         background: color-mix(in srgb, var(--status-error) 4%, var(--bg-surface));
     }
@@ -111,17 +133,6 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-    }
-
-    .status-badge {
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        font-weight: 700;
-        color: var(--text-secondary);
-        background: color-mix(in srgb, var(--bg-void) 60%, var(--bg-surface));
-        padding: 2px 8px;
-        border-radius: var(--radius-sm);
     }
 
     .type-tag {
@@ -156,7 +167,14 @@
         gap: 16px;
     }
 
-    .loading-state, .empty-state {
+    .artifact-skeleton {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px 0;
+    }
+
+    .empty-state {
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -166,18 +184,5 @@
         font-size: 13px;
         text-align: center;
         gap: 12px;
-    }
-
-    .spinner {
-        width: 24px;
-        height: 24px;
-        border: 2px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-        border-top-color: var(--accent-cyan);
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
-
-    @keyframes spin {
-        to { transform: rotate(360deg); }
     }
 </style>
