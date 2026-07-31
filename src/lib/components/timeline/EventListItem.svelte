@@ -34,30 +34,30 @@
     }
 </script>
 
-<!-- svelte-ignore a11y-click-events-have-key-events -->
-<!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="event-item" on:click={() => dispatch('select', event)}>
-    <div class="severity-indicator" style="background-color: {getSeverityColor(event.severity)}"></div>
-    
-    <div class="event-time">{formatTime(event.timestamp)}</div>
-    
-    <div class="event-type" title={event.event_type}>
-        {getEventTypeLabel(event.event_type)}
-    </div>
+<button type="button" class="lattice-btn lattice-btn--row" on:click={() => dispatch('select', event)}>
+    <div class="event-item">
+        <div class="severity-indicator" style="background-color: {getSeverityColor(event.severity)}"></div>
+        
+        <div class="event-time">{formatTime(event.timestamp)}</div>
+        
+        <div class="event-type" title={event.event_type}>
+            {getEventTypeLabel(event.event_type)}
+        </div>
 
-    <div class="event-source">
-        {#if event.cell_id}
-            <span class="badge cell-badge">{event.cell_id.substring(0, 8)}</span>
-        {/if}
-        {#if event.agent_id}
-            <span class="badge agent-badge">{event.agent_id.substring(0, 8)}</span>
-        {/if}
-    </div>
+        <div class="event-source">
+            {#if event.cell_id}
+                <span class="badge cell-badge">{event.cell_id.substring(0, 8)}</span>
+            {/if}
+            {#if event.agent_id}
+                <span class="badge agent-badge">{event.agent_id.substring(0, 8)}</span>
+            {/if}
+        </div>
 
-    <div class="event-payload">
-        {getPayloadExcerpt(event.payload)}
+        <div class="event-payload">
+            {getPayloadExcerpt(event.payload)}
+        </div>
     </div>
-</div>
+</button>
 
 <style>
     .event-item {
@@ -65,23 +65,16 @@
         grid-template-columns: 4px 80px 140px 120px 1fr;
         gap: 12px;
         align-items: center;
-        padding: 8px 12px;
-        background: var(--color-surface);
+        width: 100%;
         border-bottom: 1px solid var(--color-border);
-        cursor: pointer;
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        transition: background 0.2s;
-    }
-
-    .event-item:hover {
-        background: var(--color-surface-hover);
     }
 
     .severity-indicator {
         height: 100%;
         width: 4px;
-        border-radius: 2px;
+        border-radius: var(--radius-sm);
     }
 
     .event-time {

@@ -41,7 +41,7 @@
         {#if confidence !== null}
             <div class="confidence-box" title="Confidence: {confidence}%" aria-label="Confidence {confidence}%">
                 <div class="confidence-bar">
-                    <div class="fill" style="width: {confidence}%" class:high={confidence >= 80} class:mid={confidence >= 50 && confidence < 80} class:low={confidence < 50}></div>
+                    <div class="fill" style:transform={`scaleX(${confidence / 100})`} class:high={confidence >= 80} class:mid={confidence >= 50 && confidence < 80} class:low={confidence < 50}></div>
                 </div>
                 <span class="confidence-text">{confidence}%</span>
             </div>
@@ -79,7 +79,7 @@
             {#if artifact.changed_files.length > 3}
                 <div class="more-files">+{artifact.changed_files.length - 3} more files...</div>
             {/if}
-            <button class="show-details-btn" on:click={() => showDetails = true}>Show detailed diff & tests</button>
+            <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact" on:click={() => showDetails = true}>Show detailed diff & tests</button>
         </div>
     {/if}
 </div>
@@ -90,9 +90,10 @@
         display: flex;
         flex-direction: column;
         gap: 12px;
-        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
+        /* Semantic inset summary: the mandated sunken tone is distinct from a structural panel. */
+        background: var(--bg-sunken);
         padding: 12px;
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-lg);
         border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
     }
 
@@ -154,8 +155,10 @@
     }
 
     .fill {
+        width: 100%;
         height: 100%;
-        transition: width 0.3s ease;
+        transform-origin: left center;
+        transition: transform var(--motion-duration-arrival) var(--motion-ease-arrival);
     }
 
     .fill.high { background: var(--status-success); }
@@ -225,19 +228,4 @@
         font-style: italic;
     }
 
-    .show-details-btn {
-        margin-top: 8px;
-        background: transparent;
-        border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
-        color: var(--text-secondary);
-        font-size: 10px;
-        padding: 4px 8px;
-        border-radius: var(--radius-sm);
-        cursor: pointer;
-    }
-
-    .show-details-btn:hover {
-        background: color-mix(in srgb, var(--text-primary) 5%, transparent);
-        color: var(--text-primary);
-    }
 </style>

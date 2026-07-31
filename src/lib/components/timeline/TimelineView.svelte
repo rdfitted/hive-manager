@@ -30,12 +30,12 @@
         <div class="header-item">Payload</div>
     </div>
 
-    <div class="event-list">
+    <div class="event-list lattice-scroll-content">
         {#if $filteredEvents.length === 0}
             <div class="empty-state">
                 <p>No events found matching filters.</p>
                 {#if $events.events.length === 0}
-                    <button class="fetch-btn" on:click={handleFetchHistory}>
+                    <button type="button" class="lattice-btn lattice-btn--primary" on:click={handleFetchHistory}>
                         Load Historical Events
                     </button>
                 {/if}
@@ -94,19 +94,7 @@
         text-align: center;
     }
 
-    .fetch-btn {
+    .empty-state :global(.lattice-btn) {
         margin-top: 12px;
-        padding: 8px 16px;
-        background: var(--color-accent);
-        color: var(--color-bg);
-        border: none;
-        border-radius: var(--radius-sm);
-        cursor: pointer;
-        font-weight: 600;
-        transition: opacity 0.2s;
-    }
-
-    .fetch-btn:hover {
-        opacity: 0.9;
     }
 </style>

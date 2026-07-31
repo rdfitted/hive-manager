@@ -6,7 +6,7 @@
     $: lines = diffSummary ? diffSummary.split('\n') : [];
 </script>
 
-<div class="diff-summary-panel">
+<div class="diff-summary-panel lattice-scroll-content">
     {#if diffSummary}
         <pre class="diff-summary-text">{diffSummary}</pre>
     {:else}
@@ -23,8 +23,9 @@
 
 <style>
     .diff-summary-panel {
-        background: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
-        border-radius: var(--radius-sm);
+        /* Semantic diff content: the mandated sunken tone is not a structural panel surface. */
+        background: var(--bg-sunken);
+        border-radius: var(--radius-lg);
         padding: 12px;
         border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
         overflow-x: auto;
