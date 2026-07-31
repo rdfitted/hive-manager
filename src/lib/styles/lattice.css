@@ -1,0 +1,12 @@
+@import './globals/base.css';
+@import './globals/typography.css';
+@import './globals/surfaces.css';
+@import './globals/controls.css';
+@import './globals/status.css';
+@import './globals/keyframes.css';
+@import './globals/motion.css';
+@import './globals/table.css';
+@import './globals/tooltip.css';
+@import './globals/scrollbars.css';
+@import './globals/skeleton.css';
+@import './globals/shell.css';

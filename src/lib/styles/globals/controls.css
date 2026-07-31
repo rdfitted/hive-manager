@@ -1,0 +1,103 @@
+/* ═══════════════════════════════════════════════════════════════════
+   BUTTONS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-btn {
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  background: transparent;
+}
+
+.lattice-btn--primary {
+  border: 1px solid var(--accent-cyan);
+  color: var(--accent-cyan);
+  background-color: rgba(var(--rgb-running), 0.1);
+}
+
+.lattice-btn--primary:hover {
+  background-color: rgba(var(--rgb-running), 0.2);
+  box-shadow: 0 0 8px rgba(var(--rgb-running), 0.3), inset 0 0 4px rgba(var(--rgb-running), 0.2);
+  text-shadow: 0 0 4px var(--accent-cyan);
+}
+
+.lattice-btn--secondary {
+  border: 1px solid var(--border-structural);
+  color: var(--text-primary);
+}
+
+.lattice-btn--secondary:hover {
+  border-color: var(--accent-chrome);
+}
+
+.lattice-btn--ghost {
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+}
+
+.lattice-btn--ghost:hover {
+  color: var(--text-primary);
+}
+
+.lattice-btn--danger {
+  border: 1px solid var(--status-error);
+  color: var(--status-error);
+}
+
+.lattice-btn--danger:hover {
+  background-color: rgba(var(--rgb-error), 0.1);
+  box-shadow: 0 0 8px rgba(var(--rgb-error), 0.2);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   INPUTS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-input {
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  background-color: var(--bg-void);
+  color: var(--text-primary);
+  border: 1px solid var(--border-structural);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.lattice-input:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 4px rgba(var(--rgb-running), 0.2);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   NAVIGATION / TABS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lattice-tab {
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-4);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.lattice-tab:hover {
+  color: var(--text-primary);
+}
+
+.lattice-tab--active {
+  color: var(--accent-cyan);
+  border-bottom-color: var(--accent-cyan);
+}

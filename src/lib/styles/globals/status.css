@@ -1,0 +1,70 @@
+/* ═══════════════════════════════════════════════════════════════════
+   STATUS BADGES & GLOW EFFECTS
+   ═══════════════════════════════════════════════════════════════════ */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+
+.status-success {
+  color: var(--status-success);
+  border-color: rgba(var(--rgb-success), 0.4);
+  background-color: rgba(var(--rgb-success), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-success), 0.3), 0 0 8px rgba(var(--rgb-success), 0.1);
+}
+
+.status-running {
+  color: var(--status-running);
+  border-color: rgba(var(--rgb-running), 0.4);
+  background-color: rgba(var(--rgb-running), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-running), 0.3), 0 0 8px rgba(var(--rgb-running), 0.1);
+}
+
+.status-warning {
+  color: var(--status-warning);
+  border-color: rgba(var(--rgb-warning), 0.4);
+  background-color: rgba(var(--rgb-warning), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-warning), 0.3), 0 0 8px rgba(var(--rgb-warning), 0.1);
+}
+
+.status-error {
+  color: var(--status-error);
+  border-color: rgba(var(--rgb-error), 0.4);
+  background-color: rgba(var(--rgb-error), 0.1);
+  box-shadow: 0 0 4px rgba(var(--rgb-error), 0.3), 0 0 8px rgba(var(--rgb-error), 0.1);
+}
+
+.status-blocked {
+  color: var(--text-primary);
+  border-color: var(--status-blocked);
+  background-color: rgba(var(--rgb-blocked), 0.15);
+  animation: pulse-blocked 1s infinite alternate ease-in-out;
+}
+
+.status-queued {
+  color: var(--status-queued);
+  border-color: var(--border-structural);
+  background-color: transparent;
+}
+
+.status-canceled {
+  color: var(--status-canceled);
+  border-color: transparent;
+  background-color: transparent;
+  text-decoration: line-through;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-blocked {
+    animation: none;
+  }
+}
