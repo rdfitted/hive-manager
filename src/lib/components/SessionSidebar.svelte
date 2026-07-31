@@ -365,8 +365,12 @@
   }
 </script>
 
+<!-- The sidebar is chrome, not a panel: it must stay --bg-void so the content card
+     reads as a lit surface against the void (#183). Adopting .lattice-panel here
+     paints it --bg-surface, i.e. the same tone as .main-content, which collapses
+     that contrast entirely. -->
 <aside
-  class="sidebar lattice-panel"
+  class="sidebar"
   class:collapsed
   class:resizing
   style:width={`${sidebarWidth}px`}
