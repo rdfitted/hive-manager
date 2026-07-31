@@ -20,7 +20,7 @@
 <script lang="ts">
   import { ArrowDown, Broom, CaretDown, CaretUp, CheckSquare, ClipboardText, FileText, MagnifyingGlass, X } from 'phosphor-svelte';
   import { onMount, onDestroy, tick } from 'svelte';
-  import { Terminal as XTerm } from '@xterm/xterm';
+  import { Terminal as XTerm, type ITheme } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebglAddon } from '@xterm/addon-webgl';
   import { SearchAddon } from '@xterm/addon-search';
@@ -30,6 +30,12 @@
   import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
   import { activeAgents } from '$lib/stores/sessions';
   import { settings } from '$lib/stores/settings';
+  import {
+    mixOKLab,
+    resolveTokens,
+    withAlpha,
+    type CssTokenName,
+  } from '$lib/theme/resolveTokens';
   import '@xterm/xterm/css/xterm.css';
 
   interface Props {
@@ -130,30 +136,68 @@
     });
   });
 
-  // Tokyo Night theme colors
-  const tokyoNightTheme = {
-    background: '#1a1b26',
-    foreground: '#c0caf5',
-    cursor: '#c0caf5',
-    cursorAccent: '#1a1b26',
-    selection: '#33467c',
-    black: '#15161e',
-    red: '#f7768e',
-    green: '#9ece6a',
-    yellow: '#e0af68',
-    blue: '#7aa2f7',
-    magenta: '#bb9af7',
-    cyan: '#7dcfff',
-    white: '#a9b1d6',
-    brightBlack: '#414868',
-    brightRed: '#f7768e',
-    brightGreen: '#9ece6a',
-    brightYellow: '#e0af68',
-    brightBlue: '#7aa2f7',
-    brightMagenta: '#bb9af7',
-    brightCyan: '#7dcfff',
-    brightWhite: '#c0caf5',
-  };
+  const TERMINAL_THEME_TOKENS = {
+    bgVoid: '--bg-void',
+    textPrimary: '--text-primary',
+    textSecondary: '--text-secondary',
+    accentCyan: '--accent-cyan',
+    accentChrome: '--accent-chrome',
+    statusError: '--status-error',
+    statusSuccess: '--status-success',
+    statusWarning: '--status-warning',
+    ansiBlue: '--ansi-blue',
+    ansiBlueBright: '--ansi-blue-bright',
+    ansiMagenta: '--ansi-magenta',
+    ansiMagentaBright: '--ansi-magenta-bright',
+  } as const satisfies Record<string, CssTokenName>;
+
+  interface SearchDecorations {
+    matchBackground: string;
+    matchOverviewRuler: string;
+    activeMatchBackground: string;
+    activeMatchColorOverviewRuler: string;
+  }
+
+  interface LatticeTerminalPalette {
+    theme: ITheme;
+    searchDecorations: SearchDecorations;
+  }
+
+  function buildLatticeTerminalPalette(): LatticeTerminalPalette {
+    const colors = resolveTokens(TERMINAL_THEME_TOKENS);
+
+    return {
+      theme: {
+        background: colors.bgVoid,
+        foreground: colors.textPrimary,
+        cursor: colors.accentCyan,
+        cursorAccent: colors.bgVoid,
+        selectionBackground: withAlpha(colors.accentCyan, 0.24),
+        black: colors.textSecondary,
+        red: colors.statusError,
+        green: colors.statusSuccess,
+        yellow: colors.statusWarning,
+        blue: colors.ansiBlue,
+        magenta: colors.ansiMagenta,
+        cyan: colors.accentCyan,
+        white: mixOKLab(colors.accentChrome, colors.textPrimary, 0.5),
+        brightBlack: colors.accentChrome,
+        brightRed: mixOKLab(colors.statusError, colors.textPrimary, 0.25),
+        brightGreen: mixOKLab(colors.statusSuccess, colors.textPrimary, 0.25),
+        brightYellow: mixOKLab(colors.statusWarning, colors.textPrimary, 0.25),
+        brightBlue: colors.ansiBlueBright,
+        brightMagenta: colors.ansiMagentaBright,
+        brightCyan: mixOKLab(colors.accentCyan, colors.textPrimary, 0.25),
+        brightWhite: colors.textPrimary,
+      },
+      searchDecorations: {
+        matchBackground: mixOKLab(colors.bgVoid, colors.ansiBlue, 0.35),
+        matchOverviewRuler: colors.ansiBlue,
+        activeMatchBackground: mixOKLab(colors.bgVoid, colors.statusWarning, 0.45),
+        activeMatchColorOverviewRuler: colors.statusWarning,
+      },
+    };
+  }
 
   // Flag to suppress paste events that the browser fires AFTER our Ctrl+V
   // handler already read the clipboard via Tauri API. Without this, xterm's
@@ -321,12 +365,7 @@
   }
 
   // ── Find-in-terminal (SearchAddon) ────────────────────────────────
-  const searchDecorations = {
-    matchBackground: '#33467c',
-    matchOverviewRuler: '#7aa2f7',
-    activeMatchBackground: '#e0af68',
-    activeMatchColorOverviewRuler: '#e0af68',
-  };
+  let searchDecorations: SearchDecorations | undefined;
 
   async function openSearch() {
     showSearch = true;
@@ -477,6 +516,8 @@
   }
 
   onMount(async () => {
+    const latticePalette = buildLatticeTerminalPalette();
+    searchDecorations = latticePalette.searchDecorations;
     isWindows = navigator.platform.toLowerCase().startsWith('win');
 
     // Add global click listener
@@ -511,7 +552,7 @@
 
     // Create terminal instance
     term = new XTerm({
-      theme: tokyoNightTheme,
+      theme: latticePalette.theme,
       fontFamily: $settings.fontFamily,
       fontSize: $settings.fontSize,
       lineHeight: 1.2,
@@ -740,7 +781,7 @@
 >
   {#if isDragActive}
     <div class="drop-overlay">
-      <div class="drop-card">
+      <div class="drop-card lattice-panel">
         <span class="drop-title">Drop file here</span>
         <span class="drop-copy">Absolute path(s) will be pasted into the terminal.</span>
       </div>
@@ -748,11 +789,12 @@
   {/if}
 
   {#if showSearch}
-    <div class="search-bar" role="search">
+    <div class="search-bar lattice-panel" role="search">
       <span class="search-icon">
         <MagnifyingGlass size={14} weight="light" />
       </span>
       <input
+        class="lattice-input"
         type="text"
         bind:this={searchInputEl}
         bind:value={searchQuery}
@@ -767,26 +809,26 @@
           {searchResultCount > 0 ? `${searchResultIndex + 1}/${searchResultCount}` : 'No results'}
         {/if}
       </span>
-      <button class="search-btn" onclick={() => runSearch('previous')} title="Previous match (Shift+Enter)" aria-label="Previous match" type="button">
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={() => runSearch('previous')} title="Previous match (Shift+Enter)" aria-label="Previous match" type="button">
         <CaretUp size={14} weight="light" />
       </button>
-      <button class="search-btn" onclick={() => runSearch('next')} title="Next match (Enter)" aria-label="Next match" type="button">
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={() => runSearch('next')} title="Next match (Enter)" aria-label="Next match" type="button">
         <CaretDown size={14} weight="light" />
       </button>
-      <button class="search-btn" onclick={closeSearch} title="Close (Esc)" aria-label="Close find bar" type="button">
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--icon" onclick={closeSearch} title="Close (Esc)" aria-label="Close find bar" type="button">
         <X size={14} weight="light" />
       </button>
     </div>
   {/if}
 
   {#if isWaiting}
-    <div class="quick-response-overlay">
+    <div class="quick-response-overlay lattice-motion-panel-slide-in">
       <div class="quick-response-bar">
         <span class="prompt-text">Agent is waiting:</span>
-        <button class="action-btn" onclick={() => handleQuickAction('y')}>y</button>
-        <button class="action-btn" onclick={() => handleQuickAction('n')}>n</button>
-        <button class="action-btn approve" onclick={() => handleQuickAction('approve')}>Approve</button>
-        <button class="action-btn reject" onclick={() => handleQuickAction('reject')}>Reject</button>
+        <button class="lattice-btn lattice-btn--secondary lattice-btn--compact" onclick={() => handleQuickAction('y')}>y</button>
+        <button class="lattice-btn lattice-btn--secondary lattice-btn--compact" onclick={() => handleQuickAction('n')}>n</button>
+        <button class="lattice-btn lattice-btn--success lattice-btn--compact" onclick={() => handleQuickAction('approve')}>Approve</button>
+        <button class="lattice-btn lattice-btn--danger lattice-btn--compact" onclick={() => handleQuickAction('reject')}>Reject</button>
       </div>
     </div>
   {/if}
@@ -794,18 +836,18 @@
   {#if showContextMenu}
     <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
-      class="context-menu"
+      class="context-menu lattice-panel"
       style="left: {contextMenuX}px; top: {contextMenuY}px;"
       onclick={(e) => e.stopPropagation()}
     >
-      <button class="context-item" onclick={handleCopy} disabled={!hasSelection}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={handleCopy} disabled={!hasSelection}>
         <span class="context-icon">
           <ClipboardText size={14} weight="light" />
         </span>
         Copy
         <span class="context-shortcut">Ctrl+C</span>
       </button>
-      <button class="context-item" onclick={handlePaste}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={handlePaste}>
         <span class="context-icon">
           <FileText size={14} weight="light" />
         </span>
@@ -813,34 +855,34 @@
         <span class="context-shortcut">Ctrl+V</span>
       </button>
       <div class="context-divider"></div>
-      <button class="context-item" onclick={openSearch}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={openSearch}>
         <span class="context-icon">
           <MagnifyingGlass size={14} weight="light" />
         </span>
         Find
         <span class="context-shortcut">Ctrl+F</span>
       </button>
-      <button class="context-item" onclick={handleScrollToBottom}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={handleScrollToBottom}>
         <span class="context-icon">
           <ArrowDown size={14} weight="light" />
         </span>
         Scroll to Bottom
       </button>
-      <button class="context-item" onclick={handleClearTerminal}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={handleClearTerminal}>
         <span class="context-icon">
           <Broom size={14} weight="light" />
         </span>
         Clear Terminal
       </button>
       <div class="context-divider"></div>
-      <button class="context-item" onclick={handleSelectAll}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={handleSelectAll}>
         <span class="context-icon">
           <CheckSquare size={14} weight="light" />
         </span>
         Select All
         <span class="context-shortcut">Ctrl+A</span>
       </button>
-      <button class="context-item" onclick={handleClearSelection} disabled={!hasSelection}>
+      <button class="lattice-btn lattice-btn--ghost lattice-btn--menu-item" onclick={handleClearSelection} disabled={!hasSelection}>
         <span class="context-icon">
           <X size={14} weight="light" />
         </span>
@@ -856,7 +898,7 @@
     width: 100%;
     height: 100%;
     background: var(--bg-void);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     overflow: hidden;
   }
 
@@ -877,21 +919,23 @@
     align-items: center;
     justify-content: center;
     background:
-      linear-gradient(180deg, rgba(122, 162, 247, 0.14), rgba(122, 162, 247, 0.08)),
-      rgba(26, 27, 38, 0.72);
-    border: 2px dashed rgba(125, 207, 255, 0.9);
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--ansi-blue) 14%, transparent),
+        color-mix(in srgb, var(--ansi-blue) 8%, transparent)
+      ),
+      color-mix(in srgb, var(--bg-void) 72%, transparent);
+    border: 2px dashed color-mix(in srgb, var(--accent-cyan) 90%, transparent);
     pointer-events: none;
   }
 
   .drop-card {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 16px 20px;
+    gap: var(--space-2);
+    padding: var(--space-4) var(--space-5);
     min-width: 240px;
-    border-radius: var(--radius-sm);
-    background: rgba(36, 40, 59, 0.92);
-    border: 1px solid rgba(125, 207, 255, 0.35);
+    border-radius: var(--radius-lg);
     box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
     text-align: center;
   }
@@ -919,9 +963,7 @@
     align-items: center;
     gap: 4px;
     padding: 4px 6px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   }
 
@@ -934,17 +976,7 @@
 
   .search-bar input {
     width: 180px;
-    background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 12px;
-    padding: 4px 8px;
-    outline: none;
-  }
-
-  .search-bar input:focus {
-    border-color: var(--accent-cyan);
+    padding: var(--space-1) var(--space-2);
   }
 
   .search-count {
@@ -959,42 +991,19 @@
     color: var(--status-error);
   }
 
-  .search-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    background: none;
-    border: none;
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
-    cursor: pointer;
-  }
-
-  .search-btn:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-  }
-
   .quick-response-overlay {
     position: absolute;
     bottom: 0;
     left: 0;
     right: 0;
     padding: 8px 12px;
-    background: rgba(26, 27, 38, 0.85);
+    /* Anchored warning strip: translucency preserves terminal context underneath. */
+    background: color-mix(in srgb, var(--bg-surface) 85%, transparent);
     backdrop-filter: blur(4px);
     border-top: 1px solid var(--status-warning);
     z-index: 10;
     display: flex;
     justify-content: center;
-    animation: slideUp 0.2s ease-out;
-  }
-
-  @keyframes slideUp {
-    from { transform: translateY(100%); }
-    to { transform: translateY(0); }
   }
 
   .quick-response-bar {
@@ -1011,77 +1020,14 @@
     margin-right: 4px;
   }
 
-  .action-btn {
-    padding: 4px 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .action-btn:hover {
-    background: var(--bg-elevated);
-    border-color: var(--accent-cyan);
-  }
-
-  .action-btn.approve {
-    background: color-mix(in srgb, var(--status-success) 15%, transparent);
-    border-color: var(--status-success);
-    color: var(--status-success);
-  }
-
-  .action-btn.approve:hover {
-    background: color-mix(in srgb, var(--status-success) 25%, transparent);
-  }
-
-  .action-btn.reject {
-    background: color-mix(in srgb, var(--status-error) 15%, transparent);
-    border-color: var(--status-error);
-    color: var(--status-error);
-  }
-
-  .action-btn.reject:hover {
-    background: color-mix(in srgb, var(--status-error) 25%, transparent);
-  }
-
   /* Context Menu */
   .context-menu {
     position: fixed;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-lg);
     padding: 4px;
     min-width: 180px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
     z-index: 1000;
-  }
-
-  .context-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 8px 12px;
-    background: none;
-    border: none;
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font-size: 13px;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .context-item:hover:not(:disabled) {
-    background: var(--bg-elevated);
-  }
-
-  .context-item:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
   }
 
   .context-icon {
