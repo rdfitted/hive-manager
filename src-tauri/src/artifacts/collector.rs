@@ -1,18 +1,12 @@
 use std::path::Path;
 use std::process::Command;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
 use serde_json::json;
 
 use crate::{
     domain::ArtifactBundle,
     storage::{SessionStorage, StorageError},
 };
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub struct ArtifactCollector {
     storage: SessionStorage,
@@ -80,8 +74,7 @@ fn run_git(worktree_path: &Path, args: &[&str]) -> Result<Option<String>, Storag
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(worktree_path);
 
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    crate::process::hide_std_console_window(&mut cmd);
 
     let output = cmd
         .output()?;

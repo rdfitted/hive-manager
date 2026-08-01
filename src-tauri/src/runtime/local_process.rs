@@ -70,6 +70,7 @@ impl RuntimeAdapter for LocalProcessRuntime {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::process::hide_std_console_window(&mut cmd);
 
         for (key, value) in &spec.env {
             cmd.env(key, value);

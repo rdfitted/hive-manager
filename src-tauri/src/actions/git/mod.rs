@@ -1,9 +1,9 @@
 //! Git actions: wrap the existing git free functions behind the unified
 //! [`Action`] contract.
 //!
-//! The [`run_git_in_dir`] helper (and its load-bearing `#[cfg(windows)]`
-//! `CREATE_NO_WINDOW` creation flag, which prevents a console window from
-//! flashing on Windows) lives here as the single source of truth.
+//! The [`run_git_in_dir`] helper lives here as the single source of truth for
+//! git execution. Its shared process configuration prevents a console window
+//! from flashing on Windows.
 //! `commands/git_commands.rs` re-exports the types and helper from this module.
 
 use std::path::Path;
@@ -18,12 +18,6 @@ use serde_json::Value;
 use super::error::ActionError;
 use super::registry::{Action, ActionRegistry};
 use super::ActionContext;
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchInfo {
@@ -43,8 +37,8 @@ pub struct WorktreeInfo {
 /// Run a git command in `project_path`, returning stdout on success or a
 /// human-readable error string on failure.
 ///
-/// IMPORTANT (load-bearing): the `#[cfg(windows)]` `CREATE_NO_WINDOW` creation
-/// flag must remain — without it git spawns a flashing console window on Windows.
+/// IMPORTANT (load-bearing): the shared no-window configuration must remain —
+/// without it git spawns a flashing console window on Windows.
 pub fn run_git_in_dir(args: &[&str], project_path: &str) -> Result<String, String> {
     let path = Path::new(project_path);
     if !path.exists() {
@@ -54,9 +48,7 @@ pub fn run_git_in_dir(args: &[&str], project_path: &str) -> Result<String, Strin
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(path);
 
-    // Prevent console window from flashing on Windows
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    crate::process::hide_std_console_window(&mut cmd);
 
     let output = cmd
         .output()

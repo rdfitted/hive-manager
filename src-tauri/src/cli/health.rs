@@ -414,6 +414,7 @@ fn build_probe_command(
     if !is_batch {
         let mut command = Command::new(program);
         command.args(args);
+        crate::process::hide_tokio_console_window(&mut command);
         return Ok((command, None));
     }
 
@@ -435,6 +436,7 @@ fn build_probe_command(
 
     let mut command = Command::new("cmd.exe");
     command.arg("/d").arg("/c").arg(script_path);
+    crate::process::hide_tokio_console_window(&mut command);
     Ok((command, Some(temp_path)))
 }
 
@@ -595,6 +597,7 @@ async fn refreshed_windows_path() -> Option<OsString> {
         |key| {
             let mut command = Command::new("reg.exe");
             command.args(["query", key, "/v", "Path"]);
+            crate::process::hide_tokio_console_window(&mut command);
             command
         },
         REGISTRY_QUERY_TIMEOUT,

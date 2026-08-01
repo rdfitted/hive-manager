@@ -2514,12 +2514,7 @@ impl SessionController {
             .arg("-D")
             .arg(&branch_name);
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        crate::process::hide_std_console_window(&mut cmd);
 
         match cmd.output() {
             Ok(output) if output.status.success() => {}
@@ -3011,12 +3006,7 @@ cat "{prince_verdict}"
         let mut cmd = Command::new("git");
         cmd.args(args).current_dir(project_path);
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        crate::process::hide_std_console_window(&mut cmd);
 
         let output = cmd
             .output()

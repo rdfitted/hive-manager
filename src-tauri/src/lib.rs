@@ -11,6 +11,7 @@ pub mod events;
 mod http;
 pub mod orchestrator;
 mod preview;
+mod process;
 mod pty;
 pub mod runtime;
 mod session;
