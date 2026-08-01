@@ -1323,7 +1323,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .dialog {
     border-radius: var(--radius-lg);
     padding: 24px;
-    width: 520px;
+    width: 600px;
     max-width: 90vw;
     max-height: 85vh;
     overflow-y: auto;
@@ -1337,6 +1337,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .mode-tabs {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
     margin-bottom: 20px;
     background: var(--bg-void);

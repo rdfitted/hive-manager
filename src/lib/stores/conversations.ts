@@ -139,6 +139,7 @@ function createConversationStore() {
     },
 
     setSessionId(sessionId: string | null) {
+      if (getState().sessionId === sessionId) return;
       activeConversationRequest += 1;
       update((state) => ({
         ...state,
@@ -150,9 +151,18 @@ function createConversationStore() {
       }));
     },
 
-    async loadConversation(sessionId: string, agentId: string, since?: string) {
+    async loadConversation(
+      sessionId: string,
+      agentId: string,
+      since?: string,
+      options?: { silent?: boolean },
+    ) {
       const requestToken = ++activeConversationRequest;
-      update((state) => ({ ...state, loading: true, error: null }));
+      update((state) => ({
+        ...state,
+        loading: options?.silent ? state.loading : true,
+        error: options?.silent ? state.error : null,
+      }));
       try {
         let url = apiUrl(`/api/sessions/${sessionId}/conversations/${agentId}`);
         if (since) url += `?since=${encodeURIComponent(since)}`;
@@ -178,6 +188,7 @@ function createConversationStore() {
             ...state,
             messages: newMessages,
             loading: false,
+            error: null,
             sessionId,
             selectedAgent: agentId,
           };
@@ -218,7 +229,7 @@ function createConversationStore() {
       const lastMsg = state.messages[state.messages.length - 1];
       const since = lastMsg?.timestamp;
       
-      await this.loadConversation(state.sessionId, state.selectedAgent, since);
+      await this.loadConversation(state.sessionId, state.selectedAgent, since, { silent: true });
     },
 
     clearError() {

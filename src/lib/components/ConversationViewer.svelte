@@ -51,6 +51,7 @@
   // Load conversation when agent tab is selected
   function selectTab(agentId: string) {
     if (!sessionId) return;
+    conversationStore.selectAgent(agentId);
     conversationStore.loadConversation(sessionId, agentId);
   }
 
@@ -69,7 +70,7 @@
   onMount(() => {
     pollInterval = setInterval(() => {
       if (sessionId && selectedAgent) {
-        conversationStore.loadConversation(sessionId, selectedAgent);
+        conversationStore.loadConversation(sessionId, selectedAgent, undefined, { silent: true });
       }
     }, 5000);
   });
