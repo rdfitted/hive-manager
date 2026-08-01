@@ -160,6 +160,68 @@ describe('conversationStore loading intent', () => {
     expect(get(conversationStore).loading).toBe(false);
   });
 
+  it('preserves an existing error while a silent refresh is pending and clears it on success', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('existing failure'));
+    conversationStore.setSessionId('session-a');
+    conversationStore.selectAgent('worker-1');
+    await conversationStore.loadConversation('session-a', 'worker-1');
+
+    const pendingResponse = deferredResponse();
+    fetchMock.mockReturnValueOnce(pendingResponse.promise);
+    const load = conversationStore.loadConversation(
+      'session-a',
+      'worker-1',
+      undefined,
+      { silent: true },
+    );
+
+    expect(get(conversationStore).error).toBe('Error: existing failure');
+    pendingResponse.resolve(responseWith([]));
+    await load;
+    expect(get(conversationStore).error).toBeNull();
+  });
+
+  it('clears an existing error after a successful silent refresh', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('transient failure'));
+    conversationStore.setSessionId('session-a');
+    conversationStore.selectAgent('worker-1');
+    await conversationStore.loadConversation('session-a', 'worker-1');
+    fetchMock.mockResolvedValueOnce(responseWith([]));
+
+    await conversationStore.loadConversation(
+      'session-a',
+      'worker-1',
+      undefined,
+      { silent: true },
+    );
+
+    expect(get(conversationStore).error).toBeNull();
+  });
+
+  it('surfaces a silent refresh failure and clears it after recovery', async () => {
+    conversationStore.setSessionId('session-a');
+    conversationStore.selectAgent('worker-1');
+    fetchMock.mockRejectedValueOnce(new Error('silent failure'));
+
+    await conversationStore.loadConversation(
+      'session-a',
+      'worker-1',
+      undefined,
+      { silent: true },
+    );
+
+    expect(get(conversationStore).error).toBe('Error: silent failure');
+
+    fetchMock.mockResolvedValueOnce(responseWith([]));
+    await conversationStore.loadConversation(
+      'session-a',
+      'worker-1',
+      undefined,
+      { silent: true },
+    );
+    expect(get(conversationStore).error).toBeNull();
+  });
+
   it('polls the selected conversation silently from its last timestamp', async () => {
     fetchMock.mockResolvedValueOnce(responseWith([message()]));
     conversationStore.setSessionId('session-a');

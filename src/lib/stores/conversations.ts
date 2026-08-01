@@ -161,7 +161,7 @@ function createConversationStore() {
       update((state) => ({
         ...state,
         loading: options?.silent ? state.loading : true,
-        error: null,
+        error: options?.silent ? state.error : null,
       }));
       try {
         let url = apiUrl(`/api/sessions/${sessionId}/conversations/${agentId}`);
@@ -188,6 +188,7 @@ function createConversationStore() {
             ...state,
             messages: newMessages,
             loading: false,
+            error: null,
             sessionId,
             selectedAgent: agentId,
           };
