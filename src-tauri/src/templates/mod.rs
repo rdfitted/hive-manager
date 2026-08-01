@@ -761,7 +761,7 @@ You MUST use your native browser tools directly. Do NOT search the codebase for 
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED does not end your run, and the Evaluator or Queen may reply there. Do not replace the completed status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -833,7 +833,7 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED does not end your run, and the Evaluator or Queen may reply there. Do not replace the completed status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -905,7 +905,7 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED does not end your run, and the Evaluator or Queen may reply there. Do not replace the completed status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -983,7 +983,7 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED does not end your run, and the Evaluator or Queen may reply there. Do not replace the completed status with an idle or working heartbeat.
 
 ## Report Format
 
