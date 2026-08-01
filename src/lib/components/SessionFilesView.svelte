@@ -410,10 +410,22 @@
     padding: 4px 0;
   }
 
-  .file-browser :global(.file-tree-skeleton),
-  .content-body :global(.file-content-skeleton) {
+  .file-browser :global(.file-tree-skeleton) {
     width: 100%;
     min-height: 100%;
+  }
+
+  .content-body :global(.file-content-skeleton) {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .content-body :global(.file-content-skeleton > .lattice-skeleton-placeholder),
+  .content-body :global(.file-content-skeleton > .lattice-skeleton-content) {
+    min-height: 0;
+    overflow: hidden;
   }
 
   .file-tree-skeleton-shape,
