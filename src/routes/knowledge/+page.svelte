@@ -477,6 +477,7 @@
     flex: 1;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     min-height: 0;
     overflow: hidden;
   }
@@ -493,6 +494,17 @@
   .atlas-panel :global(.lattice-skeleton-content) {
     width: 100%;
     height: 100%;
+  }
+
+  .atlas-panel :global(.atlas-skeleton) {
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .atlas-panel :global(.atlas-skeleton > .lattice-skeleton-placeholder),
+  .atlas-panel :global(.atlas-skeleton > .lattice-skeleton-content) {
+    min-height: 0;
+    overflow: hidden;
   }
 
   .atlas-loading-shape {
@@ -527,7 +539,12 @@
     letter-spacing: 0.05em;
   }
 
-  .view-body { flex: 1; min-height: 0; }
+  .view-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
 
   .legend {
     display: flex;

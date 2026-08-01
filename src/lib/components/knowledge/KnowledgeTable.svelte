@@ -88,7 +88,8 @@
 
 <style>
   .table-scroll {
-    height: 100%;
+    min-height: 0;
+    flex: 1;
     overflow: auto;
     background: var(--bg-void);
   }
