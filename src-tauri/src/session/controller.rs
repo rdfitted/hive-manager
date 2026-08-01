@@ -842,7 +842,7 @@ fn get_polling_instructions(
         None => String::new(),
     };
 
-    match CliRegistry::get_behavior_for_role(cli, role_type) {
+    let activation_block = match CliRegistry::get_behavior_for_role(cli, role_type) {
         CliBehavior::ExplicitPolling => {
             format!(
                 r#"
@@ -913,7 +913,44 @@ last heartbeat is over {cutoff_secs}s old is treated as stuck and its run is req
                 heartbeat_block = heartbeat_block("Heartbeat command:"),
             )
         }
-    }
+    };
+
+    format!(
+        "{activation_block}{standing_channel}",
+        activation_block = activation_block,
+        standing_channel = task_file_standing_channel(task_file),
+    )
+}
+
+/// The task file is the orchestrator's only write channel to a running agent, and it stays open
+/// for the whole run — activation is just its first message.
+///
+/// IMPORTANT (load-bearing): every `get_polling_instructions` behavior arm models the file as a
+/// one-shot gate — the poll loop breaks on ACTIVE and never runs again. Without this block an
+/// agent that reports COMPLETED or BLOCKED stops reading, so a Queen answering a blocker writes
+/// into a file nobody will open and the run is stranded. BLOCKED especially is a question, not an
+/// exit; the answer arrives as an edit to this same file.
+fn task_file_standing_channel(task_file: &str) -> String {
+    format!(
+        r#"
+## The Task File Is A Standing Channel (MANDATORY)
+
+Activation is not the only thing {task_file} carries. The orchestrator writes direction to it at
+any point during your run, INCLUDING AFTER you report COMPLETED or BLOCKED. You MUST re-read it:
+
+- after each meaningful unit of work,
+- immediately after you set Status to COMPLETED or BLOCKED, and
+- every time you heartbeat, for as long as your run is alive.
+
+BLOCKED is a question to the orchestrator, not an exit. After reporting it you MUST keep polling
+and keep heartbeating. The answer arrives as an edit to this file — typically a new directive
+section plus Status set back to ACTIVE. Read it, act on it, and continue. An agent that stops
+reading after reporting a terminal status cannot be unblocked or corrected, and its run is wasted.
+
+Stop only when the orchestrator accepts your work or the session ends.
+"#,
+        task_file = task_file,
+    )
 }
 
 impl SessionController {
@@ -2514,12 +2551,7 @@ impl SessionController {
             .arg("-D")
             .arg(&branch_name);
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        crate::process::hide_std_console_window(&mut cmd);
 
         match cmd.output() {
             Ok(output) if output.status.success() => {}
@@ -3011,12 +3043,7 @@ cat "{prince_verdict}"
         let mut cmd = Command::new("git");
         cmd.args(args).current_dir(project_path);
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        crate::process::hide_std_console_window(&mut cmd);
 
         let output = cmd
             .output()
@@ -3427,7 +3454,7 @@ Read {task_file}. Begin work only when Status is ACTIVE.{polling_instructions}
    ```bash
    {completed_heartbeat}
    ```
-5. Report the commit SHA and validation evidence, then stop. Do not replace the completed status with an idle or working heartbeat unless a new ACTIVE assignment is issued."#,
+5. Report the commit SHA and validation evidence, then RESUME POLLING {task_file} on your heartbeat cadence — reporting COMPLETED does not end your run, and the Queen may reply there. Do not replace the completed status with an idle or working heartbeat unless a new ACTIVE assignment is issued."#,
             variant_name = variant_name,
             worktree_path = worktree_path,
             branch = branch,
@@ -6277,7 +6304,7 @@ When the objective and every configured gate are complete, send an idle heartbea
    ```bash
    {completed_heartbeat}
    ```
-4. Send the Queen a concise findings summary with citations, then stop. Do not replace the completed status with an idle or working heartbeat unless the Queen issues a new ACTIVE assignment.
+4. Send the Queen a concise findings summary with citations, then RESUME POLLING {task_file} on your heartbeat cadence — reporting COMPLETED does not end your run, and the Queen may reply there. Do not replace the completed status with an idle or working heartbeat unless the Queen issues a new ACTIVE assignment.
 "#,
                 validation_and_handoff_rule = validation_and_handoff_rule,
                 task_file = task_file,
@@ -6294,7 +6321,7 @@ When the objective and every configured gate are complete, send an idle heartbea
    ```bash
    {completed_heartbeat}
    ```
-5. Send the Queen the commit SHA when applicable plus focused validation evidence, then stop. Do not replace the completed status with an idle or working heartbeat unless the Queen issues a new ACTIVE assignment.
+5. Send the Queen the commit SHA when applicable plus focused validation evidence, then RESUME POLLING {task_file} on your heartbeat cadence — reporting COMPLETED does not end your run, and the Queen may reply there. Do not replace the completed status with an idle or working heartbeat unless the Queen issues a new ACTIVE assignment.
 "#,
                 validation_and_handoff_rule = validation_and_handoff_rule,
                 task_file = task_file,

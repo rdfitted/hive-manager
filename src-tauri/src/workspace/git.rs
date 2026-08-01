@@ -6,12 +6,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 use crate::domain::{CellType, SessionMode};
 use crate::runtime::WorktreeManager;
 use crate::session::{Session, SessionType};
@@ -421,8 +415,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(cwd);
 
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    crate::process::hide_std_console_window(&mut cmd);
 
     let output = cmd
         .output()

@@ -634,7 +634,7 @@ curl -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/force-pass" \
    done
    ```
 4. If the peer file is still missing, you MUST retry the same POST exactly once and poll again for up to 30 seconds.
-5. If `.hive-manager/{{session_id}}/peer/qa-verdict.json` is still missing after the retry window, you MUST report `BLOCKED` and stop.
+5. If `.hive-manager/{{session_id}}/peer/qa-verdict.json` is still missing after the retry window, you MUST report `BLOCKED`, then keep polling your task file and heartbeating. BLOCKED is a question to the Queen, not an exit — the answer arrives as an edit to your task file.
 6. You MUST rely on that POST to write `.hive-manager/{{session_id}}/peer/qa-verdict.json`.
 7. You MUST NOT write `.hive-manager/{{session_id}}/peer/qa-verdict.md` or any other shadow verdict file.
 
@@ -761,7 +761,7 @@ You MUST use your native browser tools directly. Do NOT search the codebase for 
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED or BLOCKED does not end your run, and the Evaluator or Queen may reply there. BLOCKED is a question to them, not an exit. Do not replace either terminal status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -833,7 +833,7 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED or BLOCKED does not end your run, and the Evaluator or Queen may reply there. BLOCKED is a question to them, not an exit. Do not replace either terminal status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -905,7 +905,7 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED or BLOCKED does not end your run, and the Evaluator or Queen may reply there. BLOCKED is a question to them, not an exit. Do not replace either terminal status with an idle or working heartbeat.
 
 ## Report Format
 
@@ -983,7 +983,7 @@ curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/heartbeat" \
    ```bash
    {{qa_worker_completed_heartbeat}}
    ```
-4. Return the criterion-numbered result to the Evaluator, then stop. Do not replace the completed status with an idle or working heartbeat.
+4. Return the criterion-numbered result to the Evaluator, then RESUME POLLING your task file on your heartbeat cadence — reporting COMPLETED or BLOCKED does not end your run, and the Evaluator or Queen may reply there. BLOCKED is a question to them, not an exit. Do not replace either terminal status with an idle or working heartbeat.
 
 ## Report Format
 
