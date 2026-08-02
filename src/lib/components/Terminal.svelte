@@ -936,7 +936,7 @@
     padding: var(--space-4) var(--space-5);
     min-width: 240px;
     border-radius: var(--radius-lg);
-    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+    box-shadow: var(--elev-2), var(--edge-lip);
     text-align: center;
   }
 
@@ -964,7 +964,7 @@
     gap: 4px;
     padding: 4px 6px;
     border-radius: var(--radius-lg);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--elev-2), var(--edge-lip);
   }
 
   .search-icon {
@@ -1000,7 +1000,7 @@
     /* Anchored warning strip: translucency preserves terminal context underneath. */
     background: color-mix(in srgb, var(--bg-surface) 85%, transparent);
     backdrop-filter: blur(4px);
-    border-top: 1px solid var(--status-warning);
+    box-shadow: inset 0 1px 0 var(--status-warning);
     z-index: 10;
     display: flex;
     justify-content: center;
@@ -1026,7 +1026,7 @@
     border-radius: var(--radius-lg);
     padding: 4px;
     min-width: 180px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--elev-3), var(--edge-lip);
     z-index: 1000;
   }
 

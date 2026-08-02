@@ -39,7 +39,12 @@ vi.mock('$lib/knowledge/forceSim', () => ({
   createForceSimulation: forceMocks.createForceSimulation,
 }));
 
-import KnowledgeGraph from './KnowledgeGraph.svelte';
+import KnowledgeGraph, {
+  DEFAULT_NODE_GLOW,
+  HALO_SCALE,
+  haloRadius,
+  parseComputedBoxShadows,
+} from './KnowledgeGraph.svelte';
 
 let resizeCallback: ResizeObserverCallback;
 let hostSize = { width: 760, height: 520 };
@@ -47,6 +52,12 @@ let reducedMotionMatches = false;
 let motionChangeListener: (() => void) | null = null;
 let requestAnimationFrameMock: ReturnType<typeof vi.fn>;
 let cancelAnimationFrameMock: ReturnType<typeof vi.fn>;
+
+const ELEVATION_TOKEN_FIXTURE = {
+  '--elev-1': '0 1px 2px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.35)',
+  '--elev-2': '0 2px 4px rgba(0, 0, 0, 0.55), 0 6px 16px rgba(0, 0, 0, 0.42)',
+  '--elev-3': '0 4px 8px rgba(0, 0, 0, 0.60), 0 16px 40px rgba(0, 0, 0, 0.55)',
+} as const;
 
 beforeEach(() => {
   forceMocks.createForceSimulation.mockClear();
@@ -126,15 +137,102 @@ beforeEach(() => {
     unobserve() {}
     disconnect() {}
   });
+  for (const [token, value] of Object.entries(ELEVATION_TOKEN_FIXTURE)) {
+    document.documentElement.style.setProperty(token, value);
+  }
 });
 
 afterEach(() => {
   cleanup();
+  for (const token of Object.keys(ELEVATION_TOKEN_FIXTURE)) {
+    document.documentElement.style.removeProperty(token);
+  }
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe('KnowledgeGraph', () => {
+  it('parses token-derived multi-layer shadows into concrete SVG values', () => {
+    expect(parseComputedBoxShadows(
+      'rgba(0, 0, 0, 0.55) 0px 1px 2px 0px, rgb(0 0 0 / 35%) 0px 2px 6px',
+    )).toEqual([
+      {
+        dx: 0,
+        dy: 1,
+        stdDeviation: 1,
+        floodColor: 'rgb(0, 0, 0)',
+        floodOpacity: 0.55,
+      },
+      {
+        dx: 0,
+        dy: 2,
+        stdDeviation: 3,
+        floodColor: 'rgb(0, 0, 0)',
+        floodOpacity: 0.35,
+      },
+    ]);
+
+    expect(() => parseComputedBoxShadows('rgba(0, 0, 0, 0.5) 0 2px 4px 1px'))
+      .toThrow(/Non-zero spread/);
+    expect(() => parseComputedBoxShadows('inset rgba(0, 0, 0, 0.5) 0 2px 4px'))
+      .toThrow(/Inset shadows/);
+  });
+
+  it('keeps halo geometry proportional to the node radius', () => {
+    expect(haloRadius(5)).toBe(5 * HALO_SCALE);
+    expect(haloRadius(8)).toBe(13);
+    expect(haloRadius(11)).toBe(11 * HALO_SCALE);
+  });
+
+  it('drives the proven single-blur node glow from the interactive elevation token', async () => {
+    const { container } = render(KnowledgeGraph, {
+      props: {
+        nodes: [forceMocks.pinnedNode],
+        edges: [],
+        selectedId: forceMocks.pinnedNode.id,
+        onSelect: vi.fn(),
+      },
+    });
+    await tick();
+
+    const svg = container.querySelector<SVGSVGElement>('svg[role="group"]');
+    expect(svg).not.toBeNull();
+    expect(svg!.style.getPropertyValue('--node-glow-opacity')).toBe('0.55');
+
+    const filter = container.querySelector('#node-glow');
+    expect(filter).not.toBeNull();
+    expect({
+      x: filter!.getAttribute('x'),
+      y: filter!.getAttribute('y'),
+      width: filter!.getAttribute('width'),
+      height: filter!.getAttribute('height'),
+    }).toEqual({ x: '-100%', y: '-100%', width: '300%', height: '300%' });
+    expect(filter!.firstElementChild!.tagName.toLowerCase()).toBe('fegaussianblur');
+    expect(filter!.firstElementChild!.getAttribute('stdDeviation')).toBe('2');
+    expect(container.querySelectorAll('filter')).toHaveLength(1);
+    expect(container.querySelectorAll('[result^="shadow-with-source-"]')).toHaveLength(0);
+  });
+
+  it('uses the baseline node glow when the global elevation token sheet is absent', async () => {
+    for (const token of Object.keys(ELEVATION_TOKEN_FIXTURE)) {
+      document.documentElement.style.removeProperty(token);
+    }
+    const { container } = render(KnowledgeGraph, {
+      props: {
+        nodes: [forceMocks.pinnedNode],
+        edges: [],
+        selectedId: null,
+        onSelect: vi.fn(),
+      },
+    });
+    await tick();
+
+    const svg = container.querySelector<SVGSVGElement>('svg[role="group"]');
+    const blur = container.querySelector('#node-glow')!.firstElementChild!;
+    expect(svg!.style.getPropertyValue('--node-glow-opacity')).toBe(String(DEFAULT_NODE_GLOW.opacity));
+    expect(blur.getAttribute('stdDeviation')).toBe(String(DEFAULT_NODE_GLOW.stdDeviation));
+  });
+
   it('updates simulation bounds without recreating the pinned layout on resize', async () => {
     const { getByText } = render(KnowledgeGraph, {
       props: {
@@ -232,6 +330,12 @@ describe('KnowledgeGraph', () => {
     expect(patternMark.querySelector('.node-core')?.tagName.toLowerCase()).toBe('circle');
     expect(clientMark.querySelector('.node-halo')?.tagName.toLowerCase()).toBe('rect');
     expect(patternMark.querySelector('.node-halo')?.tagName.toLowerCase()).toBe('circle');
+    const clientHaloWidth = Number(clientMark.querySelector('.node-halo')?.getAttribute('width'));
+    const clientCoreWidth = Number(clientMark.querySelector('.node-core')?.getAttribute('width'));
+    const patternHaloRadius = Number(patternMark.querySelector('.node-halo')?.getAttribute('r'));
+    const patternCoreRadius = Number(patternMark.querySelector('.node-core')?.getAttribute('r'));
+    expect(clientHaloWidth / clientCoreWidth).toBeCloseTo(HALO_SCALE, 10);
+    expect(patternHaloRadius / patternCoreRadius).toBeCloseTo(HALO_SCALE, 10);
 
     // ...and it is never the only signal: the accessible name says it too.
     expect(clientMark.getAttribute('aria-label')).toContain('clients relationship entity');

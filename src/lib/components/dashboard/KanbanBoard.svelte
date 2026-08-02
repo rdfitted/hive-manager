@@ -47,6 +47,7 @@
     gap: var(--space-4);
     height: 100%;
     min-height: 0;
+    background: var(--bg-void);
   }
   .columns {
     display: flex;

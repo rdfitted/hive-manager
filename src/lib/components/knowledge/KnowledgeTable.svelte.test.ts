@@ -33,6 +33,18 @@ function rowTitles(container: HTMLElement): string[] {
 afterEach(cleanup);
 
 describe('KnowledgeTable', () => {
+  it('marks only the selected record without replacing native row semantics', () => {
+    const { container, getByRole } = render(KnowledgeTable, {
+      props: { nodes, selectedId: 'beta', onSelect: vi.fn() },
+    });
+
+    const betaRow = getByRole('button', { name: 'Open Beta' }).closest('tr');
+    expect(betaRow?.classList.contains('selected')).toBe(true);
+    expect(betaRow?.getAttribute('role')).toBeNull();
+    expect(betaRow?.hasAttribute('tabindex')).toBe(false);
+    expect(container.querySelectorAll('tbody tr.selected')).toHaveLength(1);
+  });
+
   it('sorts every row and exposes a native action without replacing table semantics', async () => {
     const onSelect = vi.fn();
     const { container, getByRole } = render(KnowledgeTable, {

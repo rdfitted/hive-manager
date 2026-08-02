@@ -169,9 +169,15 @@
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && maximizedTerminalId) {
-      layout.setMaximizedTerminalId(null);
-    }
+    if (
+      event.key !== 'Escape' ||
+      !maximizedTerminalId ||
+      event.defaultPrevented ||
+      document.querySelector('[aria-modal="true"]') !== null
+    ) return;
+
+    event.preventDefault();
+    layout.setMaximizedTerminalId(null);
   }
 
   function markTerminalReady(id: string) {
@@ -338,8 +344,7 @@
       >
         <div
           class="terminal-header"
-          style:border-top-color={$activeSession?.color || 'transparent'}
-          style:border-top-width={$activeSession?.color ? '3px' : '0'}
+          style:--session-color={$activeSession?.color || 'transparent'}
         >
           <button
             type="button"
@@ -503,9 +508,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    transition:
-      border-color var(--motion-duration-standard) var(--motion-ease-standard),
-      box-shadow var(--motion-duration-standard) var(--motion-ease-standard);
+    transition: box-shadow var(--motion-duration-standard) var(--motion-ease-standard);
     min-height: 0;
   }
 
@@ -528,7 +531,9 @@
     justify-content: space-between;
     gap: 8px;
     padding: 6px 10px;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow:
+      inset 0 3px 0 var(--session-color),
+      var(--edge-seam);
     user-select: none;
   }
 
@@ -621,6 +626,5 @@
     overflow: hidden;
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
-    border: 0;
   }
 </style>

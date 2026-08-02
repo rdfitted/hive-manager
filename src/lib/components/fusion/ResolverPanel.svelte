@@ -29,7 +29,7 @@
 <div class="resolver-panel lattice-scroll-content">
     <Skeleton loading={loading} skeleton={resolverSkeleton} class="resolver-loading">
         {#if output}
-            <div class="output-card lattice-panel">
+            <div class="output-card lattice-forced-colors-boundary">
                 <div class="card-header">
                     <span class="label">Resolver Decision</span>
                     <div class="selected-badge">
@@ -92,6 +92,9 @@
         display: flex;
         flex-direction: column;
         gap: 20px;
+        background: var(--bg-chrome);
+        border-radius: var(--radius-shell);
+        box-shadow: var(--edge-lip);
     }
 
     .resolver-skeleton {

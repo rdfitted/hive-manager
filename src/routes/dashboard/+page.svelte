@@ -58,7 +58,7 @@
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
-    border-bottom: 1px solid var(--color-border);
+    box-shadow: var(--edge-seam);
     padding-bottom: var(--space-3);
   }
   h1 {

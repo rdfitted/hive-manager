@@ -22,9 +22,12 @@
   import { templates, selectedTemplate } from '$lib/stores/templates';
   import { defaultRoles } from '$lib/config/clis';
 
+  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'research' | 'debate';
+
   export let show: boolean = false;
   export let launching: boolean = false;
   export let launchError: string = '';
+  export let initialMode: SessionMode | undefined = undefined;
 
   const dispatch = createEventDispatcher<{
     close: void;
@@ -35,7 +38,6 @@
     launchDebate: DebateLaunchConfig;
   }>();
 
-  type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'research' | 'debate';
   type LaunchWorkerConfig = CodingPrincipalFormConfig;
   let cliHealth: CliHealthMap = {};
   let cliHealthLoading = false;
@@ -601,6 +603,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   $: if (!show) healthLoadedForOpen = false;
   $: if (show && !healthLoadedForOpen) {
     healthLoadedForOpen = true;
+    if (initialMode !== undefined) mode = initialMode;
     void loadCliHealth();
   }
   $: if (!show) {
@@ -1752,8 +1755,10 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .node {
+    --node-role: transparent;
     padding: 8px 12px;
     border-radius: var(--radius-sm);
+    box-shadow: inset 0 0 0 1px var(--node-role), var(--elev-1), var(--edge-lip);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1762,7 +1767,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .node.queen {
     /* Topology role tones are semantic node states, not structural surfaces. */
-    border-color: var(--accent-amber);
+    --node-role: var(--accent-amber);
     background: color-mix(in srgb, var(--accent-amber) 10%, transparent);
   }
 
@@ -1797,12 +1802,21 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
 
   .node.worker {
-    border-color: var(--accent-cyan);
+    --node-role: var(--accent-cyan);
     background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
   }
-  .node.fusion { border-color: var(--status-success); }
-  .node.debate { border-color: var(--accent-purple, #bb9af7); }
-  .node.solo { border-color: var(--status-warning); }
+  .node.fusion {
+    --node-role: var(--status-success);
+    background: color-mix(in srgb, var(--status-success) 10%, transparent);
+  }
+  .node.debate {
+    --node-role: var(--accent-purple, #bb9af7);
+    background: color-mix(in srgb, var(--accent-purple, #bb9af7) 10%, transparent);
+  }
+  .node.solo {
+    --node-role: var(--status-warning);
+    background: color-mix(in srgb, var(--status-warning) 10%, transparent);
+  }
 
   .topology-contract {
     width: 100%;

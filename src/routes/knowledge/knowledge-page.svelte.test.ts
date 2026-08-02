@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 
 const pageStore = vi.hoisted(() => {
   type PageValue = { url: URL };
@@ -192,5 +192,45 @@ describe('Knowledge route scope', () => {
     expect(container.querySelector('.cap-notice')?.textContent).toContain(
       'does not report which one',
     );
+  });
+
+  it('keeps one toolbar DOM and chrome surface across the graph/table lens switch', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        nodes: [graphNode('patterns/known', 'patterns')],
+        edges: [],
+        omissions: [],
+      }),
+    );
+
+    const { container, getByRole } = render(KnowledgePage);
+    await waitFor(() => expect(container.querySelector('.graph-host')).not.toBeNull());
+
+    const toolbar = container.querySelector('.toolbar');
+    expect(toolbar).not.toBeNull();
+    expect(toolbar?.classList.contains('atlas-surface')).toBe(true);
+    expect(toolbar?.classList.contains('atlas-surface--strip')).toBe(true);
+    const controls = [...toolbar!.children];
+    const toolbarClass = toolbar!.className;
+    const graphButton = getByRole('button', { name: 'Graph' });
+    const tableButton = getByRole('button', { name: 'Table' });
+
+    await fireEvent.click(tableButton);
+    await waitFor(() => expect(container.querySelector('.knowledge-table')).not.toBeNull());
+
+    expect(container.querySelector('.toolbar')).toBe(toolbar);
+    expect(toolbar!.className).toBe(toolbarClass);
+    expect(toolbar!.children).toHaveLength(controls.length);
+    controls.forEach((control, index) => expect(toolbar!.children[index]).toBe(control));
+    expect(graphButton.getAttribute('aria-pressed')).toBe('false');
+    expect(tableButton.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(graphButton);
+    await waitFor(() => expect(container.querySelector('.graph-host')).not.toBeNull());
+
+    expect(container.querySelector('.toolbar')).toBe(toolbar);
+    controls.forEach((control, index) => expect(toolbar!.children[index]).toBe(control));
+    expect(graphButton.getAttribute('aria-pressed')).toBe('true');
+    expect(tableButton.getAttribute('aria-pressed')).toBe('false');
   });
 });

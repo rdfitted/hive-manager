@@ -1,3 +1,225 @@
+<script module lang="ts">
+  import { resolveTokens, type CssTokenName } from '$lib/theme/resolveTokens';
+
+  export interface SvgShadowLayer {
+    dx: number;
+    dy: number;
+    stdDeviation: number;
+    floodColor: string;
+    floodOpacity: number;
+  }
+
+  export interface NodeGlowParameters {
+    stdDeviation: number;
+    opacity: number;
+  }
+
+  export const HALO_SCALE = 1.625;
+  export const DEFAULT_NODE_GLOW: NodeGlowParameters = {
+    stdDeviation: 2,
+    opacity: 0.28,
+  };
+
+  const NODE_GLOW_TOKENS = {
+    interactive: '--elev-2',
+  } as const satisfies Record<string, CssTokenName>;
+  const RGB_FUNCTION = /^rgba?\((.*)\)$/i;
+  const PIXEL_LENGTH = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))px$/i;
+  const UNITLESS_ZERO = /^[+-]?(?:0+(?:\.0*)?|\.0+)$/;
+
+  export function haloRadius(radius: number): number {
+    return radius * HALO_SCALE;
+  }
+
+  function splitAtTopLevel(value: string, separator: string): string[] {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+
+    for (let index = 0; index < value.length; index += 1) {
+      const character = value[index];
+      if (character === '(') depth += 1;
+      else if (character === ')') {
+        depth -= 1;
+        if (depth < 0) throw new Error(`Unbalanced CSS shadow value: ${value}`);
+      } else if (character === separator && depth === 0) {
+        const part = value.slice(start, index).trim();
+        if (!part) throw new Error(`Empty CSS shadow segment: ${value}`);
+        parts.push(part);
+        start = index + 1;
+      }
+    }
+
+    if (depth !== 0) throw new Error(`Unbalanced CSS shadow value: ${value}`);
+    const tail = value.slice(start).trim();
+    if (!tail) throw new Error(`Empty CSS shadow segment: ${value}`);
+    parts.push(tail);
+    return parts;
+  }
+
+  function tokenizeShadowLayer(value: string): string[] {
+    const tokens: string[] = [];
+    let depth = 0;
+    let start = -1;
+
+    for (let index = 0; index <= value.length; index += 1) {
+      const character = value[index] ?? ' ';
+      if (character === '(') depth += 1;
+      else if (character === ')') {
+        depth -= 1;
+        if (depth < 0) throw new Error(`Unbalanced CSS shadow layer: ${value}`);
+      }
+
+      const separator = /\s/.test(character) && depth === 0;
+      if (separator) {
+        if (start !== -1) {
+          tokens.push(value.slice(start, index));
+          start = -1;
+        }
+      } else if (start === -1) {
+        start = index;
+      }
+    }
+
+    if (depth !== 0) throw new Error(`Unbalanced CSS shadow layer: ${value}`);
+    return tokens;
+  }
+
+  function parsePixelLength(token: string): number | null {
+    if (UNITLESS_ZERO.test(token)) return 0;
+    const match = PIXEL_LENGTH.exec(token);
+    return match ? Number(match[1]) : null;
+  }
+
+  function parseRgbChannel(token: string): number {
+    const trimmed = token.trim();
+    const value = trimmed.endsWith('%')
+      ? Number(trimmed.slice(0, -1)) * 2.55
+      : Number(trimmed);
+    if (!Number.isFinite(value) || value < 0 || value > 255) {
+      throw new Error(`Invalid RGB channel in elevation token: ${token}`);
+    }
+    return value;
+  }
+
+  function parseAlpha(token: string | undefined): number {
+    if (token === undefined) return 1;
+    const trimmed = token.trim();
+    const value = trimmed.endsWith('%')
+      ? Number(trimmed.slice(0, -1)) / 100
+      : Number(trimmed);
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      throw new Error(`Invalid alpha channel in elevation token: ${token}`);
+    }
+    return value;
+  }
+
+  function parseRgbColor(token: string): { floodColor: string; floodOpacity: number } {
+    const match = RGB_FUNCTION.exec(token);
+    if (!match) throw new Error(`Unsupported elevation shadow color: ${token}`);
+
+    const body = match[1].trim();
+    let channels: string[];
+    let alpha: string | undefined;
+    if (body.includes(',')) {
+      const parts = body.split(',').map((part) => part.trim());
+      if (parts.length !== 3 && parts.length !== 4) {
+        throw new Error(`Unsupported elevation shadow color: ${token}`);
+      }
+      channels = parts.slice(0, 3);
+      alpha = parts[3];
+    } else {
+      const slashParts = body.split('/').map((part) => part.trim());
+      if (slashParts.length > 2) throw new Error(`Unsupported elevation shadow color: ${token}`);
+      channels = slashParts[0].split(/\s+/);
+      alpha = slashParts[1];
+    }
+
+    if (channels.length !== 3) throw new Error(`Unsupported elevation shadow color: ${token}`);
+    const [red, green, blue] = channels.map(parseRgbChannel);
+    return {
+      floodColor: `rgb(${red}, ${green}, ${blue})`,
+      floodOpacity: parseAlpha(alpha),
+    };
+  }
+
+  /** Parse a browser-computed box-shadow list into concrete SVG filter values. */
+  export function parseComputedBoxShadows(value: string): SvgShadowLayer[] {
+    if (!value.trim() || value.trim().toLowerCase() === 'none') {
+      throw new Error('Elevation tokens must contain at least one outer shadow');
+    }
+
+    return splitAtTopLevel(value, ',').map((shadow) => {
+      const lengths: number[] = [];
+      let color: { floodColor: string; floodOpacity: number } | null = null;
+
+      for (const token of tokenizeShadowLayer(shadow)) {
+        if (token.toLowerCase() === 'inset') {
+          throw new Error(`Inset shadows cannot drive the node glow: ${shadow}`);
+        }
+        if (RGB_FUNCTION.test(token)) {
+          if (color) throw new Error(`Multiple colors in elevation shadow: ${shadow}`);
+          color = parseRgbColor(token);
+          continue;
+        }
+        const length = parsePixelLength(token);
+        if (length === null) throw new Error(`Unsupported elevation shadow token: ${token}`);
+        lengths.push(length);
+      }
+
+      if (!color) throw new Error(`Elevation shadow has no computed RGB color: ${shadow}`);
+      if (lengths.length < 2 || lengths.length > 4) {
+        throw new Error(`Elevation shadow must contain two to four lengths: ${shadow}`);
+      }
+      const [dx, dy, blur = 0, spread = 0] = lengths;
+      if (blur < 0) throw new Error(`Elevation shadow blur cannot be negative: ${shadow}`);
+      if (spread !== 0) {
+        throw new Error(`Non-zero spread cannot drive the node glow: ${shadow}`);
+      }
+
+      return {
+        dx,
+        dy,
+        stdDeviation: blur / 2,
+        floodColor: color.floodColor,
+        floodOpacity: color.floodOpacity,
+      };
+    });
+  }
+
+  function canonicalizeBoxShadow(value: string): string {
+    const probe = document.createElement('span');
+    probe.style.position = 'fixed';
+    probe.style.visibility = 'hidden';
+    probe.style.pointerEvents = 'none';
+    probe.style.boxShadow = value;
+    if (!probe.style.boxShadow) throw new Error(`Invalid elevation token value: ${value}`);
+
+    document.documentElement.append(probe);
+    try {
+      const computed = getComputedStyle(probe).boxShadow;
+      if (!computed || computed === 'none') throw new Error(`Invalid elevation token value: ${value}`);
+      return computed;
+    } finally {
+      probe.remove();
+    }
+  }
+
+  /**
+   * Preserve the proven single-blur filter shape while sourcing its depth from
+   * the first `--elev-2` layer (sigma 2 and opacity .55 in the current ramp).
+   */
+  export function resolveNodeGlowParameters(): NodeGlowParameters {
+    const resolved = resolveTokens(NODE_GLOW_TOKENS);
+    const [layer] = parseComputedBoxShadows(canonicalizeBoxShadow(resolved.interactive));
+    if (!layer) throw new Error('The interactive elevation token has no shadow layer');
+    return {
+      stdDeviation: layer.stdDeviation,
+      opacity: layer.floodOpacity,
+    };
+  }
+</script>
+
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { ArrowClockwise } from 'phosphor-svelte';
@@ -53,6 +275,7 @@
   let dragSnapshot: DragSnapshot | null = null;
   let reducedMotionQuery = getReducedMotionQuery();
   let reducedMotion = $state(reducedMotionQuery?.matches ?? false);
+  let nodeGlow = $state<NodeGlowParameters>(DEFAULT_NODE_GLOW);
 
   let positionById = $derived.by(() => new Map(positions.map((node) => [node.id, node])));
   let pinnedCount = $derived(positions.filter((node) => node.fx !== null).length);
@@ -122,6 +345,13 @@
   });
 
   onMount(() => {
+    try {
+      nodeGlow = resolveNodeGlowParameters();
+    } catch {
+      // Component tests and defensive embeds may mount without the global token sheet.
+      nodeGlow = DEFAULT_NODE_GLOW;
+    }
+
     const updateSize = () => {
       const rect = host.getBoundingClientRect();
       const nextWidth = Math.max(Math.round(rect.width), 320);
@@ -255,6 +485,10 @@
     return Math.min(11, 5 + Math.sqrt(nodeDegree(node)) * 1.25);
   }
 
+  function nodeHaloRadius(node: KnowledgeNode): number {
+    return haloRadius(radius(node));
+  }
+
   /**
    * Side of a 45deg-rotated square whose half-diagonal equals `r`, so a diamond
    * occupies exactly the circle's horizontal/vertical extent. Layout, label
@@ -301,6 +535,8 @@
     </button>
   </div>
 
+  <!-- Keep normal nodes filterless. The proven interactive glow retains one
+       Gaussian primitive while taking blur/halo opacity from --elev-2. -->
   <svg
     bind:this={svg}
     viewBox={`0 0 ${width} ${height}`}
@@ -309,13 +545,14 @@
     onpointermove={handlePointerMove}
     onpointerup={finishPointer}
     onpointercancel={cancelPointer}
+    style={`--node-glow-opacity: ${nodeGlow.opacity};`}
   >
     <defs>
       <pattern id="knowledge-grid" width="28" height="28" patternUnits="userSpaceOnUse">
         <path d="M 28 0 L 0 0 0 28" fill="none" stroke="var(--border-structural)" stroke-width="0.45" />
       </pattern>
       <filter id="node-glow" x="-100%" y="-100%" width="300%" height="300%">
-        <feGaussianBlur stdDeviation="2" result="glow" />
+        <feGaussianBlur stdDeviation={nodeGlow.stdDeviation} result="glow" />
         <feMerge><feMergeNode in="glow" /><feMergeNode in="SourceGraphic" /></feMerge>
       </filter>
     </defs>
@@ -369,7 +606,7 @@
           }}
         >
           {#if isRelationship}
-            {@const haloSide = diamondSide(radius(node) + 5)}
+            {@const haloSide = diamondSide(nodeHaloRadius(node))}
             {@const coreSide = diamondSide(radius(node))}
             <rect
               class="node-halo"
@@ -390,7 +627,7 @@
               fill={folderColor(node.folder)}
             />
           {:else}
-            <circle class="node-halo" r={radius(node) + 5} fill={folderColor(node.folder)} />
+            <circle class="node-halo" r={nodeHaloRadius(node)} fill={folderColor(node.folder)} />
             <circle class="node-core" r={radius(node)} fill={folderColor(node.folder)} />
           {/if}
           {#if node.fx !== null}
@@ -470,7 +707,7 @@
   .node:hover .node-halo,
   .node:focus-visible .node-halo,
   .node.selected .node-halo {
-    opacity: 0.28;
+    opacity: var(--node-glow-opacity, 0.28);
   }
 
   .node:hover .node-core,
@@ -511,9 +748,10 @@
     align-items: center;
     gap: var(--space-1);
     padding: var(--space-1);
-    border: 1px solid var(--border-structural);
     /* Floating graph-control scrim, not a structural panel surface. */
-    background: color-mix(in srgb, var(--bg-surface) 91%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 91%, transparent);
+    border-radius: var(--radius-md);
+    box-shadow: var(--elev-2), var(--edge-lip);
     backdrop-filter: blur(8px);
   }
 

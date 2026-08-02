@@ -20,7 +20,7 @@
 
   let collapsed = $derived($layout.rightCollapsed);
   let activeTab = $derived($layout.rightTab);
-  let panelWidth = $derived(collapsed ? RAIL_WIDTH : $layout.rightWidth);
+  let drawerWidth = $derived($layout.rightWidth - RAIL_WIDTH);
 
   function handleResize(clientX: number) {
     layout.setRightWidth(window.innerWidth - clientX);
@@ -29,59 +29,47 @@
 
 <aside
   class="right-panel"
-  class:collapsed
-  style:width={`${panelWidth}px`}
-  style:min-width={`${panelWidth}px`}
+  style:width={`${RAIL_WIDTH}px`}
+  style:min-width={`${RAIL_WIDTH}px`}
+  style:flex-basis={`${RAIL_WIDTH}px`}
 >
-  {#if collapsed}
-    <div class="rail">
-      <button
-        type="button"
-        class="rail-control expand lattice-btn lattice-btn--ghost lattice-btn--icon"
-        onclick={() => layout.toggleRight()}
-        title="Expand panel (Ctrl+J)"
-        aria-label="Expand panel"
-      >
+  <div class="rail">
+    <button
+      type="button"
+      class="rail-control expand lattice-btn lattice-btn--ghost lattice-btn--icon"
+      onclick={() => layout.toggleRight()}
+      title={collapsed ? "Expand panel (Ctrl+J)" : "Collapse panel (Ctrl+J)"}
+      aria-label={collapsed ? "Expand panel" : "Collapse panel"}
+    >
+      {#if collapsed}
         <CaretLeft size={14} weight="light" />
-      </button>
-      {#each TABS as tab (tab.id)}
-        {@const Icon = tab.icon}
-        <button
-          type="button"
-          class={`rail-control lattice-btn lattice-btn--icon ${activeTab === tab.id ? 'lattice-btn--primary' : 'lattice-btn--ghost'}`}
-          onclick={() => layout.setRightTab(tab.id)}
-          title={tab.label}
-          aria-label={tab.label}
-        >
-          <Icon size={18} weight="light" />
-        </button>
-      {/each}
-    </div>
-  {:else}
-    <div class="panel-header">
-      <nav class="tab-bar" aria-label="Panel tabs">
-        {#each TABS as tab (tab.id)}
-          {@const Icon = tab.icon}
-          <button
-            type="button"
-            class={`panel-tab lattice-tab${activeTab === tab.id ? ' lattice-tab--active' : ''}`}
-            onclick={() => layout.setRightTab(tab.id)}
-            title={tab.label}
-          >
-            <Icon size={15} weight="light" />
-            <span class="tab-label">{tab.label}</span>
-          </button>
-        {/each}
-      </nav>
+      {:else}
+        <CaretRight size={14} weight="light" />
+      {/if}
+    </button>
+    {#each TABS as tab (tab.id)}
+      {@const Icon = tab.icon}
       <button
         type="button"
-        class="panel-collapse lattice-btn lattice-btn--ghost lattice-btn--icon"
-        onclick={() => layout.toggleRight()}
-        title="Collapse panel (Ctrl+J)"
-        aria-label="Collapse panel"
+        class={`rail-control lattice-btn lattice-btn--icon ${activeTab === tab.id ? 'lattice-btn--primary' : 'lattice-btn--ghost'}`}
+        onclick={() => layout.setRightTab(tab.id)}
+        title={tab.label}
+        aria-label={tab.label}
       >
-        <CaretRight size={14} weight="light" />
+        <Icon size={18} weight="light" />
       </button>
+    {/each}
+  </div>
+
+  <div
+    class="panel-drawer lattice-forced-colors-boundary"
+    class:collapsed
+    style:width={`${drawerWidth}px`}
+    inert={collapsed}
+    aria-hidden={collapsed}
+  >
+    <div class="panel-header">
+      <h2 class="panel-title">{TABS.find((tab) => tab.id === activeTab)?.label}</h2>
     </div>
 
     <div class="tab-content">
@@ -104,7 +92,7 @@
       label="Resize panel"
       onResize={handleResize}
     />
-  {/if}
+  </div>
 </aside>
 
 <style>
@@ -113,21 +101,28 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
+    overflow: visible;
     /* Shell chrome intentionally remains outside the content-card surface primitive. */
     background: var(--bg-void);
-    border-left: 1px solid var(--border-structural);
+    box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.45);
+    z-index: 20;
   }
 
-  .right-panel :global(.resize-handle) {
+  .panel-drawer :global(.resize-handle) {
     left: -3px;
   }
 
   .rail {
+    position: relative;
+    z-index: 2;
     display: flex;
+    flex: 1;
     flex-direction: column;
     align-items: center;
     gap: 6px;
     padding: 8px 0;
+    background: var(--bg-void);
   }
 
   .rail-control {
@@ -141,49 +136,47 @@
 
   .rail-control.expand {
     margin-bottom: 6px;
-    border-bottom: 1px solid var(--border-structural);
     border-radius: var(--radius-none);
     width: 100%;
     padding-bottom: 12px;
+    box-shadow: var(--edge-seam);
+  }
+
+  .panel-drawer {
+    position: absolute;
+    top: 11px;
+    right: 100%;
+    bottom: 11px;
+    z-index: 1;
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+    box-shadow: var(--elev-3), var(--edge-lip);
+    transform: translateX(0);
+    transition: transform var(--motion-duration-standard) var(--motion-ease-standard);
+  }
+
+  .panel-drawer.collapsed {
+    pointer-events: none;
+    transform: translateX(104%);
   }
 
   .panel-header {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 4px 6px;
-    border-bottom: 1px solid var(--border-structural);
+    min-height: 40px;
+    padding: 4px 10px;
+    box-shadow: var(--edge-seam);
   }
 
-  .tab-bar {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    overflow-x: auto;
-    /* Deliberately chromeless horizontal tab strip; ruling R9 excludes lattice scrollbars. */
-    scrollbar-width: none;
-  }
-
-  .panel-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
-  .tab-label {
-    display: inline;
-  }
-
-  .panel-collapse {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    flex-shrink: 0;
+  .panel-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: var(--text-h3);
+    font-weight: 600;
   }
 
   .tab-content {

@@ -9,7 +9,16 @@
   font-size: var(--text-small);
 }
 
-.lattice-table th {
+/* Include the table element so these shared surface semantics outrank a
+   consumer's scoped cell rules without resorting to !important. */
+table.lattice-table th,
+table.lattice-table td {
+  background-color: var(--bg-panel);
+  border-bottom: 0;
+  box-shadow: var(--edge-seam);
+}
+
+table.lattice-table th {
   text-align: left;
   font-weight: 500;
   color: var(--text-secondary);
@@ -17,16 +26,22 @@
   letter-spacing: 0.06em;
   font-size: var(--text-micro);
   padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border-structural);
 }
 
-.lattice-table td {
+table.lattice-table td {
   padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border-structural);
   height: 32px;
   vertical-align: middle;
 }
 
-.lattice-table tr:hover td {
-  background-color: var(--bg-surface);
+table.lattice-table tbody tr:hover td {
+  background-color: var(--bg-raised);
+}
+
+@media (forced-colors: active) {
+  table.lattice-table th,
+  table.lattice-table td {
+    border-bottom: 1px solid CanvasText;
+    box-shadow: none;
+  }
 }

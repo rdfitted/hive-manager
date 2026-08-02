@@ -112,13 +112,21 @@
     color: var(--accent-cyan);
   }
 
-  /* Selected-record tint, not a structural panel surface. */
-  tbody tr.selected td {
-    background: color-mix(in srgb, var(--accent-cyan) 7%, var(--bg-surface));
+  /* Dense rows use a quieter wash than the 5% active-panel convention. */
+  .knowledge-table tbody tr.selected td {
+    background: color-mix(in srgb, var(--accent-cyan) 4%, var(--bg-panel));
+    box-shadow:
+      var(--edge-seam),
+      var(--elev-1),
+      var(--edge-lip);
   }
 
-  tbody tr.selected td:first-child {
-    box-shadow: inset 2px 0 var(--accent-cyan);
+  .knowledge-table tbody tr.selected td:first-child {
+    box-shadow:
+      inset 2px 0 var(--accent-cyan),
+      var(--edge-seam),
+      var(--elev-1),
+      var(--edge-lip);
   }
 
   td:first-child {

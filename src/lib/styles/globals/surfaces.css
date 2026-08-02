@@ -3,13 +3,20 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 .lattice-panel {
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-structural);
+  background-color: var(--bg-panel);
   border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1), var(--edge-lip);
 }
 
+/* Canonical shadow order: state/identity inset, elevation, edge lip. Consumers
+   adding an identity inset must restate the full stack in this order; a
+   box-shadow stack cannot be appended to the component recipe. */
 .lattice-panel--active {
-  border-color: var(--border-active);
+  background-color: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
+  box-shadow:
+    inset 0 0 0 1px var(--accent-cyan),
+    var(--elev-1),
+    var(--edge-lip);
 }
 
 .lattice-modal {
@@ -23,4 +30,28 @@
 .lattice-modal-backdrop {
   backdrop-filter: blur(4px);
   background-color: rgba(6, 7, 9, 0.7);
+}
+
+@media (forced-colors: active) {
+  .lattice-forced-colors-boundary {
+    border: 1px solid CanvasText !important;
+  }
+
+  .lattice-forced-colors-boundary--active,
+  .lattice-forced-colors-boundary--focus-within:focus-within {
+    border-color: Highlight !important;
+  }
+
+  .lattice-panel,
+  .lattice-modal {
+    border: 1px solid CanvasText !important;
+  }
+
+  .lattice-panel--active {
+    border-color: Highlight !important;
+  }
+
+  .lattice-btn {
+    border: 1px solid ButtonBorder !important;
+  }
 }

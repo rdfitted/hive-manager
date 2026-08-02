@@ -40,7 +40,7 @@
     </div>
 {/snippet}
 
-<div class="fusion-comparison-view lattice-panel lattice-scroll-content">
+<div class="fusion-comparison-view lattice-scroll-content lattice-forced-colors-boundary">
     <div class="grid" style="grid-template-columns: repeat({Math.max(1, candidates.length)}, 1fr);">
         {#each candidates as cell (cell.id)}
             <div class="candidate-card lattice-panel" class:completed={cell.status === 'completed'} class:failed={cell.status === 'failed'}>
@@ -90,7 +90,9 @@
         height: 100%;
         overflow-x: auto;
         padding: 16px;
-        background: var(--bg-sunken);
+        background: var(--bg-chrome);
+        border-radius: var(--radius-shell);
+        box-shadow: var(--edge-lip);
     }
 
     .grid {
@@ -104,21 +106,17 @@
         flex-direction: column;
         min-width: 320px;
         max-width: 500px;
-        transition:
-            background-color var(--motion-duration-standard) var(--motion-ease-standard),
-            border-color var(--motion-duration-standard) var(--motion-ease-standard);
+        transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
     }
 
     .candidate-card.completed {
         /* Candidate outcome tint is semantic state, layered over the structural panel. */
-        border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
-        background: color-mix(in srgb, var(--status-success) 4%, var(--bg-surface));
+        background: color-mix(in srgb, var(--status-success) 4%, var(--bg-panel));
     }
 
     .candidate-card.failed {
         /* Candidate outcome tint is semantic state, layered over the structural panel. */
-        border-color: color-mix(in srgb, var(--status-error) 20%, transparent);
-        background: color-mix(in srgb, var(--status-error) 4%, var(--bg-surface));
+        background: color-mix(in srgb, var(--status-error) 4%, var(--bg-panel));
     }
 
     .card-header {

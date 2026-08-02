@@ -12,7 +12,7 @@
   let { label, sessions: items, status = 'queued', accent = 'var(--text-secondary)' }: Props = $props();
 </script>
 
-<section class="column lattice-panel" style="--col-accent: {accent};" aria-label={label}>
+<section class="column lattice-forced-colors-boundary" style="--col-accent: {accent};" aria-label={label}>
   <header class="col-head">
     <span class="dot" aria-hidden="true"></span>
     <span class="label">{label}</span>
@@ -35,13 +35,17 @@
     min-width: 220px;
     width: 220px;
     max-height: 100%;
+    overflow: hidden;
+    background: var(--bg-chrome);
+    border-radius: var(--radius-shell);
+    box-shadow: var(--edge-lip);
   }
   .col-head {
     display: flex;
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-3);
-    border-bottom: 1px solid var(--color-border);
+    box-shadow: var(--edge-seam);
     font-family: var(--font-display);
     font-size: var(--text-small);
     text-transform: uppercase;

@@ -148,7 +148,8 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
+    if (open && event.key === 'Escape') {
+      event.preventDefault();
       close();
     }
   }

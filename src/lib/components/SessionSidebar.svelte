@@ -5,7 +5,7 @@
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
   import { ui } from '$lib/stores/ui';
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import LaunchDialog from './LaunchDialog.svelte';
   import AgentTree from './AgentTree.svelte';
   import QueenControls from './QueenControls.svelte';
@@ -55,6 +55,7 @@
     onLaunchSolo?: (config: SoloLaunchConfig) => Promise<void>;
     onLaunchDebate?: (config: DebateLaunchConfig) => Promise<void>;
     onOpenAddWorker?: () => void;
+    startAction?: { id: number; action: 'hive' | 'fusion' | 'debate' | 'recent' } | null;
   }
 
   interface SessionSummary {
@@ -67,11 +68,12 @@
     state: string;
   }
 
-  let { onLaunchHiveV2, onLaunchResearch, onLaunchFusion, onLaunchSolo, onLaunchDebate, onOpenAddWorker }: Props = $props();
+  let { onLaunchHiveV2, onLaunchResearch, onLaunchFusion, onLaunchSolo, onLaunchDebate, onOpenAddWorker, startAction = null }: Props = $props();
 
   let showLaunchDialog = $state(false);
   let launching = $state(false);
   let launchError = $state('');
+  let launchInitialMode = $state<'hive' | 'fusion' | 'debate' | undefined>(undefined);
   let persistedSessions = $state<SessionSummary[]>([]);
   let loadingPersisted = $state(false);
   let currentDirectory = $state<string | null>(null);
@@ -83,14 +85,33 @@
   let resuming = $state(false);
   let resumeError = $state<string | null>(null);
   let resumeReportRequestId = 0;
+  let handledStartActionId = 0;
+  let recentDisclosure: HTMLButtonElement;
 
   let collapsed = $derived($layout.leftCollapsed);
-  let sidebarWidth = $derived(collapsed ? RAIL_WIDTH : $layout.leftWidth);
+  let drawerWidth = $derived($layout.leftWidth - RAIL_WIDTH);
   let knowledgeHref = $derived(
     $activeSession
       ? `/knowledge?session_id=${encodeURIComponent($activeSession.id)}`
       : '/knowledge',
   );
+
+  $effect(() => {
+    const request = startAction;
+    if (!request || request.id === handledStartActionId) return;
+
+    handledStartActionId = request.id;
+    if (request.action === 'recent') {
+      if ($layout.leftCollapsed) layout.toggleLeft();
+      if ($layout.recentCollapsed) layout.toggleSection('recentCollapsed');
+      void tick().then(() => recentDisclosure?.focus());
+      return;
+    }
+
+    launchInitialMode = request.action;
+    launchError = '';
+    showLaunchDialog = true;
+  });
 
   onMount(async () => {
     // Get current working directory first
@@ -365,19 +386,16 @@
   }
 </script>
 
-<!-- The sidebar is chrome, not a panel: it must stay --bg-void so the content card
-     reads as a lit surface against the void (#183). Adopting .lattice-panel here
-     paints it --bg-surface, i.e. the same tone as .main-content, which collapses
-     that contrast entirely. -->
+<!-- The permanent rail is shell chrome; the adjacent drawer is a floating panel. -->
 <aside
   class="sidebar"
-  class:collapsed
   class:resizing
-  style:width={`${sidebarWidth}px`}
-  style:min-width={`${sidebarWidth}px`}
+  style:width={`${RAIL_WIDTH}px`}
+  style:min-width={`${RAIL_WIDTH}px`}
+  style:flex-basis={`${RAIL_WIDTH}px`}
 >
-  <div class="sidebar-header" class:collapsed>
-    <nav class="view-toggle" class:collapsed aria-label="View switcher">
+  <div class="sidebar-rail">
+    <nav class="view-toggle" aria-label="View switcher">
       {#each [
         { path: '/', href: '/', icon: House, label: 'Sessions' },
         { path: '/dashboard', href: '/dashboard', icon: Kanban, label: 'Dashboard' },
@@ -409,8 +427,14 @@
     </button>
   </div>
 
-  {#if !collapsed}
-  <div class="sidebar-content lattice-scroll-chrome">
+  <div
+    class="sidebar-drawer lattice-forced-colors-boundary"
+    class:collapsed
+    style:width={`${drawerWidth}px`}
+    inert={collapsed}
+    aria-hidden={collapsed}
+  >
+    <div class="sidebar-content lattice-scroll-chrome">
     <section class="section">
       <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.sessionsCollapsed} onclick={() => layout.toggleSection('sessionsCollapsed')}>
         <span class="chevron" class:collapsed={$layout.sessionsCollapsed}>
@@ -536,7 +560,7 @@
     </section>
 
     <section class="section">
-      <button type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.recentCollapsed} onclick={() => layout.toggleSection('recentCollapsed')}>
+      <button bind:this={recentDisclosure} type="button" class="lattice-btn lattice-btn--link lattice-btn--row" aria-expanded={!$layout.recentCollapsed} onclick={() => layout.toggleSection('recentCollapsed')}>
         <span class="chevron" class:collapsed={$layout.recentCollapsed}>
           {#if $layout.recentCollapsed}
             <CaretRight size={12} weight="light" />
@@ -613,31 +637,28 @@
         {/if}
       </section>
     {/if}
-  </div>
-  {/if}
+    </div>
 
-  <div class="sidebar-footer">
-    <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled lattice-btn--row" onclick={() => { launchError = ''; showLaunchDialog = true; }} title="New Session">
-      <span class="icon">+</span>
-      {#if !collapsed}
+    <div class="sidebar-footer">
+      <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled lattice-btn--row" onclick={() => { launchInitialMode = undefined; launchError = ''; showLaunchDialog = true; }} title="New Session">
+        <span class="icon">+</span>
         New Session
-      {/if}
-    </button>
-  </div>
+      </button>
+    </div>
 
-  {#if !collapsed}
     <ResizeHandle
       label="Resize sidebar"
       onResize={(clientX) => layout.setLeftWidth(clientX)}
       onDragChange={(d) => resizing = d}
     />
-  {/if}
+  </div>
 </aside>
 
 <LaunchDialog
   show={showLaunchDialog}
   {launching}
   {launchError}
+  initialMode={launchInitialMode}
   on:close={() => { showLaunchDialog = false; launchError = ''; }}
   on:launchHive={handleLaunchHive}
   on:launchResearch={handleLaunchResearch}
@@ -691,40 +712,60 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
+    overflow: visible;
+    background: var(--bg-void);
+    box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.45);
+    z-index: 20;
   }
 
-  .sidebar.resizing {
+  .sidebar.resizing .sidebar-drawer {
     transition: none;
   }
 
-  .sidebar :global(.resize-handle) {
+  .sidebar-drawer :global(.resize-handle) {
     right: -3px;
   }
 
-  .sidebar-header {
+  .sidebar-rail {
+    position: relative;
+    z-index: 2;
     display: flex;
+    flex: 1;
+    flex-direction: column;
     align-items: center;
-    gap: 8px;
-    padding: 8px;
-    border-bottom: 1px solid var(--border-structural);
+    gap: 6px;
+    padding: 8px 0;
     width: 100%;
+    background: var(--bg-void);
   }
 
-  .sidebar-header.collapsed {
+  .sidebar-drawer {
+    position: absolute;
+    top: 11px;
+    bottom: 11px;
+    left: 100%;
+    z-index: 1;
+    display: flex;
+    min-width: 0;
     flex-direction: column;
-    gap: 6px;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+    box-shadow: var(--elev-3), var(--edge-lip);
+    transform: translateX(0);
+    transition: transform var(--motion-duration-standard) var(--motion-ease-standard);
+  }
+
+  .sidebar-drawer.collapsed {
+    pointer-events: none;
+    transform: translateX(-104%);
   }
 
   .view-toggle {
     display: flex;
-    flex-direction: row;
-    gap: 4px;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .view-toggle.collapsed {
     flex-direction: column;
+    gap: 4px;
     flex: none;
   }
 
@@ -790,8 +831,8 @@
 
   .session-item {
     margin-bottom: 4px;
-    border-left: 3px solid var(--session-color);
     border-radius: var(--radius-md);
+    box-shadow: inset 3px 0 0 var(--session-color);
   }
 
   .session-copy {
@@ -829,7 +870,7 @@
     grid-template-columns: repeat(4, 1fr);
     gap: 4px;
     z-index: 20;
-    box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-void) 30%, transparent);
+    box-shadow: var(--elev-3), var(--edge-lip);
   }
 
   .session-row {
@@ -860,24 +901,24 @@
     text-transform: uppercase;
     background: var(--bg-void);
     color: var(--text-secondary);
-    border: 1px solid var(--border-structural);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
   }
 
   .type-tag.solo {
     background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
     color: var(--accent-cyan);
-    border-color: color-mix(in srgb, var(--accent-cyan) 30%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 30%, transparent);
   }
 
   .queen-controls-section {
     margin-top: 8px;
-    border-top: 1px solid var(--border-structural);
     padding-top: 8px;
+    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
   }
 
   .sidebar-footer {
     padding: 12px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
   }
 
   .sidebar-footer .icon {
@@ -891,7 +932,6 @@
     align-items: center;
     gap: 8px;
     padding: 8px 10px;
-    border: 1px solid transparent;
     border-radius: var(--radius-md);
     transition: background-color var(--motion-duration-fast) var(--motion-ease-standard);
   }
