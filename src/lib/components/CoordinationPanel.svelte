@@ -168,7 +168,7 @@
     padding: 12px 16px;
     /* The fixed log header remains visually distinct from scrolling content. */
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .panel-header h3 {
@@ -223,11 +223,11 @@
     flex-wrap: wrap;
     gap: 4px;
     padding: 4px 0;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .message:last-child {
-    border-bottom: none;
+    box-shadow: none;
   }
 
   .timestamp {

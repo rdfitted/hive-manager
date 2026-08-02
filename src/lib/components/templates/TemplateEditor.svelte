@@ -75,12 +75,12 @@
     <div class="header">
         <h3>{is_builtin ? 'Clone Template' : (template ? 'Edit Template' : 'New Template')}</h3>
         {#if is_builtin}
-            <div class="info-badge">Built-in templates cannot be modified. Saving will create a new custom template.</div>
+            <div class="info-badge lattice-forced-colors-boundary">Built-in templates cannot be modified. Saving will create a new custom template.</div>
         {/if}
     </div>
 
     {#if error}
-        <div class="error-banner" role="alert">{error}</div>
+        <div class="error-banner lattice-forced-colors-boundary" role="alert">{error}</div>
     {/if}
 
     <div class="form-section">
@@ -127,7 +127,7 @@
 
         <div class="cells-list lattice-scroll-chrome">
             {#each cells as cell, i}
-                <div class="cell-editor-card">
+                <div class="cell-editor-card lattice-panel">
                     <div class="card-header">
                         <span class="cell-num">Cell {i + 1}</span>
                         <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--compact" on:click={() => removeCell(i)}>Remove</button>
@@ -158,7 +158,7 @@
         </div>
     </div>
 
-    <div class="actions">
+    <div class="actions lattice-forced-colors-boundary">
         <button type="button" class="lattice-btn lattice-btn--secondary" on:click={handleCancel}>Cancel</button>
         <button type="button" class="lattice-btn lattice-btn--primary" on:click={handleSave} disabled={!name}>Save Template</button>
     </div>
@@ -185,14 +185,14 @@
         background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
         padding: 6px 10px;
         border-radius: var(--radius-sm);
-        border: 1px solid color-mix(in srgb, var(--accent-cyan) 20%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 20%, transparent);
     }
 
     .error-banner {
         padding: 10px 12px;
         border-radius: var(--radius-sm);
         background: color-mix(in srgb, var(--status-error) 12%, transparent);
-        border: 1px solid color-mix(in srgb, var(--status-error) 35%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 35%, transparent);
         color: var(--status-error);
         font-size: 12px;
     }
@@ -254,7 +254,6 @@
 
     .cell-editor-card {
         background: color-mix(in srgb, var(--text-primary) 3%, transparent);
-        border: 1px solid color-mix(in srgb, var(--text-primary) 8%, transparent);
         border-radius: var(--radius-md);
         padding: 12px;
         display: flex;
@@ -281,7 +280,7 @@
         gap: 12px;
         margin-top: 12px;
         padding-top: 20px;
-        border-top: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
+        box-shadow: var(--edge-lip);
     }
 
 </style>

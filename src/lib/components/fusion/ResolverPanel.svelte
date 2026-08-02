@@ -30,7 +30,7 @@
     <Skeleton loading={loading} skeleton={resolverSkeleton} class="resolver-loading">
         {#if output}
             <div class="output-card lattice-forced-colors-boundary">
-                <div class="card-header">
+                <div class="card-header lattice-forced-colors-boundary">
                     <span class="label">Resolver Decision</span>
                     <div class="selected-badge">
                         Selected: <span class="candidate-name status-badge status-success">{output.selected_candidate}</span>
@@ -70,7 +70,7 @@
                 {/if}
             </div>
         {:else if error}
-            <div class="error-state" role="alert">{error}</div>
+            <div class="error-state lattice-forced-colors-boundary" role="alert">{error}</div>
         {:else}
             <div class="empty-state">
                 <div class="icon" aria-hidden="true">Resolver</div>
@@ -108,7 +108,7 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-        border-bottom: 1px solid color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+        box-shadow: var(--edge-seam);
         padding-bottom: 12px;
     }
 
@@ -210,7 +210,7 @@
         border-radius: var(--radius-sm);
         /* Semantic error treatment intentionally remains state-tinted. */
         background: color-mix(in srgb, var(--status-error) 12%, transparent);
-        border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 30%, transparent);
         color: var(--status-error);
         text-align: center;
     }

@@ -65,10 +65,10 @@
 
     <div class="state-grid">
         <div class="state-section">
-            <h4>Cells</h4>
+            <h4 class="lattice-forced-colors-boundary">Cells</h4>
             <div class="grid">
                 {#each Object.entries(state.cells) as [id, status]}
-                    <div class="state-chip">
+                    <div class="state-chip lattice-forced-colors-boundary">
                         <span class="label">{id.substring(0, 8)}</span>
                         <span class="status-badge {getStatusClass(status)}">{status}</span>
                     </div>
@@ -77,10 +77,10 @@
         </div>
 
         <div class="state-section">
-            <h4>Agents</h4>
+            <h4 class="lattice-forced-colors-boundary">Agents</h4>
             <div class="grid">
                 {#each Object.entries(state.agents) as [id, status]}
-                    <div class="state-chip">
+                    <div class="state-chip lattice-forced-colors-boundary">
                         <span class="label">{id.substring(0, 8)}</span>
                         <span class="status-badge {getStatusClass(status)}">{status}</span>
                     </div>
@@ -117,7 +117,7 @@
         color: var(--text-secondary);
         text-transform: uppercase;
         font-size: 0.75rem;
-        border-bottom: 1px solid var(--border-structural);
+        box-shadow: var(--edge-seam);
         padding-bottom: 4px;
     }
 
@@ -134,7 +134,7 @@
         padding: 6px 12px;
         /* Replay entity rows are compact state records, not structural panels. */
         background: var(--bg-surface);
-        border: 1px solid var(--border-structural);
+        box-shadow: var(--edge-seam), var(--edge-lip);
         border-radius: var(--radius-sm);
         font-size: 0.85rem;
     }

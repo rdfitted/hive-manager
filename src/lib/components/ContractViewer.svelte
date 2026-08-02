@@ -110,7 +110,7 @@
     align-items: center;
     padding: 12px 16px;
     background: var(--bg-void);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .header-info h3 {
@@ -205,7 +205,7 @@
   .weights-section {
     padding: 12px 16px;
     background: var(--bg-void);
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
   }
 
   h4 {

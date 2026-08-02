@@ -148,7 +148,7 @@
     <header class="files-header">
       <div class="heading">
         <span class="title">Session Files</span>
-        <span class="read-only-badge">Read only</span>
+        <span class="read-only-badge lattice-forced-colors-boundary">Read only</span>
       </div>
       <button
         type="button"
@@ -350,7 +350,7 @@
     padding: 9px 10px;
     /* Dense section header, not a standalone panel surface. */
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .heading,
@@ -368,7 +368,7 @@
 
   .read-only-badge {
     padding: 2px 5px;
-    border: 1px solid var(--border-structural);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
     border-radius: var(--radius-sm);
     color: var(--text-muted);
     font-size: 9px;
@@ -386,7 +386,7 @@
     color: var(--status-error);
     /* Semantic inline error strip, not a structural panel. */
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--status-error);
+    box-shadow: inset 0 -1px 0 var(--status-error);
     font-size: 11px;
   }
 
@@ -402,7 +402,7 @@
     max-height: 42%;
     flex: 0 1 42%;
     overflow: auto;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .file-list {
@@ -464,7 +464,7 @@
     gap: 8px;
     /* Sticky pagination controls remain a control strip, not a panel. */
     background: var(--bg-surface);
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
   }
 
   .file-window-status {
@@ -520,7 +520,7 @@
     padding: 8px 10px;
     /* File metadata header, not a standalone panel surface. */
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
     font-family: var(--font-mono);
     font-size: 10px;
   }

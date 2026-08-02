@@ -83,7 +83,7 @@
                   <span class="keys">
                     {#each shortcut.keys as key, i (key)}
                       {#if i > 0}<span class="plus">+</span>{/if}
-                      <kbd>{key}</kbd>
+                      <kbd class="lattice-forced-colors-boundary">{key}</kbd>
                     {/each}
                   </span>
                   <span class="action">{shortcut.action}</span>
@@ -121,7 +121,7 @@
     align-items: center;
     gap: 10px;
     padding: 14px 16px;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .dialog-icon {
@@ -179,8 +179,9 @@
   kbd {
     padding: 2px 6px;
     background: var(--bg-void);
-    border: 1px solid var(--border-structural);
-    border-bottom-width: 2px;
+    box-shadow:
+      inset 0 0 0 1px var(--border-structural),
+      inset 0 -2px 0 var(--border-structural);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-family: var(--font-mono);

@@ -111,7 +111,7 @@
             </div>
         {:else}
             <div class="terminal-section lattice-panel">
-                <div class="terminal-controls">
+                <div class="terminal-controls lattice-forced-colors-boundary">
                     <div class="tab-bar" role="tablist" aria-label="Session view">
                         <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'terminal'} aria-selected={activeView === 'terminal'} onclick={() => activeView = 'terminal'}>Terminal</button>
                         <button type="button" role="tab" class="lattice-tab" class:lattice-tab--active={activeView === 'observability'} aria-selected={activeView === 'observability'} onclick={() => activeView = 'observability'}>Observability</button>
@@ -129,10 +129,10 @@
                     {#if activeView === 'observability'}
                         <div class="observability-container">
                             <div class="obs-main">
-                                <div class="obs-timeline">
+                                <div class="obs-timeline lattice-forced-colors-boundary">
                                     <TimelineView />
                                 </div>
-                                <div class="obs-replay">
+                                <div class="obs-replay lattice-forced-colors-boundary">
                                     <ReplayView />
                                 </div>
                             </div>
@@ -201,7 +201,7 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-        border-bottom: 1px solid var(--border-structural);
+        box-shadow: var(--edge-seam);
     }
 
     .tab-bar {
@@ -239,6 +239,6 @@
 
     .obs-timeline, .obs-replay {
         overflow: hidden;
-        border-right: 1px solid var(--border-structural);
+        box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.45);
     }
 </style>

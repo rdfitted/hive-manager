@@ -102,7 +102,7 @@
 
         <div class="criteria-list">
           {#each verdict.criteria as criterion}
-            <div class="criterion-item" class:passed={criterion.passed}>
+            <div class="criterion-item lattice-forced-colors-boundary" class:passed={criterion.passed}>
               <div class="criterion-header">
                 <span class="criterion-icon">
                   {#if criterion.passed}
@@ -191,7 +191,7 @@
     line-height: 1.5;
     color: var(--text-primary);
     padding-bottom: 12px;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .summary p {
@@ -208,12 +208,12 @@
     padding: 10px;
     border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--status-error) 5%, transparent);
-    border: 1px solid color-mix(in srgb, var(--status-error) 10%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 10%, transparent);
   }
 
   .criterion-item.passed {
     background: color-mix(in srgb, var(--status-success) 5%, transparent);
-    border-color: color-mix(in srgb, var(--status-success) 10%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-success) 10%, transparent);
   }
 
   .criterion-header {

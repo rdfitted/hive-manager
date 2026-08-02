@@ -164,7 +164,7 @@
 
   .modal-header {
     padding: 1rem 1.25rem;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .modal-header h2 {
@@ -227,7 +227,7 @@
 
   .modal-footer {
     padding: 0.85rem 1.25rem;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
     display: flex;
     justify-content: flex-end;
     gap: 0.5rem;

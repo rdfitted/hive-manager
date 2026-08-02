@@ -15,7 +15,7 @@
 </script>
 
 {#if artifact}
-<div class="artifact-summary" class:compact class:show-details={showDetails}>
+<div class="artifact-summary lattice-forced-colors-boundary" class:compact class:show-details={showDetails}>
     <div class="header">
         <div class="main-stats">
             <div class="stat">
@@ -94,7 +94,7 @@
         background: var(--bg-sunken);
         padding: 12px;
         border-radius: var(--radius-lg);
-        border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 5%, transparent);
     }
 
     .artifact-summary.compact {
@@ -188,7 +188,7 @@
         flex-direction: column;
         gap: 8px;
         margin-top: 8px;
-        border-top: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: var(--edge-seam-top);
         padding-top: 12px;
     }
 

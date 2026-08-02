@@ -57,7 +57,7 @@
 
 <div class="fusion-panel lattice-scroll-content">
   <div class="panel-controls">
-    <div class="view-tabs">
+    <div class="view-tabs lattice-forced-colors-boundary">
       <button class="lattice-tab" class:lattice-tab--active={viewMode === 'terminals'} aria-pressed={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
         <Keyboard size={20} weight="light" /> Terminals
       </button>
@@ -155,7 +155,7 @@
   {/if}
 
   {#if error}
-    <div class="error-banner">{error}</div>
+    <div class="error-banner lattice-forced-colors-boundary">{error}</div>
   {/if}
 
   {#if showCleanupConfirm}
@@ -193,7 +193,7 @@
     background: var(--bg-void);
     padding: 4px;
     border-radius: var(--radius-md);
-    border: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam), var(--edge-lip);
     gap: 4px;
   }
 
@@ -216,7 +216,7 @@
     gap: 10px;
     padding: 10px 14px;
     background: var(--bg-void);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .orchestrator-header h3 {
@@ -263,7 +263,7 @@
     align-items: center;
     padding: 10px 14px;
     background: var(--bg-void);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .variant-name {
@@ -281,7 +281,7 @@
   .variant-actions {
     padding: 12px;
     background: var(--bg-void);
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
     display: flex;
     justify-content: center;
   }
@@ -296,7 +296,7 @@
     gap: 10px;
     padding: 12px 16px;
     background: var(--bg-void);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .section-header h3 {
@@ -325,7 +325,7 @@
     /* Full-width semantic error banner intentionally remains state-tinted. */
     background: color-mix(in srgb, var(--status-error) 15%, transparent);
     color: var(--status-error);
-    border: 1px solid var(--status-error);
+    box-shadow: inset 0 0 0 1px var(--status-error);
     border-radius: var(--radius-sm);
     font-size: 13px;
   }

@@ -163,7 +163,7 @@
     </div>
     
     <div class="panel-controls">
-      <div class="view-tabs">
+      <div class="view-tabs lattice-forced-colors-boundary">
         <button class="lattice-tab" class:lattice-tab--active={viewMode === 'terminals'} aria-pressed={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
           <Keyboard size={18} weight="light" /> Terminals
         </button>
@@ -178,7 +178,7 @@
   </div>
 
   {#if error}
-    <div class="error-banner">
+    <div class="error-banner lattice-forced-colors-boundary">
       <Warning size={16} />
       <span>{error}</span>
     </div>
@@ -273,7 +273,7 @@
     <!-- JUDGE VERDICT VIEW -->
     <div class="verdict-layout">
       {#if prUrl}
-        <div class="pr-banner">
+        <div class="pr-banner lattice-forced-colors-boundary">
           <div class="pr-icon-wrapper">
             <GitPullRequest size={24} />
           </div>
@@ -329,7 +329,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
     padding-bottom: 12px;
   }
 
@@ -366,7 +366,7 @@
     background: color-mix(in srgb, var(--text-primary) 3%, var(--bg-surface));
     padding: 4px;
     border-radius: var(--radius-md);
-    border: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam), var(--edge-lip);
     gap: 4px;
   }
 
@@ -377,7 +377,7 @@
     padding: 12px;
     background: color-mix(in srgb, var(--status-error) 12%, transparent);
     color: var(--status-error);
-    border: 1px solid color-mix(in srgb, var(--status-error) 25%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 25%, transparent);
     border-radius: var(--radius-sm);
     font-size: 13px;
   }
@@ -400,7 +400,7 @@
     padding: 10px 14px;
     /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .section-header h3 {
@@ -442,7 +442,7 @@
     padding: 10px 14px;
     /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .variant-name {
@@ -495,7 +495,7 @@
     padding: 12px 16px;
     /* Fixed comparison header keeps a subtle chrome tint above card content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .status-indicator {
@@ -590,7 +590,7 @@
     align-items: center;
     /* Captured-PR banner intentionally uses a success-state surface. */
     background: color-mix(in srgb, var(--status-success) 10%, var(--bg-surface));
-    border: 1px solid color-mix(in srgb, var(--status-success) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-success) 20%, transparent);
     border-radius: var(--radius-md);
     padding: 16px;
     gap: 16px;
@@ -631,7 +631,7 @@
     padding: 12px 16px;
     /* Fixed verdict header keeps a subtle chrome tint above report content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .verdict-header h3 {

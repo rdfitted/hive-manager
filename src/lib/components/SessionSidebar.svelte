@@ -936,12 +936,12 @@
   .queen-controls-section {
     margin-top: 8px;
     padding-top: 8px;
-    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
+    box-shadow: var(--edge-seam-top);
   }
 
   .sidebar-footer {
     padding: 12px;
-    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
+    box-shadow: var(--edge-seam-top);
   }
 
   .sidebar-footer .icon {

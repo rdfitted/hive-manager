@@ -6,7 +6,7 @@
     $: lines = diffSummary ? diffSummary.split('\n') : [];
 </script>
 
-<div class="diff-summary-panel lattice-scroll-content">
+<div class="diff-summary-panel lattice-forced-colors-boundary lattice-scroll-content">
     {#if diffSummary}
         <pre class="diff-summary-text">{diffSummary}</pre>
     {:else}
@@ -27,7 +27,7 @@
         background: var(--bg-sunken);
         border-radius: var(--radius-lg);
         padding: 12px;
-        border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 5%, transparent);
         overflow-x: auto;
     }
 

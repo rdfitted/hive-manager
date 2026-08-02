@@ -826,7 +826,7 @@
   .actions-section {
     margin-top: auto;
     padding-top: 12px;
-    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
+    box-shadow: var(--edge-seam-top);
   }
 
   .close-session-action {

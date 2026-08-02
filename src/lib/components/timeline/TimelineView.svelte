@@ -23,7 +23,7 @@
 <div class="timeline-container">
     <EventFilterPanel />
 
-    <div class="event-list-header">
+    <div class="event-list-header lattice-forced-colors-boundary">
         <div class="header-item">Time</div>
         <div class="header-item">Type</div>
         <div class="header-item">Source</div>
@@ -67,7 +67,7 @@
         gap: 12px;
         padding: 8px 12px;
         background: var(--color-surface-hover);
-        border-bottom: 1px solid var(--color-border);
+        box-shadow: var(--edge-seam);
         font-family: var(--font-mono);
         font-size: 0.7rem;
         font-weight: bold;

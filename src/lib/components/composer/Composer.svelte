@@ -219,7 +219,7 @@
 
     const before = document.createTextNode(beforeText);
     const token = document.createElement('span');
-    token.className = `composer-token ${kind}`;
+    token.className = `composer-token lattice-forced-colors-boundary ${kind}`;
     token.dataset.tokenValue = value;
     token.contentEditable = 'false';
     token.textContent = display;
@@ -395,7 +395,7 @@
     max-width: 100%;
     margin: 0 2px;
     padding: 1px 6px;
-    border: 1px solid color-mix(in srgb, var(--accent-cyan) 45%, var(--border-structural));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 45%, var(--border-structural));
     border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--accent-cyan) 12%, transparent);
     color: var(--accent-cyan);
@@ -407,7 +407,7 @@
   }
 
   .composer :global(.composer-token.command) {
-    border-color: color-mix(in srgb, var(--accent-amber) 45%, var(--border-structural));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-amber) 45%, var(--border-structural));
     background: color-mix(in srgb, var(--accent-amber) 12%, transparent);
     color: var(--accent-amber);
   }

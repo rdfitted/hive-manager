@@ -266,14 +266,14 @@
   {/if}
 
   {#if $conversationStore.error}
-    <div class="error">
+    <div class="error lattice-forced-colors-boundary">
       {$conversationStore.error}
       <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => conversationStore.clearError()} aria-label="Dismiss conversation error">&#10005;</button>
     </div>
   {/if}
 
   {#if approvalError}
-    <div class="error">
+    <div class="error lattice-forced-colors-boundary">
       {approvalError}
       <button class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--icon" onclick={() => approvalError = ''} aria-label="Dismiss approval error">&#10005;</button>
     </div>
@@ -292,7 +292,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
     padding: 0 4px;
     overflow-x: auto;
   }
@@ -342,11 +342,11 @@
     display: flex;
     gap: 6px;
     padding: 3px 0;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .message:last-child {
-    border-bottom: none;
+    box-shadow: none;
   }
 
   .msg-time {
@@ -374,7 +374,7 @@
     display: flex;
     gap: 8px;
     padding: 8px 12px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
     /* Composer dock remains a distinct full-width input surface. */
     background: var(--bg-surface);
   }
@@ -388,7 +388,7 @@
     background: var(--bg-surface);
     color: var(--status-error);
     font-size: 12px;
-    border: 1px solid var(--status-error);
+    box-shadow: inset 0 0 0 1px var(--status-error);
   }
 
 </style>

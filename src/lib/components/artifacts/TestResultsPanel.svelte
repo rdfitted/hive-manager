@@ -11,16 +11,16 @@
 
 <div class="test-results-panel">
     <div class="summary">
-        <div class="summary-item" class:pass={passed > 0}>
+        <div class="summary-item lattice-forced-colors-boundary" class:pass={passed > 0}>
             <span class="count">{passed}</span>
             <span class="label">Passed</span>
         </div>
-        <div class="summary-item" class:fail={failed > 0}>
+        <div class="summary-item lattice-forced-colors-boundary" class:fail={failed > 0}>
             <span class="count">{failed}</span>
             <span class="label">Failed</span>
         </div>
         {#if skipped > 0}
-            <div class="summary-item">
+            <div class="summary-item lattice-forced-colors-boundary">
                 <span class="count">{skipped}</span>
                 <span class="label">Skipped</span>
             </div>
@@ -31,7 +31,7 @@
         <div class="failures-list">
             <div class="failures-header">Failure Details</div>
             {#each failures as failure}
-                <div class="failure-item">
+                <div class="failure-item lattice-forced-colors-boundary">
                     <div class="test-name">
                         <X size={14} weight="light" />
                         {failure.name || 'Unknown test'}
@@ -66,15 +66,15 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        border: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 5%, transparent);
     }
 
     .summary-item.pass {
-        border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-success) 20%, transparent);
     }
 
     .summary-item.fail {
-        border-color: color-mix(in srgb, var(--status-error) 20%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 20%, transparent);
     }
 
     .count {
@@ -110,7 +110,7 @@
 
     .failure-item {
         background: color-mix(in srgb, var(--status-error) 5%, transparent);
-        border: 1px solid color-mix(in srgb, var(--status-error) 10%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 10%, transparent);
         border-radius: var(--radius-lg);
         padding: 8px;
     }

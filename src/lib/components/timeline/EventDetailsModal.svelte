@@ -59,7 +59,7 @@
         aria-label="Event details"
         tabindex="-1"
     >
-        <div class="modal-header">
+        <div class="modal-header lattice-forced-colors-boundary">
             <h3>Event Details</h3>
             <div class="header-actions">
                 <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact" on:click={copyToClipboard}>Copy JSON</button>
@@ -81,7 +81,7 @@
             </div>
 
             <div class="payload-section">
-                <h4>Payload</h4>
+                <h4 class="lattice-forced-colors-boundary">Payload</h4>
                 <pre class="lattice-scroll-content">{formatJSON(event.payload)}</pre>
             </div>
         </div>
@@ -125,7 +125,7 @@
         justify-content: space-between;
         align-items: center;
         padding: 16px;
-        border-bottom: 1px solid var(--color-border);
+        box-shadow: var(--edge-seam);
     }
 
     .modal-header h3 {
@@ -169,7 +169,7 @@
     .payload-section h4 {
         margin: 0 0 12px 0;
         color: var(--color-text-muted);
-        border-bottom: 1px solid var(--color-border);
+        box-shadow: var(--edge-seam);
         padding-bottom: 4px;
     }
 
