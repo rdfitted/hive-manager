@@ -110,7 +110,7 @@
   }
 </script>
 
-<div class="diff-widget">
+<div class="diff-widget lattice-forced-colors-boundary">
   {#if renderable}
     <div class="diff-body lattice-scroll-content">
       {#each lines as line, i (i)}
@@ -129,7 +129,7 @@
   .diff-widget {
     /* Tool results are nested work products, so their body uses the shared sunken tone. */
     background: var(--bg-sunken);
-    border: 1px solid var(--border-structural);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }

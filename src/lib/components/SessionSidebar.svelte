@@ -639,7 +639,7 @@
             selectedId={$ui.focusedAgentId}
             on:select={handleAgentSelect}
           />
-          <div class="queen-controls-section">
+          <div class="queen-controls-section lattice-forced-colors-boundary">
             <QueenControls on:openAddWorker={() => onOpenAddWorker?.()} />
           </div>
         {/if}
@@ -647,7 +647,7 @@
     {/if}
     </div>
 
-    <div class="sidebar-footer">
+    <div class="sidebar-footer lattice-forced-colors-boundary">
       <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled lattice-btn--row" onclick={() => { launchInitialMode = undefined; launchError = ''; showLaunchDialog = true; }} title="New Session">
         <span class="icon">+</span>
         New Session
@@ -936,12 +936,12 @@
   .queen-controls-section {
     margin-top: 8px;
     padding-top: 8px;
-    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
+    box-shadow: var(--edge-seam-top);
   }
 
   .sidebar-footer {
     padding: 12px;
-    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
+    box-shadow: var(--edge-seam-top);
   }
 
   .sidebar-footer .icon {

@@ -706,7 +706,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           </div>
           <div class="form-group flex-1">
             <span class="group-label">Session Color</span>
-            <div class="color-picker-inline">
+            <div class="color-picker-inline lattice-forced-colors-boundary">
               {#each COLORS as color}
                 <button
                   type="button"
@@ -765,7 +765,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         {/if}
 
         {#if mode === 'hive'}
-          <div class="form-section hive-policy-section">
+          <div class="form-section hive-policy-section lattice-forced-colors-boundary">
             <div class="section-heading-copy">
               <h3>Hive Topology</h3>
               <p>Keep the team legible: a Queen, a small set of coding principals, and bounded native delegation.</p>
@@ -877,7 +877,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               {showHiveAdvanced ? 'Hide' : 'Show'} delegation guidance
             </button>
             {#if showHiveAdvanced}
-              <div class="advanced-grid" id="hive-delegation-limits">
+              <div class="advanced-grid lattice-forced-colors-boundary" id="hive-delegation-limits">
                 <label>Queen target max children <input class="lattice-input" type="number" min="1" max="8" bind:value={queenMaxChildren} /></label>
                 <label>Queen target max depth <input class="lattice-input" type="number" min="1" max="4" bind:value={queenMaxDepth} /></label>
                 <label>Principal target max children <input class="lattice-input" type="number" min="1" max="8" bind:value={principalMaxChildren} /></label>
@@ -920,7 +920,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 </label>
               </div>
               {#if (mode === 'hive' && withEvaluator) || (mode === 'solo' && withSoloEvaluator)}
-                <div class="evaluator-config subsection">
+                <div class="evaluator-config subsection lattice-forced-colors-boundary">
                   <h4>Evaluator Configuration</h4>
                   <AgentConfigEditor
                     bind:config={evaluatorConfig}
@@ -932,7 +932,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   />
                 </div>
 
-                <div class="qa-workers-config subsection">
+                <div class="qa-workers-config subsection lattice-forced-colors-boundary">
                   <div class="section-header">
                     <h4>QA Workers ({qaWorkers.length})</h4>
                     <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>+ Add</button>
@@ -1024,7 +1024,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </select>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Variant Configurations</h4>
               <div class="workers-list">
                 {#each activeFusionVariants as variant, i (i)}
@@ -1051,7 +1051,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Judge Configuration</h4>
               <p class="section-description">Evaluates variant outputs and recommends a winner.</p>
               <div class="worker-card lattice-panel">
@@ -1094,7 +1094,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Debater Configurations</h4>
               <div class="workers-list">
                 {#each activeDebaters as debater, i (i)}
@@ -1129,7 +1129,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Judge Configuration</h4>
               <p class="section-description">Evaluates the debate and renders the verdict.</p>
               <div class="worker-card lattice-panel">
@@ -1187,11 +1187,11 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         {/if}
 
         {#if error || launchError}
-          <div class="error-message" role="alert">{error || launchError}</div>
+          <div class="error-message lattice-forced-colors-boundary" role="alert">{error || launchError}</div>
         {/if}
 
         {#if mode !== 'templates'}
-        <div class="launch-preview-section">
+        <div class="launch-preview-section lattice-forced-colors-boundary">
           <button
             type="button"
             class="lattice-btn lattice-btn--ghost lattice-btn--link"
@@ -1262,19 +1262,19 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 {/if}
 
                 {#if mode === 'hive'}
-                  <div class="topology-contract">
-                    <div class="topology-layer">
+                  <div class="topology-contract lattice-forced-colors-boundary">
+                    <div class="topology-layer lattice-forced-colors-boundary">
                       <span class="topology-layer-title">Managed principals</span>
                       <span>1 Queen + {codingPrincipals.length} manager-launched coding principal{codingPrincipals.length === 1 ? '' : 's'}</span>
                       <span>Workspace: {workspaceStrategy === 'shared_cell' ? 'one shared cell' : 'one Queen worktree plus one per principal'}</span>
                     </div>
                     {#if withEvaluator}
-                      <div class="topology-layer">
+                      <div class="topology-layer lattice-forced-colors-boundary">
                         <span class="topology-layer-title">Verification control plane</span>
                         <span>Evaluator + Prince peers; {qaWorkers.length} configured QA role{qaWorkers.length === 1 ? '' : 's'}, plus {automaticAdversarialLanes} missing adversarial lane{automaticAdversarialLanes === 1 ? '' : 's'} added automatically to reach the {adversarialLaneTarget}-lane target.</span>
                       </div>
                     {/if}
-                    <div class="topology-layer">
+                    <div class="topology-layer lattice-forced-colors-boundary">
                       <span class="topology-layer-title">Potential native children</span>
                       <span>Queen: {delegationModeLabel(queenDelegationMode)} · Principals: {delegationModeLabel(principalDelegationMode)}</span>
                       <span>Harness-native children stay inside their parent’s assignment; they are not additional managed principals.</span>
@@ -1385,7 +1385,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     gap: 6px;
     padding: 6px;
     background: var(--bg-void);
-    border: 1px solid var(--border-structural);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-md);
   }
 
@@ -1471,7 +1471,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .hive-policy-section {
     /* Semantic policy emphasis, not a reusable structural surface. */
-    border: 1px solid color-mix(in srgb, var(--accent-cyan) 26%, var(--border-structural));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 26%, var(--border-structural));
     background: color-mix(in srgb, var(--accent-cyan) 4%, var(--bg-void));
   }
 
@@ -1547,7 +1547,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .advanced-grid {
     margin-top: 12px;
     padding-top: 12px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
   }
 
   .advanced-grid label {
@@ -1576,7 +1576,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   .subsection {
     margin-top: 16px;
     padding-top: 12px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
   }
 
   .subsection h4 {
@@ -1655,7 +1655,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     padding: 12px;
     margin-bottom: 16px;
     background: color-mix(in srgb, var(--status-error) 15%, transparent);
-    border: 1px solid var(--status-error);
+    box-shadow: inset 0 0 0 1px var(--status-error);
     border-radius: var(--radius-sm);
     color: var(--status-error);
     font-size: 13px;
@@ -1735,7 +1735,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .launch-preview-section {
     margin-top: 20px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
     padding-top: 16px;
   }
 
@@ -1824,14 +1824,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
     padding-top: 12px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
   }
 
   .topology-layer {
     display: grid;
     gap: 4px;
     padding: 10px;
-    border: 1px solid var(--border-structural);
+    box-shadow: var(--edge-lip);
     border-radius: var(--radius-sm);
     color: var(--text-secondary);
     font-size: 10px;

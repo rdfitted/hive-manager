@@ -424,7 +424,7 @@
         </section>
 
         {#if isSessionActive($activeSession.state)}
-          <section class="section actions-section">
+          <section class="section actions-section lattice-forced-colors-boundary">
             <div class="operator-controls">
               {#if serdeEnumVariantName($activeSession.state) === 'QaInProgress'}
                 <button class="lattice-btn lattice-btn--secondary lattice-btn--compact" onclick={() => showSkipQaConfirm = true}>Skip QA</button>
@@ -826,7 +826,7 @@
   .actions-section {
     margin-top: auto;
     padding-top: 12px;
-    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
+    box-shadow: var(--edge-seam-top);
   }
 
   .close-session-action {

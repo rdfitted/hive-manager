@@ -22,7 +22,7 @@
 </script>
 
 <div class="artifact-browser">
-    <div class="browser-header">
+    <div class="browser-header lattice-forced-colors-boundary">
         <h3>Artifact Browser</h3>
         <div class="cell-filters">
             <span class="label">Filter Cells:</span>
@@ -45,7 +45,7 @@
         {:else}
             {#each displayedCells as cell}
                 <div class="cell-column lattice-panel">
-                    <div class="column-header">
+                    <div class="column-header lattice-forced-colors-boundary">
                         Cell: {cell.id.substring(0, 8)}
                     </div>
                     <div class="column-content lattice-scroll-content">
@@ -75,7 +75,7 @@
         padding: 16px;
         /* Workspace control strip, not a standalone structural panel. */
         background: var(--color-surface);
-        border-bottom: 1px solid var(--color-border);
+        box-shadow: var(--edge-seam);
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -124,7 +124,7 @@
     .column-header {
         padding: 10px 16px;
         background: var(--color-surface-hover);
-        border-bottom: 1px solid var(--color-border);
+        box-shadow: var(--edge-seam);
         font-weight: bold;
         color: var(--color-text);
         font-size: 0.9rem;

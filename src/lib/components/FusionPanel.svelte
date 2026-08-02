@@ -57,7 +57,7 @@
 
 <div class="fusion-panel lattice-scroll-content">
   <div class="panel-controls">
-    <div class="view-tabs">
+    <div class="view-tabs lattice-forced-colors-boundary">
       <button class="lattice-tab" class:lattice-tab--active={viewMode === 'terminals'} aria-pressed={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
         <Keyboard size={20} weight="light" /> Terminals
       </button>
@@ -70,7 +70,7 @@
   {#if viewMode === 'terminals'}
     {#if queenAgent}
       <div class="orchestrator-section lattice-panel">
-        <div class="orchestrator-header">
+        <div class="orchestrator-header lattice-forced-colors-boundary">
           <Crown size={24} weight="light" />
           <h3>Fusion Queen</h3>
           <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
@@ -86,7 +86,7 @@
         {@const variantName = typeof agent.role === 'object' && 'Fusion' in agent.role ? agent.role.Fusion.variant : ''}
         {@const status = getVariantStatus(variantName)}
         <div class="variant-card lattice-panel">
-          <div class="variant-header">
+          <div class="variant-header lattice-forced-colors-boundary">
             <span class="variant-name">{variantName}</span>
             <span class="status-badge" class:status-running={status === 'Running'} class:status-success={status === 'Completed'} class:status-error={status === 'Failed'}>
               {status}
@@ -96,7 +96,7 @@
             <Terminal agentId={agent.id} isFocused={true} />
           </div>
           {#if evaluationReady}
-            <div class="variant-actions">
+            <div class="variant-actions lattice-forced-colors-boundary">
               <button 
                 class="lattice-btn lattice-btn--primary"
                 onclick={() => handleApplyWinner(variantName)}
@@ -112,7 +112,7 @@
 
     {#if judgeAgent}
       <div class="orchestrator-section lattice-panel">
-        <div class="orchestrator-header">
+        <div class="orchestrator-header lattice-forced-colors-boundary">
           <Scales size={24} weight="light" />
           <h3>Judge</h3>
           <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
@@ -132,7 +132,7 @@
 
   {#if isResolvingOrCompleted}
     <div class="resolver-section lattice-panel lattice-panel--active">
-      <div class="section-header">
+      <div class="section-header lattice-forced-colors-boundary">
         <MagnifyingGlass size={24} weight="light" />
         <h3>Resolver Analysis</h3>
       </div>
@@ -144,7 +144,7 @@
 
   {#if evaluationReady && judgeReport}
     <div class="judge-section lattice-panel">
-      <div class="section-header">
+      <div class="section-header lattice-forced-colors-boundary">
         <Scales size={24} weight="light" />
         <h3>Judge Evaluation Report</h3>
       </div>
@@ -155,7 +155,7 @@
   {/if}
 
   {#if error}
-    <div class="error-banner">{error}</div>
+    <div class="error-banner lattice-forced-colors-boundary">{error}</div>
   {/if}
 
   {#if showCleanupConfirm}
@@ -193,7 +193,7 @@
     background: var(--bg-void);
     padding: 4px;
     border-radius: var(--radius-md);
-    border: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam), var(--edge-lip);
     gap: 4px;
   }
 
@@ -216,7 +216,7 @@
     gap: 10px;
     padding: 10px 14px;
     background: var(--bg-void);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .orchestrator-header h3 {
@@ -263,7 +263,7 @@
     align-items: center;
     padding: 10px 14px;
     background: var(--bg-void);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .variant-name {
@@ -281,7 +281,7 @@
   .variant-actions {
     padding: 12px;
     background: var(--bg-void);
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
     display: flex;
     justify-content: center;
   }
@@ -296,7 +296,7 @@
     gap: 10px;
     padding: 12px 16px;
     background: var(--bg-void);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .section-header h3 {
@@ -325,7 +325,7 @@
     /* Full-width semantic error banner intentionally remains state-tinted. */
     background: color-mix(in srgb, var(--status-error) 15%, transparent);
     color: var(--status-error);
-    border: 1px solid var(--status-error);
+    box-shadow: inset 0 0 0 1px var(--status-error);
     border-radius: var(--radius-sm);
     font-size: 13px;
   }

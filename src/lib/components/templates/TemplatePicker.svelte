@@ -25,7 +25,7 @@
 {#snippet templateGridSkeleton()}
     <div class="templates-grid lattice-scroll-chrome">
         {#each [0, 1, 2] as _}
-            <div class="template-skeleton-card">
+            <div class="template-skeleton-card lattice-forced-colors-boundary">
                 <SkelBar width="44px" height="44px" radius="md" />
                 <div class="template-skeleton-info">
                     <SkelBar width="62%" height="1rem" />
@@ -72,7 +72,11 @@
                         on:click={() => selectTemplate(template)}
                         title={template.description}
                     >
-                        <div class="card-icon" class:builtin={template.is_builtin}>
+                        <div
+                            class="card-icon"
+                            class:builtin={template.is_builtin}
+                            class:lattice-forced-colors-boundary={template.is_builtin}
+                        >
                             {#if template.mode === 'hive'}
                                 <Hexagon size={24} weight="light" />
                             {:else if template.mode === 'debate'}
@@ -147,7 +151,7 @@
         padding: 12px;
         display: flex;
         gap: 12px;
-        border: 1px solid var(--border-structural);
+        box-shadow: inset 0 0 0 1px var(--border-structural);
         border-radius: var(--radius-md);
     }
 
@@ -178,7 +182,7 @@
     }
 
     .card-icon.builtin {
-        border: 1px solid color-mix(in srgb, var(--accent-cyan) 30%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-cyan) 30%, transparent);
     }
 
     .card-info {

@@ -73,9 +73,9 @@
   }
 </script>
 
-<div class="data-table-widget">
+<div class="data-table-widget lattice-forced-colors-boundary">
   {#if table.rows.length > ROW_CAP}
-    <div class="notice">Showing first {ROW_CAP} of {table.rows.length} rows.</div>
+    <div class="notice lattice-forced-colors-boundary">Showing first {ROW_CAP} of {table.rows.length} rows.</div>
   {/if}
   {#if columns.length === 0}
     <div class="empty">No tabular data.</div>
@@ -114,7 +114,7 @@
   .data-table-widget {
     /* Tool results are nested work products, so their body uses the shared sunken tone. */
     background: var(--bg-sunken);
-    border: 1px solid var(--border-structural);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -124,7 +124,7 @@
     font-size: 10px;
     color: var(--text-secondary);
     background: color-mix(in srgb, var(--accent-amber) 8%, transparent);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .empty {
@@ -156,13 +156,12 @@
 
   td {
     padding: 4px 8px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border-structural) 50%, transparent);
     color: var(--text-primary);
     word-break: break-word;
   }
 
   tbody tr:last-child td {
-    border-bottom: none;
+    box-shadow: none;
   }
 
   tbody tr:hover td {

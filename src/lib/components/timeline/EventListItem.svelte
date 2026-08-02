@@ -35,7 +35,7 @@
 </script>
 
 <button type="button" class="lattice-btn lattice-btn--row" on:click={() => dispatch('select', event)}>
-    <div class="event-item">
+    <div class="event-item lattice-forced-colors-boundary">
         <div class="severity-indicator" style="background-color: {getSeverityColor(event.severity)}"></div>
         
         <div class="event-time">{formatTime(event.timestamp)}</div>
@@ -46,10 +46,10 @@
 
         <div class="event-source">
             {#if event.cell_id}
-                <span class="badge cell-badge">{event.cell_id.substring(0, 8)}</span>
+                <span class="badge cell-badge lattice-forced-colors-boundary">{event.cell_id.substring(0, 8)}</span>
             {/if}
             {#if event.agent_id}
-                <span class="badge agent-badge">{event.agent_id.substring(0, 8)}</span>
+                <span class="badge agent-badge lattice-forced-colors-boundary">{event.agent_id.substring(0, 8)}</span>
             {/if}
         </div>
 
@@ -66,7 +66,7 @@
         gap: 12px;
         align-items: center;
         width: 100%;
-        border-bottom: 1px solid var(--color-border);
+        box-shadow: var(--edge-seam);
         font-family: var(--font-mono);
         font-size: 0.8rem;
     }
@@ -95,7 +95,7 @@
         font-size: 0.7rem;
         background: var(--color-accent-dim);
         color: var(--color-accent);
-        border: 1px solid var(--color-accent-dim);
+        box-shadow: inset 0 0 0 1px var(--color-accent-dim);
     }
 
     .cell-badge {

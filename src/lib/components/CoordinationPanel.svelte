@@ -98,7 +98,7 @@
 {/snippet}
 
 <div class="coordination-panel">
-  <div class="panel-header">
+  <div class="panel-header lattice-forced-colors-boundary">
     <h3>Coordination Log</h3>
     <div class="header-actions">
       <input
@@ -127,7 +127,7 @@
         </div>
       {:else}
         {#each displayMessages as message (message.id)}
-          <div class="message">
+          <div class="message lattice-forced-colors-boundary">
             <span class="timestamp">{formatTimestamp(message.timestamp)}</span>
             <span class="sender {getSenderColor(message.from)}">
               <span class="sender-icon">{getSenderIcon(message.from)}</span>
@@ -168,7 +168,7 @@
     padding: 12px 16px;
     /* The fixed log header remains visually distinct from scrolling content. */
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .panel-header h3 {
@@ -223,11 +223,11 @@
     flex-wrap: wrap;
     gap: 4px;
     padding: 4px 0;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .message:last-child {
-    border-bottom: none;
+    box-shadow: none;
   }
 
   .timestamp {

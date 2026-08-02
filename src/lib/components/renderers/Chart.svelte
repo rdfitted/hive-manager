@@ -205,9 +205,9 @@
   }
 </script>
 
-<div class="chart-widget" data-testid="chart-widget">
+<div class="chart-widget lattice-forced-colors-boundary" data-testid="chart-widget">
   {#if chart.title}
-    <div class="chart-title">{chart.title}</div>
+    <div class="chart-title lattice-forced-colors-boundary">{chart.title}</div>
   {/if}
 
   {#if hasPoints}
@@ -276,7 +276,7 @@
   .chart-widget {
     /* Tool results are nested work products, so their body uses the shared sunken tone. */
     background: var(--bg-sunken);
-    border: 1px solid var(--border-structural);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -288,7 +288,7 @@
     color: var(--text-primary);
     /* The opaque title strip remains table-like renderer chrome, not a structural panel. */
     background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .chart-frame {

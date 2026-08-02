@@ -287,7 +287,7 @@
       <span class="hint">The Master Planner will create a plan when the session starts.</span>
     </div>
   {:else}
-    <div class="plan-header">
+    <div class="plan-header lattice-forced-colors-boundary">
       <h3>{plan.title}</h3>
       {#if plan.summary}
         <p class="summary">{plan.summary}</p>
@@ -334,7 +334,7 @@
     {:else}
       <!-- Show raw markdown when no tasks parsed yet (plan in progress) -->
       <div class="raw-content">
-        <div class="raw-header">
+        <div class="raw-header lattice-forced-colors-boundary">
           <span class="raw-icon">
             <FileText size={16} weight="light" />
           </span>
@@ -351,7 +351,7 @@
     {/if}
 
     {#if isPlanning() || isPlanReady()}
-      <div class="plan-actions">
+      <div class="plan-actions lattice-forced-colors-boundary">
         {#if canRefine()}
           <div class="refinement-section">
             <p class="refinement-hint">
@@ -412,7 +412,7 @@
   </Skeleton>
 
   {#if error}
-    <div class="error">{error}</div>
+    <div class="error lattice-forced-colors-boundary">{error}</div>
   {/if}
 </div>
 
@@ -483,7 +483,7 @@
   .plan-header {
     margin-bottom: 20px;
     padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .plan-header h3 {
@@ -591,7 +591,7 @@
     border-radius: var(--radius-sm);
     font-size: 12px;
     margin-top: 12px;
-    border: 1px solid var(--status-error);
+    box-shadow: inset 0 0 0 1px var(--status-error);
   }
 
   /* Raw content display (for plans in progress) */
@@ -605,7 +605,7 @@
     gap: 8px;
     margin-bottom: 12px;
     padding-bottom: 8px;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .raw-icon {
@@ -701,7 +701,7 @@
   .plan-actions {
     margin-top: 24px;
     padding-top: 20px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam-top);
     display: flex;
     flex-direction: column;
     gap: 20px;

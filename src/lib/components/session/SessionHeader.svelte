@@ -292,15 +292,15 @@
     }
 </script>
 
-<div class="session-header">
+<div class="session-header lattice-forced-colors-boundary">
     {#if session}
         <div class="main-info">
             <div class="top-row">
-                <span class="mode-badge {mode}">{mode}</span>
+                <span class="mode-badge lattice-forced-colors-boundary {mode}">{mode}</span>
                 <h1 class="session-name">{session.name || session.id}</h1>
                 <span class="status-badge {getStatusClass(status)}">{status.replaceAll('_', ' ')}</span>
                 {#if showWorktreeChip}
-                    <span class="worktree-chip" title={worktreeTooltip}>
+                    <span class="worktree-chip lattice-forced-colors-boundary" title={worktreeTooltip}>
                         <GitBranch size={14} weight="light" aria-hidden="true" />
                         <span class="worktree-label">{worktreeChipLabel}</span>
                     </span>
@@ -359,7 +359,7 @@
                 {/if}
 
                 {#if previewOpen}
-                    <div class="preview-live" aria-live="polite">
+                    <div class="preview-live lattice-forced-colors-boundary" aria-live="polite">
                         <span class="preview-live-mode">{previewDocked ? 'Docked' : 'Popped out'}</span>
                         <div class="preview-live-url" title={previewCurrentUrl}>
                             <Skeleton loading={!previewStatusResolved && !previewUrlCopied} layout="inline">
@@ -443,7 +443,7 @@
 <style>
     .session-header {
         background: var(--bg-void);
-        border-bottom: 1px solid var(--border-structural);
+        box-shadow: var(--edge-seam);
         padding: 12px 20px;
         display: flex;
         justify-content: space-between;
@@ -481,7 +481,7 @@
         /* A compact mode badge uses a neutral semantic backing, not a panel surface. */
         background: var(--bg-surface);
         color: var(--text-primary);
-        border: 1px solid var(--border-structural);
+        box-shadow: inset 0 0 0 1px var(--border-structural);
     }
 
     .mode-badge.hive { background: var(--status-warning); color: var(--bg-void); }
@@ -496,7 +496,7 @@
         max-width: min(240px, 38vw);
         padding: 2px 8px;
         border-radius: var(--radius-sm);
-        border: 1px solid var(--border-structural);
+        box-shadow: inset 0 0 0 1px var(--border-structural);
         /* Worktree metadata is a compact chip, not a structural panel. */
         background: var(--bg-elevated);
         color: var(--text-muted);
@@ -559,7 +559,7 @@
         max-width: min(360px, 42vw);
         height: 24px;
         padding: 0 4px 0 8px;
-        border: 1px solid var(--border-structural);
+        box-shadow: inset 0 0 0 1px var(--border-structural);
         border-radius: var(--radius-sm);
         /* Live preview metadata is a compact control chip, not a structural panel. */
         background: var(--bg-elevated);

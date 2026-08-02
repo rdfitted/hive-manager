@@ -148,7 +148,7 @@
 
 <div class="debate-panel lattice-scroll-content">
   <!-- Debate Header Bar -->
-  <div class="debate-header-bar">
+  <div class="debate-header-bar lattice-forced-colors-boundary">
     <div class="info-group">
       <div class="state-tag" class:eval-ready={evaluationReady}>
         {#if evaluationReady}
@@ -163,7 +163,7 @@
     </div>
     
     <div class="panel-controls">
-      <div class="view-tabs">
+      <div class="view-tabs lattice-forced-colors-boundary">
         <button class="lattice-tab" class:lattice-tab--active={viewMode === 'terminals'} aria-pressed={viewMode === 'terminals'} onclick={() => viewMode = 'terminals'}>
           <Keyboard size={18} weight="light" /> Terminals
         </button>
@@ -178,7 +178,7 @@
   </div>
 
   {#if error}
-    <div class="error-banner">
+    <div class="error-banner lattice-forced-colors-boundary">
       <Warning size={16} />
       <span>{error}</span>
     </div>
@@ -189,7 +189,7 @@
     <div class="terminals-layout">
       {#if queenAgent}
         <div class="orchestrator-section lattice-panel">
-          <div class="section-header">
+          <div class="section-header lattice-forced-colors-boundary">
             <Crown size={20} weight="light" class="icon-queen" />
             <h3>Orchestrator Queen</h3>
             <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
@@ -203,7 +203,7 @@
       <div class="debaters-terminals-grid">
         {#each debaterAgents as agent (agent.id)}
           <div class="variant-card lattice-panel">
-            <div class="variant-header">
+            <div class="variant-header lattice-forced-colors-boundary">
               <span class="variant-name">{agent.config?.label || 'Debater'}</span>
               <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
             </div>
@@ -216,7 +216,7 @@
 
       {#if judgeAgent}
         <div class="orchestrator-section lattice-panel">
-          <div class="section-header">
+          <div class="section-header lattice-forced-colors-boundary">
             <Scales size={20} weight="light" class="icon-judge" />
             <h3>Debate Judge</h3>
             <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
@@ -234,7 +234,7 @@
       <div class="debaters-grid">
         {#each debaters as debater (debater.index)}
           <div class="debater-status-card lattice-panel" class:completed={debater.status === 'Completed'}>
-            <div class="debater-card-header">
+            <div class="debater-card-header lattice-forced-colors-boundary">
               <div class="status-indicator">
                 <span class="status-dot {getDebaterStatusClass(debater.status)}"></span>
                 <span class="debater-name">{debater.name}</span>
@@ -273,7 +273,7 @@
     <!-- JUDGE VERDICT VIEW -->
     <div class="verdict-layout">
       {#if prUrl}
-        <div class="pr-banner">
+        <div class="pr-banner lattice-forced-colors-boundary">
           <div class="pr-icon-wrapper">
             <GitPullRequest size={24} />
           </div>
@@ -288,7 +288,7 @@
       {/if}
 
       <div class="verdict-card lattice-panel">
-        <div class="verdict-header">
+        <div class="verdict-header lattice-forced-colors-boundary">
           <Scales size={22} weight="light" />
           <h3>Structured Verdict</h3>
           {#if debateEvaluation?.report_path}
@@ -329,7 +329,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
     padding-bottom: 12px;
   }
 
@@ -366,7 +366,7 @@
     background: color-mix(in srgb, var(--text-primary) 3%, var(--bg-surface));
     padding: 4px;
     border-radius: var(--radius-md);
-    border: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam), var(--edge-lip);
     gap: 4px;
   }
 
@@ -377,7 +377,7 @@
     padding: 12px;
     background: color-mix(in srgb, var(--status-error) 12%, transparent);
     color: var(--status-error);
-    border: 1px solid color-mix(in srgb, var(--status-error) 25%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-error) 25%, transparent);
     border-radius: var(--radius-sm);
     font-size: 13px;
   }
@@ -400,7 +400,7 @@
     padding: 10px 14px;
     /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .section-header h3 {
@@ -442,7 +442,7 @@
     padding: 10px 14px;
     /* Fixed terminal header keeps a subtle chrome tint above terminal content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .variant-name {
@@ -495,7 +495,7 @@
     padding: 12px 16px;
     /* Fixed comparison header keeps a subtle chrome tint above card content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .status-indicator {
@@ -590,7 +590,7 @@
     align-items: center;
     /* Captured-PR banner intentionally uses a success-state surface. */
     background: color-mix(in srgb, var(--status-success) 10%, var(--bg-surface));
-    border: 1px solid color-mix(in srgb, var(--status-success) 20%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-success) 20%, transparent);
     border-radius: var(--radius-md);
     padding: 16px;
     gap: 16px;
@@ -631,7 +631,7 @@
     padding: 12px 16px;
     /* Fixed verdict header keeps a subtle chrome tint above report content. */
     background: color-mix(in srgb, var(--text-primary) 2%, var(--bg-surface));
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .verdict-header h3 {

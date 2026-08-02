@@ -63,7 +63,7 @@
     {#each agents as agent (agent.id)}
       {@const statusStr = typeof agent.status === 'string' ? agent.status : 'Unknown'}
       {@const hb = getHeartbeat(agent.id)}
-      <div class="agent-chip" title={hb?.summary || statusStr}>
+      <div class="agent-chip lattice-forced-colors-boundary" title={hb?.summary || statusStr}>
         <span
           class="status-dot"
           class:pulse-error={$heartbeatStore.stalledAgents.has(agent.id)}
@@ -95,7 +95,7 @@
     gap: 5px;
     padding: 4px 10px;
     background: var(--bg-void);
-    border: 1px solid var(--border-structural);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
     border-radius: var(--radius-sm);
     font-size: 11px;
     cursor: default;

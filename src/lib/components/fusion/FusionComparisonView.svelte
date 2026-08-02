@@ -44,7 +44,7 @@
     <div class="grid" style="grid-template-columns: repeat({Math.max(1, candidates.length)}, 1fr);">
         {#each candidates as cell (cell.id)}
             <div class="candidate-card lattice-panel" class:completed={cell.status === 'completed'} class:failed={cell.status === 'failed'}>
-                <div class="card-header">
+                <div class="card-header lattice-forced-colors-boundary">
                     <div class="status-row">
                         <span class="status-badge {getStatusClass(cell.status)}" title={cell.status}>
                             <svelte:component 
@@ -121,7 +121,7 @@
 
     .card-header {
         padding: 16px;
-        border-bottom: 1px solid color-mix(in srgb, var(--text-primary) 5%, transparent);
+        box-shadow: var(--edge-seam);
         display: flex;
         flex-direction: column;
         gap: 8px;

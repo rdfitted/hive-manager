@@ -612,7 +612,7 @@
       <label for={`${idPrefix}-cli`}>CLI</label>
       <!-- Indeterminate CLI health-check action affordance, not content loading. -->
       <span
-        class="cli-health-badge {cliHealthTone(selectedCliHealth, cliHealthError)}"
+        class="cli-health-badge lattice-forced-colors-boundary {cliHealthTone(selectedCliHealth, cliHealthError)}"
         title={cliHealthTitle(selectedCliHealth, cliHealthLoading, cliHealthError)}
         aria-label={`CLI health: ${cliHealthLabel(selectedCliHealth, cliHealthLoading, cliHealthError)}`}
         aria-busy={cliHealthLoading}
@@ -694,7 +694,7 @@
     gap: 5px;
     max-width: 70%;
     padding: 2px 7px;
-    border: 1px solid currentColor;
+    box-shadow: inset 0 0 0 1px currentColor;
     border-radius: var(--radius-full);
     font-size: 10px;
     font-weight: 600;

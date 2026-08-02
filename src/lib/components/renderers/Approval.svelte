@@ -38,7 +38,7 @@
   }
 </script>
 
-<div class="approval-widget" class:destructive={approval.destructive}>
+<div class="approval-widget lattice-forced-colors-boundary" class:destructive={approval.destructive}>
   <div class="approval-body">
     <div class="approval-title">{approval.title ?? 'Approval required'}</div>
     {#if approval.description}
@@ -67,7 +67,7 @@
     gap: 10px;
     /* Tool results are nested work products, so their body uses the shared sunken tone. */
     background: var(--bg-sunken);
-    border: 1px solid var(--border-structural);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
     border-left: 3px solid var(--accent-cyan);
     border-radius: var(--radius-lg);
     padding: 12px;
