@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CaretLeft, CaretRight, ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, ListBullets, NotePencil } from 'phosphor-svelte';
+  import { ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, ListBullets, NotePencil } from 'phosphor-svelte';
   import { layout, RAIL_WIDTH, type RightPanelTab } from '$lib/stores/layout';
   import StatusPanel from './StatusPanel.svelte';
   import PlanView from './PlanView.svelte';
@@ -34,31 +34,25 @@
   style:flex-basis={`${RAIL_WIDTH}px`}
 >
   <div class="rail">
-    <button
-      type="button"
-      class="rail-control expand lattice-btn lattice-btn--ghost lattice-btn--icon"
-      onclick={() => layout.toggleRight()}
-      title={collapsed ? "Expand panel (Ctrl+J)" : "Collapse panel (Ctrl+J)"}
-      aria-label={collapsed ? "Expand panel" : "Collapse panel"}
-    >
-      {#if collapsed}
-        <CaretLeft size={14} weight="light" />
-      {:else}
-        <CaretRight size={14} weight="light" />
-      {/if}
-    </button>
     {#each TABS as tab (tab.id)}
       {@const Icon = tab.icon}
       <button
         type="button"
         class={`rail-control lattice-btn lattice-btn--icon ${activeTab === tab.id ? 'lattice-btn--primary' : 'lattice-btn--ghost'}`}
-        onclick={() => layout.setRightTab(tab.id)}
+        onclick={() => layout.activateRightTab(tab.id)}
         title={tab.label}
         aria-label={tab.label}
       >
         <Icon size={18} weight="light" />
       </button>
     {/each}
+    <button
+      type="button"
+      class="rail-filler"
+      onclick={() => layout.toggleRight()}
+      title={collapsed ? "Expand panel (Ctrl+J)" : "Collapse panel (Ctrl+J)"}
+      aria-label={collapsed ? "Expand panel (Ctrl+J)" : "Collapse panel (Ctrl+J)"}
+    ></button>
   </div>
 
   <div
@@ -134,12 +128,19 @@
     padding: 0;
   }
 
-  .rail-control.expand {
-    margin-bottom: 6px;
-    border-radius: var(--radius-none);
-    width: 100%;
-    padding-bottom: 12px;
-    box-shadow: var(--edge-seam);
+  .rail-filler {
+    align-self: stretch;
+    flex: 1;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
+  }
+
+  .rail-filler:hover {
+    background: var(--color-surface-hover);
   }
 
   .panel-drawer {

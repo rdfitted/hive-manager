@@ -1,25 +1,21 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
   import { ArrowsSplit, ClockCounterClockwise, Crown, Scales } from 'phosphor-svelte';
-  import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
-  import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
   import ShortcutsOverlay from '$lib/components/ShortcutsOverlay.svelte';
   import UpdateChecker from '$lib/components/UpdateChecker.svelte';
   import FusionPanel from '$lib/components/FusionPanel.svelte';
   import DebatePanel from '$lib/components/DebatePanel.svelte';
   import SessionOverview from '$lib/components/session/SessionOverview.svelte';
   import { readTerminalSelection } from '$lib/components/Terminal.svelte';
-  import { sessions, activeSession, activeAgents, serdeEnumVariantName, type HiveLaunchConfig, type FusionLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
+  import { sessions, activeSession, activeAgents, serdeEnumVariantName } from '$lib/stores/sessions';
   import { coordination } from '$lib/stores/coordination';
   import { ui } from '$lib/stores/ui';
   import { layout } from '$lib/stores/layout';
   import { pendingContext } from '$lib/stores/pendingContext';
+  import { shell } from '$lib/stores/shell';
 
-  let showAddWorkerDialog = $state(false);
   let showShortcuts = $state(false);
-  let startAction = $state<{ id: number; action: 'hive' | 'fusion' | 'debate' | 'recent' } | null>(null);
-  let startActionId = 0;
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
@@ -95,30 +91,6 @@
     }
   });
 
-  async function handleLaunchHiveV2(config: HiveLaunchConfig): Promise<void> {
-    await sessions.launchHiveV2(config);
-  }
-
-  async function handleLaunchFusion(config: FusionLaunchConfig): Promise<void> {
-    await sessions.launchFusion(config);
-  }
-
-  async function handleLaunchDebate(config: DebateLaunchConfig): Promise<void> {
-    await sessions.launchDebate(config);
-  }
-
-  function openAddWorkerDialog() {
-    showAddWorkerDialog = true;
-  }
-
-  function closeAddWorkerDialog() {
-    showAddWorkerDialog = false;
-  }
-
-  function requestStartAction(action: 'hive' | 'fusion' | 'debate' | 'recent') {
-    startAction = { id: ++startActionId, action };
-  }
-
   // Read an xterm terminal selection if the focused/under-cursor element is inside one.
   function readXtermSelection(): string | null {
     return readTerminalSelection($ui.focusedAgentId);
@@ -145,11 +117,6 @@
   // Keyboard shortcuts (Ctrl on Windows/Linux, Cmd on macOS)
   function handleKeydown(event: KeyboardEvent) {
     const mod = event.ctrlKey || event.metaKey;
-    // Ctrl+B to toggle the left sidebar
-    if (mod && event.key === 'b') {
-      event.preventDefault();
-      layout.toggleLeft();
-    }
     // Ctrl+J to toggle the right panel
     if (mod && event.key === 'j') {
       event.preventDefault();
@@ -221,23 +188,14 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="app">
-  <SessionSidebar
-    onLaunchHiveV2={handleLaunchHiveV2}
-    onLaunchFusion={handleLaunchFusion}
-    onLaunchDebate={handleLaunchDebate}
-    onOpenAddWorker={openAddWorkerDialog}
-    {startAction}
-  />
-
-  <main class="main-content">
+<main class="main-content">
     {#if !$activeSession}
       <div class="welcome lattice-scroll-content">
         <section class="welcome-content" aria-labelledby="welcome-title">
           <h1 id="welcome-title">Hive Manager</h1>
           <p class="welcome-intro">Choose how you want to start.</p>
           <div class="features" role="group" aria-label="Start a session">
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('hive')}>
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('hive')}>
               <span class="feature-icon" aria-hidden="true">
                 <Crown size={24} weight="light" />
               </span>
@@ -246,7 +204,7 @@
                 <span class="feature-text">Coordinate implementation with a principal-led team.</span>
               </span>
             </button>
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('fusion')}>
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('fusion')}>
               <span class="feature-icon" aria-hidden="true">
                 <ArrowsSplit size={24} weight="light" />
               </span>
@@ -255,7 +213,7 @@
                 <span class="feature-text">Compare independent approaches and synthesize the best.</span>
               </span>
             </button>
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('debate')}>
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('debate')}>
               <span class="feature-icon" aria-hidden="true">
                 <Scales size={24} weight="light" />
               </span>
@@ -264,7 +222,7 @@
                 <span class="feature-text">Test a decision through structured opposing arguments.</span>
               </span>
             </button>
-            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('recent')}>
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => shell.requestStartAction('recent')}>
               <span class="feature-icon" aria-hidden="true">
                 <ClockCounterClockwise size={24} weight="light" />
               </span>
@@ -284,7 +242,7 @@
             <section class="no-agents-content lattice-panel" aria-labelledby="no-agents-title">
               <h2 id="no-agents-title">No principals yet</h2>
               <p>Add a principal to begin working in this session.</p>
-              <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled" onclick={openAddWorkerDialog}>Add Principal</button>
+              <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled" onclick={() => shell.openAddWorker()}>Add Principal</button>
             </section>
           </div>
         {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && activeSessionState !== 'Planning' && activeSessionState !== 'PlanReady'}
@@ -296,14 +254,12 @@
         {/if}
       </div>
     {/if}
-  </main>
+</main>
 
-  {#if $activeSession}
-    <RightPanel />
-  {/if}
-</div>
+{#if $activeSession}
+  <RightPanel />
+{/if}
 
-<AddWorkerDialog bind:open={showAddWorkerDialog} on:close={closeAddWorkerDialog} />
 <ShortcutsOverlay open={showShortcuts} onClose={() => showShortcuts = false} />
 <UpdateChecker />
 
