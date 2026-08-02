@@ -46,7 +46,7 @@
 </script>
 
 {#if contract}
-  <div class="contract-viewer lattice-panel">
+  <div class="contract-viewer">
     <div class="contract-header">
       <div class="header-info">
         <h3>Sprint Contract</h3>
@@ -99,6 +99,9 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    background: var(--bg-chrome);
+    border-radius: var(--radius-shell);
+    box-shadow: var(--edge-lip);
   }
 
   .contract-header {

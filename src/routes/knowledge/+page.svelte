@@ -87,16 +87,16 @@
 <svelte:head><title>Knowledge · Hive Manager</title></svelte:head>
 
 <div class="knowledge-page">
-  <header class="page-header">
+  <header class="page-header atlas-surface atlas-surface--strip">
     <div class="identity">
-      <div class="identity-mark" aria-hidden="true"><Brain size={20} weight="light" /></div>
+      <div class="identity-mark atlas-surface atlas-surface--active" aria-hidden="true"><Brain size={20} weight="light" /></div>
       <div>
         <div class="eyebrow">Institutional memory</div>
         <h1>Knowledge Atlas</h1>
       </div>
     </div>
 
-    <div class="corpus-stats" aria-label="Knowledge corpus totals">
+    <div class="corpus-stats atlas-surface" aria-label="Knowledge corpus totals">
       <div><strong>{$knowledgeStore.graph.nodes.length}</strong><span>Pages</span></div>
       <div><strong>{$knowledgeStore.graph.edges.length}</strong><span>Links</span></div>
       <div><strong>{folders.length}</strong><span>Folders</span></div>
@@ -108,8 +108,8 @@
     </nav>
   </header>
 
-  <section class="toolbar" aria-label="Knowledge controls">
-    <label class="search-field">
+  <section class="toolbar atlas-surface atlas-surface--strip" aria-label="Knowledge controls">
+    <label class="search-field atlas-surface">
       <MagnifyingGlass size={15} weight="light" aria-hidden="true" />
       <span class="sr-only">Search knowledge</span>
       <input bind:value={query} type="search" placeholder="Search title, path, or folder…" />
@@ -126,7 +126,7 @@
       </select>
     </label>
 
-    <div class="view-switch" aria-label="Knowledge view">
+    <div class="view-switch atlas-surface" aria-label="Knowledge view">
       <button
         type="button"
         class={`lattice-tab${view === 'graph' ? ' lattice-tab--active' : ''}`}
@@ -160,12 +160,12 @@
   </section>
 
   {#if $knowledgeStore.error && $knowledgeStore.graph.nodes.length > 0}
-    <div class="notice error-notice" role="alert">
+    <div class="notice error-notice atlas-surface atlas-surface--strip atlas-surface--raised" role="alert">
       Refresh failed: {$knowledgeStore.error}. Showing the last loaded graph.
     </div>
   {/if}
   {#if omissions.length > 0}
-    <div class="notice cap-notice">
+    <div class="notice cap-notice atlas-surface atlas-surface--strip atlas-surface--raised">
       <strong>Not everything is shown.</strong>
       <ul>
         {#each omissions as omission (omission.reason)}
@@ -175,7 +175,7 @@
     </div>
   {:else if $knowledgeStore.graph.truncated}
     <!-- Older backend: the boolean without the report behind it. -->
-    <div class="notice cap-notice">
+    <div class="notice cap-notice atlas-surface atlas-surface--strip atlas-surface--raised">
       This atlas reached a scan limit, but this backend does not report which one.
     </div>
   {/if}
@@ -222,7 +222,7 @@
           </div>
         {:else}
           <div class="view-frame">
-            <div class="result-strip">
+            <div class="result-strip atlas-surface atlas-surface--strip atlas-surface--sunken">
               <span>{filteredGraph.nodes.length} of {$knowledgeStore.graph.nodes.length} pages</span>
               <span>{filteredGraph.edges.length} visible relationships</span>
             </div>
@@ -242,7 +242,7 @@
                 />
               {/if}
             </div>
-            <footer class="legend lattice-scroll-chrome">
+            <footer class="legend lattice-scroll-chrome atlas-surface atlas-surface--strip">
               <div class="legend-group" aria-label="Folder colors and shapes">
                 {#each folders as name (name)}
                   <span>
@@ -297,16 +297,47 @@
     font-family: var(--font-body);
   }
 
+  /* One recipe for Atlas chrome and controls. Variants only select tokens; the
+     surface declarations stay centralized so graph/table lenses cannot drift. */
+  .atlas-surface {
+    --atlas-surface-background: var(--bg-panel);
+    --atlas-surface-elevation: var(--elev-1);
+    --atlas-surface-edge: var(--edge-lip);
+    --atlas-surface-radius: var(--radius-md);
+
+    border-radius: var(--atlas-surface-radius);
+    background: var(--atlas-surface-background);
+    box-shadow: var(--atlas-surface-elevation), var(--atlas-surface-edge);
+  }
+
+  .atlas-surface--strip {
+    --atlas-surface-background: var(--bg-chrome);
+    --atlas-surface-elevation: var(--edge-seam);
+    --atlas-surface-radius: var(--radius-none);
+  }
+
+  .atlas-surface--raised {
+    --atlas-surface-background: var(--bg-raised);
+  }
+
+  .atlas-surface--sunken {
+    --atlas-surface-background: var(--bg-void);
+  }
+
+  .atlas-surface--active {
+    --atlas-surface-background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
+    --atlas-surface-elevation: inset 0 0 0 1px var(--accent-cyan), var(--elev-1);
+  }
+
   .page-header {
     display: grid;
     grid-template-columns: 1fr auto 1fr;
     align-items: center;
     min-height: 72px;
     padding: 0 var(--space-5);
-    border-bottom: 1px solid var(--border-structural);
-    background:
+    --atlas-surface-background:
       linear-gradient(90deg, color-mix(in srgb, var(--accent-cyan) 4%, transparent), transparent 34%),
-      var(--bg-surface);
+      var(--bg-chrome);
   }
 
   /* Full-bleed route chrome and its hover tones cannot adopt bordered panel primitives. */
@@ -322,10 +353,7 @@
     place-items: center;
     width: 38px;
     height: 38px;
-    border: 1px solid var(--accent-cyan);
     color: var(--accent-cyan);
-    background: color-mix(in srgb, var(--accent-cyan) 7%, transparent);
-    box-shadow: inset 0 0 12px color-mix(in srgb, var(--accent-cyan) 5%, transparent);
   }
 
   .eyebrow {
@@ -348,8 +376,8 @@
   .corpus-stats {
     display: flex;
     align-items: stretch;
-    border: 1px solid var(--border-structural);
-    background: var(--bg-void);
+    gap: 1px;
+    padding: 1px;
   }
 
   .corpus-stats div {
@@ -357,10 +385,9 @@
     align-items: baseline;
     gap: 5px;
     padding: 6px 11px;
-    border-right: 1px solid var(--border-structural);
+    background: var(--bg-chrome);
   }
 
-  .corpus-stats div:last-child { border-right: 0; }
   .corpus-stats strong { color: var(--accent-cyan); font: 14px var(--font-mono); }
   .corpus-stats span { color: var(--text-disabled); font: 9px var(--font-mono); text-transform: uppercase; }
 
@@ -381,9 +408,6 @@
     gap: var(--space-2);
     min-height: 52px;
     padding: var(--space-2) var(--space-4);
-    border-bottom: 1px solid var(--border-structural);
-    /* Fixed workspace controls form a toolbar strip, not a standalone panel. */
-    background: var(--bg-surface);
   }
 
   .search-field {
@@ -393,13 +417,12 @@
     width: min(430px, 42vw);
     height: 34px;
     padding: 0 var(--space-3);
-    border: 1px solid var(--border-structural);
-    background: var(--bg-void);
     color: var(--text-disabled);
   }
 
   .search-field:focus-within {
-    border-color: var(--accent-cyan);
+    --atlas-surface-background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
+    --atlas-surface-elevation: inset 0 0 0 1px var(--accent-cyan), var(--elev-1);
     color: var(--accent-cyan);
   }
 
@@ -426,16 +449,10 @@
 
   .view-switch {
     display: flex;
+    gap: var(--space-1);
     margin-left: auto;
-    border: 1px solid var(--border-structural);
+    padding: 1px;
   }
-
-  .view-switch :global(.lattice-tab) {
-    height: 32px;
-    border-right: 1px solid var(--border-structural);
-  }
-
-  .view-switch :global(.lattice-tab:last-child) { border-right: 0; }
 
   .refresh {
     display: inline-flex;
@@ -452,10 +469,7 @@
 
   .notice {
     padding: 5px var(--space-4);
-    border-bottom: 1px solid var(--border-structural);
     color: var(--text-secondary);
-    /* Full-width query/cap feedback is a semantic notice strip, not a modal or panel. */
-    background: var(--bg-elevated);
     font: var(--text-micro) var(--font-mono);
   }
 
@@ -531,9 +545,7 @@
     display: flex;
     justify-content: space-between;
     padding: 5px var(--space-3);
-    border-bottom: 1px solid var(--border-structural);
     color: var(--text-disabled);
-    background: var(--bg-void);
     font: 9px var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -553,9 +565,6 @@
     gap: var(--space-3);
     min-height: 34px;
     padding: 0 var(--space-3);
-    border-top: 1px solid var(--border-structural);
-    /* Persistent graph keys form a footer legend strip, not a standalone panel. */
-    background: var(--bg-surface);
     overflow-x: auto;
   }
 

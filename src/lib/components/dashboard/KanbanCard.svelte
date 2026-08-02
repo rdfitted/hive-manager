@@ -39,7 +39,7 @@
   }
 </script>
 
-<article class="card lattice-panel" aria-label={title} style:--session-color={session.color || 'var(--color-border)'}>
+<article class="card lattice-panel" aria-label={title} style:--session-color={session.color || 'var(--text-disabled)'}>
   <header class="card-head">
     <div class="title-wrap">
       <div class="status-icon" title={status} aria-hidden="true">
@@ -64,17 +64,22 @@
 
 <style>
   .card {
-    border-left: 3px solid var(--session-color);
+    background-color: var(--bg-panel);
+    border-radius: var(--radius-lg);
+    box-shadow: inset 3px 0 0 var(--session-color), var(--elev-1), var(--edge-lip);
     padding: var(--space-3);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    transition: border-color var(--motion-duration-fast);
+    transition:
+      background-color var(--motion-duration-fast) var(--motion-ease-standard),
+      box-shadow var(--motion-duration-fast) var(--motion-ease-standard),
+      transform var(--motion-duration-fast) var(--motion-ease-standard);
   }
   .card:hover {
-    border-top-color: var(--accent-cyan);
-    border-right-color: var(--accent-cyan);
-    border-bottom-color: var(--accent-cyan);
+    background-color: var(--bg-raised);
+    box-shadow: inset 3px 0 0 var(--session-color), var(--elev-2), var(--edge-lip);
+    transform: translateY(-1px);
   }
   .card-head {
     display: flex;

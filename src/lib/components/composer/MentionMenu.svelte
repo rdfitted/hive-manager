@@ -46,7 +46,7 @@
     max-width: 320px;
     max-height: 240px;
     overflow-y: auto;
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--elev-3), var(--edge-lip);
     padding: 4px;
     display: flex;
     flex-direction: column;

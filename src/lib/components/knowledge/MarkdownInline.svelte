@@ -28,9 +28,9 @@
   .inline-markdown :global(strong) { color: var(--text-primary); font-weight: 600; }
   .inline-markdown :global(em) { color: var(--accent-chrome); }
   .inline-markdown :global(code) {
-    padding: 1px 4px;
-    border: 1px solid var(--border-structural);
-    background: var(--bg-void);
+    padding: 2px 5px;
+    background: var(--bg-panel);
+    box-shadow: var(--edge-lip), var(--edge-seam);
     color: var(--accent-chrome);
     font: 0.9em var(--font-mono);
   }

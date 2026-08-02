@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack, tick } from 'svelte';
-  import { ChartBar, ChatCenteredText, Crown, GearSix } from 'phosphor-svelte';
+  import { ArrowsSplit, ClockCounterClockwise, Crown, Scales } from 'phosphor-svelte';
   import SessionSidebar from '$lib/components/SessionSidebar.svelte';
   import RightPanel from '$lib/components/RightPanel.svelte';
   import AddWorkerDialog from '$lib/components/AddWorkerDialog.svelte';
@@ -18,6 +18,8 @@
 
   let showAddWorkerDialog = $state(false);
   let showShortcuts = $state(false);
+  let startAction = $state<{ id: number; action: 'hive' | 'fusion' | 'debate' | 'recent' } | null>(null);
+  let startActionId = 0;
 
   // Use UI store as single source of truth for focused agent
   let focusedAgentId = $derived($ui.focusedAgentId);
@@ -113,6 +115,10 @@
     showAddWorkerDialog = false;
   }
 
+  function requestStartAction(action: 'hive' | 'fusion' | 'debate' | 'recent') {
+    startAction = { id: ++startActionId, action };
+  }
+
   // Read an xterm terminal selection if the focused/under-cursor element is inside one.
   function readXtermSelection(): string | null {
     return readTerminalSelection($ui.focusedAgentId);
@@ -154,8 +160,20 @@
       event.preventDefault();
       showShortcuts = !showShortcuts;
     }
-    if (event.key === 'Escape' && showShortcuts) {
-      showShortcuts = false;
+    if (event.key === 'Escape') {
+      if (showShortcuts) {
+        showShortcuts = false;
+        return;
+      }
+
+      if (!event.defaultPrevented) {
+        if (!$layout.leftCollapsed) {
+          layout.toggleLeft();
+        }
+        if ($activeSession && !$layout.rightCollapsed) {
+          layout.toggleRight();
+        }
+      }
     }
     // Ctrl+I: capture the terminal/window text selection as one-shot operator context for the
     // next composer submit. Skip when focus is inside the composer (don't hijack its own
@@ -200,49 +218,65 @@
     onLaunchFusion={handleLaunchFusion}
     onLaunchDebate={handleLaunchDebate}
     onOpenAddWorker={openAddWorkerDialog}
+    {startAction}
   />
 
   <main class="main-content">
     {#if !$activeSession}
       <div class="welcome lattice-scroll-content">
-        <div class="welcome-content">
-          <h1>Hive Manager</h1>
-          <p>Orchestrate and monitor Claude Code multi-agent workflows</p>
-          <div class="features">
-            <div class="feature lattice-panel">
-              <span class="feature-icon">
+        <section class="welcome-content" aria-labelledby="welcome-title">
+          <h1 id="welcome-title">Hive Manager</h1>
+          <p class="welcome-intro">Choose how you want to start.</p>
+          <div class="features" role="group" aria-label="Start a session">
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('hive')}>
+              <span class="feature-icon" aria-hidden="true">
                 <Crown size={24} weight="light" />
               </span>
-              <span class="feature-text">Launch principal-led Hive or comparative Fusion sessions</span>
-            </div>
-            <div class="feature lattice-panel">
-              <span class="feature-icon">
-                <GearSix size={24} weight="light" />
+              <span class="feature-copy">
+                <span class="feature-title">Hive</span>
+                <span class="feature-text">Coordinate implementation with a principal-led team.</span>
               </span>
-              <span class="feature-text">Configure each agent with different commands</span>
-            </div>
-            <div class="feature lattice-panel">
-              <span class="feature-icon">
-                <ChartBar size={24} weight="light" />
+            </button>
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('fusion')}>
+              <span class="feature-icon" aria-hidden="true">
+                <ArrowsSplit size={24} weight="light" />
               </span>
-              <span class="feature-text">Monitor agent status in real-time</span>
-            </div>
-            <div class="feature lattice-panel">
-              <span class="feature-icon">
-                <ChatCenteredText size={24} weight="light" />
+              <span class="feature-copy">
+                <span class="feature-title">Fusion</span>
+                <span class="feature-text">Compare independent approaches and synthesize the best.</span>
               </span>
-              <span class="feature-text">Interact with agents directly</span>
-            </div>
+            </button>
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('debate')}>
+              <span class="feature-icon" aria-hidden="true">
+                <Scales size={24} weight="light" />
+              </span>
+              <span class="feature-copy">
+                <span class="feature-title">Debate</span>
+                <span class="feature-text">Test a decision through structured opposing arguments.</span>
+              </span>
+            </button>
+            <button type="button" class="feature lattice-btn lattice-btn--card lattice-panel" onclick={() => requestStartAction('recent')}>
+              <span class="feature-icon" aria-hidden="true">
+                <ClockCounterClockwise size={24} weight="light" />
+              </span>
+              <span class="feature-copy">
+                <span class="feature-title">Open recent</span>
+                <span class="feature-text">Resume a stored session from this project.</span>
+              </span>
+            </button>
           </div>
-          <p class="cta">Click <strong>New Session</strong> in the sidebar to get started</p>
           <p class="cta hint">Press <strong>Ctrl+/</strong> for keyboard shortcuts</p>
-        </div>
+        </section>
       </div>
     {:else}
       <div class="terminal-area">
         {#if $activeAgents.length === 0}
           <div class="no-agents">
-            <p>No agents in this session</p>
+            <section class="no-agents-content lattice-panel" aria-labelledby="no-agents-title">
+              <h2 id="no-agents-title">No principals yet</h2>
+              <p>Add a principal to begin working in this session.</p>
+              <button type="button" class="lattice-btn lattice-btn--primary lattice-btn--filled" onclick={openAddWorkerDialog}>Add Principal</button>
+            </section>
           </div>
         {:else if $activeSession?.session_type && 'Fusion' in $activeSession.session_type && activeSessionState !== 'Planning' && activeSessionState !== 'PlanReady'}
           <FusionPanel />
@@ -271,41 +305,52 @@
     align-items: safe center;
     justify-content: center;
     min-height: 0;
-    padding: 40px;
+    padding: calc(var(--space-6) + var(--space-2));
     overflow-y: auto;
   }
 
   .welcome-content {
-    max-width: 500px;
+    width: min(100%, calc(var(--space-7) * 10));
     text-align: center;
   }
 
   .welcome h1 {
-    margin: 0 0 12px 0;
-    font-size: 32px;
+    margin: 0 0 var(--space-3);
+    font-family: var(--font-display);
+    font-size: var(--text-h1);
     font-weight: 700;
-    color: var(--color-text);
+    color: var(--text-primary);
   }
 
-  .welcome p {
-    margin: 0 0 32px 0;
-    font-size: 16px;
-    color: var(--color-text-muted);
+  .welcome-intro {
+    margin: 0 0 var(--space-6);
+    font-size: var(--text-h3);
+    color: var(--text-secondary);
   }
 
   .features {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    margin-bottom: 32px;
+    gap: var(--space-4);
+    margin-bottom: var(--space-6);
   }
 
   .feature {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 16px 20px;
+    gap: var(--space-3);
+    padding: var(--space-4) calc(var(--space-4) + var(--space-1));
+    background: var(--bg-panel);
+    box-shadow: var(--elev-1), var(--edge-lip);
     text-align: left;
+    transition:
+      background-color var(--motion-duration-fast) var(--motion-ease-standard),
+      box-shadow var(--motion-duration-fast) var(--motion-ease-standard);
+  }
+
+  .feature:hover:where(:not(:disabled):not([aria-disabled="true"])) {
+    background: var(--bg-raised);
+    box-shadow: var(--elev-2), var(--edge-lip);
   }
 
   .feature-icon {
@@ -313,32 +358,48 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    color: var(--accent-cyan);
+  }
+
+  .feature-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .feature-title {
+    font-family: var(--font-display);
+    font-size: var(--text-h3);
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .feature-text {
-    font-size: 14px;
-    color: var(--color-text);
+    font-size: var(--text-base);
+    color: var(--text-secondary);
   }
 
   .cta {
-    font-size: 14px;
-    color: var(--color-text-muted);
+    margin: 0;
+    font-size: var(--text-base);
+    color: var(--text-secondary);
   }
 
   .cta strong {
-    color: var(--color-accent);
+    color: var(--accent-cyan);
   }
 
   .cta.hint {
-    margin-top: 8px;
-    font-size: 12px;
-    opacity: 0.8;
+    margin-top: var(--space-2);
+    font-size: var(--text-small);
+    color: var(--text-disabled);
   }
 
   .terminal-area {
     flex: 1;
     position: relative;
-    padding: 16px;
+    padding: var(--space-4);
     overflow: hidden;
   }
 
@@ -347,6 +408,26 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--color-text-muted);
+    min-height: 100%;
+    padding: var(--space-6);
+    color: var(--text-secondary);
+  }
+
+  .no-agents-content {
+    width: min(100%, calc(var(--space-7) * 8));
+    padding: var(--space-6);
+    text-align: center;
+  }
+
+  .no-agents-content h2 {
+    margin: 0 0 var(--space-3);
+    font-family: var(--font-display);
+    font-size: var(--text-h2);
+    color: var(--text-primary);
+  }
+
+  .no-agents-content p {
+    margin: 0 0 var(--space-5);
+    font-size: var(--text-base);
   }
 </style>

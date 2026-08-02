@@ -162,7 +162,7 @@
     justify-content: space-between;
     min-height: 44px;
     padding: 0 var(--space-3) 0 var(--space-4);
-    border-bottom: 1px solid var(--border-structural);
+    box-shadow: var(--edge-seam);
   }
 
   .preview-kicker,
@@ -175,8 +175,8 @@
 
   .page-head {
     padding: var(--space-5) var(--space-5) var(--space-4);
-    border-bottom: 1px solid var(--border-structural);
     background: linear-gradient(150deg, color-mix(in srgb, var(--accent-cyan) 4%, transparent), transparent 52%);
+    box-shadow: var(--edge-seam);
   }
 
   .folder-label {
@@ -311,14 +311,16 @@
   .markdown hr {
     margin: var(--space-5) 0;
     border: 0;
-    border-top: 1px solid var(--border-structural);
+    height: 1px;
+    box-shadow: var(--edge-seam), var(--edge-lip);
   }
 
   .code-block {
     position: relative;
     margin: 1em 0;
-    border: 1px solid var(--border-structural);
+    padding: 1px;
     background: var(--bg-void);
+    box-shadow: var(--edge-lip), var(--edge-seam);
   }
 
   .code-block > span {

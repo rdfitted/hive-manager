@@ -663,7 +663,7 @@
     gap: 5px;
     flex: 0 0 auto;
     padding: 2px 6px;
-    border: 1px solid currentColor;
+    box-shadow: inset 0 0 0 1px currentColor;
     border-radius: var(--radius-full);
     font-size: 9px;
     font-weight: 600;
@@ -826,7 +826,7 @@
   .actions-section {
     margin-top: auto;
     padding-top: 12px;
-    border-top: 1px solid var(--border-structural);
+    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.45);
   }
 
   .close-session-action {

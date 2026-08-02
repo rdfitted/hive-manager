@@ -1,12 +1,19 @@
 :root {
   /* ── Core Surfaces ─────────────────────────────────────────────── */
   --bg-void: #060709;
-  --bg-surface: #0D0F14;
+
+  /* ── Surface ladder (#198) — tonal steps, not hairlines ───────── */
+  --bg-chrome: #0D0F14;   /* app chrome: rails, toolbars, headers, tab strips */
+  --bg-panel:  #131720;   /* panels, cards, modals — the .lattice-panel tone   */
+  --bg-raised: #181D27;   /* hover / raised card state                          */
+
+  /* D3: --bg-surface stays a value-preserving chrome alias. The large lit
+     .main-content card deliberately consumes --bg-panel in shell.css. */
+  --bg-surface: var(--bg-chrome);
   --bg-elevated: #151820;
   --bg-sunken: color-mix(in srgb, var(--bg-void) 45%, var(--bg-surface));
 
   --border-structural: #222631;
-  --border-active: #00E5FF;
 
   /* ── Text ──────────────────────────────────────────────────────── */
   --text-primary: #E4E7EB;
@@ -87,9 +94,15 @@
   --color-running: var(--status-running);
 
   /* ── Shadows ───────────────────────────────────────────────────── */
-  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.15);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
+  /* ── Edges — a lit top lip and an inset seam replace the 1px rule ── */
+  --edge-lip:  inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  --edge-seam: inset 0 -1px 0 rgba(0, 0, 0, 0.45);
+
+  /* ── Elevation — occlusion shadow; must read on --bg-void ──────── */
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.55), 0 2px 6px  rgba(0, 0, 0, 0.35);
+  --elev-2: 0 2px 4px rgba(0, 0, 0, 0.55), 0 6px 16px rgba(0, 0, 0, 0.42);
+  --elev-3: 0 4px 8px rgba(0, 0, 0, 0.60), 0 16px 40px rgba(0, 0, 0, 0.55);
+
   --shadow-glow-sm: 0 0 4px;
   --shadow-glow-md: 0 0 8px;
 }

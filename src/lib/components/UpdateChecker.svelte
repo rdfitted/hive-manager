@@ -100,7 +100,7 @@
     flex-direction: column;
     gap: 8px;
     z-index: 1000;
-    box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-void) 70%, transparent);
+    box-shadow: var(--elev-3), var(--edge-lip);
     max-width: 300px;
   }
 

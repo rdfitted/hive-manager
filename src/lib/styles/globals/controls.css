@@ -5,6 +5,7 @@
 .lattice-btn {
   --lattice-btn-tone: var(--accent-cyan);
   --lattice-btn-tone-rgb: var(--rgb-running);
+  --lattice-btn-ring: transparent;
 
   display: inline-flex;
   align-items: center;
@@ -17,45 +18,50 @@
   line-height: 1.2;
   text-decoration: none;
   white-space: nowrap;
-  padding: var(--space-2) var(--space-4);
-  border: 1px solid transparent;
+  /* The former 1px border contributed to the border box. The extra padding
+     preserves existing button geometry while the inset ring stays layout-free. */
+  padding: calc(var(--space-2) + 1px) calc(var(--space-4) + 1px);
+  border: 0;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition:
     color var(--motion-duration-standard) var(--motion-ease-standard),
     background-color var(--motion-duration-standard) var(--motion-ease-standard),
-    border-color var(--motion-duration-standard) var(--motion-ease-standard),
     box-shadow var(--motion-duration-standard) var(--motion-ease-standard),
     text-shadow var(--motion-duration-standard) var(--motion-ease-standard),
     opacity var(--motion-duration-standard) var(--motion-ease-standard);
   background: transparent;
+  box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
 .lattice-btn--primary {
   --lattice-btn-tone: var(--accent-cyan);
   --lattice-btn-tone-rgb: var(--rgb-running);
-  border: 1px solid var(--accent-cyan);
+  --lattice-btn-ring: var(--accent-cyan);
   color: var(--accent-cyan);
   background-color: rgba(var(--rgb-running), 0.1);
 }
 
 .lattice-btn--primary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-running), 0.2);
-  box-shadow: 0 0 8px rgba(var(--rgb-running), 0.3), inset 0 0 4px rgba(var(--rgb-running), 0.2);
+  box-shadow:
+    inset 0 0 0 1px var(--lattice-btn-ring),
+    0 0 8px rgba(var(--rgb-running), 0.3),
+    inset 0 0 4px rgba(var(--rgb-running), 0.2);
   text-shadow: 0 0 4px var(--accent-cyan);
 }
 
 .lattice-btn--secondary {
-  border: 1px solid var(--border-structural);
+  --lattice-btn-ring: var(--border-structural);
   color: var(--text-primary);
 }
 
 .lattice-btn--secondary:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  border-color: var(--accent-chrome);
+  --lattice-btn-ring: var(--accent-chrome);
+  background-color: var(--bg-elevated);
 }
 
 .lattice-btn--ghost {
-  border: 1px solid transparent;
   color: var(--text-secondary);
 }
 
@@ -67,17 +73,20 @@
 .lattice-btn--danger {
   --lattice-btn-tone: var(--status-error);
   --lattice-btn-tone-rgb: var(--rgb-error);
-  border: 1px solid var(--status-error);
+  --lattice-btn-ring: var(--status-error);
   color: var(--status-error);
+  background-color: rgba(var(--rgb-error), 0.08);
 }
 
 .lattice-btn--danger:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  background-color: rgba(var(--rgb-error), 0.1);
-  box-shadow: 0 0 8px rgba(var(--rgb-error), 0.2);
+  background-color: rgba(var(--rgb-error), 0.16);
+  box-shadow:
+    inset 0 0 0 1px var(--lattice-btn-ring),
+    0 0 8px rgba(var(--rgb-error), 0.2);
 }
 
 .lattice-btn--ghost.lattice-btn--danger {
-  border-color: transparent;
+  --lattice-btn-ring: transparent;
   background-color: transparent;
 }
 
@@ -90,32 +99,36 @@
 .lattice-btn--success {
   --lattice-btn-tone: var(--status-success);
   --lattice-btn-tone-rgb: var(--rgb-success);
-  border: 1px solid var(--status-success);
+  --lattice-btn-ring: var(--status-success);
   color: var(--status-success);
   background-color: rgba(var(--rgb-success), 0.1);
 }
 
 .lattice-btn--success:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-success), 0.2);
-  box-shadow: 0 0 8px rgba(var(--rgb-success), 0.2);
+  box-shadow:
+    inset 0 0 0 1px var(--lattice-btn-ring),
+    0 0 8px rgba(var(--rgb-success), 0.2);
 }
 
 .lattice-btn--warning {
   --lattice-btn-tone: var(--status-warning);
   --lattice-btn-tone-rgb: var(--rgb-warning);
-  border: 1px solid var(--status-warning);
+  --lattice-btn-ring: var(--status-warning);
   color: var(--status-warning);
   background-color: rgba(var(--rgb-warning), 0.1);
 }
 
 .lattice-btn--warning:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   background-color: rgba(var(--rgb-warning), 0.2);
-  box-shadow: 0 0 8px rgba(var(--rgb-warning), 0.2);
+  box-shadow:
+    inset 0 0 0 1px var(--lattice-btn-ring),
+    0 0 8px rgba(var(--rgb-warning), 0.2);
 }
 
 .lattice-btn--filled {
+  --lattice-btn-ring: color-mix(in srgb, var(--bg-void) 35%, transparent);
   color: var(--bg-void);
-  border-color: var(--lattice-btn-tone);
   background-color: var(--lattice-btn-tone);
 }
 
@@ -126,14 +139,16 @@
 
 /* ── Composable affordance and size modifiers ───────────────────── */
 
-.lattice-btn--dashed {
-  border-style: dashed;
+.lattice-btn.lattice-btn--dashed {
+  --lattice-btn-ring: transparent;
+  outline: 1px dashed currentColor;
+  outline-offset: -1px;
   background-color: transparent;
 }
 
 .lattice-btn--compact {
   gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
+  padding: calc(var(--space-1) + 1px) calc(var(--space-2) + 1px);
   font-size: var(--text-micro);
 }
 
@@ -176,8 +191,7 @@
 }
 
 .lattice-btn--menu-item {
-  padding: var(--space-2) var(--space-3);
-  border-color: transparent;
+  padding: calc(var(--space-2) + 1px) calc(var(--space-3) + 1px);
   background-color: transparent;
 }
 
@@ -186,8 +200,7 @@
 }
 
 .lattice-btn--row {
-  padding: var(--space-1) var(--space-2);
-  border-color: transparent;
+  padding: calc(var(--space-1) + 1px) calc(var(--space-2) + 1px);
   background-color: transparent;
 }
 
@@ -198,19 +211,19 @@
 
 .lattice-btn--card {
   align-items: flex-start;
-  padding: var(--space-3);
-  border-color: var(--border-structural);
+  --lattice-btn-ring: var(--border-structural);
+  padding: calc(var(--space-3) + 1px);
   background-color: var(--bg-surface);
 }
 
 .lattice-btn--card:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
-  border-color: var(--accent-chrome);
+  --lattice-btn-ring: var(--accent-chrome);
   background-color: var(--bg-elevated);
 }
 
 .lattice-btn--chip {
-  padding: 2px var(--space-2);
-  border-color: var(--border-structural);
+  --lattice-btn-ring: var(--border-structural);
+  padding: calc(2px + 1px) calc(var(--space-2) + 1px);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   text-transform: none;
@@ -219,16 +232,16 @@
 
 .lattice-btn--chip:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   color: var(--text-primary);
-  border-color: var(--accent-chrome);
+  --lattice-btn-ring: var(--accent-chrome);
 }
 
 .lattice-btn--menu-item.lattice-btn--compact,
 .lattice-btn--row.lattice-btn--compact {
-  padding: var(--space-1) var(--space-2);
+  padding: calc(var(--space-1) + 1px) calc(var(--space-2) + 1px);
 }
 
 .lattice-btn--card.lattice-btn--compact {
-  padding: var(--space-2);
+  padding: calc(var(--space-2) + 1px);
 }
 
 /* Flush row: full-width, left-aligned, zero-padding. --link supplies the zero
@@ -239,7 +252,6 @@
 .lattice-btn--row.lattice-btn--link,
 .lattice-btn--menu-item.lattice-btn--link {
   padding: 0;
-  border-color: transparent;
   background-color: transparent;
 }
 
@@ -251,9 +263,8 @@
 .lattice-btn[aria-current="true"],
 .lattice-btn[aria-current="page"] {
   color: var(--lattice-btn-tone);
-  border-color: var(--lattice-btn-tone);
   background-color: rgba(var(--lattice-btn-tone-rgb), 0.1);
-  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.25);
+  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.65);
 }
 
 .lattice-btn.lattice-btn--selected:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
@@ -262,9 +273,8 @@
 .lattice-btn[aria-current="true"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)),
 .lattice-btn[aria-current="page"]:hover:where(:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]):not(.lattice-btn--waiting)) {
   color: var(--lattice-btn-tone);
-  border-color: var(--lattice-btn-tone);
   background-color: rgba(var(--lattice-btn-tone-rgb), 0.16);
-  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.25);
+  box-shadow: inset 0 0 0 1px rgba(var(--lattice-btn-tone-rgb), 0.75);
 }
 
 /* Labels and role-controls can share selection/focus without button layout. */
@@ -356,6 +366,11 @@
   cursor: default;
   box-shadow: none;
   text-shadow: none;
+}
+
+.lattice-btn:disabled,
+.lattice-btn[aria-disabled="true"] {
+  box-shadow: inset 0 0 0 1px var(--lattice-btn-ring);
 }
 
 .lattice-btn.lattice-btn--waiting,

@@ -480,14 +480,11 @@
 
   .debater-status-card {
     overflow: hidden;
-    transition:
-      background-color var(--motion-duration-standard) var(--motion-ease-standard),
-      border-color var(--motion-duration-standard) var(--motion-ease-standard);
+    transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
   }
 
   .debater-status-card.completed {
     /* Completed-card tint is semantic state layered over the structural panel. */
-    border-color: color-mix(in srgb, var(--status-success) 20%, transparent);
     background: color-mix(in srgb, var(--status-success) 2%, var(--bg-surface));
   }
 

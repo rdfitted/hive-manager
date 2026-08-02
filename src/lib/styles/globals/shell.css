@@ -73,7 +73,6 @@ button:disabled,
   margin: 1px var(--space-2) var(--space-2) 1px;
   overflow: hidden;
   border-radius: var(--radius-shell);
-  background: var(--bg-surface);
-  box-shadow: -1px -1px 0 0
-    color-mix(in srgb, var(--border-structural) 45%, transparent);
+  background: var(--bg-panel);
+  box-shadow: var(--edge-lip);
 }
