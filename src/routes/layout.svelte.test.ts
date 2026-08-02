@@ -132,4 +132,21 @@ describe('persistent app layout', () => {
     expect(event.defaultPrevented).toBe(true);
     expect(testMocks.toggleLeft).toHaveBeenCalledTimes(1);
   });
+
+  it('ignores repeated Ctrl+B keydown events', async () => {
+    render(Layout);
+    const event = new KeyboardEvent('keydown', {
+      key: 'b',
+      ctrlKey: true,
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    window.dispatchEvent(event);
+    await tick();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(testMocks.toggleLeft).not.toHaveBeenCalled();
+  });
 });

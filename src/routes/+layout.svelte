@@ -33,7 +33,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if ((event.ctrlKey || event.metaKey) && event.key === 'b') {
+    if (!event.repeat && (event.ctrlKey || event.metaKey) && event.key === 'b') {
       event.preventDefault();
       layout.toggleLeft();
     }
