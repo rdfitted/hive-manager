@@ -116,17 +116,17 @@
   .knowledge-table tbody tr.selected td {
     background: color-mix(in srgb, var(--accent-cyan) 4%, var(--bg-panel));
     box-shadow:
+      var(--edge-seam),
       var(--elev-1),
-      var(--edge-lip),
-      var(--edge-seam);
+      var(--edge-lip);
   }
 
   .knowledge-table tbody tr.selected td:first-child {
     box-shadow:
       inset 2px 0 var(--accent-cyan),
+      var(--edge-seam),
       var(--elev-1),
-      var(--edge-lip),
-      var(--edge-seam);
+      var(--edge-lip);
   }
 
   td:first-child {

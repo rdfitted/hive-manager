@@ -162,18 +162,27 @@
     }
     if (event.key === 'Escape') {
       if (showShortcuts) {
+        event.preventDefault();
         showShortcuts = false;
         return;
       }
 
-      if (!event.defaultPrevented) {
+      const modalWasOpen = document.querySelector('[aria-modal="true"]') !== null;
+      queueMicrotask(() => {
+        if (event.defaultPrevented || modalWasOpen) return;
+
+        let collapsedPanel = false;
         if (!$layout.leftCollapsed) {
           layout.toggleLeft();
+          collapsedPanel = true;
         }
         if ($activeSession && !$layout.rightCollapsed) {
           layout.toggleRight();
+          collapsedPanel = true;
         }
-      }
+
+        if (collapsedPanel) event.preventDefault();
+      });
     }
     // Ctrl+I: capture the terminal/window text selection as one-shot operator context for the
     // next composer submit. Skip when focus is inside the composer (don't hijack its own
@@ -188,7 +197,7 @@
     }
     // Navigate agents with arrow keys — skip when user is typing in inputs, textareas,
     // contenteditable regions, or terminal panes so we don't hijack their keystrokes.
-    const target = event.target as HTMLElement | null;
+    const target = event.target instanceof HTMLElement ? event.target : null;
     const inTypingContext = !!target && (
       target.tagName === 'INPUT' ||
       target.tagName === 'TEXTAREA' ||

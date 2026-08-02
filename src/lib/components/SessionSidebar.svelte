@@ -428,7 +428,7 @@
   </div>
 
   <div
-    class="sidebar-drawer"
+    class="sidebar-drawer lattice-forced-colors-boundary"
     class:collapsed
     style:width={`${drawerWidth}px`}
     inert={collapsed}

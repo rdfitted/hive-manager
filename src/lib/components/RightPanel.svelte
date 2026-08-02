@@ -62,7 +62,7 @@
   </div>
 
   <div
-    class="panel-drawer"
+    class="panel-drawer lattice-forced-colors-boundary"
     class:collapsed
     style:width={`${drawerWidth}px`}
     inert={collapsed}

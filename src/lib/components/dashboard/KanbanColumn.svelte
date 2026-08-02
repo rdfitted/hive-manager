@@ -12,7 +12,7 @@
   let { label, sessions: items, status = 'queued', accent = 'var(--text-secondary)' }: Props = $props();
 </script>
 
-<section class="column" style="--col-accent: {accent};" aria-label={label}>
+<section class="column lattice-forced-colors-boundary" style="--col-accent: {accent};" aria-label={label}>
   <header class="col-head">
     <span class="dot" aria-hidden="true"></span>
     <span class="label">{label}</span>

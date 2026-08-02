@@ -87,16 +87,16 @@
 <svelte:head><title>Knowledge · Hive Manager</title></svelte:head>
 
 <div class="knowledge-page">
-  <header class="page-header atlas-surface atlas-surface--strip">
+  <header class="page-header atlas-surface atlas-surface--strip lattice-forced-colors-boundary">
     <div class="identity">
-      <div class="identity-mark atlas-surface atlas-surface--active" aria-hidden="true"><Brain size={20} weight="light" /></div>
+      <div class="identity-mark atlas-surface atlas-surface--active lattice-forced-colors-boundary lattice-forced-colors-boundary--active" aria-hidden="true"><Brain size={20} weight="light" /></div>
       <div>
         <div class="eyebrow">Institutional memory</div>
         <h1>Knowledge Atlas</h1>
       </div>
     </div>
 
-    <div class="corpus-stats atlas-surface" aria-label="Knowledge corpus totals">
+    <div class="corpus-stats atlas-surface lattice-forced-colors-boundary" aria-label="Knowledge corpus totals">
       <div><strong>{$knowledgeStore.graph.nodes.length}</strong><span>Pages</span></div>
       <div><strong>{$knowledgeStore.graph.edges.length}</strong><span>Links</span></div>
       <div><strong>{folders.length}</strong><span>Folders</span></div>
@@ -108,8 +108,8 @@
     </nav>
   </header>
 
-  <section class="toolbar atlas-surface atlas-surface--strip" aria-label="Knowledge controls">
-    <label class="search-field atlas-surface">
+  <section class="toolbar atlas-surface atlas-surface--strip lattice-forced-colors-boundary" aria-label="Knowledge controls">
+    <label class="search-field atlas-surface lattice-forced-colors-boundary lattice-forced-colors-boundary--focus-within">
       <MagnifyingGlass size={15} weight="light" aria-hidden="true" />
       <span class="sr-only">Search knowledge</span>
       <input bind:value={query} type="search" placeholder="Search title, path, or folder…" />
@@ -126,7 +126,7 @@
       </select>
     </label>
 
-    <div class="view-switch atlas-surface" aria-label="Knowledge view">
+    <div class="view-switch atlas-surface lattice-forced-colors-boundary lattice-forced-colors-boundary--focus-within" aria-label="Knowledge view">
       <button
         type="button"
         class={`lattice-tab${view === 'graph' ? ' lattice-tab--active' : ''}`}
@@ -160,12 +160,12 @@
   </section>
 
   {#if $knowledgeStore.error && $knowledgeStore.graph.nodes.length > 0}
-    <div class="notice error-notice atlas-surface atlas-surface--strip atlas-surface--raised" role="alert">
+    <div class="notice error-notice atlas-surface atlas-surface--strip atlas-surface--raised lattice-forced-colors-boundary" role="alert">
       Refresh failed: {$knowledgeStore.error}. Showing the last loaded graph.
     </div>
   {/if}
   {#if omissions.length > 0}
-    <div class="notice cap-notice atlas-surface atlas-surface--strip atlas-surface--raised">
+    <div class="notice cap-notice atlas-surface atlas-surface--strip atlas-surface--raised lattice-forced-colors-boundary">
       <strong>Not everything is shown.</strong>
       <ul>
         {#each omissions as omission (omission.reason)}
@@ -175,7 +175,7 @@
     </div>
   {:else if $knowledgeStore.graph.truncated}
     <!-- Older backend: the boolean without the report behind it. -->
-    <div class="notice cap-notice atlas-surface atlas-surface--strip atlas-surface--raised">
+    <div class="notice cap-notice atlas-surface atlas-surface--strip atlas-surface--raised lattice-forced-colors-boundary">
       This atlas reached a scan limit, but this backend does not report which one.
     </div>
   {/if}
@@ -222,7 +222,7 @@
           </div>
         {:else}
           <div class="view-frame">
-            <div class="result-strip atlas-surface atlas-surface--strip atlas-surface--sunken">
+            <div class="result-strip atlas-surface atlas-surface--strip atlas-surface--sunken lattice-forced-colors-boundary">
               <span>{filteredGraph.nodes.length} of {$knowledgeStore.graph.nodes.length} pages</span>
               <span>{filteredGraph.edges.length} visible relationships</span>
             </div>
@@ -242,7 +242,7 @@
                 />
               {/if}
             </div>
-            <footer class="legend lattice-scroll-chrome atlas-surface atlas-surface--strip">
+            <footer class="legend lattice-scroll-chrome atlas-surface atlas-surface--strip lattice-forced-colors-boundary">
               <div class="legend-group" aria-label="Folder colors and shapes">
                 {#each folders as name (name)}
                   <span>

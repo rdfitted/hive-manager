@@ -33,6 +33,15 @@
 }
 
 @media (forced-colors: active) {
+  .lattice-forced-colors-boundary {
+    border: 1px solid CanvasText !important;
+  }
+
+  .lattice-forced-colors-boundary--active,
+  .lattice-forced-colors-boundary--focus-within:focus-within {
+    border-color: Highlight !important;
+  }
+
   .lattice-panel,
   .lattice-modal {
     border: 1px solid CanvasText !important;

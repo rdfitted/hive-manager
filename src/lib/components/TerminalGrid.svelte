@@ -169,9 +169,15 @@
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && maximizedTerminalId) {
-      layout.setMaximizedTerminalId(null);
-    }
+    if (
+      event.key !== 'Escape' ||
+      !maximizedTerminalId ||
+      event.defaultPrevented ||
+      document.querySelector('[aria-modal="true"]') !== null
+    ) return;
+
+    event.preventDefault();
+    layout.setMaximizedTerminalId(null);
   }
 
   function markTerminalReady(id: string) {

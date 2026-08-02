@@ -29,7 +29,7 @@
 <div class="resolver-panel lattice-scroll-content">
     <Skeleton loading={loading} skeleton={resolverSkeleton} class="resolver-loading">
         {#if output}
-            <div class="output-card">
+            <div class="output-card lattice-forced-colors-boundary">
                 <div class="card-header">
                     <span class="label">Resolver Decision</span>
                     <div class="selected-badge">

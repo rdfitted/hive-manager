@@ -27,6 +27,7 @@
 
     function handleWindowKeydown(event: KeyboardEvent) {
         if (event.key === 'Escape') {
+            event.preventDefault();
             closeModal();
         }
     }

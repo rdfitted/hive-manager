@@ -320,7 +320,7 @@
     margin: 1em 0;
     padding: 1px;
     background: var(--bg-void);
-    box-shadow: var(--edge-lip), var(--edge-seam);
+    box-shadow: var(--edge-seam), var(--edge-lip);
   }
 
   .code-block > span {

@@ -46,7 +46,7 @@
 </script>
 
 {#if contract}
-  <div class="contract-viewer">
+  <div class="contract-viewer lattice-forced-colors-boundary">
     <div class="contract-header">
       <div class="header-info">
         <h3>Sprint Contract</h3>

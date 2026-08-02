@@ -30,7 +30,7 @@
   .inline-markdown :global(code) {
     padding: 2px 5px;
     background: var(--bg-panel);
-    box-shadow: var(--edge-lip), var(--edge-seam);
+    box-shadow: var(--edge-seam), var(--edge-lip);
     color: var(--accent-chrome);
     font: 0.9em var(--font-mono);
   }

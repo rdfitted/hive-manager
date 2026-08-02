@@ -485,7 +485,7 @@
 
   .debater-status-card.completed {
     /* Completed-card tint is semantic state layered over the structural panel. */
-    background: color-mix(in srgb, var(--status-success) 2%, var(--bg-surface));
+    background: color-mix(in srgb, var(--status-success) 2%, var(--bg-panel));
   }
 
   .debater-card-header {

@@ -40,7 +40,7 @@
     </div>
 {/snippet}
 
-<div class="fusion-comparison-view lattice-scroll-content">
+<div class="fusion-comparison-view lattice-scroll-content lattice-forced-colors-boundary">
     <div class="grid" style="grid-template-columns: repeat({Math.max(1, candidates.length)}, 1fr);">
         {#each candidates as cell (cell.id)}
             <div class="candidate-card lattice-panel" class:completed={cell.status === 'completed'} class:failed={cell.status === 'failed'}>
@@ -111,12 +111,12 @@
 
     .candidate-card.completed {
         /* Candidate outcome tint is semantic state, layered over the structural panel. */
-        background: color-mix(in srgb, var(--status-success) 4%, var(--bg-surface));
+        background: color-mix(in srgb, var(--status-success) 4%, var(--bg-panel));
     }
 
     .candidate-card.failed {
         /* Candidate outcome tint is semantic state, layered over the structural panel. */
-        background: color-mix(in srgb, var(--status-error) 4%, var(--bg-surface));
+        background: color-mix(in srgb, var(--status-error) 4%, var(--bg-panel));
     }
 
     .card-header {
