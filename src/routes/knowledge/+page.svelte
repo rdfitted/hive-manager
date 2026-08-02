@@ -4,8 +4,6 @@
     ArrowClockwise,
     Brain,
     GitBranch,
-    House,
-    Kanban,
     ListBullets,
     MagnifyingGlass,
   } from 'phosphor-svelte';
@@ -102,10 +100,6 @@
       <div><strong>{folders.length}</strong><span>Folders</span></div>
     </div>
 
-    <nav class="page-nav" aria-label="Main views">
-      <a href="/" class="lattice-btn lattice-btn--ghost lattice-btn--compact" title="Session view"><House size={16} weight="light" /><span>Sessions</span></a>
-      <a href="/dashboard" class="lattice-btn lattice-btn--ghost lattice-btn--compact" title="Dashboard"><Kanban size={16} weight="light" /><span>Dashboard</span></a>
-    </nav>
   </header>
 
   <section class="toolbar atlas-surface atlas-surface--strip lattice-forced-colors-boundary" aria-label="Knowledge controls">
@@ -289,9 +283,12 @@
   .knowledge-page {
     display: flex;
     flex-direction: column;
-    width: 100vw;
-    height: 100vh;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
     overflow: hidden;
+    container: knowledge / inline-size;
     background: var(--bg-void);
     color: var(--text-primary);
     font-family: var(--font-body);
@@ -390,17 +387,6 @@
 
   .corpus-stats strong { color: var(--accent-cyan); font: 14px var(--font-mono); }
   .corpus-stats span { color: var(--text-disabled); font: 9px var(--font-mono); text-transform: uppercase; }
-
-  .page-nav {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
-  }
-
-  .page-nav :global(.lattice-btn) {
-    gap: 6px;
-    text-decoration: none;
-  }
 
   .toolbar {
     display: flex;
@@ -628,16 +614,15 @@
     border: 0;
   }
 
-  @media (max-width: 920px) {
+  @container knowledge (max-width: 920px) {
     .page-header { grid-template-columns: 1fr auto; }
     .corpus-stats { display: none; }
     .workspace.preview-open { grid-template-columns: minmax(0, 1fr) minmax(300px, 42vw); }
     .edge-legend { display: none; }
   }
 
-  @media (max-width: 700px) {
+  @container knowledge (max-width: 700px) {
     .page-header { min-height: 62px; padding: 0 var(--space-3); }
-    .page-nav span { display: none; }
     .identity-mark { display: none; }
     .toolbar { flex-wrap: wrap; min-height: auto; padding: var(--space-2); }
     .search-field { width: 100%; }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Brain, CaretDown, CaretLeft, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
+  import { Brain, CaretDown, CaretRight, Check, House, Kanban, PencilSimple } from 'phosphor-svelte';
   import { page } from '$app/stores';
   import { sessions, activeSession, activeAgents, serdeEnumVariantName, type Session, type ResumeReport, type HiveLaunchConfig, type ResearchLaunchConfig, type FusionLaunchConfig, type SoloLaunchConfig, type DebateLaunchConfig } from '$lib/stores/sessions';
   import { layout, RAIL_WIDTH } from '$lib/stores/layout';
@@ -384,6 +384,19 @@
     node.focus();
     node.select();
   }
+
+  function handleViewClick(event: MouseEvent, path: string) {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) {
+      return;
+    }
+
+    if ($page.url.pathname === path) {
+      event.preventDefault();
+      layout.toggleLeft();
+    } else if (path === '/') {
+      layout.setLeftCollapsed(false);
+    }
+  }
 </script>
 
 <!-- The permanent rail is shell chrome; the adjacent drawer is a floating panel. -->
@@ -407,6 +420,7 @@
           aria-label={label}
           aria-current={$page.url.pathname === path ? 'page' : undefined}
           title={label}
+          onclick={(event) => handleViewClick(event, path)}
         >
           <Icon size={18} weight="light" />
         </a>
@@ -414,17 +428,11 @@
     </nav>
     <button
       type="button"
-      class="lattice-btn lattice-btn--ghost lattice-btn--icon"
+      class="rail-filler"
       onclick={() => layout.toggleLeft()}
       title={collapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
-      aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-    >
-      {#if collapsed}
-        <CaretRight size={14} weight="light" />
-      {:else}
-        <CaretLeft size={14} weight="light" />
-      {/if}
-    </button>
+      aria-label={collapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"}
+    ></button>
   </div>
 
   <div
@@ -767,6 +775,21 @@
     flex-direction: column;
     gap: 4px;
     flex: none;
+  }
+
+  .rail-filler {
+    align-self: stretch;
+    flex: 1;
+    min-height: 24px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color var(--motion-duration-standard) var(--motion-ease-standard);
+  }
+
+  .rail-filler:hover {
+    background: var(--color-surface-hover);
   }
 
   .sidebar-content {

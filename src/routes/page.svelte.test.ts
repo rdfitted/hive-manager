@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/svelte';
+import { cleanup, render } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import type { AgentInfo } from '$lib/stores/sessions';
 
@@ -143,6 +143,13 @@ vi.mock('$lib/stores/pendingContext', () => ({
   pendingContext: { capture: vi.fn() },
 }));
 
+vi.mock('$lib/stores/shell', () => ({
+  shell: {
+    openAddWorker: vi.fn(),
+    requestStartAction: vi.fn(),
+  },
+}));
+
 vi.mock('$lib/stores/scratchTerminals', async () => {
   const { writable } = await import('svelte/store');
   const state = writable({ panesBySession: {}, focusedBySession: {} });
@@ -218,15 +225,14 @@ afterEach(() => {
 });
 
 describe('page Escape priority', () => {
-  it('closes Add Worker without collapsing either expanded panel', async () => {
-    const view = render(Page);
-    await fireEvent.click(view.getByRole('button', { name: 'Add Principal' }));
-    expect(view.getByRole('dialog')).toBeTruthy();
+  it('leaves panels alone while a modal is open', async () => {
+    render(Page);
+    const modal = document.createElement('div');
+    modal.setAttribute('aria-modal', 'true');
+    document.body.append(modal);
 
-    const event = await pressEscape();
+    await pressEscape();
 
-    expect(event.defaultPrevented).toBe(true);
-    expect(view.queryByRole('dialog')).toBeNull();
     expect(testMocks.toggleLeft).not.toHaveBeenCalled();
     expect(testMocks.toggleRight).not.toHaveBeenCalled();
   });

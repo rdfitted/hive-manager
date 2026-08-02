@@ -57,7 +57,7 @@ function loadInitial(): LayoutState {
   }
 }
 
-function createLayoutStore() {
+export function createLayoutStore() {
   const { subscribe, update } = writable<LayoutState>(loadInitial());
 
   function updateAndPersist(mutate: (state: LayoutState) => LayoutState) {
@@ -79,11 +79,21 @@ function createLayoutStore() {
     toggleLeft() {
       updateAndPersist((s) => ({ ...s, leftCollapsed: !s.leftCollapsed }));
     },
+    setLeftCollapsed(collapsed: boolean) {
+      updateAndPersist((s) => ({ ...s, leftCollapsed: collapsed }));
+    },
     toggleRight() {
       updateAndPersist((s) => ({ ...s, rightCollapsed: !s.rightCollapsed }));
     },
     setRightTab(tab: RightPanelTab) {
       updateAndPersist((s) => ({ ...s, rightTab: tab, rightCollapsed: false }));
+    },
+    activateRightTab(tab: RightPanelTab) {
+      updateAndPersist((s) =>
+        tab === s.rightTab && !s.rightCollapsed
+          ? { ...s, rightCollapsed: true }
+          : { ...s, rightTab: tab, rightCollapsed: false },
+      );
     },
     setLeftWidth(width: number) {
       updateAndPersist((s) => ({ ...s, leftWidth: clamp(width, LEFT_WIDTH_MIN, LEFT_WIDTH_MAX) }));

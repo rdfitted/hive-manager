@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { House } from 'phosphor-svelte';
   import KanbanBoard from '$lib/components/dashboard/KanbanBoard.svelte';
   import { sessions } from '$lib/stores/sessions';
 
@@ -31,10 +30,6 @@
       <h1>Dashboard</h1>
       <p class="subtitle">All sessions grouped by status</p>
     </div>
-    <a href="/" class="home-link lattice-btn lattice-btn--secondary lattice-btn--compact" title="Back to session view">
-      <House size={16} weight="light" />
-      Session View
-    </a>
   </header>
   <div class="board-wrap">
     <KanbanBoard />
@@ -45,8 +40,9 @@
   .dashboard {
     display: flex;
     flex-direction: column;
-    width: 100vw;
-    height: 100vh;
+    flex: 1;
+    min-width: 0;
+    height: 100%;
     background: var(--color-bg);
     color: var(--color-text);
     padding: var(--space-5);
@@ -72,12 +68,6 @@
     margin: var(--space-1) 0 0 0;
     color: var(--text-secondary);
     font-size: var(--text-small);
-  }
-  .home-link {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    text-decoration: none;
   }
   .board-wrap {
     flex: 1;
