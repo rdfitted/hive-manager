@@ -7476,7 +7476,7 @@ async fn test_complete_session_returns_conflict_when_not_quiescent() {
 #[tokio::test]
 async fn test_completed_heartbeat_does_not_extend_quiescence() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let session_id = format!("session-completed-quiet-{}", uuid::Uuid::new_v4());
+    let session_id = format!("completed-quiet-{}", uuid::Uuid::new_v4());
     let temp_dir = std::env::temp_dir().join(&session_id);
     let _ = std::fs::create_dir_all(&temp_dir);
     let worker_1 = format!("{session_id}-worker-1");
@@ -7539,7 +7539,7 @@ async fn test_completed_heartbeat_does_not_extend_quiescence() {
 #[tokio::test]
 async fn test_working_heartbeat_still_extends_quiescence() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let session_id = format!("session-working-active-{}", uuid::Uuid::new_v4());
+    let session_id = format!("working-active-{}", uuid::Uuid::new_v4());
     let temp_dir = std::env::temp_dir().join(&session_id);
     let _ = std::fs::create_dir_all(&temp_dir);
     let worker_id = format!("{session_id}-worker-1");
@@ -7581,7 +7581,7 @@ async fn test_working_heartbeat_still_extends_quiescence() {
 #[tokio::test]
 async fn test_completed_heartbeat_still_refreshes_agent_liveness() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let session_id = format!("session-completed-live-{}", uuid::Uuid::new_v4());
+    let session_id = format!("completed-live-{}", uuid::Uuid::new_v4());
     let temp_dir = std::env::temp_dir().join(&session_id);
     let _ = std::fs::create_dir_all(&temp_dir);
     let worker_id = format!("{session_id}-worker-1");
@@ -7657,7 +7657,7 @@ async fn test_completed_heartbeat_still_refreshes_agent_liveness() {
 #[tokio::test]
 async fn test_list_sessions_ignores_completed_heartbeats_for_activity() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let session_id = format!("session-list-completed-{}", uuid::Uuid::new_v4());
+    let session_id = format!("list-completed-{}", uuid::Uuid::new_v4());
     let temp_dir = std::env::temp_dir().join(&session_id);
     let _ = std::fs::create_dir_all(&temp_dir);
     let worker_id = format!("{session_id}-worker-1");
@@ -7714,9 +7714,9 @@ async fn test_list_sessions_ignores_completed_heartbeats_for_activity() {
 }
 
 #[tokio::test]
-async fn test_queen_working_heartbeat_holds_session_open_while_workers_idle() {
+async fn test_queen_working_heartbeat_holds_session_open_while_workers_completed() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let session_id = format!("session-queen-working-{}", uuid::Uuid::new_v4());
+    let session_id = format!("queen-working-{}", uuid::Uuid::new_v4());
     let temp_dir = std::env::temp_dir().join(&session_id);
     let _ = std::fs::create_dir_all(&temp_dir);
     let queen_id = format!("{session_id}-queen");
@@ -7771,7 +7771,7 @@ async fn test_queen_working_heartbeat_holds_session_open_while_workers_idle() {
 #[tokio::test]
 async fn test_queen_completed_heartbeat_releases_session() {
     let (app, controller) = setup_test_app_with_controller().await;
-    let session_id = format!("session-queen-completed-{}", uuid::Uuid::new_v4());
+    let session_id = format!("queen-completed-{}", uuid::Uuid::new_v4());
     let temp_dir = std::env::temp_dir().join(&session_id);
     let _ = std::fs::create_dir_all(&temp_dir);
     let queen_id = format!("{session_id}-queen");
