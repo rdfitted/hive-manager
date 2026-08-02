@@ -70,7 +70,7 @@
   {#if viewMode === 'terminals'}
     {#if queenAgent}
       <div class="orchestrator-section lattice-panel">
-        <div class="orchestrator-header">
+        <div class="orchestrator-header lattice-forced-colors-boundary">
           <Crown size={24} weight="light" />
           <h3>Fusion Queen</h3>
           <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
@@ -86,7 +86,7 @@
         {@const variantName = typeof agent.role === 'object' && 'Fusion' in agent.role ? agent.role.Fusion.variant : ''}
         {@const status = getVariantStatus(variantName)}
         <div class="variant-card lattice-panel">
-          <div class="variant-header">
+          <div class="variant-header lattice-forced-colors-boundary">
             <span class="variant-name">{variantName}</span>
             <span class="status-badge" class:status-running={status === 'Running'} class:status-success={status === 'Completed'} class:status-error={status === 'Failed'}>
               {status}
@@ -96,7 +96,7 @@
             <Terminal agentId={agent.id} isFocused={true} />
           </div>
           {#if evaluationReady}
-            <div class="variant-actions">
+            <div class="variant-actions lattice-forced-colors-boundary">
               <button 
                 class="lattice-btn lattice-btn--primary"
                 onclick={() => handleApplyWinner(variantName)}
@@ -112,7 +112,7 @@
 
     {#if judgeAgent}
       <div class="orchestrator-section lattice-panel">
-        <div class="orchestrator-header">
+        <div class="orchestrator-header lattice-forced-colors-boundary">
           <Scales size={24} weight="light" />
           <h3>Judge</h3>
           <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
@@ -132,7 +132,7 @@
 
   {#if isResolvingOrCompleted}
     <div class="resolver-section lattice-panel lattice-panel--active">
-      <div class="section-header">
+      <div class="section-header lattice-forced-colors-boundary">
         <MagnifyingGlass size={24} weight="light" />
         <h3>Resolver Analysis</h3>
       </div>
@@ -144,7 +144,7 @@
 
   {#if evaluationReady && judgeReport}
     <div class="judge-section lattice-panel">
-      <div class="section-header">
+      <div class="section-header lattice-forced-colors-boundary">
         <Scales size={24} weight="light" />
         <h3>Judge Evaluation Report</h3>
       </div>

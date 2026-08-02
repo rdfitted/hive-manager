@@ -186,7 +186,7 @@
   <AgentStatusBar />
 
   <!-- Agent tabs -->
-  <div class="agent-tabs lattice-scroll-chrome" role="tablist">
+  <div class="agent-tabs lattice-scroll-chrome lattice-forced-colors-boundary" role="tablist">
     {#each agentTabs as tab (tab.id)}
       <button
         class="lattice-tab"
@@ -231,7 +231,7 @@
           </div>
         {:else}
           {#each filteredMessages as msg, i (i)}
-            <div class="message">
+            <div class="message lattice-forced-colors-boundary">
               <span class="msg-time">{formatTimestamp(msg.timestamp)}</span>
               <span class="msg-sender" style="color: {getSenderColor(msg.from)}">{msg.from}</span>
               {#if msg.renderer || msg.data}
@@ -254,7 +254,7 @@
 
   <!-- Input -->
   {#if selectedAgent && selectedAgent !== 'shared'}
-    <div class="input-bar">
+    <div class="input-bar lattice-forced-colors-boundary">
       <Composer
         sessionId={sessionId}
         agentId={selectedAgent}

@@ -56,13 +56,13 @@
 
     {#if !compact && showDetails}
         {#if artifact.test_results}
-            <div class="detail-section">
+            <div class="detail-section lattice-forced-colors-boundary">
                 <div class="detail-header">Tests</div>
                 <TestResultsPanel results={artifact.test_results} />
             </div>
         {/if}
 
-        <div class="detail-section">
+        <div class="detail-section lattice-forced-colors-boundary">
             <div class="detail-header">Changes</div>
             <DiffSummaryPanel changedFiles={artifact.changed_files} diffSummary={artifact.diff_summary} />
         </div>

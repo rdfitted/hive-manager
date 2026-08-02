@@ -98,7 +98,7 @@
 {/snippet}
 
 <div class="coordination-panel">
-  <div class="panel-header">
+  <div class="panel-header lattice-forced-colors-boundary">
     <h3>Coordination Log</h3>
     <div class="header-actions">
       <input
@@ -127,7 +127,7 @@
         </div>
       {:else}
         {#each displayMessages as message (message.id)}
-          <div class="message">
+          <div class="message lattice-forced-colors-boundary">
             <span class="timestamp">{formatTimestamp(message.timestamp)}</span>
             <span class="sender {getSenderColor(message.from)}">
               <span class="sender-icon">{getSenderIcon(message.from)}</span>

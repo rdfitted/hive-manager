@@ -47,7 +47,7 @@
 
 {#if contract}
   <div class="contract-viewer lattice-forced-colors-boundary">
-    <div class="contract-header">
+    <div class="contract-header lattice-forced-colors-boundary">
       <div class="header-info">
         <h3>Sprint Contract</h3>
         <span class="milestone-id">Milestone: {contract.milestone_id}</span>
@@ -79,7 +79,7 @@
     </div>
 
     {#if Object.keys(contract.grading_weights).length > 0}
-      <div class="weights-section">
+      <div class="weights-section lattice-forced-colors-boundary">
         <h4>Grading Weights</h4>
         <div class="weights-grid">
           {#each Object.entries(contract.grading_weights) as [key, weight]}

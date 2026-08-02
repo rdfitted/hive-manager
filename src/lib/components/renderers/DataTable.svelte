@@ -75,7 +75,7 @@
 
 <div class="data-table-widget lattice-forced-colors-boundary">
   {#if table.rows.length > ROW_CAP}
-    <div class="notice">Showing first {ROW_CAP} of {table.rows.length} rows.</div>
+    <div class="notice lattice-forced-colors-boundary">Showing first {ROW_CAP} of {table.rows.length} rows.</div>
   {/if}
   {#if columns.length === 0}
     <div class="empty">No tabular data.</div>

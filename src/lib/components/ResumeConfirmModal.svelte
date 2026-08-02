@@ -65,7 +65,7 @@
       on:click|stopPropagation
       on:keydown|stopPropagation={(e) => e.key === 'Escape' && cancel()}
     >
-      <header class="modal-header">
+      <header class="modal-header lattice-forced-colors-boundary">
         <h2>Resume {sessionName ?? 'session'}</h2>
       </header>
 
@@ -130,7 +130,7 @@
         </label>
       </div>
 
-      <footer class="modal-footer">
+      <footer class="modal-footer lattice-forced-colors-boundary">
         <button type="button" class="lattice-btn lattice-btn--secondary" on:click={cancel} disabled={confirming}>
           Cancel
         </button>

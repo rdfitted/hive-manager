@@ -280,7 +280,7 @@
         gap: 12px;
         margin-top: 12px;
         padding-top: 20px;
-        box-shadow: var(--edge-lip);
+        box-shadow: var(--edge-seam-top);
     }
 
 </style>

@@ -96,7 +96,7 @@
 
     {#if !collapsed}
       <div class="panel-content">
-        <div class="summary">
+        <div class="summary lattice-forced-colors-boundary">
           <p>{verdict.summary}</p>
         </div>
 

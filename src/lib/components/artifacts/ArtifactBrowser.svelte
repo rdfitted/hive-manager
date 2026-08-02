@@ -22,7 +22,7 @@
 </script>
 
 <div class="artifact-browser">
-    <div class="browser-header">
+    <div class="browser-header lattice-forced-colors-boundary">
         <h3>Artifact Browser</h3>
         <div class="cell-filters">
             <span class="label">Filter Cells:</span>
@@ -45,7 +45,7 @@
         {:else}
             {#each displayedCells as cell}
                 <div class="cell-column lattice-panel">
-                    <div class="column-header">
+                    <div class="column-header lattice-forced-colors-boundary">
                         Cell: {cell.id.substring(0, 8)}
                     </div>
                     <div class="column-content lattice-scroll-content">

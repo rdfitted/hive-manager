@@ -60,7 +60,7 @@
       onclick={(e) => e.stopPropagation()}
       onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') onClose(); }}
     >
-      <div class="dialog-header">
+      <div class="dialog-header lattice-forced-colors-boundary">
         <span class="dialog-icon"><Keyboard size={18} weight="light" /></span>
         <h2>Keyboard Shortcuts</h2>
         <button

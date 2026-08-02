@@ -877,7 +877,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               {showHiveAdvanced ? 'Hide' : 'Show'} delegation guidance
             </button>
             {#if showHiveAdvanced}
-              <div class="advanced-grid" id="hive-delegation-limits">
+              <div class="advanced-grid lattice-forced-colors-boundary" id="hive-delegation-limits">
                 <label>Queen target max children <input class="lattice-input" type="number" min="1" max="8" bind:value={queenMaxChildren} /></label>
                 <label>Queen target max depth <input class="lattice-input" type="number" min="1" max="4" bind:value={queenMaxDepth} /></label>
                 <label>Principal target max children <input class="lattice-input" type="number" min="1" max="8" bind:value={principalMaxChildren} /></label>
@@ -920,7 +920,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 </label>
               </div>
               {#if (mode === 'hive' && withEvaluator) || (mode === 'solo' && withSoloEvaluator)}
-                <div class="evaluator-config subsection">
+                <div class="evaluator-config subsection lattice-forced-colors-boundary">
                   <h4>Evaluator Configuration</h4>
                   <AgentConfigEditor
                     bind:config={evaluatorConfig}
@@ -932,7 +932,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                   />
                 </div>
 
-                <div class="qa-workers-config subsection">
+                <div class="qa-workers-config subsection lattice-forced-colors-boundary">
                   <div class="section-header">
                     <h4>QA Workers ({qaWorkers.length})</h4>
                     <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addQaWorker} disabled={qaWorkers.length >= 6}>+ Add</button>
@@ -1024,7 +1024,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </select>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Variant Configurations</h4>
               <div class="workers-list">
                 {#each activeFusionVariants as variant, i (i)}
@@ -1051,7 +1051,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Judge Configuration</h4>
               <p class="section-description">Evaluates variant outputs and recommends a winner.</p>
               <div class="worker-card lattice-panel">
@@ -1094,7 +1094,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Debater Configurations</h4>
               <div class="workers-list">
                 {#each activeDebaters as debater, i (i)}
@@ -1129,7 +1129,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </div>
 
-            <div class="subsection">
+            <div class="subsection lattice-forced-colors-boundary">
               <h4>Judge Configuration</h4>
               <p class="section-description">Evaluates the debate and renders the verdict.</p>
               <div class="worker-card lattice-panel">
@@ -1191,7 +1191,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         {/if}
 
         {#if mode !== 'templates'}
-        <div class="launch-preview-section">
+        <div class="launch-preview-section lattice-forced-colors-boundary">
           <button
             type="button"
             class="lattice-btn lattice-btn--ghost lattice-btn--link"
@@ -1262,7 +1262,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                 {/if}
 
                 {#if mode === 'hive'}
-                  <div class="topology-contract">
+                  <div class="topology-contract lattice-forced-colors-boundary">
                     <div class="topology-layer lattice-forced-colors-boundary">
                       <span class="topology-layer-title">Managed principals</span>
                       <span>1 Queen + {codingPrincipals.length} manager-launched coding principal{codingPrincipals.length === 1 ? '' : 's'}</span>

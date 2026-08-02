@@ -287,7 +287,7 @@
       <span class="hint">The Master Planner will create a plan when the session starts.</span>
     </div>
   {:else}
-    <div class="plan-header">
+    <div class="plan-header lattice-forced-colors-boundary">
       <h3>{plan.title}</h3>
       {#if plan.summary}
         <p class="summary">{plan.summary}</p>
@@ -334,7 +334,7 @@
     {:else}
       <!-- Show raw markdown when no tasks parsed yet (plan in progress) -->
       <div class="raw-content">
-        <div class="raw-header">
+        <div class="raw-header lattice-forced-colors-boundary">
           <span class="raw-icon">
             <FileText size={16} weight="light" />
           </span>
@@ -351,7 +351,7 @@
     {/if}
 
     {#if isPlanning() || isPlanReady()}
-      <div class="plan-actions">
+      <div class="plan-actions lattice-forced-colors-boundary">
         {#if canRefine()}
           <div class="refinement-section">
             <p class="refinement-hint">

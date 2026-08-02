@@ -148,7 +148,7 @@
 
 <div class="debate-panel lattice-scroll-content">
   <!-- Debate Header Bar -->
-  <div class="debate-header-bar">
+  <div class="debate-header-bar lattice-forced-colors-boundary">
     <div class="info-group">
       <div class="state-tag" class:eval-ready={evaluationReady}>
         {#if evaluationReady}
@@ -189,7 +189,7 @@
     <div class="terminals-layout">
       {#if queenAgent}
         <div class="orchestrator-section lattice-panel">
-          <div class="section-header">
+          <div class="section-header lattice-forced-colors-boundary">
             <Crown size={20} weight="light" class="icon-queen" />
             <h3>Orchestrator Queen</h3>
             <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
@@ -203,7 +203,7 @@
       <div class="debaters-terminals-grid">
         {#each debaterAgents as agent (agent.id)}
           <div class="variant-card lattice-panel">
-            <div class="variant-header">
+            <div class="variant-header lattice-forced-colors-boundary">
               <span class="variant-name">{agent.config?.label || 'Debater'}</span>
               <span class="cli-badge">{agent.config?.cli || 'unknown'}</span>
             </div>
@@ -216,7 +216,7 @@
 
       {#if judgeAgent}
         <div class="orchestrator-section lattice-panel">
-          <div class="section-header">
+          <div class="section-header lattice-forced-colors-boundary">
             <Scales size={20} weight="light" class="icon-judge" />
             <h3>Debate Judge</h3>
             <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
@@ -234,7 +234,7 @@
       <div class="debaters-grid">
         {#each debaters as debater (debater.index)}
           <div class="debater-status-card lattice-panel" class:completed={debater.status === 'Completed'}>
-            <div class="debater-card-header">
+            <div class="debater-card-header lattice-forced-colors-boundary">
               <div class="status-indicator">
                 <span class="status-dot {getDebaterStatusClass(debater.status)}"></span>
                 <span class="debater-name">{debater.name}</span>
@@ -288,7 +288,7 @@
       {/if}
 
       <div class="verdict-card lattice-panel">
-        <div class="verdict-header">
+        <div class="verdict-header lattice-forced-colors-boundary">
           <Scales size={22} weight="light" />
           <h3>Structured Verdict</h3>
           {#if debateEvaluation?.report_path}

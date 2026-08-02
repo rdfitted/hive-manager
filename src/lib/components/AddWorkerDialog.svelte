@@ -162,7 +162,7 @@
   <div class="dialog-overlay lattice-modal-backdrop" on:click={close} role="presentation">
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
     <div class="dialog lattice-modal lattice-scroll-chrome" on:click|stopPropagation role="dialog" aria-modal="true" tabindex="-1">
-      <div class="dialog-header">
+      <div class="dialog-header lattice-forced-colors-boundary">
         <h2>Add Managed Principal</h2>
         <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--icon" on:click={close} aria-label="Close add principal dialog">&times;</button>
       </div>

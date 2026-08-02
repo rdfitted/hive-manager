@@ -207,7 +207,7 @@
 
 <div class="chart-widget lattice-forced-colors-boundary" data-testid="chart-widget">
   {#if chart.title}
-    <div class="chart-title">{chart.title}</div>
+    <div class="chart-title lattice-forced-colors-boundary">{chart.title}</div>
   {/if}
 
   {#if hasPoints}
