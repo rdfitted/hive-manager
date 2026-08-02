@@ -1539,6 +1539,12 @@ impl SessionController {
         })
     }
 
+    /// A heartbeat represents session work unless the reporting actor has finished.
+    /// Completed heartbeats still refresh per-agent liveness for stall detection.
+    fn status_counts_as_session_activity(status: &str) -> bool {
+        status != "completed"
+    }
+
     pub fn list_sessions(&self) -> Vec<Session> {
         let sessions = self.sessions.read();
         let heartbeats = self.agent_heartbeats.read();
@@ -1547,7 +1553,14 @@ impl SessionController {
             .cloned()
             .map(|mut session| {
                 if let Some(map) = heartbeats.get(&session.id) {
-                    if let Some(max_hb) = map.values().map(|h| h.last_activity).max() {
+                    if let Some(max_hb) = map
+                        .values()
+                        .filter(|heartbeat| {
+                            Self::status_counts_as_session_activity(&heartbeat.status)
+                        })
+                        .map(|heartbeat| heartbeat.last_activity)
+                        .max()
+                    {
                         if max_hb > session.last_activity_at {
                             session.last_activity_at = max_hb;
                         }
@@ -1647,7 +1660,9 @@ impl SessionController {
         let session_snapshot = {
             let mut sessions = self.sessions.write();
             sessions.get_mut(session_id).map(|session| {
-                if now > session.last_activity_at {
+                if Self::status_counts_as_session_activity(status)
+                    && now > session.last_activity_at
+                {
                     session.last_activity_at = now;
                 }
                 session.clone()
@@ -6004,6 +6019,13 @@ This tests that:
             "working",
             "Coordinating managed principals",
         );
+        let queen_completed_heartbeat = heartbeat_snippet(
+            "http://localhost:18800",
+            session_id,
+            "queen",
+            "completed",
+            "Objective and every configured gate complete",
+        );
 
         format!(
             r#"# Queen - Hive Meta-Harness
@@ -6070,7 +6092,12 @@ Log every quality-reconciliation iteration to {coordination_log_path}:
 
 {objective}
 
-When the objective and every configured gate are complete, send an idle heartbeat and continue monitoring the Queen conversation."#,
+While you intend further waves, keep heartbeating `working` to hold the session open — including across wave boundaries while you deliberate and no principal is active.
+
+When the objective and every configured gate are complete, send this `completed` heartbeat and continue monitoring the Queen conversation:
+```bash
+{queen_completed_heartbeat}
+```"#,
             role_kernel = role_kernel,
             capability_card = capability_card,
             delegation = delegation,
@@ -6092,6 +6119,7 @@ When the objective and every configured gate are complete, send an idle heartbea
             post_workers_protocol = post_workers_protocol,
             coordination_log_path = coordination_log_path,
             queen_quality_log = Self::queen_quality_reconciliation_log_lines(has_evaluator),
+            queen_completed_heartbeat = queen_completed_heartbeat,
             objective = objective,
         )
     }
@@ -7149,7 +7177,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | agent_id | string | Yes | Exact full agent ID from the roster or worker API, such as `{session_id}-worker-2` or `{session_id}-fusion-1` |
-| status | string | Yes | `working`, `idle`, or `completed` |
+| status | string | Yes | `working` = doing work or holding the session open; `idle` = alive and blocked on another actor; `completed` = this actor is finished |
 | summary | string | No | Concise evidence-backed status summary |
 
 ## Mark a Verified Completion
@@ -7166,6 +7194,7 @@ For a Fusion variant or another agent type, keep the request identical and use t
 
 - Verify the deliverable and required gates before sending `completed`; a task-file claim alone is not sufficient.
 - Use the exact full agent ID. A shortened ID such as `worker-N` will not drive that agent's UI status, and the `<exact-agent-id>` placeholder fails validation if left unchanged.
+- A `completed` heartbeat keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window; `working` and `idle` heartbeats do extend it.
 - Send `completed` immediately after verification. A later `working` or `idle` heartbeat replaces it, so do not downgrade a completed agent unless it has received a new ACTIVE assignment.
 "#,
             session_id = session_id,
@@ -14525,6 +14554,17 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_activity_semantics_only_exempt_completed_status() {
+        assert!(SessionController::status_counts_as_session_activity(
+            "working"
+        ));
+        assert!(SessionController::status_counts_as_session_activity("idle"));
+        assert!(!SessionController::status_counts_as_session_activity(
+            "completed"
+        ));
+    }
+
+    #[test]
     fn stall_sweep_excludes_completed_heartbeats() {
         let controller = test_controller();
         controller
@@ -15309,6 +15349,12 @@ mod tests {
         assert!(status_content.contains(r#""status":"completed""#));
         assert!(status_content.contains("shortened ID such as `worker-N`"));
         assert!(status_content.contains("placeholder fails validation"));
+        assert!(status_content.contains("`working` = doing work or holding the session open"));
+        assert!(status_content.contains("`idle` = alive and blocked on another actor"));
+        assert!(status_content.contains("`completed` = this actor is finished"));
+        assert!(status_content.contains(
+            "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
+        ));
     }
 
     fn shared_meta_harness_policy() -> HiveExecutionPolicy {
@@ -15411,6 +15457,13 @@ mod tests {
         assert!(prompt.contains("Managed principals are visible Hive agents"));
         assert!(prompt.contains("mark-worker-status.md"));
         assert!(prompt.contains("UI completion checkoff and stall monitor depend on it"));
+        let objective_tail = extract_markdown_section(&prompt, "## Operator Objective");
+        assert!(objective_tail.contains("across wave boundaries"));
+        assert!(objective_tail.contains("keep heartbeating `working` to hold the session open"));
+        assert!(objective_tail.contains("send this `completed` heartbeat"));
+        assert!(objective_tail.contains(r#""agent_id":"queen""#));
+        assert!(objective_tail.contains(r#""status":"completed""#));
+        assert!(!objective_tail.contains("send an idle heartbeat"));
         assert!(!prompt.contains("full Claude Code capabilities"));
         assert!(!prompt.contains("Claude Code Tools"));
         assert!(!prompt.contains("git checkout -b"));

@@ -382,6 +382,27 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
     }
 }
 
+fn make_test_agent(id: &str, role: AgentRole) -> AgentInfo {
+    AgentInfo {
+        id: id.to_string(),
+        role,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+    }
+}
+
+fn make_quiet_test_session(id: &str, project_path: &str, agents: Vec<AgentInfo>) -> Session {
+    let quiet_since = chrono::Utc::now() - chrono::Duration::minutes(11);
+    let mut session = make_test_session(id, project_path);
+    session.created_at = quiet_since - chrono::Duration::minutes(1);
+    session.last_activity_at = quiet_since;
+    session.agents = agents;
+    session
+}
+
 fn make_test_session_for_completion(
     id: &str,
     project_path: &str,
@@ -409,6 +430,48 @@ fn make_test_session_for_completion(
         };
     }
     session
+}
+
+async fn post_test_heartbeat(
+    app: &axum::Router,
+    session_id: &str,
+    agent_id: &str,
+    status: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": status,
+                        "summary": format!("test {status} heartbeat")
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn post_test_completion(
+    app: &axum::Router,
+    session_id: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/complete"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -7406,6 +7469,379 @@ async fn test_complete_session_returns_conflict_when_not_quiescent() {
         .and_then(|value| value.as_str())
         .unwrap();
     assert!(error.contains("QaPassed"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_completed_heartbeat_does_not_extend_quiescence() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("session-completed-quiet-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let worker_1 = format!("{session_id}-worker-1");
+    let worker_2 = format!("{session_id}-worker-2");
+
+    controller
+        .read()
+        .insert_test_session(make_quiet_test_session(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            vec![
+                make_test_agent(
+                    &worker_1,
+                    AgentRole::Worker {
+                        index: 1,
+                        parent: None,
+                    },
+                ),
+                make_test_agent(
+                    &worker_2,
+                    AgentRole::Worker {
+                        index: 2,
+                        parent: None,
+                    },
+                ),
+            ],
+        ));
+    let quiet_since = controller
+        .read()
+        .get_session(&session_id)
+        .expect("session inserted")
+        .last_activity_at;
+
+    for _ in 0..3 {
+        for worker_id in [&worker_1, &worker_2] {
+            let heartbeat =
+                post_test_heartbeat(&app, &session_id, worker_id, "completed").await;
+            assert_eq!(heartbeat.status(), StatusCode::OK);
+        }
+        assert!(
+            controller.read().can_complete_session(&session_id).is_ok(),
+            "repeated completed heartbeats must not restore remaining quiescence time"
+        );
+        assert_eq!(
+            controller
+                .read()
+                .get_session(&session_id)
+                .expect("session remains loaded")
+                .last_activity_at,
+            quiet_since
+        );
+    }
+
+    let response = post_test_completion(&app, &session_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_working_heartbeat_still_extends_quiescence() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("session-working-active-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let worker_id = format!("{session_id}-worker-1");
+
+    controller
+        .read()
+        .insert_test_session(make_quiet_test_session(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            vec![make_test_agent(
+                &worker_id,
+                AgentRole::Worker {
+                    index: 1,
+                    parent: None,
+                },
+            )],
+        ));
+
+    let heartbeat = post_test_heartbeat(&app, &session_id, &worker_id, "working").await;
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+
+    let response = post_test_completion(&app, &session_id).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["current_state"], "quiescence_required");
+    assert!(
+        response_json["remaining_quiescence_seconds"]
+            .as_i64()
+            .is_some_and(|remaining| (590..=600).contains(&remaining)),
+        "working heartbeat should restore a fresh quiescence wait: {response_json}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_completed_heartbeat_still_refreshes_agent_liveness() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("session-completed-live-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let worker_id = format!("{session_id}-worker-1");
+
+    controller
+        .read()
+        .insert_test_session(make_quiet_test_session(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            vec![make_test_agent(
+                &worker_id,
+                AgentRole::Worker {
+                    index: 1,
+                    parent: None,
+                },
+            )],
+        ));
+    assert!(controller
+        .read()
+        .get_heartbeat_info(&session_id)
+        .is_empty());
+
+    let heartbeat_started = chrono::Utc::now();
+    let heartbeat = post_test_heartbeat(&app, &session_id, &worker_id, "completed").await;
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+
+    let heartbeat_info = controller.read().get_heartbeat_info(&session_id);
+    let worker_info = heartbeat_info
+        .get(&worker_id)
+        .expect("completed heartbeat should remain visible as agent liveness");
+    assert_eq!(worker_info.status, "completed");
+    assert!(worker_info.last_activity >= heartbeat_started);
+    assert!(controller
+        .read()
+        .get_stalled_agents(&session_id, std::time::Duration::ZERO)
+        .is_empty());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions/active")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let listed_agent = response_json["sessions"]
+        .as_array()
+        .and_then(|sessions| {
+            sessions
+                .iter()
+                .find(|session| session["id"].as_str() == Some(session_id.as_str()))
+        })
+        .and_then(|session| session["agents"].as_array())
+        .and_then(|agents| {
+            agents
+                .iter()
+                .find(|agent| agent["id"].as_str() == Some(worker_id.as_str()))
+        })
+        .expect("active sessions should expose the completed agent heartbeat");
+    assert_eq!(listed_agent["status"], "completed");
+    assert!(listed_agent["last_activity"].as_str().is_some());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_list_sessions_ignores_completed_heartbeats_for_activity() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("session-list-completed-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let worker_id = format!("{session_id}-worker-1");
+    let session = make_quiet_test_session(
+        &session_id,
+        temp_dir.to_str().unwrap(),
+        vec![make_test_agent(
+            &worker_id,
+            AgentRole::Worker {
+                index: 1,
+                parent: None,
+            },
+        )],
+    );
+    let quiet_since = session.last_activity_at;
+    controller.read().insert_test_session(session);
+
+    let heartbeat = post_test_heartbeat(&app, &session_id, &worker_id, "completed").await;
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let listed = response_json["sessions"]
+        .as_array()
+        .and_then(|sessions| {
+            sessions
+                .iter()
+                .find(|session| session["id"].as_str() == Some(session_id.as_str()))
+        })
+        .expect("session should be listed");
+    let listed_last_activity = chrono::DateTime::parse_from_rfc3339(
+        listed["last_activity_at"]
+            .as_str()
+            .expect("listed last_activity_at"),
+    )
+    .unwrap()
+    .with_timezone(&chrono::Utc);
+    assert_eq!(listed_last_activity, quiet_since);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_queen_working_heartbeat_holds_session_open_while_workers_idle() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("session-queen-working-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let queen_id = format!("{session_id}-queen");
+    let worker_1 = format!("{session_id}-worker-1");
+    let worker_2 = format!("{session_id}-worker-2");
+
+    controller
+        .read()
+        .insert_test_session(make_quiet_test_session(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            vec![
+                make_test_agent(&queen_id, AgentRole::Queen),
+                make_test_agent(
+                    &worker_1,
+                    AgentRole::Worker {
+                        index: 1,
+                        parent: None,
+                    },
+                ),
+                make_test_agent(
+                    &worker_2,
+                    AgentRole::Worker {
+                        index: 2,
+                        parent: None,
+                    },
+                ),
+            ],
+        ));
+
+    for worker_id in [&worker_1, &worker_2] {
+        let heartbeat = post_test_heartbeat(&app, &session_id, worker_id, "completed").await;
+        assert_eq!(heartbeat.status(), StatusCode::OK);
+    }
+    let queen_heartbeat = post_test_heartbeat(&app, &session_id, &queen_id, "working").await;
+    assert_eq!(queen_heartbeat.status(), StatusCode::OK);
+
+    let response = post_test_completion(&app, &session_id).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["current_state"], "quiescence_required");
+    assert!(response_json["remaining_quiescence_seconds"]
+        .as_i64()
+        .is_some_and(|remaining| (590..=600).contains(&remaining)));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_queen_completed_heartbeat_releases_session() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("session-queen-completed-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let queen_id = format!("{session_id}-queen");
+    let worker_1 = format!("{session_id}-worker-1");
+    let worker_2 = format!("{session_id}-worker-2");
+
+    controller
+        .read()
+        .insert_test_session(make_quiet_test_session(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            vec![
+                make_test_agent(&queen_id, AgentRole::Queen),
+                make_test_agent(
+                    &worker_1,
+                    AgentRole::Worker {
+                        index: 1,
+                        parent: None,
+                    },
+                ),
+                make_test_agent(
+                    &worker_2,
+                    AgentRole::Worker {
+                        index: 2,
+                        parent: None,
+                    },
+                ),
+            ],
+        ));
+
+    for agent_id in [&worker_1, &worker_2, &queen_id] {
+        let heartbeat = post_test_heartbeat(&app, &session_id, agent_id, "completed").await;
+        assert_eq!(heartbeat.status(), StatusCode::OK);
+    }
+
+    let response = post_test_completion(&app, &session_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_prince_idle_heartbeat_still_extends_quiescence() {
+    let (app, controller) = setup_test_app_with_controller().await;
+    let session_id = format!("session-prince-idle-{}", uuid::Uuid::new_v4());
+    let temp_dir = std::env::temp_dir().join(&session_id);
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let prince_id = format!("{session_id}-prince");
+
+    controller
+        .read()
+        .insert_test_session(make_quiet_test_session(
+            &session_id,
+            temp_dir.to_str().unwrap(),
+            vec![make_test_agent(&prince_id, AgentRole::Prince)],
+        ));
+
+    let heartbeat = post_test_heartbeat(&app, &session_id, &prince_id, "idle").await;
+    assert_eq!(heartbeat.status(), StatusCode::OK);
+
+    let response = post_test_completion(&app, &session_id).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let response_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response_json["current_state"], "quiescence_required");
+    assert!(response_json["remaining_quiescence_seconds"]
+        .as_i64()
+        .is_some_and(|remaining| (590..=600).contains(&remaining)));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
