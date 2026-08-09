@@ -13124,12 +13124,116 @@ phases and do EXACTLY this, then stop:
     /// The worker index the next spawn will take. One definition, used by both
     /// the handler's reservation and `add_worker` itself.
     pub(crate) fn next_worker_index(session: &Session) -> u8 {
-        let existing = session
+        // #207: first unused index, not roster-count + 1. Counting breaks the moment a
+        // slot is discarded (a dead-on-arrival worker, or an operator release of a dead
+        // slot): with workers 1 and 3 on the roster a count would hand out 3 again and
+        // collide with the live worker-3, while the freed worker-2 — whose branch, task
+        // file, and queue row all key on its index — could never be respawned in place.
+        let used: std::collections::HashSet<u8> = session
             .agents
             .iter()
-            .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
-            .count();
-        (existing + 1) as u8
+            .filter_map(|a| match a.role {
+                AgentRole::Worker { index, .. } => Some(index),
+                _ => None,
+            })
+            .collect();
+        (1..=u8::MAX)
+            .find(|candidate| !used.contains(candidate))
+            .unwrap_or(u8::MAX)
+    }
+
+    /// Remove a dead worker's roster entry and launch artifacts so its slot can be
+    /// respawned in place (#207).
+    ///
+    /// This is the recovery half of startup verification: a worker whose CLI died
+    /// during startup — or one the operator releases after its process is gone — keeps
+    /// its roster entry under the old rules, which both misreports it as `Running`
+    /// forever and permanently burns its index. Discarding the entry lets
+    /// `next_worker_index` hand the same slot out again, so the retry reuses the
+    /// original branch name, task-file path, and durable queue row instead of
+    /// advancing to worker-N+1 and orphaning all three.
+    ///
+    /// The caller is responsible for making sure the process is actually dead first
+    /// (kill it or verify `is_alive` is false); this method only cleans up.
+    pub fn discard_worker_slot(&self, session_id: &str, worker_id: &str) -> Result<u8, String> {
+        let (session, worker_index) = {
+            let sessions = self.sessions.read();
+            let session = sessions
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            let index = session
+                .agents
+                .iter()
+                .find_map(|a| match (&a.role, a.id == worker_id) {
+                    (AgentRole::Worker { index, .. }, true) => Some(*index),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Worker {} is not a rostered worker of session {}",
+                        worker_id, session_id
+                    )
+                })?;
+            (session, index)
+        };
+
+        let uses_shared_workspace = !session.no_git
+            && matches!(&session.session_type, SessionType::Hive { .. })
+            && session.execution_policy.workspace_strategy == WorkspaceStrategy::SharedCell;
+        let creates_worker_worktree = !session.no_git && !uses_shared_workspace;
+        let worker_cell_name = format!("worker-{worker_index}");
+
+        // Mirror add_worker's artifact layout exactly: task file (strategy-dependent),
+        // prompt file under the worker cwd, and the per-worker worktree + branch.
+        let task_file_path =
+            Self::task_file_path_for_session_worker(&session, worker_index as usize)?;
+        let worker_cwd = if session.no_git {
+            session.project_path.clone()
+        } else if uses_shared_workspace {
+            session
+                .worktree_path
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| session.project_path.clone())
+        } else {
+            session
+                .project_path
+                .join(".hive-manager")
+                .join("worktrees")
+                .join(session_id)
+                .join(&worker_cell_name)
+        };
+        let prompt_file = worker_cwd
+            .join(".hive-manager")
+            .join("prompts")
+            .join(format!("worker-{}-prompt.md", worker_index));
+
+        Self::rollback_worker_launch_artifacts(
+            &session.project_path,
+            session_id,
+            &worker_cell_name,
+            &task_file_path,
+            Some(&prompt_file),
+            creates_worker_worktree,
+        );
+
+        {
+            let mut sessions = self.sessions.write();
+            if let Some(session) = sessions.get_mut(session_id) {
+                session.agents.retain(|a| a.id != worker_id);
+            }
+        }
+        self.update_session_storage(session_id);
+        self.emit_session_update(session_id);
+
+        tracing::info!(
+            session = %session_id,
+            worker = %worker_id,
+            index = worker_index,
+            "discarded dead worker slot; index is reusable"
+        );
+        Ok(worker_index)
     }
 
     /// Read-only reservation used by the HTTP handler before it touches the

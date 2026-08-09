@@ -9058,8 +9058,12 @@ async fn release_recovers_a_leaked_claim() {
     assert_eq!(snap.rows[0].attempts, 0, "the spawn budget must be reset");
 }
 
-/// The release route must refuse a worker that is genuinely on the roster —
-/// releasing it would strand the row, since the index allocator targets N+1.
+/// The release route must refuse a worker that is on the roster AND has a live
+/// process — releasing it would strand the row behind a running agent.
+///
+/// #207 narrowed this guard: roster membership alone no longer refuses, because a
+/// rostered entry with no live process is exactly the dead slot the route must be
+/// able to recover (see `release_frees_a_dead_rostered_slot_for_in_place_respawn`).
 #[tokio::test]
 async fn release_refuses_a_rostered_worker() {
     let storage_dir = TempDir::new().unwrap();
@@ -9073,6 +9077,14 @@ async fn release_refuses_a_rostered_worker() {
         temp_dir.path().to_str().unwrap(),
         &[&worker],
     ));
+    register_live_pty(
+        &state,
+        &worker,
+        AgentRole::Worker {
+            index: 1,
+            parent: None,
+        },
+    );
 
     state
         .queue_manager
@@ -9106,6 +9118,254 @@ async fn release_refuses_a_rostered_worker() {
         1,
         "a refused release must leave the row untouched"
     );
+}
+
+// ----------------------------------------------------------------------------
+// #207 — startup death detection + in-place slot recovery
+// ----------------------------------------------------------------------------
+
+/// #207 fix 2. A worker whose CLI dies during startup must be reported
+/// `failed_to_start` with the CLI's own output — not `Running`.
+///
+/// This pins the exact field failure: codex died in moments with "database is
+/// locked" while the roster said Running for ~50 minutes. The stub PTY treats the
+/// `--stub-die-on-start` flag as an immediate startup death, exercising the full
+/// HTTP path through the startup-grace poll.
+#[tokio::test]
+async fn add_worker_that_dies_during_startup_is_failed_to_start_not_running() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("doa-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    // A research (no-git) session spawns straight from the project dir, so the spawn
+    // itself succeeds and only the startup verification can catch the death.
+    session.no_git = true;
+    controller.read().insert_test_session(session);
+
+    let post = |body: serde_json::Value| {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/workers", session_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    let res = post(serde_json::json!({
+        "role_type": "researcher",
+        "cli": "claude",
+        "flags": ["--stub-die-on-start"],
+    }))
+    .await;
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "failed_to_start");
+    assert!(
+        body["cli_output"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("database is locked"),
+        "the CLI's dying words must be surfaced, got: {}",
+        body["cli_output"]
+    );
+
+    // The dead slot must be fully recovered: roster empty, claim released.
+    {
+        let controller = controller.read();
+        let session = controller.get_session(&session_id).unwrap();
+        assert!(
+            session.agents.is_empty(),
+            "a worker that never ran must not stay on the roster"
+        );
+    }
+    let snap = state.queue_manager.queue_snapshot(&session_id).unwrap();
+    assert_eq!(snap.running, 0, "the claim must be released");
+    assert_eq!(snap.queued, 1, "the row must be claimable again");
+    assert_eq!(snap.rows[0].attempts, 1, "the failed start must burn one attempt");
+
+    // And a retry must reuse worker-1 in place, not advance to worker-2.
+    let res = post(serde_json::json!({ "role_type": "researcher", "cli": "claude" })).await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body["worker_id"],
+        format!("{}-worker-1", session_id),
+        "recovery must respawn the original slot"
+    );
+}
+
+/// #207 fix 4. A rostered worker with no live process is a dead slot; release must
+/// recover it — discard the roster entry, release the claim — so the index can be
+/// respawned in place instead of advancing to N+1.
+#[tokio::test]
+async fn release_frees_a_dead_rostered_slot_for_in_place_respawn() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("deadslot-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let worker_1 = format!("{}-worker-1", session_id);
+    let worker_2 = format!("{}-worker-2", session_id);
+    let mut session = make_test_session_with_agents(
+        &session_id,
+        temp_dir.path().to_str().unwrap(),
+        &[&worker_1, &worker_2],
+    );
+    session.no_git = true;
+    controller.read().insert_test_session(session);
+    // worker-1 is genuinely alive; worker-2 has no PTY at all — the phantom.
+    register_live_pty(
+        &state,
+        &worker_1,
+        AgentRole::Worker {
+            index: 1,
+            parent: None,
+        },
+    );
+
+    state
+        .queue_manager
+        .enqueue_worker(&worker_2, &session_id, &worker_2, "backend", "claude", serde_json::json!({}), None)
+        .await
+        .unwrap();
+    state
+        .queue_manager
+        .claim_and_spawn(&worker_2, &session_id, &worker_2)
+        .await
+        .unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/workers/{}/release",
+                    session_id, worker_2
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["released"], true);
+    assert_eq!(body["discarded_rostered_slot"], true);
+
+    // The roster keeps the live worker and drops the phantom.
+    {
+        let controller = controller.read();
+        let session = controller.get_session(&session_id).unwrap();
+        let ids: Vec<&str> = session.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec![worker_1.as_str()]);
+    }
+    let snap = state.queue_manager.queue_snapshot(&session_id).unwrap();
+    assert_eq!(snap.running, 0);
+    assert_eq!(snap.queued, 1, "the row must be claimable again");
+
+    // The freed index is handed out again: the next spawn is worker-2, not worker-3.
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "role_type": "researcher", "cli": "claude" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["worker_id"], worker_2);
+}
+
+/// #207. The index allocator hands out the lowest unused worker index, keyed on the
+/// roster's role indices — with workers 1 and 3 present, the next spawn is 2.
+///
+/// The old count-based allocator would return 3 here and collide with the live
+/// worker-3 (mutation check: `count + 1` fails this test).
+#[tokio::test]
+async fn add_worker_fills_the_lowest_free_worker_slot() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("gapfill-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.no_git = true;
+    session.agents = vec![
+        make_test_agent(
+            &format!("{}-worker-1", session_id),
+            AgentRole::Worker {
+                index: 1,
+                parent: None,
+            },
+        ),
+        make_test_agent(
+            &format!("{}-worker-3", session_id),
+            AgentRole::Worker {
+                index: 3,
+                parent: None,
+            },
+        ),
+    ];
+    controller.read().insert_test_session(session);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "role_type": "researcher", "cli": "claude" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["worker_id"], format!("{}-worker-2", session_id));
 }
 
 /// #175(f). A heartbeat from an id with no roster entry, no PTY and no queue row
