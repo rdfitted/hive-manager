@@ -2558,6 +2558,30 @@ impl SessionController {
         }
     }
 
+    /// Whether a worktree has uncommitted changes (`git status --porcelain` non-empty).
+    ///
+    /// Fails safe: if git cannot answer, report dirty so a discard refuses rather than
+    /// destroys.
+    fn worktree_has_local_changes(worktree_path: &Path) -> bool {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(worktree_path)
+            .arg("status")
+            .arg("--porcelain");
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match cmd.output() {
+            Ok(output) if output.status.success() => !output.stdout.trim_ascii().is_empty(),
+            _ => true,
+        }
+    }
+
     fn delete_branch(project_path: &Path, branch_name: &str) {
         let mut cmd = Command::new("git");
         cmd.arg("-C")
@@ -13155,19 +13179,24 @@ phases and do EXACTLY this, then stop:
     ///
     /// The caller is responsible for making sure the process is actually dead first
     /// (kill it or verify `is_alive` is false); this method only cleans up.
+    ///
+    /// Discarding is refused unless the lane provably produced nothing: no recorded
+    /// completion commit, and — for isolated git lanes — a branch tip still at the
+    /// recorded base with a clean worktree. `rollback_worker_launch_artifacts`
+    /// force-deletes the worker branch, so without these guards a release aimed at a
+    /// phantom could destroy a finished worker's committed work.
     pub fn discard_worker_slot(&self, session_id: &str, worker_id: &str) -> Result<u8, String> {
-        let (session, worker_index) = {
+        let (session, worker_index, worker_commit_sha, worker_base_commit_sha) = {
             let sessions = self.sessions.read();
             let session = sessions
                 .get(session_id)
                 .cloned()
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            let index = session
+            let agent = session
                 .agents
                 .iter()
-                .find_map(|a| match (&a.role, a.id == worker_id) {
-                    (AgentRole::Worker { index, .. }, true) => Some(*index),
-                    _ => None,
+                .find(|a| {
+                    a.id == worker_id && matches!(a.role, AgentRole::Worker { .. })
                 })
                 .ok_or_else(|| {
                     format!(
@@ -13175,8 +13204,25 @@ phases and do EXACTLY this, then stop:
                         worker_id, session_id
                     )
                 })?;
-            (session, index)
+            let index = match agent.role {
+                AgentRole::Worker { index, .. } => index,
+                _ => unreachable!("filtered to Worker above"),
+            };
+            (
+                session.clone(),
+                index,
+                agent.commit_sha.clone(),
+                agent.base_commit_sha.clone(),
+            )
         };
+
+        if worker_commit_sha.is_some() {
+            return Err(format!(
+                "Worker {} has a recorded completion commit; refusing to discard a slot \
+                 that produced work",
+                worker_id
+            ));
+        }
 
         let uses_shared_workspace = !session.no_git
             && matches!(&session.session_type, SessionType::Hive { .. })
@@ -13208,6 +13254,42 @@ phases and do EXACTLY this, then stop:
             .join(".hive-manager")
             .join("prompts")
             .join(format!("worker-{}-prompt.md", worker_index));
+
+        // For isolated git lanes, prove the lane is empty before destroying it. A worker
+        // killed mid-run has commits past its base or a dirty worktree; a phantom that
+        // never executed an instruction has neither.
+        if creates_worker_worktree && worker_cwd.exists() {
+            match current_head(&worker_cwd) {
+                Ok(tip) => match &worker_base_commit_sha {
+                    Some(base) if *base == tip => {}
+                    Some(base) => {
+                        return Err(format!(
+                            "Worker {} branch has advanced past its base ({} -> {}); \
+                             refusing to discard a slot that produced work",
+                            worker_id, base, tip
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "Worker {} has no recorded base commit to compare against; \
+                             refusing to discard — clean up the worktree manually if the \
+                             lane is truly empty",
+                            worker_id
+                        ));
+                    }
+                },
+                // No resolvable HEAD (worktree half-created) — nothing to preserve.
+                Err(_) => {}
+            }
+
+            if Self::worktree_has_local_changes(&worker_cwd) {
+                return Err(format!(
+                    "Worker {} worktree has uncommitted changes; refusing to discard a \
+                     slot that produced work",
+                    worker_id
+                ));
+            }
+        }
 
         Self::rollback_worker_launch_artifacts(
             &session.project_path,

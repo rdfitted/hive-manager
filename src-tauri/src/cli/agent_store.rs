@@ -24,6 +24,29 @@ pub fn store_root() -> PathBuf {
     std::env::temp_dir().join("hive-manager").join("cli-state")
 }
 
+/// Restrict the store root to the current user on platforms with a shared, world-writable
+/// temp directory. On Windows, `%TEMP%` is already per-user; on Unix, `/tmp` is shared and
+/// the per-agent paths are predictable, so without this another local user could pre-own
+/// them. Best-effort: isolation still works if the chmod fails, it is just less private.
+#[cfg(unix)]
+fn restrict_to_current_user(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn restrict_to_current_user(_dir: &Path) {}
+
+/// Create the per-agent store directory, tightening permissions on the shared root.
+pub fn ensure_store_dir(store_dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(store_dir)?;
+    if let Some(root) = store_dir.parent() {
+        restrict_to_current_user(root);
+    }
+    restrict_to_current_user(store_dir);
+    Ok(())
+}
+
 /// State-store directory for a single agent.
 pub fn store_dir_for(agent_id: &str) -> PathBuf {
     store_root().join(sanitize_component(agent_id))
@@ -89,9 +112,18 @@ pub fn cleanup_stale_stores() {
         if !metadata.is_dir() {
             continue;
         }
-        let expired = metadata
-            .modified()
-            .ok()
+        // Age by the newest timestamp of the directory AND everything inside it: a
+        // directory's own mtime does not move when SQLite writes into an existing file,
+        // so judging the directory alone could reap a store that is still in active use
+        // (e.g. by a long-lived process from a prior session).
+        let newest = std::fs::read_dir(entry.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|child| child.metadata().ok()?.modified().ok())
+            .chain(metadata.modified().ok())
+            .max();
+        let expired = newest
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age > STALE_STORE_RETENTION);
         if expired && std::fs::remove_dir_all(entry.path()).is_ok() {

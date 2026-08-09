@@ -9175,6 +9175,10 @@ async fn add_worker_that_dies_during_startup_is_failed_to_start_not_running() {
     )
     .unwrap();
     assert_eq!(body["reason"], "failed_to_start");
+    assert_eq!(
+        body["slot_freed"], true,
+        "the response must confirm the slot was actually recovered"
+    );
     assert!(
         body["cli_output"]
             .as_str()
@@ -9311,6 +9315,75 @@ async fn release_frees_a_dead_rostered_slot_for_in_place_respawn() {
     )
     .unwrap();
     assert_eq!(body["worker_id"], worker_2);
+}
+
+/// #207. Dead-slot recovery must never destroy work: a rostered worker with a
+/// recorded completion commit is refused even though its process is gone, because
+/// discarding would force-delete its branch.
+#[tokio::test]
+async fn release_refuses_a_dead_worker_that_produced_work() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("haswork-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+    let worker = format!("{}-worker-1", session_id);
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    let mut finished = make_test_agent(
+        &worker,
+        AgentRole::Worker {
+            index: 1,
+            parent: None,
+        },
+    );
+    finished.commit_sha = Some("abc123def".to_string());
+    session.agents = vec![finished];
+    controller.read().insert_test_session(session);
+
+    state
+        .queue_manager
+        .enqueue_worker(&worker, &session_id, &worker, "backend", "claude", serde_json::json!({}), None)
+        .await
+        .unwrap();
+    state
+        .queue_manager
+        .claim_and_spawn(&worker, &session_id, &worker)
+        .await
+        .unwrap();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/workers/{}/release",
+                    session_id, worker
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "slot_has_work");
+
+    // Nothing was half-done: roster intact, queue row untouched.
+    {
+        let controller = controller.read();
+        let session = controller.get_session(&session_id).unwrap();
+        assert_eq!(session.agents.len(), 1, "the finished worker must stay rostered");
+    }
+    assert_eq!(
+        state.queue_manager.queue_snapshot(&session_id).unwrap().running,
+        1,
+        "a refused release must leave the row untouched"
+    );
 }
 
 /// #207. The index allocator hands out the lowest unused worker index, keyed on the

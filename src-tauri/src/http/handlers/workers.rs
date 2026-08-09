@@ -344,22 +344,26 @@ pub async fn add_worker(
 
         // Free the slot so a retry respawns worker-N in place instead of advancing the
         // index and orphaning the original branch/task-file paths.
-        let discard = {
+        let slot_freed = {
             let controller = state.session_controller.read();
-            controller.discard_worker_slot(&session_id, &agent_info.id)
+            match controller.discard_worker_slot(&session_id, &agent_info.id) {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        worker_id = %agent_info.id,
+                        %error,
+                        "failed to discard the dead worker's roster slot"
+                    );
+                    false
+                }
+            }
         };
-        if let Err(error) = discard {
-            tracing::warn!(
-                worker_id = %agent_info.id,
-                %error,
-                "failed to discard the dead worker's roster slot"
-            );
-        }
 
         let mut details: HashMap<String, Value> = HashMap::new();
         details.insert("worker_id".to_string(), json!(predicted_worker_id));
         details.insert("session_id".to_string(), json!(session_id));
         details.insert("reason".to_string(), json!("failed_to_start"));
+        details.insert("slot_freed".to_string(), json!(slot_freed));
         details.insert("cli_output".to_string(), json!(tail_for_api(&cli_output)));
 
         match state
@@ -386,11 +390,19 @@ pub async fn add_worker(
         }
 
         return Err(ApiError::internal_with_details(
-            format!(
-                "Worker {} spawned but its process died during startup; the slot has \
-                 been freed for an in-place retry",
-                predicted_worker_id
-            ),
+            if slot_freed {
+                format!(
+                    "Worker {} spawned but its process died during startup; the slot has \
+                     been freed for an in-place retry",
+                    predicted_worker_id
+                )
+            } else {
+                format!(
+                    "Worker {} spawned but its process died during startup; its roster \
+                     slot could NOT be freed, so an in-place retry is not yet possible",
+                    predicted_worker_id
+                )
+            },
             details,
         ));
     }
@@ -539,7 +551,10 @@ pub async fn release_worker(
     }
 
     // Rostered but dead: discard the roster entry (and its launch artifacts) so the
-    // index becomes reusable, then release the claim below as usual.
+    // index becomes reusable, then release the claim below as usual. The discard
+    // refuses lanes that produced work (a completion commit, commits past base, or a
+    // dirty worktree) — that refusal is a conflict the caller must resolve, not a
+    // server fault.
     let discarded_rostered_slot = rostered;
     if rostered {
         let discard = {
@@ -547,10 +562,10 @@ pub async fn release_worker(
             controller.discard_worker_slot(&session_id, &worker_id)
         };
         if let Err(error) = discard {
-            return Err(ApiError::internal(format!(
-                "Worker {} has no live process but its roster slot could not be discarded: {}",
-                worker_id, error
-            )));
+            let mut details: HashMap<String, Value> = HashMap::new();
+            details.insert("reason".to_string(), json!("slot_has_work"));
+            details.insert("worker_id".to_string(), json!(worker_id));
+            return Err(ApiError::conflict_with_details(error, details));
         }
     }
 

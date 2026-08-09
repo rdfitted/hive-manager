@@ -120,7 +120,7 @@ impl PtyManager {
         let isolation_flags = if isolation_flags.is_empty() {
             isolation_flags
         } else {
-            match std::fs::create_dir_all(&store_dir) {
+            match agent_store::ensure_store_dir(&store_dir) {
                 Ok(()) => isolation_flags,
                 Err(error) => {
                     tracing::warn!(
