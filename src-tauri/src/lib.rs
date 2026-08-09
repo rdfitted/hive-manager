@@ -90,6 +90,10 @@ pub fn run() {
     let shared_config = Arc::new(tokio::sync::RwLock::new(config));
     let event_bus = EventBus::new(storage.base_dir().clone());
 
+    // #207: sweep per-agent CLI state stores left behind by finished sessions. Off the
+    // startup path — it walks and deletes directories — and best-effort by design.
+    std::thread::spawn(crate::cli::agent_store::cleanup_stale_stores);
+
     // Create shared state
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
     let session_controller = Arc::new(RwLock::new(SessionController::new(Arc::clone(

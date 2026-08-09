@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -179,6 +180,9 @@ fn sanitize_bracketed_paste(data: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(sanitized)
 }
 
+/// How much of the child's most recent output to retain for failure diagnostics.
+const RECENT_OUTPUT_CAPACITY: usize = 8 * 1024;
+
 pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
@@ -186,6 +190,14 @@ pub struct PtySession {
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
     master: Arc<Mutex<MasterPtyHandle>>,
+    /// Bounded tail of everything the child wrote to the PTY.
+    ///
+    /// A PTY merges stdout and stderr, and before #207 those bytes were forwarded to the
+    /// UI and otherwise discarded — with no app handle (headless HTTP mode, and every
+    /// test) no reader thread ran at all, so a CLI that died during startup left no trace
+    /// in the process, on disk, or in the DB. Startup verification needs this text to say
+    /// *why* a worker failed instead of just that it did.
+    recent_output: Arc<Mutex<VecDeque<u8>>>,
 }
 
 // Make PtySession Send + Sync
@@ -277,7 +289,30 @@ impl PtySession {
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
             master: Arc::new(Mutex::new(MasterPtyHandle(master))),
+            recent_output: Arc::new(Mutex::new(VecDeque::with_capacity(
+                RECENT_OUTPUT_CAPACITY,
+            ))),
         })
+    }
+
+    /// Append `bytes` to the rolling diagnostic tail, evicting the oldest bytes once the
+    /// buffer is full. Called by the reader thread for every chunk, whether or not the UI
+    /// is attached.
+    pub fn record_output(&self, bytes: &[u8]) {
+        let mut buffer = self.recent_output.lock();
+        for byte in bytes {
+            if buffer.len() == RECENT_OUTPUT_CAPACITY {
+                buffer.pop_front();
+            }
+            buffer.push_back(*byte);
+        }
+    }
+
+    /// The retained tail of the child's output, lossily decoded.
+    pub fn recent_output(&self) -> String {
+        let buffer = self.recent_output.lock();
+        let bytes: Vec<u8> = buffer.iter().copied().collect();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
