@@ -3,6 +3,7 @@
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use thiserror::Error;
@@ -149,11 +150,19 @@ fn sanitize_bracketed_paste(data: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(sanitized)
 }
 
+const RECENT_OUTPUT_CAPACITY: usize = 8 * 1024;
+
 pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
     writer: Arc<Mutex<SendWriter>>,
     reader: Arc<Mutex<SendReader>>,
+    /// The argv this session was created with. The real session hands these to the OS and
+    /// forgets them; retaining them here is what lets tests assert that per-agent store
+    /// isolation (#207) actually reached the spawn rather than just the helper that
+    /// computes it.
+    args: Vec<String>,
+    recent_output: Arc<Mutex<VecDeque<u8>>>,
 }
 
 unsafe impl Send for PtySession {}
@@ -164,19 +173,58 @@ impl PtySession {
         _id: String,
         role: AgentRole,
         _command: &str,
-        _args: &[&str],
+        args: &[&str],
         _cwd: Option<&str>,
         _cols: u16,
         _rows: u16,
     ) -> Result<Self, PtyError> {
-        Ok(Self {
+        let session = Self {
             role,
             status: Arc::new(parking_lot::RwLock::new(AgentStatus::Starting)),
             writer: Arc::new(Mutex::new(SendWriter(Box::new(std::io::sink())))),
             reader: Arc::new(Mutex::new(SendReader(Box::new(std::io::Cursor::new(
                 Vec::new(),
             ))))),
-        })
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            recent_output: Arc::new(Mutex::new(VecDeque::with_capacity(
+                RECENT_OUTPUT_CAPACITY,
+            ))),
+        };
+
+        // #207 test fixture: a flag-borne sentinel is the only way an integration test
+        // can produce a spawn that "succeeds" and then dies during startup — the field
+        // failure mode. It flows in through AgentConfig.flags, so the full HTTP path is
+        // exercised. The canned output mirrors the real codex lock error so tests can
+        // assert the text is surfaced.
+        if session.args.iter().any(|arg| arg == "--stub-die-on-start") {
+            *session.status.write() = AgentStatus::Completed;
+            session.record_output(
+                b"failed to initialize state runtime: failed to open log DB: \
+                  (code: 5) database is locked (stub)",
+            );
+        }
+
+        Ok(session)
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn record_output(&self, bytes: &[u8]) {
+        let mut buffer = self.recent_output.lock();
+        for byte in bytes {
+            if buffer.len() == RECENT_OUTPUT_CAPACITY {
+                buffer.pop_front();
+            }
+            buffer.push_back(*byte);
+        }
+    }
+
+    pub fn recent_output(&self) -> String {
+        let buffer = self.recent_output.lock();
+        let bytes: Vec<u8> = buffer.iter().copied().collect();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {

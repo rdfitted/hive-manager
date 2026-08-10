@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::{validate_cli, validate_session_id};
 use crate::cli::CliRegistry;
@@ -21,6 +22,20 @@ use crate::session::{AddWorkerError, AddWorkerRejectionReason, SessionController
 /// A session that simply is not accepting workers right now is a conflict the
 /// caller can act on, not an internal error — the old blanket 500 gave the Queen
 /// nothing to work with.
+/// Last portion of a CLI's captured output, sized for an API error payload (#207).
+fn tail_for_api(output: &str) -> String {
+    const MAX_BYTES: usize = 2000;
+    let trimmed = output.trim();
+    if trimmed.len() <= MAX_BYTES {
+        return trimmed.to_string();
+    }
+    let mut start = trimmed.len() - MAX_BYTES;
+    while !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    trimmed[start..].to_string()
+}
+
 fn add_worker_error_to_api(err: AddWorkerError) -> ApiError {
     match err {
         AddWorkerError::SessionNotFound(id) => {
@@ -297,6 +312,101 @@ pub async fn add_worker(
         }
     };
 
+    // #207 fix 2: the spawn call returning is not evidence the worker is running. In the
+    // field, codex processes died within moments of starting ("database is locked") while
+    // the roster reported them Running for ~50 minutes. Hold the response until the
+    // process has survived a short startup grace window; if it dies inside the window,
+    // fail loudly with the CLI's own output and recover the slot in place.
+    let startup_grace = Duration::from_millis(if cfg!(test) { 250 } else { 1500 });
+    let startup_poll = Duration::from_millis(50);
+    let started_at = std::time::Instant::now();
+    let died_during_startup = loop {
+        let alive = { state.pty_manager.read().is_alive(&agent_info.id) };
+        if !alive {
+            break true;
+        }
+        if started_at.elapsed() >= startup_grace {
+            break false;
+        }
+        tokio::time::sleep(startup_poll).await;
+    };
+
+    if died_during_startup {
+        // Give the reader thread a beat to drain the PTY's final bytes, then capture the
+        // output BEFORE killing: kill() drops the session, and with it the only record of
+        // why the CLI died.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let cli_output = { state.pty_manager.read().recent_output(&agent_info.id) }
+            .unwrap_or_default();
+        {
+            let _ = state.pty_manager.read().kill(&agent_info.id);
+        }
+
+        // Free the slot so a retry respawns worker-N in place instead of advancing the
+        // index and orphaning the original branch/task-file paths.
+        let slot_freed = {
+            let controller = state.session_controller.read();
+            match controller.discard_worker_slot(&session_id, &agent_info.id) {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        worker_id = %agent_info.id,
+                        %error,
+                        "failed to discard the dead worker's roster slot"
+                    );
+                    false
+                }
+            }
+        };
+
+        let mut details: HashMap<String, Value> = HashMap::new();
+        details.insert("worker_id".to_string(), json!(predicted_worker_id));
+        details.insert("session_id".to_string(), json!(session_id));
+        details.insert("reason".to_string(), json!("failed_to_start"));
+        details.insert("slot_freed".to_string(), json!(slot_freed));
+        details.insert("cli_output".to_string(), json!(tail_for_api(&cli_output)));
+
+        match state
+            .queue_manager
+            .release_after_failed_spawn(&session_id, &predicted_worker_id, &queue_id, epoch)
+            .await
+        {
+            Ok(ReleaseAfterFailure::Exhausted { attempts }) => {
+                details.insert("attempts".to_string(), json!(attempts));
+                return Err(ApiError::conflict_with_details(
+                    format!(
+                        "Worker {} failed to start {} times and has been retired",
+                        predicted_worker_id, attempts
+                    ),
+                    details,
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                worker_id = %predicted_worker_id,
+                error = %e,
+                "failed to release the queue claim after a startup death"
+            ),
+        }
+
+        return Err(ApiError::internal_with_details(
+            if slot_freed {
+                format!(
+                    "Worker {} spawned but its process died during startup; the slot has \
+                     been freed for an in-place retry",
+                    predicted_worker_id
+                )
+            } else {
+                format!(
+                    "Worker {} spawned but its process died during startup; its roster \
+                     slot could NOT be freed, so an in-place retry is not yet possible",
+                    predicted_worker_id
+                )
+            },
+            details,
+        ));
+    }
+
     // From here to the response there must be NO fallible early return: the PTY
     // is live, and releasing the claim past this point is a double-spawn vector.
     let (worker_id, worker_index) = {
@@ -396,17 +506,28 @@ pub async fn release_worker(
     super::validate_agent_id(&worker_id)?;
 
     // Scope every !Send guard before the await below.
-    let (rostered, live_pty) = {
+    let (rostered, is_worker_slot, live_pty) = {
         let controller = state.session_controller.read();
         let session = controller
             .get_session(&session_id)
             .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
-        let rostered = session.agents.iter().any(|a| a.id == worker_id);
+        let rostered_agent = session.agents.iter().find(|a| a.id == worker_id);
+        let rostered = rostered_agent.is_some();
+        let is_worker_slot = rostered_agent
+            .map(|a| matches!(a.role, AgentRole::Worker { .. }))
+            .unwrap_or(false);
         let live_pty = state.pty_manager.read().is_alive(&worker_id);
-        (rostered, live_pty)
+        (rostered, is_worker_slot, live_pty)
     };
 
-    if rostered {
+    // #207 fix 4: for WORKER slots, refusal now requires a live process, not mere roster
+    // membership. Under the old rules a worker whose CLI died at startup — still
+    // rostered, reported Running, no process behind it — could never be recovered in
+    // place: release refused with "rostered", DELETE moved it to Completed but kept the
+    // entry, and a re-spawn advanced the index, orphaning the original task-file paths.
+    // Non-worker roster members (queen, evaluator, prince, QA) keep the unconditional
+    // refusal: this route recovers worker slots, nothing else.
+    if rostered && (live_pty || !is_worker_slot) {
         let mut details: HashMap<String, Value> = HashMap::new();
         details.insert("reason".to_string(), json!("rostered"));
         details.insert("worker_id".to_string(), json!(worker_id));
@@ -429,6 +550,25 @@ pub async fn release_worker(
         ));
     }
 
+    // Rostered but dead: discard the roster entry (and its launch artifacts) so the
+    // index becomes reusable, then release the claim below as usual. The discard
+    // refuses lanes that produced work (a completion commit, commits past base, or a
+    // dirty worktree) — that refusal is a conflict the caller must resolve, not a
+    // server fault.
+    let discarded_rostered_slot = rostered;
+    if rostered {
+        let discard = {
+            let controller = state.session_controller.read();
+            controller.discard_worker_slot(&session_id, &worker_id)
+        };
+        if let Err(error) = discard {
+            let mut details: HashMap<String, Value> = HashMap::new();
+            details.insert("reason".to_string(), json!("slot_has_work"));
+            details.insert("worker_id".to_string(), json!(worker_id));
+            return Err(ApiError::conflict_with_details(error, details));
+        }
+    }
+
     let outcome = state
         .queue_manager
         .release_claim(&session_id, &worker_id)
@@ -444,6 +584,7 @@ pub async fn release_worker(
                 "released": true,
                 "previous_status": previous.as_tag(),
                 "new_status": "queued",
+                "discarded_rostered_slot": discarded_rostered_slot,
             })),
         )),
         ReleaseOutcome::AlreadyQueued => Ok((
@@ -454,6 +595,7 @@ pub async fn release_worker(
                 "released": false,
                 "previous_status": "queued",
                 "new_status": "queued",
+                "discarded_rostered_slot": discarded_rostered_slot,
             })),
         )),
         ReleaseOutcome::Terminal { status } => Ok((
@@ -464,6 +606,21 @@ pub async fn release_worker(
                 "released": false,
                 "previous_status": status.as_tag(),
                 "new_status": status.as_tag(),
+                "discarded_rostered_slot": discarded_rostered_slot,
+            })),
+        )),
+        // Launch-time workers predate the durable queue and have no row; if we just
+        // discarded such a worker's dead slot, that recovery is the meaningful outcome
+        // and deserves a 200, not a 404 (#207).
+        ReleaseOutcome::NoRow if discarded_rostered_slot => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "session_id": session_id,
+                "worker_id": worker_id,
+                "released": false,
+                "previous_status": "none",
+                "new_status": "none",
+                "discarded_rostered_slot": true,
             })),
         )),
         ReleaseOutcome::NoRow => Err(ApiError::not_found(format!(
