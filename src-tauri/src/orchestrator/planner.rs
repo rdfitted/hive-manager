@@ -1,17 +1,10 @@
-//! Planner submodule for vNext orchestration.
+//! Planning-facing work-graph API.
 //!
-//! TODO: Extract from controller.rs:4533-5060
-//!
-//! This module will handle:
-//! - Plan decomposition and task breakdown
-//! - Dependency resolution between tasks
-//! - Task scheduling and prioritization
-//! - Plan state management
+//! Plan parsing and validation live in `work_graph`; this module preserves the
+//! orchestrator's planner seam while exposing the typed graph contract.
 
-/// Placeholder for planner types and functions.
-/// Implementation will be extracted in Phase 2.
-pub struct Planner;
-
-// TODO: Extract PlannerError, PlanState, TaskGraph, etc.
-// TODO: Extract plan decomposition logic
-// TODO: Extract dependency resolution algorithms
+pub use super::work_graph::{
+    topological_sort, BindingRef, CompositeExpansion, CycleError, EdgeKind, EdgeProvenance,
+    NodeContract, NodeKind, NodeStatus, TaskGraph, TaskId, WorkEdge, WorkGraph,
+    WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
+};

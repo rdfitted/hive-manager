@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+use crate::orchestrator::work_graph::WorkGraph;
 use crate::pty::WorkerRole;
 
 use super::{parse_sprint_contract, SprintContract};
@@ -389,6 +390,28 @@ impl StateManager {
         let hierarchy: Vec<HierarchyNode> = serde_json::from_str(&json)?;
 
         Ok(hierarchy)
+    }
+
+    /// Atomically persist the session's typed work graph beside hierarchy.json.
+    #[allow(dead_code)]
+    pub fn write_work_graph(&self, graph: &WorkGraph) -> Result<(), StateError> {
+        self.ensure_state_dir()?;
+
+        let json = serde_json::to_string_pretty(graph)?;
+        self.write_atomic_text(self.state_dir().join("work-graph.json"), &json)
+    }
+
+    /// Read the session's work graph. Legacy sessions have no graph file and
+    /// return `None`, which is distinct from an explicitly empty graph.
+    #[allow(dead_code)]
+    pub fn read_work_graph(&self) -> Result<Option<WorkGraph>, StateError> {
+        let path = self.state_dir().join("work-graph.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let json = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&json)?))
     }
 
     /// Record a task assignment

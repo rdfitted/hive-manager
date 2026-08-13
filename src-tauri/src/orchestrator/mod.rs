@@ -7,3 +7,4 @@ pub mod fusion;
 pub mod planner;
 pub mod resolver;
 pub mod session_orchestrator;
+pub mod work_graph;

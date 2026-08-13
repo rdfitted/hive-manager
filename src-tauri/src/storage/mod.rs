@@ -342,6 +342,7 @@ impl SessionStorage {
         fs::create_dir_all(session_dir.join("coordination"))?;
         fs::create_dir_all(session_dir.join("prompts"))?;
         fs::create_dir_all(session_dir.join("logs"))?;
+        fs::create_dir_all(session_dir.join("archive").join("work-graphs"))?;
         fs::create_dir_all(session_dir.join("lessons"))?;
         fs::create_dir_all(session_dir.join("lessons").join("archive"))?;
         // Initialize empty state files
@@ -350,6 +351,10 @@ impl SessionStorage {
             "# Available Workers\n\nNo workers yet.\n",
         )?;
         fs::write(session_dir.join("state").join("hierarchy.json"), "[]")?;
+        fs::write(
+            session_dir.join("state").join("work-graph.json"),
+            r#"{"nodes":[],"edges":[],"omissions":[]}"#,
+        )?;
         fs::write(session_dir.join("state").join("assignments.json"), "{}")?;
 
         // Initialize coordination files

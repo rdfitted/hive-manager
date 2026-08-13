@@ -10,7 +10,7 @@ interface AgentsState {
 }
 
 /// Durable run-queue (#126) status, normalized from the backend's snake_case serde enum.
-export type QueueStatus = 'queued' | 'running' | 'finalized' | 'failed';
+export type QueueStatus = 'queued' | 'running' | 'finalized' | 'failed' | 'blocked';
 
 export interface QueueRow {
     id: string;
@@ -26,6 +26,7 @@ export interface QueueRow {
     no_progress_count: number;
     last_status: string | null;
     heartbeat_at: number | null;
+    blocked_reason: string | null;
     created_at: number;
     updated_at: number;
 }
@@ -35,6 +36,7 @@ export interface QueueSnapshot {
     running: number;
     finalized: number;
     failed: number;
+    blocked: number;
     rows: QueueRow[];
 }
 
@@ -45,7 +47,13 @@ interface QueueState {
     error: string | null;
 }
 
-const KNOWN_QUEUE_STATUSES: readonly QueueStatus[] = ['queued', 'running', 'finalized', 'failed'];
+const KNOWN_QUEUE_STATUSES: readonly QueueStatus[] = [
+    'queued',
+    'running',
+    'finalized',
+    'failed',
+    'blocked',
+];
 
 /// Normalize an arbitrary status string into a known QueueStatus, mirroring the
 /// serde-enum-normalization pattern used by the other stores. Unknown values fall back

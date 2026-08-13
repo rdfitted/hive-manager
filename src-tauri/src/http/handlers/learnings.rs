@@ -69,10 +69,10 @@ fn validate_submit_learning_request(req: &SubmitLearningRequest) -> Result<(), A
         return Err(ApiError::bad_request("Insight cannot be empty"));
     }
     match req.outcome.as_str() {
-        "success" | "partial" | "failed" => {}
+        "success" | "partial" | "failed" | "unreviewed" => {}
         _ => {
             return Err(ApiError::bad_request(
-                "Outcome must be one of: success, partial, failed",
+                "Outcome must be one of: success, partial, failed, unreviewed",
             ));
         }
     }
@@ -314,4 +314,31 @@ pub async fn get_project_dna_for_session(
     Ok(Json(json!({
         "content": content
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_submit_learning_request, SubmitLearningRequest};
+
+    fn request(outcome: &str) -> SubmitLearningRequest {
+        SubmitLearningRequest {
+            session: "retro-session".to_string(),
+            task: "post-run graph retro".to_string(),
+            outcome: outcome.to_string(),
+            keywords: vec!["work-graph".to_string()],
+            insight: "archive-backed promotion proposal".to_string(),
+            files_touched: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn learning_outcome_accepts_unreviewed_but_rejects_unknown_values() {
+        for outcome in ["success", "partial", "failed", "unreviewed"] {
+            assert!(
+                validate_submit_learning_request(&request(outcome)).is_ok(),
+                "{outcome} remains a sanctioned outcome"
+            );
+        }
+        assert!(validate_submit_learning_request(&request("anything-goes")).is_err());
+    }
 }

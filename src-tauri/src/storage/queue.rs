@@ -12,7 +12,9 @@
 //! both see a `queued` row — exactly one observes `conn.changes() == 1` and wins; the loser
 //! observes `0` and is turned away (HTTP 409). The same `WHERE` clause also treats a
 //! `running` row with a stale (or absent) heartbeat as claimable, which is the
-//! reclaim-after-cutoff guarantee folded into the same statement.
+//! reclaim-after-cutoff guarantee folded into the same statement. Dependency readiness is
+//! part of that SAME `UPDATE`: a correlated `NOT EXISTS` rejects a row until every recorded
+//! prerequisite has a finalized queue row. There is deliberately no check-then-claim pre-read.
 //!
 //! The queue table is the SOURCE OF TRUTH for sub-agent runs; the in-memory
 //! `Session.agents` Vec is a UI cache that is reconciled against this table on resume.
@@ -36,6 +38,7 @@ pub enum QueueStatus {
     Running,
     Finalized,
     Failed,
+    Blocked,
 }
 
 impl QueueStatus {
@@ -46,6 +49,7 @@ impl QueueStatus {
             QueueStatus::Running => "running",
             QueueStatus::Finalized => "finalized",
             QueueStatus::Failed => "failed",
+            QueueStatus::Blocked => "blocked",
         }
     }
 
@@ -55,6 +59,7 @@ impl QueueStatus {
             "running" => QueueStatus::Running,
             "finalized" => QueueStatus::Finalized,
             "failed" => QueueStatus::Failed,
+            "blocked" => QueueStatus::Blocked,
             _ => QueueStatus::Queued,
         }
     }
@@ -80,6 +85,8 @@ pub struct QueueRow {
     pub last_status: Option<String>,
     /// Unix epoch millis of the last heartbeat, or `None` if never heartbeated.
     pub heartbeat_at: Option<i64>,
+    /// Human-readable reason recorded when dependency failure/cancellation blocks this row.
+    pub blocked_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -91,6 +98,7 @@ pub struct QueueSnapshot {
     pub running: usize,
     pub finalized: usize,
     pub failed: usize,
+    pub blocked: usize,
     pub rows: Vec<QueueRow>,
 }
 
@@ -129,6 +137,35 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
          ON agent_run_queue(status, heartbeat_at)",
         [],
     )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_session_task_status
+         ON agent_run_queue(session_id, task_id, status)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_run_queue_deps (
+            session_id          TEXT NOT NULL,
+            task_id             TEXT NOT NULL,
+            prerequisite_task_id TEXT NOT NULL,
+            PRIMARY KEY (session_id, task_id, prerequisite_task_id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_deps_prerequisite
+         ON agent_run_queue_deps(session_id, prerequisite_task_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_run_queue_blocks (
+            queue_id           TEXT PRIMARY KEY,
+            blocked_by_task_id TEXT,
+            reason             TEXT NOT NULL,
+            created_at         INTEGER NOT NULL,
+            FOREIGN KEY (queue_id) REFERENCES agent_run_queue(id)
+        )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -156,9 +193,25 @@ impl QueueRepo {
     /// same logical run is a no-op (the existing row — possibly already `running` — is
     /// preserved), so a duplicate POST does not resurrect a claimed row.
     pub fn enqueue(&self, row: &QueueRow) -> Result<(), StorageError> {
+        self.enqueue_with_dependencies(row, &[])
+    }
+
+    /// Atomically insert a run and the authoritative incoming dependencies for its task.
+    ///
+    /// The transaction is load-bearing: exposing the queue row before its dependency rows
+    /// would create a window in which the readiness subquery sees zero prerequisites and a
+    /// concurrent claimer can start dependent work early. Dependencies are recorded only when
+    /// this call inserted the queue row; an idempotent duplicate cannot rewrite the graph under
+    /// an already-running claim.
+    pub fn enqueue_with_dependencies(
+        &self,
+        row: &QueueRow,
+        prerequisite_task_ids: &[String],
+    ) -> Result<(), StorageError> {
         let payload_text = serde_json::to_string(&row.payload)?;
         self.db.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let inserted = tx.execute(
                 "INSERT INTO agent_run_queue
                     (id, task_id, session_id, worker_id, role_type, cli, status, payload,
                      attempts, continuation_count, no_progress_count, last_status,
@@ -183,6 +236,20 @@ impl QueueRepo {
                     row.updated_at,
                 ],
             )?;
+            if inserted == 1 {
+                if let Some(task_id) = row.task_id.as_deref() {
+                    for prerequisite_task_id in prerequisite_task_ids {
+                        tx.execute(
+                            "INSERT INTO agent_run_queue_deps
+                                (session_id, task_id, prerequisite_task_id)
+                             VALUES (?1, ?2, ?3)
+                             ON CONFLICT(session_id, task_id, prerequisite_task_id) DO NOTHING",
+                            params![row.session_id, task_id, prerequisite_task_id],
+                        )?;
+                    }
+                }
+            }
+            tx.commit()?;
             Ok(())
         })
     }
@@ -190,9 +257,11 @@ impl QueueRepo {
     /// THE atomic claim. A single `UPDATE ... WHERE` flips a claimable row to `running`.
     ///
     /// A row is claimable when it is `queued`, OR it is `running` but its heartbeat is
-    /// stale (older than `stuck_cutoff_ms`) or absent. Returns `true` iff THIS call won
-    /// the claim (`conn.changes() == 1`). Because the statement is atomic and runs under
-    /// the process mutex, exactly one of N concurrent claimers wins.
+    /// stale (older than `stuck_cutoff_ms`) or absent, AND every dependency recorded for its
+    /// task has at least one finalized queue row in the same session. Returns `true` iff THIS
+    /// call won the claim (`conn.changes() == 1`). Because readiness is a correlated subquery
+    /// inside the atomic statement, exactly one of N concurrent claimers wins without a
+    /// check-then-claim race.
     ///
     /// The claim STAMPS `heartbeat_at = now_ms` on the won row. This is load-bearing for
     /// the no-double-spawn invariant: without it, a just-claimed row keeps `heartbeat_at`
@@ -211,18 +280,57 @@ impl QueueRepo {
         stuck_cutoff_ms: i64,
         now_ms: i64,
     ) -> Result<Option<i64>, StorageError> {
+        self.try_claim_for_worker(id, None, stuck_cutoff_ms, now_ms)
+    }
+
+    /// Claim a ready row and atomically bind it to the worker slot that will spawn it.
+    ///
+    /// Task-backed queue IDs are stable across retries, while worker indexes are allocated
+    /// from the live roster at retry time. Rebinding in this SAME UPDATE prevents a task that
+    /// waited behind dependencies from retaining another task's former worker slot. The
+    /// worker-slot `NOT EXISTS` is also inside the statement, so two distinct ready tasks that
+    /// concurrently reserve the same roster index cannot both become `running` under that ID.
+    pub fn try_claim_for_worker(
+        &self,
+        id: &str,
+        worker_id: Option<&str>,
+        stuck_cutoff_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<i64>, StorageError> {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
                  SET status = 'running',
                      attempts = attempts + 1,
                      updated_at = ?2,
-                     heartbeat_at = ?2
+                     heartbeat_at = ?2,
+                     worker_id = COALESCE(?4, worker_id)
                  WHERE id = ?1
                    AND (status = 'queued'
                         OR (status = 'running'
-                            AND (heartbeat_at IS NULL OR heartbeat_at < ?3)))",
-                params![id, now_ms, stuck_cutoff_ms],
+                            AND (heartbeat_at IS NULL OR heartbeat_at < ?3)))
+                   AND (?4 IS NULL OR NOT EXISTS (
+                       SELECT 1
+                       FROM agent_run_queue AS active_worker
+                       WHERE active_worker.session_id = agent_run_queue.session_id
+                         AND active_worker.worker_id = ?4
+                         AND active_worker.status = 'running'
+                         AND active_worker.id <> agent_run_queue.id
+                   ))
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM agent_run_queue_deps AS dependency
+                       WHERE dependency.session_id = agent_run_queue.session_id
+                         AND dependency.task_id = agent_run_queue.task_id
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM agent_run_queue AS prerequisite
+                             WHERE prerequisite.session_id = dependency.session_id
+                               AND prerequisite.task_id = dependency.prerequisite_task_id
+                               AND prerequisite.status = 'finalized'
+                         )
+                   )",
+                params![id, now_ms, stuck_cutoff_ms, worker_id],
             )?;
             if conn.changes() != 1 {
                 return Ok(None);
@@ -233,6 +341,37 @@ impl QueueRepo {
                 |row| row.get(0),
             )?;
             Ok(Some(attempts))
+        })
+    }
+
+    /// Explain a lost claim with a best-effort snapshot of unfinished prerequisite IDs.
+    ///
+    /// This MUST be called only after [`Self::try_claim`]'s atomic UPDATE returned `None`.
+    /// The losing UPDATE is authoritative; this post-loss read is diagnostic only and never
+    /// feeds back into a claim decision. The returned IDs are advisory and may already have
+    /// finalized by the time the caller reports them.
+    pub fn pending_dependencies(&self, id: &str) -> Result<Vec<String>, StorageError> {
+        self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT dependency.prerequisite_task_id
+                 FROM agent_run_queue AS candidate
+                 JOIN agent_run_queue_deps AS dependency
+                   ON dependency.session_id = candidate.session_id
+                  AND dependency.task_id = candidate.task_id
+                 WHERE candidate.id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM agent_run_queue AS prerequisite
+                       WHERE prerequisite.session_id = dependency.session_id
+                         AND prerequisite.task_id = dependency.prerequisite_task_id
+                         AND prerequisite.status = 'finalized'
+                   )
+                 ORDER BY dependency.prerequisite_task_id",
+            )?;
+            let pending = stmt
+                .query_map(params![id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(pending)
         })
     }
 
@@ -255,7 +394,10 @@ impl QueueRepo {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
-                 SET status = 'queued', updated_at = ?3
+                 SET status = 'queued',
+                     worker_id = CASE
+                         WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
+                     updated_at = ?3
                  WHERE id = ?1 AND status = 'running' AND attempts = ?2",
                 params![id, expected_attempts, now_ms],
             )?;
@@ -271,13 +413,53 @@ impl QueueRepo {
         now_ms: i64,
     ) -> Result<bool, StorageError> {
         self.db.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
                 "UPDATE agent_run_queue
                  SET status = 'failed', updated_at = ?3
                  WHERE id = ?1 AND status = 'running' AND attempts = ?2",
                 params![id, expected_attempts, now_ms],
             )?;
-            Ok(conn.changes() == 1)
+            if changed == 1 {
+                let root: Option<(String, Option<String>)> = tx
+                    .query_row(
+                        "SELECT session_id, task_id FROM agent_run_queue WHERE id = ?1",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((session_id, Some(task_id))) = root {
+                    let reason = format!("dependency task {task_id} failed");
+                    block_task_subtree(&tx, &session_id, &task_id, false, &reason, now_ms)?;
+                }
+            }
+            tx.commit()?;
+            Ok(changed == 1)
+        })
+    }
+
+    /// Cancel one task and block every transitive dependent with a persisted reason.
+    /// Finalized/failed rows remain terminal and are never rewritten.
+    pub fn cancel_task_and_descendants(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        reason: &str,
+        now_ms: i64,
+    ) -> Result<Vec<String>, StorageError> {
+        self.db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let detail = format!("task {task_id} cancelled: {reason}");
+            let blocked = block_task_subtree(
+                &tx,
+                session_id,
+                task_id,
+                true,
+                &detail,
+                now_ms,
+            )?;
+            tx.commit()?;
+            Ok(blocked)
         })
     }
 
@@ -288,7 +470,11 @@ impl QueueRepo {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
-                 SET status = 'queued', attempts = 0, updated_at = ?2
+                 SET status = 'queued',
+                     worker_id = CASE
+                         WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
+                     attempts = 0,
+                     updated_at = ?2
                  WHERE id = ?1 AND status IN ('running', 'failed')",
                 params![id, now_ms],
             )?;
@@ -360,7 +546,10 @@ impl QueueRepo {
             if !ids.is_empty() {
                 conn.execute(
                     "UPDATE agent_run_queue
-                     SET status = 'queued', updated_at = ?2
+                     SET status = 'queued',
+                         worker_id = CASE
+                             WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
+                         updated_at = ?2
                      WHERE status = 'running'
                        AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
                     params![stuck_cutoff_ms, now_ms],
@@ -411,7 +600,10 @@ impl QueueRepo {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
-                 SET status = 'queued', updated_at = ?2
+                 SET status = 'queued',
+                     worker_id = CASE
+                         WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
+                     updated_at = ?2
                  WHERE id = ?1 AND status = 'running'",
                 params![id, now_ms],
             )?;
@@ -423,12 +615,15 @@ impl QueueRepo {
     pub fn rows_for_session(&self, session_id: &str) -> Result<Vec<QueueRow>, StorageError> {
         self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, task_id, session_id, worker_id, role_type, cli, status, payload,
-                        attempts, continuation_count, no_progress_count, last_status,
-                        heartbeat_at, created_at, updated_at
-                 FROM agent_run_queue
-                 WHERE session_id = ?1
-                 ORDER BY created_at, id",
+                "SELECT queue.id, queue.task_id, queue.session_id, queue.worker_id,
+                        queue.role_type, queue.cli, queue.status, queue.payload,
+                        queue.attempts, queue.continuation_count, queue.no_progress_count,
+                        queue.last_status, queue.heartbeat_at, queue.created_at, queue.updated_at,
+                        block.reason
+                 FROM agent_run_queue AS queue
+                 LEFT JOIN agent_run_queue_blocks AS block ON block.queue_id = queue.id
+                 WHERE queue.session_id = ?1
+                 ORDER BY queue.created_at, queue.id",
             )?;
             let rows = stmt
                 .query_map(params![session_id], row_to_queue_row)?
@@ -442,10 +637,14 @@ impl QueueRepo {
         self.db.with_conn(|conn| {
             let row = conn
                 .query_row(
-                    "SELECT id, task_id, session_id, worker_id, role_type, cli, status, payload,
-                            attempts, continuation_count, no_progress_count, last_status,
-                            heartbeat_at, created_at, updated_at
-                     FROM agent_run_queue WHERE id = ?1",
+                    "SELECT queue.id, queue.task_id, queue.session_id, queue.worker_id,
+                            queue.role_type, queue.cli, queue.status, queue.payload,
+                            queue.attempts, queue.continuation_count, queue.no_progress_count,
+                            queue.last_status, queue.heartbeat_at, queue.created_at, queue.updated_at,
+                            block.reason
+                     FROM agent_run_queue AS queue
+                     LEFT JOIN agent_run_queue_blocks AS block ON block.queue_id = queue.id
+                     WHERE queue.id = ?1",
                     params![id],
                     row_to_queue_row,
                 )
@@ -461,12 +660,14 @@ impl QueueRepo {
         let mut running = 0;
         let mut finalized = 0;
         let mut failed = 0;
+        let mut blocked = 0;
         for r in &rows {
             match r.status {
                 QueueStatus::Queued => queued += 1,
                 QueueStatus::Running => running += 1,
                 QueueStatus::Finalized => finalized += 1,
                 QueueStatus::Failed => failed += 1,
+                QueueStatus::Blocked => blocked += 1,
             }
         }
         Ok(QueueSnapshot {
@@ -474,6 +675,7 @@ impl QueueRepo {
             running,
             finalized,
             failed,
+            blocked,
             rows,
         })
     }
@@ -501,7 +703,60 @@ fn row_to_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
         heartbeat_at: row.get(12)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
+        blocked_reason: row.get(15)?,
     })
+}
+
+fn block_task_subtree(
+    conn: &Connection,
+    session_id: &str,
+    root_task_id: &str,
+    include_root: bool,
+    reason: &str,
+    now_ms: i64,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE descendants(task_id) AS (
+             SELECT task_id
+             FROM agent_run_queue_deps
+             WHERE session_id = ?1 AND prerequisite_task_id = ?2
+             UNION
+             SELECT dependency.task_id
+             FROM agent_run_queue_deps AS dependency
+             JOIN descendants ON dependency.prerequisite_task_id = descendants.task_id
+             WHERE dependency.session_id = ?1
+         )
+         SELECT id
+         FROM agent_run_queue
+         WHERE session_id = ?1
+           AND status IN ('queued', 'running')
+           AND (task_id IN (SELECT task_id FROM descendants)
+                OR (?3 = 1 AND task_id = ?2))
+         ORDER BY id",
+    )?;
+    let ids = stmt
+        .query_map(params![session_id, root_task_id, include_root as i64], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for id in &ids {
+        conn.execute(
+            "UPDATE agent_run_queue
+             SET status = 'blocked', updated_at = ?2
+             WHERE id = ?1 AND status IN ('queued', 'running')",
+            params![id, now_ms],
+        )?;
+        conn.execute(
+            "INSERT INTO agent_run_queue_blocks
+                (queue_id, blocked_by_task_id, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(queue_id) DO NOTHING",
+            params![id, root_task_id, reason, now_ms],
+        )?;
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -602,6 +857,7 @@ mod tests {
             no_progress_count: 0,
             last_status: None,
             heartbeat_at: None,
+            blocked_reason: None,
             created_at: 1000,
             updated_at: 1000,
         }
@@ -622,6 +878,7 @@ mod tests {
             (QueueStatus::Running, "\"running\""),
             (QueueStatus::Finalized, "\"finalized\""),
             (QueueStatus::Failed, "\"failed\""),
+            (QueueStatus::Blocked, "\"blocked\""),
         ] {
             let json = serde_json::to_string(&status).unwrap();
             assert_eq!(json, tag);

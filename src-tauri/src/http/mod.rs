@@ -4,6 +4,26 @@ pub mod routes;
 pub mod state;
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod tests_wg_codegraph;
+#[cfg(test)]
+mod tests_wg_context;
+#[cfg(test)]
+mod tests_wg_plan;
+#[cfg(test)]
+mod tests_wg_queue;
+#[cfg(test)]
+mod tests_wg_retro;
+#[cfg(test)]
+mod tests_wg_review;
+#[cfg(test)]
+mod tests_wg_runtime;
+#[cfg(test)]
+mod tests_wg_schema;
+#[cfg(test)]
+mod tests_wg_state;
+#[cfg(test)]
+mod tests_wg_templates;
 
 use crate::http::routes::create_router;
 use crate::http::state::AppState;

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use super::{validate_cli, validate_session_id};
 use crate::cli::CliRegistry;
+use crate::coordination::queue_manager::ClaimOutcome;
 use crate::coordination::{ReleaseAfterFailure, ReleaseOutcome, StateManager, WorkerStateInfo};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
@@ -92,6 +93,9 @@ pub struct AddWorkerRequest {
     pub flags: Option<Vec<String>>,
     /// Initial task/prompt for the worker
     pub initial_task: Option<String>,
+    /// Stable work-graph node ID. Explicit or null; never inferred from free-text task prose.
+    #[serde(default)]
+    pub task_id: Option<String>,
     /// Parent agent ID (defaults to Queen)
     pub parent_id: Option<String>,
 }
@@ -123,6 +127,7 @@ pub async fn add_worker(
         model: requested_model,
         flags: requested_flags,
         initial_task,
+        task_id,
         parent_id,
     } = req;
 
@@ -196,14 +201,30 @@ pub async fn add_worker(
     }
     .map_err(add_worker_error_to_api)?;
 
-    // #126: enqueue + atomically claim the worker BEFORE spawning. The queue table is the
-    // source of truth, so we compute the deterministic worker_id the same way the controller
-    // does (`{session}-worker-{index}`, index = existing worker count + 1), enqueue a
-    // `queued` row, then try to claim it. A duplicate POST for the same worker hits an
-    // already-`running` row, loses the claim, and is turned away with 409 — no double spawn.
+    // #126/#212: enqueue + atomically claim the task BEFORE spawning. Explicit task IDs get a
+    // stable queue identity independent of the current roster slot: a dependency-pending task
+    // must not monopolize `worker-1` or let a later task claim its row with different config.
+    // Legacy null task IDs retain the historical worker-id key. The winning claim atomically
+    // rebinds a task-backed row to the current reservation's worker ID.
     let predicted_index = reservation.index;
     let predicted_worker_id = reservation.worker_id.clone();
-    let queue_id = predicted_worker_id.clone();
+    let queue_id = task_id.as_deref().map_or_else(
+        || predicted_worker_id.clone(),
+        |task_id| {
+            format!(
+                "task:{}",
+                uuid::Uuid::new_v5(
+                    &uuid::Uuid::NAMESPACE_URL,
+                    format!("hive-manager:queue-task:{session_id}:{task_id}").as_bytes(),
+                )
+            )
+        },
+    );
+    let queued_worker_id = if task_id.is_some() {
+        format!("pending:{queue_id}")
+    } else {
+        predicted_worker_id.clone()
+    };
     let payload = json!({
         "role_type": role_type,
         "cli": cli,
@@ -211,18 +232,44 @@ pub async fn add_worker(
         "flags": config.flags,
         "parent_id": parent_id,
         "initial_task": initial_task,
+        "task_id": task_id,
     });
+
+    // The persisted work graph is the single source of scheduling dependencies. Missing graphs,
+    // legacy null task IDs, and unresolved IDs all degrade to zero dependencies without rejecting
+    // worker creation; downstream runtime graph reconstruction reports unresolved bindings.
+    let prerequisite_task_ids = if let Some(task_id) = task_id.as_deref() {
+        let state_manager = StateManager::new(state.storage.session_dir(&session_id));
+        match state_manager.read_work_graph() {
+            Ok(Some(graph)) => graph
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.kind == crate::orchestrator::work_graph::EdgeKind::DependsOn
+                        && edge.target == task_id
+                })
+                .map(|edge| edge.source.clone())
+                .collect(),
+            Ok(None) => Vec::new(),
+            Err(error) => return Err(ApiError::internal(format!(
+                "Could not read the authoritative work graph for task {task_id}: {error}"
+            ))),
+        }
+    } else {
+        Vec::new()
+    };
 
     state
         .queue_manager
-        .enqueue_worker(
+        .enqueue_worker_with_dependencies(
             &queue_id,
             &session_id,
-            &predicted_worker_id,
+            &queued_worker_id,
             &role_type,
             &cli,
             payload,
-            None,
+            task_id.clone(),
+            &prerequisite_task_ids,
         )
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -233,8 +280,23 @@ pub async fn add_worker(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
     {
-        Some(epoch) => epoch,
-        None => {
+        ClaimOutcome::Claimed { epoch } => epoch,
+        ClaimOutcome::DependenciesPending { task_ids } => {
+            let mut details: HashMap<String, Value> = HashMap::new();
+            details.insert("worker_id".to_string(), json!(predicted_worker_id));
+            details.insert("session_id".to_string(), json!(session_id));
+            details.insert("reason".to_string(), json!("dependencies_pending"));
+            details.insert("blocking_task_ids".to_string(), json!(task_ids));
+            details.insert("retryable".to_string(), json!(true));
+            return Err(ApiError::conflict_with_details(
+                format!(
+                    "Worker {} is waiting for queue readiness",
+                    predicted_worker_id
+                ),
+                details,
+            ));
+        }
+        ClaimOutcome::AlreadyClaimed => {
             let mut details: HashMap<String, Value> = HashMap::new();
             details.insert("worker_id".to_string(), json!(predicted_worker_id));
             details.insert("session_id".to_string(), json!(session_id));

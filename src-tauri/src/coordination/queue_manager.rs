@@ -131,6 +131,28 @@ pub enum ReleaseOutcome {
     NoRow,
 }
 
+/// Result of the atomic claim UPDATE. Dependency diagnostics are gathered only after a loss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    Claimed { epoch: i64 },
+    /// Retryable queue wait. The advisory prerequisite snapshot may be stale or empty when
+    /// readiness changed after the loss, or when another task briefly reserved the worker slot.
+    DependenciesPending { task_ids: Vec<String> },
+    AlreadyClaimed,
+}
+
+impl ClaimOutcome {
+    /// Compatibility helper for existing queue-mechanics callers.
+    pub fn is_some(&self) -> bool {
+        matches!(self, Self::Claimed { .. })
+    }
+
+    /// Compatibility helper for existing queue-mechanics callers.
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+}
+
 /// Coordination-layer façade over the durable queue. Cheaply clonable.
 #[derive(Clone)]
 pub struct QueueManager {
@@ -165,6 +187,32 @@ impl QueueManager {
         payload: serde_json::Value,
         task_id: Option<String>,
     ) -> Result<(), StorageError> {
+        self.enqueue_worker_with_dependencies(
+            id,
+            session_id,
+            worker_id,
+            role_type,
+            cli,
+            payload,
+            task_id,
+            &[],
+        )
+        .await
+    }
+
+    /// Enqueue a worker and its graph-derived prerequisites in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_worker_with_dependencies(
+        &self,
+        id: &str,
+        session_id: &str,
+        worker_id: &str,
+        role_type: &str,
+        cli: &str,
+        payload: serde_json::Value,
+        task_id: Option<String>,
+        prerequisite_task_ids: &[String],
+    ) -> Result<(), StorageError> {
         let now = Self::now_ms();
         let row = QueueRow {
             id: id.to_string(),
@@ -180,41 +228,84 @@ impl QueueManager {
             no_progress_count: 0,
             last_status: None,
             heartbeat_at: None,
+            blocked_reason: None,
             created_at: now,
             updated_at: now,
         };
-        self.repo.enqueue(&row)?;
-        self.emit(session_id, worker_id, EventType::WorkerQueued, Severity::Info)
+        self.repo
+            .enqueue_with_dependencies(&row, prerequisite_task_ids)?;
+        self.emit(
+            session_id,
+            worker_id,
+            row.task_id.as_deref(),
+            EventType::WorkerQueued,
+            Severity::Info,
+        )
             .await;
         Ok(())
     }
 
-    /// Atomically claim a queued (or stale-running) row, flipping it to `running`. Returns
-    /// `true` iff THIS call won the claim. Emits `WorkerClaimed` on a win and
-    /// `WorkerClaimFailed` on a loss. The HTTP handler proceeds to spawn only on `true`.
-    /// Returns the claim epoch (`attempts`) on a win, `None` on a loss.
+    /// Atomically claim a ready queued (or stale-running) row, flipping it to `running`.
+    ///
+    /// The UPDATE loss is authoritative. Only after it loses do we perform an explanatory
+    /// read distinguishing a still-queued retry from an already-held claim. The diagnostic
+    /// read never gates or retries the UPDATE and its prerequisite IDs are advisory by
+    /// construction; an empty list remains retryable after a readiness/worker-slot race.
     pub async fn claim_and_spawn(
         &self,
         id: &str,
         session_id: &str,
         worker_id: &str,
-    ) -> Result<Option<i64>, StorageError> {
+    ) -> Result<ClaimOutcome, StorageError> {
         let now = Self::now_ms();
         let cutoff = now - STUCK_CUTOFF_MS;
-        let epoch = self.repo.try_claim(id, cutoff, now)?;
-        if epoch.is_some() {
-            self.emit(session_id, worker_id, EventType::WorkerClaimed, Severity::Info)
-                .await;
-        } else {
+        let epoch = self
+            .repo
+            .try_claim_for_worker(id, Some(worker_id), cutoff, now)?;
+        let row_after_claim = self.repo.get_row(id)?;
+        let task_id = row_after_claim
+            .as_ref()
+            .and_then(|row| row.task_id.clone());
+        if let Some(epoch) = epoch {
             self.emit(
                 session_id,
                 worker_id,
+                task_id.as_deref(),
+                EventType::WorkerClaimed,
+                Severity::Info,
+            )
+                .await;
+            Ok(ClaimOutcome::Claimed { epoch })
+        } else {
+            let queued_after_loss = row_after_claim
+                .as_ref()
+                .is_some_and(|row| row.status == QueueStatus::Queued);
+            let task_ids = if queued_after_loss {
+                self.repo.pending_dependencies(id)?
+            } else {
+                Vec::new()
+            };
+            self.emit(
+                session_id,
+                worker_id,
+                task_id.as_deref(),
                 EventType::WorkerClaimFailed,
-                Severity::Warning,
+                if queued_after_loss {
+                    Severity::Info
+                } else {
+                    Severity::Warning
+                },
             )
             .await;
+            // A queued row lost because readiness was false at the instant of the UPDATE.
+            // Its post-loss prerequisite list may already be empty if a dependency finalized
+            // between the authoritative UPDATE and this advisory read; it remains retryable.
+            if queued_after_loss {
+                Ok(ClaimOutcome::DependenciesPending { task_ids })
+            } else {
+                Ok(ClaimOutcome::AlreadyClaimed)
+            }
         }
-        Ok(epoch)
     }
 
     /// Release a claim whose spawn failed (#175d).
@@ -231,20 +322,15 @@ impl QueueManager {
     /// deletion against the operator's real repository.
     pub async fn release_after_failed_spawn(
         &self,
-        session_id: &str,
-        worker_id: &str,
+        _session_id: &str,
+        _worker_id: &str,
         id: &str,
         epoch: i64,
     ) -> Result<ReleaseAfterFailure, StorageError> {
         let now = Self::now_ms();
         if epoch >= MAX_SPAWN_ATTEMPTS {
             if self.repo.fail_claimed(id, epoch, now)? {
-                self.emit(
-                    session_id,
-                    worker_id,
-                    EventType::WorkerFinalized,
-                    Severity::Warning,
-                )
+                self.emit_for_row(id, EventType::WorkerFinalized, Severity::Warning)
                 .await;
                 return Ok(ReleaseAfterFailure::Exhausted { attempts: epoch });
             }
@@ -253,12 +339,7 @@ impl QueueManager {
 
         if self.repo.requeue_claimed(id, epoch, now)? {
             // Reuse the event `reconcile` already emits for the identical repair.
-            self.emit(
-                session_id,
-                worker_id,
-                EventType::WorkerReclaimed,
-                Severity::Warning,
-            )
+            self.emit_for_row(id, EventType::WorkerReclaimed, Severity::Warning)
             .await;
             Ok(ReleaseAfterFailure::Released)
         } else {
@@ -273,9 +354,18 @@ impl QueueManager {
         worker_id: &str,
     ) -> Result<ReleaseOutcome, StorageError> {
         let rows = self.repo.rows_for_session(session_id)?;
-        // `worker_id` has no UNIQUE constraint; `rows_for_session` orders by
-        // creation, so this deterministically takes the oldest duplicate.
-        let Some(row) = rows.into_iter().find(|r| r.worker_id == worker_id) else {
+        // Task-backed queue rows keep their historical worker binding when terminal, so a
+        // reused slot can legitimately have older finalized/failed rows. Recovery must target
+        // the live claim first; a terminal historical row must never mask it.
+        let row = rows
+            .iter()
+            .find(|row| row.worker_id == worker_id && row.status == QueueStatus::Running)
+            .or_else(|| {
+                rows.iter()
+                    .find(|row| row.worker_id == worker_id && row.status == QueueStatus::Failed)
+            })
+            .or_else(|| rows.iter().find(|row| row.worker_id == worker_id));
+        let Some(row) = row else {
             return Ok(ReleaseOutcome::NoRow);
         };
 
@@ -283,12 +373,7 @@ impl QueueManager {
             QueueStatus::Running | QueueStatus::Failed => {
                 let previous = row.status;
                 if self.repo.release_claim_manual(&row.id, Self::now_ms())? {
-                    self.emit(
-                        session_id,
-                        worker_id,
-                        EventType::WorkerReclaimed,
-                        Severity::Warning,
-                    )
+                    self.emit_for_row(&row.id, EventType::WorkerReclaimed, Severity::Warning)
                     .await;
                     Ok(ReleaseOutcome::Released { previous })
                 } else {
@@ -314,13 +399,15 @@ impl QueueManager {
             .repo
             .record_heartbeat(session_id, worker_id, status, now)?;
         if updated && status == "completed" {
-            self.emit(
-                session_id,
-                worker_id,
-                EventType::WorkerFinalized,
-                Severity::Info,
-            )
-            .await;
+            if let Some(row) = self
+                .repo
+                .rows_for_session(session_id)?
+                .into_iter()
+                .find(|row| row.worker_id == worker_id)
+            {
+                self.emit_for_row(&row.id, EventType::WorkerFinalized, Severity::Info)
+                    .await;
+            }
         }
         Ok(updated)
     }
@@ -375,7 +462,7 @@ impl QueueManager {
                 && !live_worker_ids.iter().any(|w| w == &row.worker_id);
             if orphaned && self.repo.requeue_running(&row.id, now)? {
                 reclaimed.push(row.id.clone());
-                self.emit(session_id, &row.worker_id, EventType::WorkerReclaimed, Severity::Warning)
+                self.emit_for_row(&row.id, EventType::WorkerReclaimed, Severity::Warning)
                     .await;
             }
         }
@@ -385,6 +472,17 @@ impl QueueManager {
     /// Counts + rows for a session's queue (dashboard endpoint).
     pub fn queue_snapshot(&self, session_id: &str) -> Result<QueueSnapshot, StorageError> {
         self.repo.snapshot(session_id)
+    }
+
+    /// Cancel a task and block all downstream queue rows with a visible reason.
+    pub fn cancel_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        self.repo
+            .cancel_task_and_descendants(session_id, task_id, reason, Self::now_ms())
     }
 
     /// Borrow the underlying repo (tests / resume reconcile lookups).
@@ -397,6 +495,7 @@ impl QueueManager {
         &self,
         session_id: &str,
         worker_id: &str,
+        task_id: Option<&str>,
         event_type: EventType,
         severity: Severity,
     ) {
@@ -407,7 +506,7 @@ impl QueueManager {
             agent_id: Some(worker_id.to_string()),
             event_type,
             timestamp: Utc::now(),
-            payload: serde_json::json!({ "worker_id": worker_id }),
+            payload: serde_json::json!({ "worker_id": worker_id, "task_id": task_id }),
             severity,
         };
         if let Err(e) = self.event_bus.publish(event).await {
@@ -420,7 +519,13 @@ impl QueueManager {
     async fn emit_for_row(&self, id: &str, event_type: EventType, severity: Severity) {
         match self.repo.get_row(id) {
             Ok(Some(row)) => {
-                self.emit(&row.session_id, &row.worker_id, event_type, severity)
+                self.emit(
+                    &row.session_id,
+                    &row.worker_id,
+                    row.task_id.as_deref(),
+                    event_type,
+                    severity,
+                )
                     .await
             }
             Ok(None) => {}

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::coordination::{CoordinationMessage, MessageType, StateManager, WorkerStateInfo};
+use crate::orchestrator::work_graph::TaskId;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
 use crate::tauri_shim::Emitter;
 
@@ -56,6 +57,20 @@ pub struct PlanTask {
     pub status: String,
     pub assignee: Option<String>,
     pub priority: Option<String>,
+    #[serde(default)]
+    pub depends_on: Vec<TaskId>,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    /// Internal parser provenance. It is intentionally absent from the stored/UI
+    /// plan shape so adding graph syntax does not change legacy serialization.
+    #[serde(skip)]
+    pub(crate) explicit_id: bool,
+    #[serde(skip)]
+    pub(crate) checkbox_source: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -662,14 +677,43 @@ impl Action for GetSessionPlan {
     }
 }
 
-fn parse_plan_markdown(content: &str) -> SessionPlan {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanMarkdownError {
+    pub messages: Vec<String>,
+}
+
+impl std::fmt::Display for PlanMarkdownError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.messages.join("; "))
+    }
+}
+
+impl std::error::Error for PlanMarkdownError {}
+
+pub(crate) fn parse_plan_markdown(content: &str) -> SessionPlan {
+    parse_plan_markdown_with_diagnostics(content).0
+}
+
+pub(crate) fn parse_plan_markdown_checked(
+    content: &str,
+) -> Result<SessionPlan, PlanMarkdownError> {
+    let (plan, messages) = parse_plan_markdown_with_diagnostics(content);
+    if messages.is_empty() {
+        Ok(plan)
+    } else {
+        Err(PlanMarkdownError { messages })
+    }
+}
+
+fn parse_plan_markdown_with_diagnostics(content: &str) -> (SessionPlan, Vec<String>) {
     let mut title = String::new();
     let mut summary = String::new();
     let mut tasks: Vec<PlanTask> = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut current_section = "";
     let mut task_counter = 0;
 
-    for line in content.lines() {
+    for (line_index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
 
         if trimmed.starts_with("# ") && title.is_empty() {
@@ -698,7 +742,11 @@ fn parse_plan_markdown(content: &str) -> SessionPlan {
         }
 
         if current_section == "tasks" {
-            if let Some(task) = parse_task_line(trimmed, &mut task_counter) {
+            let (task, error) = parse_task_line_with_diagnostics(trimmed, &mut task_counter);
+            if let Some(message) = error {
+                diagnostics.push(format!("line {}: {}", line_index + 1, message));
+            }
+            if let Some(task) = task {
                 tasks.push(task);
             }
         }
@@ -707,21 +755,58 @@ fn parse_plan_markdown(content: &str) -> SessionPlan {
     if title.is_empty() {
         title = "Plan in Progress...".to_string();
     }
-
-    SessionPlan {
-        title,
-        summary,
-        tasks,
-        generated_at: chrono::Utc::now().to_rfc3339(),
-        raw_content: content.to_string(),
+    if tasks.iter().any(|task| task.explicit_id) {
+        for task in tasks
+            .iter()
+            .filter(|task| task.checkbox_source && !task.explicit_id)
+        {
+            diagnostics.push(format!(
+                "schedulable checkbox task is missing a stable T<number>: id: {}",
+                task.title
+            ));
+        }
     }
+
+    (
+        SessionPlan {
+            title,
+            summary,
+            tasks,
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            raw_content: content.to_string(),
+        },
+        diagnostics,
+    )
 }
 
+#[cfg(test)]
 fn parse_task_line(line: &str, counter: &mut i32) -> Option<PlanTask> {
+    parse_task_line_with_diagnostics(line, counter).0
+}
+
+#[derive(Debug, Default)]
+struct TaskMetadata {
+    depends_on: Vec<TaskId>,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    acceptance: Vec<String>,
+}
+
+/// Task-line extraction order is deliberately stable: checkbox/list marker ->
+/// graph metadata -> priority -> explicit `T<number>:` id -> assignee. Priority
+/// still precedes assignee exactly as it did for legacy lines; metadata is removed
+/// first so neither historical extractor can consume it.
+fn parse_task_line_with_diagnostics(
+    line: &str,
+    counter: &mut i32,
+) -> (Option<PlanTask>, Option<String>) {
     let trimmed = line.trim();
+    let checkbox_source = ["- [ ]", "* [ ]", "- [x]", "* [x]", "- [X]", "* [X]"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix));
 
     if trimmed.is_empty() || trimmed.starts_with('#') {
-        return None;
+        return (None, None);
     }
 
     let (status, rest) = if trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]") {
@@ -743,28 +828,101 @@ fn parse_task_line(line: &str, counter: &mut i32) -> Option<PlanTask> {
         if let Some(pos) = trimmed.find(". ") {
             ("pending", trimmed[pos + 2..].trim())
         } else {
-            return None;
+            return (None, None);
         }
     } else {
-        return None;
+        return (None, None);
     };
 
     if rest.is_empty() {
-        return None;
+        return (None, None);
     }
 
     *counter += 1;
-    let (title, priority) = extract_priority(rest);
+    let (rest, metadata, metadata_error) = extract_task_metadata(rest);
+    let (title, priority) = extract_priority(&rest);
+    let (title, explicit_id) = extract_explicit_task_id(&title);
+    let has_explicit_id = explicit_id.is_some();
     let (title, assignee) = extract_assignee(&title);
 
-    Some(PlanTask {
-        id: format!("task-{}", counter),
-        title: title.trim().to_string(),
-        description: String::new(),
-        status: status.to_string(),
-        assignee,
-        priority,
-    })
+    (
+        Some(PlanTask {
+            id: explicit_id.unwrap_or_else(|| format!("task-{}", counter)),
+            title: title.trim().to_string(),
+            description: String::new(),
+            status: status.to_string(),
+            assignee,
+            priority,
+            depends_on: metadata.depends_on,
+            inputs: metadata.inputs,
+            outputs: metadata.outputs,
+            acceptance: metadata.acceptance,
+            explicit_id: has_explicit_id,
+            checkbox_source,
+        }),
+        metadata_error,
+    )
+}
+
+fn extract_explicit_task_id(text: &str) -> (String, Option<TaskId>) {
+    let Some((candidate, remainder)) = text.split_once(':') else {
+        return (text.to_string(), None);
+    };
+    let mut chars = candidate.chars();
+    let is_explicit_id = matches!(chars.next(), Some('T' | 't'))
+        && chars.clone().next().is_some()
+        && chars.all(|character| character.is_ascii_digit());
+
+    if is_explicit_id {
+        (remainder.trim_start().to_string(), Some(candidate.to_string()))
+    } else {
+        (text.to_string(), None)
+    }
+}
+
+fn extract_task_metadata(text: &str) -> (String, TaskMetadata, Option<String>) {
+    let mut cleaned = text.to_string();
+    let mut metadata = TaskMetadata::default();
+
+    for key in ["deps", "inputs", "outputs", "acceptance"] {
+        let marker = format!("({key}:");
+        while let Some(start) = cleaned.find(&marker) {
+            let value_start = start + marker.len();
+            let Some(close_offset) = cleaned[value_start..].find(')') else {
+                return (
+                    text.to_string(),
+                    TaskMetadata::default(),
+                    Some(format!("unterminated ({key}: ...) metadata")),
+                );
+            };
+            let close = value_start + close_offset;
+            let values = cleaned[value_start..close]
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+
+            match key {
+                "deps" => append_unique(&mut metadata.depends_on, values),
+                "inputs" => append_unique(&mut metadata.inputs, values),
+                "outputs" => append_unique(&mut metadata.outputs, values),
+                "acceptance" => append_unique(&mut metadata.acceptance, values),
+                _ => unreachable!("metadata keys are fixed"),
+            }
+            cleaned.replace_range(start..=close, "");
+        }
+    }
+
+    (cleaned, metadata, None)
+}
+
+fn append_unique(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 fn extract_priority(text: &str) -> (String, Option<String>) {
@@ -808,7 +966,7 @@ fn extract_assignee(text: &str) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_assignee, extract_priority};
+    use super::{extract_assignee, extract_priority, parse_task_line};
 
     #[test]
     fn extract_priority_strips_detected_token_case_insensitively() {
@@ -827,6 +985,34 @@ mod tests {
         assert_eq!(
             extract_assignee("Fix launch \u{2192} worker-9"),
             ("Fix launch ".to_string(), Some("worker-9".to_string()))
+        );
+    }
+
+    #[test]
+    fn legacy_task_pipeline_pins_priority_then_assignee_order() {
+        let mut counter = 0;
+        let task = parse_task_line("- [ ] [P1]   Fix launch regression   -> worker-8", &mut counter)
+            .expect("legacy checkbox task");
+
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.title, "Fix launch regression");
+        assert_eq!(task.priority.as_deref(), Some("high"));
+        assert_eq!(task.assignee.as_deref(), Some("worker-8"));
+    }
+
+    #[test]
+    fn legacy_extractors_pin_spacing_and_first_arrow_behavior() {
+        assert_eq!(
+            extract_priority("  Keep   internal   spacing  "),
+            ("  Keep   internal   spacing  ".to_string(), None)
+        );
+        assert_eq!(
+            extract_priority("[P2]  Normalize   only when marked"),
+            ("Normalize only when marked".to_string(), Some("medium".to_string()))
+        );
+        assert_eq!(
+            extract_assignee("Title -> worker-1 -> trailing"),
+            ("Title ".to_string(), Some("worker-1 -> trailing".to_string()))
         );
     }
 }
