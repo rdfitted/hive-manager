@@ -21,6 +21,8 @@ describe('default Hive launch contract', () => {
       queenMaxDepth: defaults.queenMaxDepth,
       principalMaxChildren: defaults.principalMaxChildren,
       principalMaxDepth: defaults.principalMaxDepth,
+      workGraphArchetype: defaults.workGraphArchetype,
+      workGraphParameters: defaults.workGraphParameters,
       withPlanning: true,
       smokeTest: false,
       withEvaluator: true,
@@ -39,6 +41,62 @@ describe('default Hive launch contract', () => {
       queen_delegation: { mode: 'auto', max_children: 3, max_depth: 1 },
       principal_delegation: { mode: 'encouraged', max_children: 2, max_depth: 1 },
     });
+    expect(config.work_graph_archetype).toBeNull();
+    expect(config.work_graph_parameters).toEqual({});
+  });
+
+  it('transports a selected work-graph archetype and normalized overrides', () => {
+    const defaults = createDefaultHiveFormState();
+    const config = buildHiveLaunchConfig({
+      projectPath: 'C:/code/project',
+      queenConfig: defaults.queenConfig,
+      principals: defaults.codingPrincipals,
+      workspaceStrategy: defaults.workspaceStrategy,
+      queenDelegationMode: defaults.queenDelegationMode,
+      principalDelegationMode: defaults.principalDelegationMode,
+      queenMaxChildren: defaults.queenMaxChildren,
+      queenMaxDepth: defaults.queenMaxDepth,
+      principalMaxChildren: defaults.principalMaxChildren,
+      principalMaxDepth: defaults.principalMaxDepth,
+      workGraphArchetype: ' feature-build ',
+      workGraphParameters: {
+        ' component ': ' launch surface ',
+        empty: ' ',
+        ' ': 'ignored',
+      },
+      withPlanning: false,
+      smokeTest: false,
+      withEvaluator: false,
+    });
+
+    expect(config.work_graph_archetype).toBe('feature-build');
+    expect(config.work_graph_parameters).toEqual({ component: 'launch surface' });
+    expect(config.with_planning).toBe(true);
+  });
+
+  it('drops stale overrides when no archetype is selected', () => {
+    const defaults = createDefaultHiveFormState();
+    const config = buildHiveLaunchConfig({
+      projectPath: 'C:/code/project',
+      queenConfig: defaults.queenConfig,
+      principals: defaults.codingPrincipals,
+      workspaceStrategy: defaults.workspaceStrategy,
+      queenDelegationMode: defaults.queenDelegationMode,
+      principalDelegationMode: defaults.principalDelegationMode,
+      queenMaxChildren: defaults.queenMaxChildren,
+      queenMaxDepth: defaults.queenMaxDepth,
+      principalMaxChildren: defaults.principalMaxChildren,
+      principalMaxDepth: defaults.principalMaxDepth,
+      workGraphArchetype: null,
+      workGraphParameters: { component: 'must-not-leak' },
+      withPlanning: false,
+      smokeTest: false,
+      withEvaluator: false,
+    });
+
+    expect(config.work_graph_archetype).toBeNull();
+    expect(config.work_graph_parameters).toEqual({});
+    expect(config.with_planning).toBe(false);
   });
 
   it('normalizes legacy Sol defaults for workers added after launch', () => {

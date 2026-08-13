@@ -161,6 +161,8 @@ export interface SessionTemplate {
     mode: SessionMode;
     cells: CellTemplate[];
     workspace_strategy: WorkspaceStrategy;
+    work_graph_archetype?: string | null;
+    work_graph_parameters?: Record<string, string>;
     is_builtin: boolean;
 }
 

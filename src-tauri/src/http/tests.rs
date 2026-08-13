@@ -9055,7 +9055,15 @@ async fn release_recovers_a_leaked_claim() {
     let snap = state.queue_manager.queue_snapshot(&session_id).unwrap();
     assert_eq!(snap.running, 0);
     assert_eq!(snap.queued, 1, "the row must be claimable again");
-    assert_eq!(snap.rows[0].attempts, 0, "the spawn budget must be reset");
+    assert_eq!(
+        state.queue_manager.spawn_failure_count(&leaked).unwrap(),
+        0,
+        "the independent spawn-failure budget must be reset"
+    );
+    assert_eq!(
+        snap.rows[0].attempts, 1,
+        "the fencing epoch is monotone; resetting it would let epoch 1 be reacquired after epoch 2"
+    );
 }
 
 /// The release route must refuse a worker that is on the roster AND has a live

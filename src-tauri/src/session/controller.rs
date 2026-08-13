@@ -2,7 +2,7 @@ use crate::tauri_shim::{AppHandle, Emitter};
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -22,8 +22,8 @@ use crate::session::cell_status::{
     variant_to_cell_id, PRIMARY_CELL_ID, RESOLVER_CELL_ID,
 };
 use crate::session::polling_intervals::{
-    format_poll_label, ACTIVATION_POLL_INTERVAL, SMOKE_ACTIVE_POLL_INTERVAL,
-    SMOKE_EVALUATOR_FIRST_POLL_INTERVAL, SMOKE_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL,
+    format_poll_label, SMOKE_ACTIVE_POLL_INTERVAL, SMOKE_EVALUATOR_FIRST_POLL_INTERVAL,
+    SMOKE_IDLE_POLL_INTERVAL, STANDARD_ACTIVE_POLL_INTERVAL,
     STANDARD_EVALUATOR_FIRST_POLL_INTERVAL, STANDARD_IDLE_POLL_INTERVAL,
 };
 use crate::session::prompt_contract::{
@@ -309,6 +309,47 @@ pub enum SessionState {
 }
 
 impl SessionState {
+    pub fn kind(&self) -> super::transitions::SessionStateKind {
+        use super::transitions::SessionStateKind;
+
+        match self {
+            SessionState::Planning => SessionStateKind::Planning,
+            SessionState::PlanReady => SessionStateKind::PlanReady,
+            SessionState::Starting => SessionStateKind::Starting,
+            SessionState::SpawningWorker(_) => SessionStateKind::SpawningWorker,
+            SessionState::WaitingForWorker(_) => SessionStateKind::WaitingForWorker,
+            SessionState::SpawningPlanner(_) => SessionStateKind::SpawningPlanner,
+            SessionState::WaitingForPlanner(_) => SessionStateKind::WaitingForPlanner,
+            SessionState::SpawningFusionVariant(_) => {
+                SessionStateKind::SpawningFusionVariant
+            }
+            SessionState::WaitingForFusionVariants => {
+                SessionStateKind::WaitingForFusionVariants
+            }
+            SessionState::SpawningDebateRound(_) => SessionStateKind::SpawningDebateRound,
+            SessionState::WaitingForDebateRound(_) => SessionStateKind::WaitingForDebateRound,
+            SessionState::SpawningJudge => SessionStateKind::SpawningJudge,
+            SessionState::Judging => SessionStateKind::Judging,
+            SessionState::AwaitingVerdictSelection => {
+                SessionStateKind::AwaitingVerdictSelection
+            }
+            SessionState::MergingWinner => SessionStateKind::MergingWinner,
+            SessionState::SpawningEvaluator => SessionStateKind::SpawningEvaluator,
+            SessionState::QaInProgress { .. } => SessionStateKind::QaInProgress,
+            SessionState::QaPassed => SessionStateKind::QaPassed,
+            SessionState::QaFailed { .. } => SessionStateKind::QaFailed,
+            SessionState::QaMaxRetriesExceeded => SessionStateKind::QaMaxRetriesExceeded,
+            SessionState::PrinceRemediation => SessionStateKind::PrinceRemediation,
+            SessionState::QaInconclusive => SessionStateKind::QaInconclusive,
+            SessionState::Running => SessionStateKind::Running,
+            SessionState::Paused => SessionStateKind::Paused,
+            SessionState::Completed => SessionStateKind::Completed,
+            SessionState::Closing => SessionStateKind::Closing,
+            SessionState::Closed => SessionStateKind::Closed,
+            SessionState::Failed(_) => SessionStateKind::Failed,
+        }
+    }
+
     pub fn is_monitorable(&self) -> bool {
         matches!(
             self,
@@ -360,6 +401,16 @@ pub struct HiveLaunchConfig {
     pub smoke_test: bool, // If true, create a minimal test plan without real investigation
     #[serde(default)]
     pub execution_policy: HiveExecutionPolicy,
+    /// Optional plan-time work-graph archetype. Missing remains the exact
+    /// legacy checkbox-plan path; no composition sidecar or prompt section is
+    /// created for old callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_graph_archetype: Option<String>,
+    /// Per-session values used to fill archetype holes (for example
+    /// `component`). Empty parameters are omitted from persisted legacy launch
+    /// configs so old sessions retain their prior serialized shape.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub work_graph_parameters: BTreeMap<String, String>,
 }
 
 /// Launch config for **Research** mode.
@@ -694,12 +745,10 @@ unsafe impl Send for SessionController {}
 unsafe impl Sync for SessionController {}
 
 fn is_terminal_session_state(state: &SessionState) -> bool {
-    matches!(
-        state,
-        SessionState::QaMaxRetriesExceeded
-            | SessionState::Completed
-            | SessionState::Closed
-            | SessionState::Failed(_)
+    super::transitions::has_rule(
+        state.kind(),
+        state.kind(),
+        super::transitions::TransitionTrigger::ClassifyTerminal,
     )
 }
 
@@ -750,35 +799,50 @@ pub struct AddWorkerReservation {
 /// unrelated worker progression from dragging a session back to `Running` and
 /// orphaning an in-flight review (#175a).
 fn is_qa_phase_state(state: &SessionState) -> bool {
-    matches!(
-        state,
-        SessionState::SpawningEvaluator
-            | SessionState::QaInProgress { .. }
-            | SessionState::QaPassed
-            | SessionState::QaFailed { .. }
-            | SessionState::QaInconclusive
-            | SessionState::QaMaxRetriesExceeded
-            | SessionState::PrinceRemediation
+    super::transitions::has_rule(
+        state.kind(),
+        state.kind(),
+        super::transitions::TransitionTrigger::ClassifyQaPhase,
     )
 }
 
 fn qa_in_progress_state(state: &SessionState) -> SessionState {
-    match state {
-        SessionState::QaFailed { iteration } => SessionState::QaInProgress {
-            iteration: Some(*iteration),
-        },
-        SessionState::QaInProgress { iteration } => SessionState::QaInProgress {
-            iteration: *iteration,
-        },
-        _ => SessionState::QaInProgress { iteration: None },
+    let preserves_iteration = super::transitions::has_rule(
+        state.kind(),
+        super::transitions::SessionStateKind::QaInProgress,
+        super::transitions::TransitionTrigger::PreserveQaIteration,
+    );
+
+    if preserves_iteration {
+        match state {
+            SessionState::QaFailed { iteration } => SessionState::QaInProgress {
+                iteration: Some(*iteration),
+            },
+            SessionState::QaInProgress { iteration } => SessionState::QaInProgress {
+                iteration: *iteration,
+            },
+            _ => SessionState::QaInProgress { iteration: None },
+        }
+    } else {
+        SessionState::QaInProgress { iteration: None }
     }
 }
 
 fn next_qa_failure_iteration(state: &SessionState) -> u8 {
-    match state {
-        SessionState::QaFailed { iteration } => iteration.saturating_add(1),
-        SessionState::QaInProgress { iteration } => iteration.unwrap_or(0).saturating_add(1),
-        _ => 1,
+    let advances_iteration = super::transitions::has_rule(
+        state.kind(),
+        super::transitions::SessionStateKind::QaFailed,
+        super::transitions::TransitionTrigger::AdvanceQaFailureIteration,
+    );
+
+    if advances_iteration {
+        match state {
+            SessionState::QaFailed { iteration } => iteration.saturating_add(1),
+            SessionState::QaInProgress { iteration } => iteration.unwrap_or(0).saturating_add(1),
+            _ => 1,
+        }
+    } else {
+        1
     }
 }
 
@@ -804,6 +868,11 @@ fn cell_status_changes_for_transition(
     session: &Session,
     new_state: &SessionState,
 ) -> Vec<(String, String, String)> {
+    // Keep cell projection behavior identical even when a transition is not yet
+    // represented. The live mutator logs absent rows, while this lookup makes
+    // the transition table the shared query seam for the status-change path.
+    let _transition =
+        super::transitions::transition_for(session.state.kind(), new_state.kind());
     let cell_ids = session_cell_ids(session);
     let before = cell_ids
         .iter()
@@ -827,93 +896,29 @@ fn get_polling_instructions(
     cli: &str,
     task_file: &str,
     role_type: Option<&str>,
-    heartbeat_command: Option<&str>,
+    _heartbeat_command: Option<&str>,
 ) -> String {
-    // #141: the cadence is derived from the reclaim cutoff, and EVERY behavior gets it. A
-    // behavior that receives no cadence instruction produces a silent worker, and a silent
-    // worker is indistinguishable from a dead one to `reclaim_stuck`.
-    let cadence = heartbeat_cadence_label();
-    let heartbeat_line = heartbeat_command
-        .map(|command| format!("  {command}\n"))
-        .unwrap_or_default();
-    // Behaviors that get no bash loop need the same instruction in their own register.
-    let heartbeat_block = |lead: &str| match heartbeat_command {
-        Some(command) => format!("\n{lead}\n```bash\n{command}\n```\n"),
-        None => String::new(),
+    let read_instruction = match CliRegistry::get_behavior_for_role(cli, role_type) {
+        CliBehavior::ExplicitPolling => "Read the task file once before starting work.",
+        CliBehavior::ActionProne => "Read the complete task file before taking any action.",
+        CliBehavior::InstructionFollowing => "Read and follow the complete task file.",
+        CliBehavior::Interactive => {
+            "Open the task file in the interactive interface before starting."
+        }
     };
 
-    let activation_block = match CliRegistry::get_behavior_for_role(cli, role_type) {
-        CliBehavior::ExplicitPolling => {
-            format!(
-                r#"
-## Polling Protocol (MANDATORY)
-Run this bash loop to wait for task activation:
-```bash
-while true; do
-  STATUS=$(grep "^## Status:" "{task_file}" | head -1)
-  if [[ "$STATUS" == *"ACTIVE"* ]]; then break; fi
-{heartbeat_line}
-  sleep {poll_secs}
-done
-```
-The `sleep {poll_secs}` keeps you inside the required heartbeat cadence ({cadence}). Do not
-lengthen it: the orchestrator requeues a worker whose last heartbeat is over {cutoff_secs}s old.
+    let activation_block = format!(
+        r#"
+## Queue Activation
+
+The backend's durable queue launched you only after every declared input dependency was finalized.
+`## Status:` in `{task_file}` is a human-readable mirror, not the activation mechanism. Do not
+poll or grep that line and do not use it to decide dependency readiness. If the task file contains
+`## Plan Task ID`, preserve and report that exact ID in status and completion messages. {read_instruction}
 "#,
-                task_file = task_file,
-                heartbeat_line = heartbeat_line,
-                poll_secs = ACTIVATION_POLL_INTERVAL.as_secs(),
-                cadence = cadence,
-                cutoff_secs = STUCK_CUTOFF_SECS,
-            )
-        }
-        CliBehavior::ActionProne => {
-            format!(
-                r#"
-## WAIT FOR ACTIVATION (CRITICAL)
-WARNING: You MUST wait for your task file Status to become ACTIVE.
-WARNING: Do NOT start working just because you received this prompt.
-WARNING: Read {task_file} - if Status is STANDBY, WAIT.
-WARNING: Waiting is NOT silence. You MUST send a heartbeat {cadence} the entire time you
-wait. The orchestrator requeues a worker whose last heartbeat is over {cutoff_secs}s old.
-{heartbeat_block}
-Check the file, heartbeat, then wait. Do not proceed until ACTIVE.
-"#,
-                task_file = task_file,
-                cadence = cadence,
-                cutoff_secs = STUCK_CUTOFF_SECS,
-                heartbeat_block = heartbeat_block("Send this heartbeat while waiting:"),
-            )
-        }
-        CliBehavior::InstructionFollowing => {
-            format!(
-                r#"
-## Task Coordination
-Read {task_file}. Begin work only when Status is ACTIVE.
-While the status is still STANDBY, send a heartbeat {cadence}. A worker whose last heartbeat
-is over {cutoff_secs}s old is treated as stuck and its run is requeued.
-{heartbeat_block}"#,
-                task_file = task_file,
-                cadence = cadence,
-                cutoff_secs = STUCK_CUTOFF_SECS,
-                heartbeat_block = heartbeat_block("Heartbeat command:"),
-            )
-        }
-        CliBehavior::Interactive => {
-            format!(
-                r#"
-## Task Coordination
-Read {task_file}. Begin work only when Status is ACTIVE.
-Use the interactive interface to monitor your task file.
-While you monitor, run this heartbeat {cadence} from the interactive shell. A worker whose
-last heartbeat is over {cutoff_secs}s old is treated as stuck and its run is requeued.
-{heartbeat_block}"#,
-                task_file = task_file,
-                cadence = cadence,
-                cutoff_secs = STUCK_CUTOFF_SECS,
-                heartbeat_block = heartbeat_block("Heartbeat command:"),
-            )
-        }
-    };
+        task_file = task_file,
+        read_instruction = read_instruction,
+    );
 
     format!(
         "{activation_block}{standing_channel}",
@@ -925,11 +930,10 @@ last heartbeat is over {cutoff_secs}s old is treated as stuck and its run is req
 /// The task file is the orchestrator's only write channel to a running agent, and it stays open
 /// for the whole run — activation is just its first message.
 ///
-/// IMPORTANT (load-bearing): every `get_polling_instructions` behavior arm models the file as a
-/// one-shot gate — the poll loop breaks on ACTIVE and never runs again. Without this block an
-/// agent that reports COMPLETED or BLOCKED stops reading, so a Queen answering a blocker writes
-/// into a file nobody will open and the run is stranded. BLOCKED especially is a question, not an
-/// exit; the answer arrives as an edit to this same file.
+/// IMPORTANT (load-bearing): durable queue readiness replaces the old one-shot `Status: ACTIVE`
+/// polling gate, but the file remains a standing human communication channel after launch. Without
+/// this block an agent that reports COMPLETED or BLOCKED stops reading, so a Queen answering a
+/// blocker writes into a file nobody will open and the run is stranded.
 fn task_file_standing_channel(task_file: &str) -> String {
     format!(
         r#"
@@ -2130,6 +2134,11 @@ impl SessionController {
         session: &mut Session,
         new_state: SessionState,
     ) -> Vec<(String, String, String)> {
+        let from_kind = session.state.kind();
+        let to_kind = new_state.kind();
+        let trigger = super::transitions::trigger_for(from_kind, to_kind)
+            .unwrap_or(super::transitions::TransitionTrigger::ControllerMutation);
+        let _ = super::transitions::validate_and_log(from_kind, to_kind, trigger);
         let changes = cell_status_changes_for_transition(session, &new_state);
         session.state = new_state;
         changes
@@ -2367,6 +2376,13 @@ impl SessionController {
 
             self.emit_cell_status_changes(session_id, changes);
             self.emit_session_update(session_id);
+            if let Some(storage) = self.storage.as_ref() {
+                crate::orchestrator::work_graph::archive::schedule_completed_session_archive_and_retro(
+                    storage.base_dir().clone(),
+                    self.run_journal.clone(),
+                    session_id.to_string(),
+                );
+            }
             return Ok(());
         }
 
@@ -2383,6 +2399,11 @@ impl SessionController {
         storage.save_session(&persisted).map_err(|e| {
             CompletionError::storage(format!("Failed to persist session completion: {}", e))
         })?;
+        crate::orchestrator::work_graph::archive::schedule_completed_session_archive_and_retro(
+            storage.base_dir().clone(),
+            self.run_journal.clone(),
+            session_id.to_string(),
+        );
 
         Ok(())
     }
@@ -3279,6 +3300,8 @@ cat "{prince_verdict}"
 
 ## Status: ACTIVE
 
+> Status is a human-readable progress mirror, not a dependency-readiness signal.
+
 ## Role Constraints
 
 - **EXECUTOR**: You have full authority to implement and fix issues.
@@ -3601,6 +3624,8 @@ curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/learnings" \
             r#"# Task Assignment - Debate Debater {debater_index} ({debater_name}) Round {round}
 
 ## Status: ACTIVE
+
+> Status is a human-readable progress mirror, not a dependency-readiness signal.
 
 ## Role Constraints
 
@@ -4622,9 +4647,18 @@ Write the plan in this structure:
 - [ ] Performance — efficient implementation?
 - [ ] Pattern adherence — follows project conventions?
 
+## Tasks
+- [ ] T1: Implement the task independently in every variant (inputs: task requirements) (outputs: variant implementations) (acceptance: each variant is complete and tested) -> fusion-variants
+- [ ] T2: Compare the completed variants (deps: T1) (inputs: variant implementations) (outputs: judge verdict) (acceptance: one evidence-backed winner is selected) -> judge
+
 ## Notes
 [Any additional context for the variants and judge]
 ```
+
+Task syntax is load-bearing: use a unique stable `T<number>:` prefix, put comma-separated
+prerequisites in `(deps: T1, T2)`, and keep `(inputs: ...)`, `(outputs: ...)`, and
+`(acceptance: ...)` on the same checkbox line. Omit `deps:` for roots. Dependency metadata,
+not prose phases, is the executable ordering source.
 
 ## IMPORTANT
 - Write the plan to `.hive-manager/{session_id}/plan.md` and then STOP
@@ -4706,7 +4740,16 @@ Write a concise debate plan to `.hive-manager/{session_id}/plan.md`:
 - [ ] Rebuttal strength
 - [ ] Evidence and specificity
 - [ ] Consistency
+
+## Tasks
+- [ ] T1: Establish positions and evidence (inputs: topic) (outputs: opening positions) (acceptance: every stance is represented) -> debaters
+- [ ] T2: Run rebuttal rounds (deps: T1) (inputs: opening positions) (outputs: rebuttals) (acceptance: all configured rounds complete) -> debaters
+- [ ] T3: Select a verdict (deps: T2) (inputs: rebuttals) (outputs: judge verdict) (acceptance: verdict cites the debate evidence) -> judge
 ```
+
+Task syntax is load-bearing: every task has a unique stable `T<number>:` prefix; prerequisites
+use `(deps: T1, T2)`; contracts use `(inputs: ...)`, `(outputs: ...)`, and
+`(acceptance: ...)` on that same checkbox line. Omit `deps:` for roots.
 
 Do not run the debate. Stop after writing the plan.
 "#,
@@ -5074,7 +5117,7 @@ This roster is available implementation capacity, not a required task count. Des
 1. Establish the objective, non-goals, acceptance criteria, and authoritative evidence.
 2. Investigate the repository directly. Use native read-only scouts only when the Capability Card says delegation is authorized; choose the number from genuinely independent questions and wait for every scout before synthesis. Never launch unmanaged CLI subprocesses.
 3. Partition by coherent workstream and file ownership, not by agent count. Identify shared files, migrations, schemas, generated artifacts, lockfiles, and git operations that must be serialized.
-4. Define dependency order, integration gates, validation commands, observable evidence, risks, and explicit stop/escalation conditions.
+4. Define dependency order as task-line `deps:` declarations, plus integration gates, validation commands, observable evidence, risks, and explicit stop/escalation conditions. Prose phases are context only and must never be the sole statement of ordering.
 5. Write exactly one plan to `{plan_path}` and stop. Do not implement, edit production files, create branches, commit, push, or launch managed principals.
 
 ## Required Plan Shape
@@ -5082,8 +5125,12 @@ This roster is available implementation capacity, not a required task count. Des
 - Objective, constraints, non-goals, and acceptance criteria
 - Evidence and repository findings
 - Coherent workstreams with owned paths and authoritative inputs
+- A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
+  `- [ ] [P1] T1: Stable root task (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
+  `- [ ] [P2] T2: Stable dependent task (deps: T1) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
 - Ownership matrix and serialized hotspots
-- Dependency and integration order
+- Integration order and wave narrative consistent with the task graph
 - Validation gates with commands/evidence
 - Risks, unresolved decisions, and stop conditions
 - Recommended principal assignment as a suggestion, not a roster-count invariant
@@ -5308,14 +5355,14 @@ Write to `.hive-manager/{session_id}/plan.md`:
 ## Domain Tasks (for Planners)
 
 ### Domain 1: [Domain Name]
-- [ ] [PRIORITY] Task description -> Planner 1
-- Files: [list of files in this domain]
-- Workers: {workers_per} available
+- [ ] [P1] T1: Task description (inputs: required context) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 1
+Files: [list of files in this domain]
+Workers: {workers_per} available
 
 ### Domain 2: [Domain Name]
-- [ ] [PRIORITY] Task description -> Planner 2
-- Files: [list of files in this domain]
-- Workers: {workers_per} available
+- [ ] [P2] T2: Task description (deps: T1) (inputs: T1 output) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 2
+Files: [list of files in this domain]
+Workers: {workers_per} available
 
 [... repeat for all {planner_count} planners ...]
 
@@ -5324,11 +5371,15 @@ Write to `.hive-manager/{session_id}/plan.md`:
 |------|--------|----------|----------------|
 
 ## Cross-Domain Dependencies
-[Note any dependencies between domains]
+[Explain the task-line deps; never use this prose as the only ordering declaration]
 
 ## Risks
 [List potential risks and mitigation strategies]
 ```
+
+Task syntax is load-bearing: use unique stable `T<number>:` ids, comma-separated prerequisite
+ids in `(deps: ...)`, and same-line `(inputs: ...)`, `(outputs: ...)`, and `(acceptance: ...)`.
+Omit `deps:` for roots. The graph metadata, not PHASE prose, controls execution order.
 
 ---
 
@@ -5383,13 +5434,18 @@ Write to `.hive-manager/{session_id}/plan.md`:
                 "LOW"
             };
             let task_desc = match index {
-                1 => format!("Send a message to queen via conversation API, send heartbeat, then read shared conversation -> Worker {}", index),
-                2 => format!("Read queen conversation for messages, post to shared conversation, send heartbeat with summary -> Worker {}", index),
-                _ => format!("Send heartbeat, read shared conversation, post completion message to queen -> Worker {}", index),
+                1 => "Send a message to queen via conversation API, send heartbeat, then read shared conversation".to_string(),
+                2 => "Read queen conversation for messages, post to shared conversation, send heartbeat with summary".to_string(),
+                _ => "Send heartbeat, read shared conversation, post completion message to queen".to_string(),
+            };
+            let dependency = if index > 1 {
+                format!(" (deps: T{})", index - 1)
+            } else {
+                String::new()
             };
             task_list.push_str(&format!(
-                "- [ ] [{}] Smoke test task {}: {} \n",
-                priority, index, task_desc
+                "- [ ] [{}] T{}: {}{} (inputs: conversation API) (outputs: heartbeat and conversation evidence) (acceptance: required API calls succeed) -> Worker {}\n",
+                priority, index, task_desc, dependency, index
             ));
 
             if index > 1 {
@@ -5525,6 +5581,10 @@ Testing {worker_count} workers as configured by the user.
 
 ## Tasks
 {task_list}
+The `T<number>:` ids and `(deps: ...)` declarations above are the executable work graph.
+Keep every task's `(inputs: ...)`, `(outputs: ...)`, and `(acceptance: ...)` metadata on its
+checkbox line; prose in the Dependencies section is explanatory only.
+
 ## Task Details
 
 Each worker should use the Inter-Agent Communication endpoints from their prompt.
@@ -5639,8 +5699,17 @@ This tests that:
                 "LOW"
             };
             domain_tasks.push_str(&format!(
-                "- [ ] [{}] Domain {}: {} smoke test tasks (will be broken into {} worker tasks)\n",
-                priority, index, domain, workers_per
+                "- [ ] [{}] T{}: Domain {} smoke test tasks{} (inputs: planner smoke instructions) (outputs: domain worker evidence) (acceptance: all {} worker tasks complete) -> Planner {}\n",
+                priority,
+                index,
+                domain,
+                if index > 1 {
+                    format!(" (deps: T{})", index - 1)
+                } else {
+                    String::new()
+                },
+                workers_per,
+                index
             ));
         }
 
@@ -5767,6 +5836,10 @@ Testing {planner_count} planners, each with {workers_per} workers ({total_worker
 
 ## Domain Tasks (for Planners)
 {domain_tasks}
+The stable `T<number>:` ids and task-line `(deps: ...)` declarations are the executable graph.
+Inputs, outputs, and acceptance stay on the same checkbox line; the prose dependency section is
+only a readable explanation of those edges.
+
 ## Planner → Worker Breakdown
 
 Each Planner spawns their workers sequentially and assigns subtasks:
@@ -6979,6 +7052,7 @@ Content-Type: application/json
 | description | string | No | One-line task summary used for deterministic labels |
 | label | string | No | Legacy label field; kept as a fallback input |
 | initial_task | string | No | Initial task/prompt for the worker |
+| task_id | string | No | Exact stable plan task ID (for example `T6`). Copy it from `plan.md`; never infer it from prose. |
 | parent_id | string | No | Parent agent ID (defaults to Queen) |
 
 ## Example Usage
@@ -6992,7 +7066,7 @@ curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
 # Spawn a frontend worker with an initial task
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
   -H "Content-Type: application/json" \
-  -d '{{"role_type": "frontend", "name": "Worker 2 (Frontend)", "description": "Implement the login form UI", "initial_task": "Implement the login form UI"}}'
+  -d '{{"role_type": "frontend", "task_id": "T2", "name": "Worker 2 (Frontend)", "description": "Implement the login form UI", "initial_task": "Implement the login form UI"}}'
 
 # Spawn a reviewer worker
 curl -X POST "http://localhost:18800/api/sessions/{session_id}/workers" \
@@ -7019,6 +7093,7 @@ A 4xx here is actionable — read `reason` before retrying.
 | Status | `reason` | What it means | What to do |
 |--------|----------|---------------|------------|
 | 409 | `already_claimed` | This worker index is already claimed and running | STOP. Do not retry — you would double-spawn. Check `GET /workers` |
+| 409 | `dependencies_pending` | The task is queued because declared prerequisites were not finalized when the atomic claim ran, or another claim briefly reserved the same roster slot | Read `blocking_task_ids`, refresh `GET /workers` and `GET /queue`, keep working on other ready tasks, and retry this exact request after readiness changes. The list is advisory, may already be stale, and can be empty after a race. |
 | 409 | `session_state` | The session cannot accept workers right now (see `current_state`) | Do not retry blindly. Resolve the state first (e.g. an unresolved QA verdict) |
 | 409 | `index_raced` | The roster moved between reservation and spawn | Re-read `GET /workers`, then retry ONCE |
 | 409 | `spawn_failed` | The spawn failed repeatedly and the queue row was retired (`attempts` included) | Call the release endpoint in `recovery`, then retry once |
@@ -7040,10 +7115,11 @@ running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
 
 - Workers spawn in a new Windows Terminal tab (visible window)
 - Treat the absolute `task_file` returned by the API as authoritative; do not reconstruct it from the worker ID
+- When spawning a plan task, send its exact `task_id` from `plan.md`. Never guess, fuzzy-match, or derive it from `initial_task`; explicit or null is the safe contract.
 - Shared-cell Hive: the task file is under `.hive-manager/tasks/` in the shared primary workspace
 - Isolated-cell Hive: the task file is under `.hive-manager/tasks/` in that worker's isolated workspace
 - Research/no-worktree Hive: the task file is under `.hive-manager/{session_id}/tasks/` in the operator project
-- Workers poll the returned task file for ACTIVE status
+- Workers re-read the returned task file for new direction; durable queue readiness, not markdown polling, controls activation
 - Dynamic principals are supported by Hive/Research sessions. Fusion variants use their pre-created Fusion task files instead of this endpoint
 - Use this to spawn workers sequentially as tasks complete
 "#,
@@ -7252,7 +7328,7 @@ Content-Type: application/json
   "session": "{{session_id}}",
   "task": "Description of the task you completed",
   "insight": "What you learned or discovered",
-  "outcome": "success|partial|failed",
+  "outcome": "success|partial|failed|unreviewed",
   "keywords": ["keyword1", "keyword2"],
   "files_touched": ["path/to/file.rs"]
 }
@@ -7265,7 +7341,7 @@ Content-Type: application/json
 | session | string | Current session ID |
 | task | string | What task was being performed |
 | insight | string | The learning or discovery |
-| outcome | string | Category: success, partial, failed |
+| outcome | string | Category: success, partial, failed, or unreviewed. `unreviewed` is an ungraded proposal awaiting authorized review. |
 | keywords | string[] | Relevant keywords for filtering |
 | files_touched | string[] | Files involved in this learning |
 
@@ -7545,7 +7621,14 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         read_only: bool,
     ) -> Result<PathBuf, String> {
         let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
-        Self::write_task_file_at_path(&file_path, worker_index, initial_task, status, read_only)
+        Self::write_task_file_at_path(
+            &file_path,
+            worker_index,
+            initial_task,
+            status,
+            read_only,
+            None,
+        )
     }
 
     fn write_task_file_at_path(
@@ -7554,6 +7637,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         initial_task: Option<&str>,
         status: Option<&str>,
         read_only: bool,
+        plan_task_id: Option<&str>,
     ) -> Result<PathBuf, String> {
         let tasks_dir = file_path
             .parent()
@@ -7582,6 +7666,11 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         } else {
             "Awaiting task assignment. Monitor this file for updates.".to_string()
         };
+        let plan_task_block = plan_task_id.map_or_else(String::new, |task_id| {
+            let encoded = serde_json::to_string(task_id)
+                .unwrap_or_else(|_| "\"<unserializable>\"".to_string());
+            format!("## Plan Task ID\n\n{encoded}\n\n")
+        });
 
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let content = format!(
@@ -7589,7 +7678,9 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
 
 ## Status: {status}
 
-## Role Constraints
+> Status is a human-readable mirror. Durable queue dependencies control activation.
+
+{plan_task_block}## Role Constraints
 
 {role_constraints}
 
@@ -7612,6 +7703,7 @@ Last updated: {timestamp}
 ",
             worker_index = worker_index,
             status = status,
+            plan_task_block = plan_task_block,
             role_constraints = role_constraints,
             scope_block = scope_block,
             task_content = task_content,
@@ -7656,6 +7748,8 @@ Last updated: {timestamp}
             "# Task Assignment - QA Worker {worker_index} ({specialization})
 
 ## Status: {status}
+
+> Status is a human-readable progress mirror, not a dependency-readiness signal.
 
 ## Role Constraints
 
@@ -7962,12 +8056,28 @@ Last updated: {timestamp}
         let mut created_cells = Vec::new();
         let mut spawned_agent_ids = Vec::new();
 
+        if config.work_graph_archetype.is_some() && !config.with_planning {
+            return Err(
+                "A work-graph archetype requires the Master Planner so it can start from the persisted skeleton"
+                    .to_string(),
+            );
+        }
+
         let topology = SessionOrchestrator::plan_hive_launch(
             &config.execution_policy,
             config.workers.len(),
             !use_worktrees,
         )
         .map_err(|error| error.to_string())?;
+
+        if config.work_graph_archetype.is_some()
+            && topology.launch_kind == HiveLaunchKind::Solo
+        {
+            return Err(
+                "A work-graph archetype requires a Hive planning topology and cannot be coerced to Solo"
+                    .to_string(),
+            );
+        }
 
         if topology.launch_kind == HiveLaunchKind::Solo
             && (pre_spawn_workers || config.execution_policy.launch_kind == HiveLaunchKind::Solo)
@@ -8360,13 +8470,16 @@ Last updated: {timestamp}
         // Initialize session storage
         self.init_session_storage(&session);
         self.ensure_task_watcher(&session.id, &session.project_path);
-        self.spawn_launch_evaluator_agents(
-            &session.id,
-            config.with_evaluator,
-            config.evaluator_config.clone(),
-            config.qa_workers.as_deref(),
-            config.smoke_test,
-        )
+        self.ensure_live_retro_provenance(&session.id, config.with_evaluator)
+            .and_then(|_| {
+                self.spawn_launch_evaluator_agents(
+                    &session.id,
+                    config.with_evaluator,
+                    config.evaluator_config.clone(),
+                    config.qa_workers.as_deref(),
+                    config.smoke_test,
+                )
+            })
         .map_err(|err| {
             {
                 let mut watchers = self.task_watchers.lock();
@@ -8438,6 +8551,8 @@ Last updated: {timestamp}
                 workspace_strategy: WorkspaceStrategy::None,
                 ..HiveExecutionPolicy::default()
             },
+            work_graph_archetype: None,
+            work_graph_parameters: BTreeMap::new(),
         };
 
         // Resolve the global wiki path from AppConfig (falls back to the documented
@@ -9213,6 +9328,244 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
+    fn configured_institutional_wiki_root(&self) -> Option<PathBuf> {
+        self.storage
+            .as_ref()
+            .and_then(|storage| storage.load_config().ok())
+            .and_then(|config| config.global_wiki_path)
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| PathBuf::from(expand_tilde(&path)))
+    }
+
+    fn planning_codegraph_artifact_path(project_path: &Path, session_id: &str) -> PathBuf {
+        Self::session_root_path(project_path, session_id)
+            .join("artifacts")
+            .join("codegraph.json")
+    }
+
+    fn discard_initial_work_graph(&self, session_id: &str) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let path = storage
+            .session_dir(session_id)
+            .join("state")
+            .join("work-graph-composition.json");
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    session_id,
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to discard an unlaunched work-graph skeleton"
+                );
+            }
+        }
+        let provenance_path = storage
+            .session_dir(session_id)
+            .join("state")
+            .join("retro-evaluator-provenance.json");
+        if let Err(error) = std::fs::remove_file(&provenance_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    session_id,
+                    path = %provenance_path.display(),
+                    error = %error,
+                    "Failed to discard unlaunched retro evaluator provenance"
+                );
+            }
+        }
+    }
+
+    fn normalized_retro_repo_id(project_path: &Path) -> String {
+        std::fs::canonicalize(project_path)
+            .unwrap_or_else(|_| project_path.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    pub(crate) fn persist_retro_provenance(
+        &self,
+        project_path: &Path,
+        session_id: &str,
+        planner_agent_ids: Vec<String>,
+        supervisor_agent_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let Some(storage) = self.storage.as_ref() else {
+            // Preserve storage-free unit/legacy launch behavior. The completion
+            // hook reports missing provenance instead of inventing identities.
+            return Ok(());
+        };
+        crate::orchestrator::work_graph::archive::persist_retro_evaluator_provenance(
+            storage.base_dir(),
+            session_id,
+            &crate::orchestrator::work_graph::archive::RetroEvaluatorProvenance {
+                repo_id: Self::normalized_retro_repo_id(project_path),
+                evaluator_id: format!("{session_id}-retro-evaluator"),
+                planner_agent_ids,
+                supervisor_agent_ids,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Failed to persist retro evaluator provenance: {error}"))
+    }
+
+    fn ensure_live_retro_provenance(
+        &self,
+        session_id: &str,
+        include_prince: bool,
+    ) -> Result<(), String> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(());
+        };
+        let path = storage
+            .session_dir(session_id)
+            .join("state")
+            .join("retro-evaluator-provenance.json");
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+        let mut planner_agent_ids: Vec<String> = session
+            .agents
+            .iter()
+            .filter(|agent| {
+                matches!(agent.role, AgentRole::MasterPlanner | AgentRole::Planner { .. })
+            })
+            .map(|agent| agent.id.clone())
+            .collect();
+        let mut supervisor_agent_ids: Vec<String> = session
+            .agents
+            .iter()
+            .filter(|agent| matches!(agent.role, AgentRole::Queen | AgentRole::Prince))
+            .map(|agent| agent.id.clone())
+            .collect();
+        if path.exists() {
+            let existing: crate::orchestrator::work_graph::archive::RetroEvaluatorProvenance =
+                serde_json::from_str(
+                    &std::fs::read_to_string(&path).map_err(|error| {
+                        format!("Failed to read existing retro evaluator provenance: {error}")
+                    })?,
+                )
+                .map_err(|error| {
+                    format!("Failed to parse existing retro evaluator provenance: {error}")
+                })?;
+            planner_agent_ids.extend(existing.planner_agent_ids);
+            supervisor_agent_ids.extend(existing.supervisor_agent_ids);
+        }
+        if include_prince {
+            let expected_prince = format!("{session_id}-prince");
+            if !supervisor_agent_ids.contains(&expected_prince) {
+                supervisor_agent_ids.push(expected_prince);
+            }
+        }
+        planner_agent_ids.sort();
+        planner_agent_ids.dedup();
+        supervisor_agent_ids.sort();
+        supervisor_agent_ids.dedup();
+        self.persist_retro_provenance(
+            &session.project_path,
+            session_id,
+            planner_agent_ids,
+            supervisor_agent_ids,
+        )
+    }
+
+    /// Phase A of named work-graph composition. This method is deliberately a
+    /// strict no-op for `None`: old/edgeless launches neither write a sidecar
+    /// nor gain omission nodes or prompt bytes.
+    pub(crate) fn prepare_initial_work_graph(
+        &self,
+        project_path: &Path,
+        session_id: &str,
+        archetype_id: Option<&str>,
+        session_parameters: &BTreeMap<String, String>,
+    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String> {
+        let Some(archetype_id) = archetype_id else {
+            return Ok(None);
+        };
+        let archetype_id = archetype_id.trim();
+        if archetype_id.is_empty() {
+            return Err("Work-graph archetype cannot be blank".to_string());
+        }
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            "Session storage is required to persist a selected work-graph archetype".to_string()
+        })?;
+        let resolver = crate::orchestrator::work_graph::codegraph::ArtifactCodegraph::load(
+            project_path,
+            &Self::planning_codegraph_artifact_path(project_path, session_id),
+        )
+        .map_err(|error| format!("Failed to load the planning codegraph artifact: {error}"))?;
+        let institutional_wiki_root = self.configured_institutional_wiki_root();
+        let composition =
+            crate::orchestrator::work_graph::runtime::compose_initial_work_graph(
+                crate::orchestrator::work_graph::TaskGraph::default(),
+                project_path,
+                institutional_wiki_root.as_deref(),
+                Some(archetype_id),
+                session_parameters,
+                &resolver,
+            )
+            .map_err(|error| format!("Failed to compose initial work graph: {error}"))?;
+        StateManager::new(storage.session_dir(session_id))
+            .write_graph_composition_state(&composition)
+            .map_err(|error| format!("Failed to persist initial work-graph skeleton: {error}"))?;
+        Ok(Some(composition))
+    }
+
+    pub(crate) fn graph_skeleton_prompt_section(
+        composition: &crate::orchestrator::work_graph::runtime::GraphCompositionState,
+    ) -> Result<String, String> {
+        let payload = serde_json::to_string_pretty(&serde_json::json!({
+            "lineage": &composition.lineage,
+            "nodes": &composition.graph.nodes,
+            "edges": &composition.graph.edges,
+            "omissions": &composition.graph.omissions,
+        }))
+        .map_err(|error| format!("Failed to serialize work-graph skeleton: {error}"))?;
+        Ok(format!(
+            r#"
+
+## Required Instantiated Work-Graph Skeleton
+
+The backend composed and persisted the following authoritative skeleton before launching you. Start from it; do not invent a replacement topology.
+
+- Every listed node ID is reserved and stable. Do not rename it, remove it, or create a `T<number>` duplicate for the same work.
+- The listed node contracts and dependency edges already exist and will be reconciled with your plan rather than replaced by it.
+- Add only genuinely plan-specific `T<number>` tasks. Their `(deps: ...)` values may reference the exact skeleton IDs below.
+- Do not emit a checkbox line that attempts to redefine a non-`T<number>` skeleton node. Describe any rationale in prose and preserve the stable ID in dependency metadata.
+
+```json
+{payload}
+```
+"#,
+        ))
+    }
+
+    /// Phase B reads the latest persisted composition value, so a retry after
+    /// writing the reconciled sidecar is an exact no-op. `None` is the legacy
+    /// path and leaves the planner graph byte-for-value unchanged.
+    pub(crate) fn reconcile_planner_graph_with_persisted_skeleton(
+        state_manager: &StateManager,
+        planner_graph: &crate::orchestrator::work_graph::TaskGraph,
+    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String> {
+        let Some(persisted) = state_manager
+            .read_graph_composition_state()
+            .map_err(|error| format!("Failed to read initial work-graph skeleton: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let mut reconciled =
+            crate::orchestrator::work_graph::runtime::reconcile_composed_work_graph(
+                &persisted,
+                planner_graph,
+            )
+            .map_err(|error| format!("Failed to reconcile planner work graph: {error}"))?;
+        crate::orchestrator::work_graph::plan_parse::promote_initial_ready_nodes(
+            &mut reconciled.graph,
+        );
+        Ok(Some(reconciled))
+    }
+
     /// Launch the planning phase - spawns Master Planner only
     fn launch_planning_phase(
         &self,
@@ -9246,8 +9599,38 @@ phases and do EXACTLY this, then stop:
         let worktree_path = Some(cwd.clone());
         let worktree_branch = Some(branch);
 
+        // Phase A must finish durably before the Master Planner receives a
+        // prompt or a PTY. A selected archetype without a persisted skeleton is
+        // not allowed to degrade into the legacy planner-invents-topology path.
+        let initial_composition = match self.prepare_initial_work_graph(
+            &project_path,
+            &session_id,
+            config.work_graph_archetype.as_deref(),
+            &config.work_graph_parameters,
+        ) {
+            Ok(composition) => composition,
+            Err(error) => {
+                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &[]);
+                return Err(error);
+            }
+        };
+        let mut supervisor_agent_ids = vec![format!("{session_id}-queen")];
+        if config.with_evaluator {
+            supervisor_agent_ids.push(format!("{session_id}-prince"));
+        }
+        if let Err(error) = self.persist_retro_provenance(
+            &project_path,
+            &session_id,
+            vec![format!("{session_id}-master-planner")],
+            supervisor_agent_ids,
+        ) {
+            self.discard_initial_work_graph(&session_id);
+            self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &[]);
+            return Err(error);
+        }
+
         // Build the appropriate prompt based on mode
-        let planner_prompt = if config.smoke_test {
+        let mut planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
             Self::build_smoke_test_prompt(
                 &session_id,
@@ -9267,6 +9650,21 @@ phases and do EXACTLY this, then stop:
                 Path::new(&cwd),
             )
         };
+        if let Some(composition) = initial_composition.as_ref() {
+            match Self::graph_skeleton_prompt_section(composition) {
+                Ok(section) => planner_prompt.push_str(&section),
+                Err(error) => {
+                    self.discard_initial_work_graph(&session_id);
+                    self.rollback_launch_allocations(
+                        &project_path,
+                        &session_id,
+                        &created_cells,
+                        &[],
+                    );
+                    return Err(error);
+                }
+            }
+        }
 
         // Persist continuation input before spawning the planner. A failure here
         // must not leave a live PTY or an orphaned planning worktree.
@@ -9283,6 +9681,7 @@ phases and do EXACTLY this, then stop:
                 .map_err(|e| format!("Failed to write pending config: {}", e))
         })();
         if let Err(error) = pending_result {
+            self.discard_initial_work_graph(&session_id);
             self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &[]);
             return Err(error);
         }
@@ -9304,6 +9703,7 @@ phases and do EXACTLY this, then stop:
                 Ok(prompt_file) => prompt_file,
                 Err(error) => {
                     let _ = std::fs::remove_file(&pending_config_path);
+                    self.discard_initial_work_graph(&session_id);
                     self.rollback_launch_allocations(
                         &project_path,
                         &session_id,
@@ -9330,6 +9730,7 @@ phases and do EXACTLY this, then stop:
                 )
                 .map_err(|e| {
                     let _ = std::fs::remove_file(&pending_config_path);
+                    self.discard_initial_work_graph(&session_id);
                     self.rollback_launch_allocations(
                         &project_path,
                         &session_id,
@@ -11305,6 +11706,11 @@ phases and do EXACTLY this, then stop:
                             session,
                             &SessionState::QaInconclusive,
                         );
+                        let _ = super::transitions::validate_and_log(
+                            session.state.kind(),
+                            super::transitions::SessionStateKind::QaInconclusive,
+                            super::transitions::TransitionTrigger::QaTimedOut,
+                        );
                         session.state = SessionState::QaInconclusive;
                         Some((previous_state, changes, session.clone()))
                     } else {
@@ -12387,30 +12793,148 @@ phases and do EXACTLY this, then stop:
 
     /// Mark a planning session as ready (plan generated)
     pub fn mark_plan_ready(&self, session_id: &str) -> Result<(), String> {
-        let mut sessions = self.sessions.write();
-        if let Some(session) = sessions.get_mut(session_id) {
-            if session.state == SessionState::Planning {
-                let changes = self.set_session_state_with_events(session, SessionState::PlanReady);
+        use crate::orchestrator::work_graph::{
+            TaskGraph, WorkGraphOmission, WorkGraphOmissionReason,
+        };
 
-                if let Some(ref app_handle) = self.app_handle {
-                    let _ = app_handle.emit(
-                        "session-update",
-                        SessionUpdate {
-                            session: session.clone(),
-                        },
-                    );
-                }
-                self.emit_cell_status_changes(session_id, changes);
-                Ok(())
-            } else {
-                Err(format!(
+        let project_path = {
+            let sessions = self.sessions.read();
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            if session.state != SessionState::Planning {
+                return Err(format!(
                     "Session is not in planning state: {:?}",
                     session.state
-                ))
+                ));
             }
+            session.project_path.clone()
+        };
+
+        let project_plan_path = project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("plan.md");
+        let storage_plan_path = self
+            .storage
+            .as_ref()
+            .map(|storage| storage.session_dir(session_id).join("plan.md"));
+        let plan_path = if project_plan_path.exists() {
+            project_plan_path
+        } else if let Some(path) = storage_plan_path.filter(|path| path.exists()) {
+            path
         } else {
-            Err(format!("Session not found: {}", session_id))
+            project_plan_path
+        };
+
+        let mut graph = match std::fs::read_to_string(&plan_path) {
+            Ok(content) => {
+                match crate::actions::coordination::parse_plan_markdown_checked(&content) {
+                    Ok(plan) => {
+                        crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id,
+                            plan_path = %plan_path.display(),
+                            error = %error,
+                            "Plan graph metadata could not be parsed; degrading to an edgeless graph"
+                        );
+                        let mut graph = TaskGraph::default();
+                        graph.omissions.push(WorkGraphOmission::new(
+                            WorkGraphOmissionReason::ResolutionIncomplete,
+                            error.messages.len(),
+                            error.messages,
+                        ));
+                        graph
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    plan_path = %plan_path.display(),
+                    error = %error,
+                    "Plan source could not be read; degrading to an edgeless graph"
+                );
+                let mut graph = TaskGraph::default();
+                graph.omissions.push(WorkGraphOmission::new(
+                    WorkGraphOmissionReason::SourceUnreadable,
+                    1,
+                    vec![format!("{}: {}", plan_path.display(), error)],
+                ));
+                graph
+            }
+        };
+
+        // Phase B is opt-in by persisted state rather than by a live launch
+        // config. That makes a crash/retry deterministic and lets resumed
+        // planning sessions finish without reconstructing departed agents.
+        let reconciled_composition = if let Some(storage) = self.storage.as_ref() {
+            let state_manager = StateManager::new(storage.session_dir(session_id));
+            Self::reconcile_planner_graph_with_persisted_skeleton(&state_manager, &graph)?
+        } else {
+            None
+        };
+        if let Some(composition) = reconciled_composition.as_ref() {
+            graph = composition.graph.clone();
         }
+
+        let validation = crate::orchestrator::work_graph::validate::validate_plan_ready(&graph)
+            .map_err(|error| error.to_string())?;
+        for warning in validation.warnings {
+            tracing::warn!(session_id, warning = %warning, "PlanReady validation warning");
+        }
+
+        if self.storage.is_none() {
+            let message =
+                "session state storage is unavailable; validated plan graph was not persisted";
+            graph.omissions.push(WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                1,
+                vec![message.to_string()],
+            ));
+            tracing::warn!(session_id, omission = message);
+        }
+
+        let changes = {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {}", session_id))?;
+            if session.state != SessionState::Planning {
+                return Err(format!(
+                    "Session is not in planning state: {:?}",
+                    session.state
+                ));
+            }
+            if let Some(storage) = self.storage.as_ref() {
+                let state_manager = StateManager::new(storage.session_dir(session_id));
+                if let Some(composition) = reconciled_composition.as_ref() {
+                    state_manager
+                        .write_graph_composition_state(composition)
+                        .map_err(|error| {
+                            format!("Failed to persist reconciled work-graph state: {error}")
+                        })?;
+                }
+                state_manager
+                    .write_work_graph(&graph)
+                    .map_err(|error| format!("Failed to persist plan work graph: {error}"))?;
+            }
+            let previous_session = session.clone();
+            let changes = self.set_session_state_with_events(session, SessionState::PlanReady);
+            if let Some(storage) = self.storage.as_ref() {
+                if let Err(error) = Self::persist_session_snapshot(storage, session, session_id) {
+                    *session = previous_session;
+                    return Err(error);
+                }
+            }
+            changes
+        };
+
+        self.emit_cell_status_changes(session_id, changes);
+        self.emit_session_update(session_id);
+        Ok(())
     }
 
     /// Resume a persisted session from storage
@@ -13022,6 +13546,11 @@ phases and do EXACTLY this, then stop:
             return Ok(());
         }
 
+        // New direct launches capture the live planner/supervisor set here.
+        // Planned launches already wrote the complete future identity set
+        // before the Master Planner PTY and are deliberately not overwritten.
+        self.ensure_live_retro_provenance(session_id, true)?;
+
         let evaluator_config = evaluator_config.unwrap_or(AgentConfig {
             cli: String::new(),
             model: None,
@@ -13353,6 +13882,27 @@ phases and do EXACTLY this, then stop:
         parent_id: Option<String>,
         expected_index: Option<u8>,
     ) -> Result<AgentInfo, String> {
+        self.add_worker_for_plan_task(
+            session_id,
+            config,
+            role,
+            parent_id,
+            expected_index,
+            None,
+        )
+    }
+
+    /// Add a worker with an explicit work-graph binding. The ID is transported verbatim;
+    /// callers must never infer it from task prose or reject it for failing graph resolution.
+    pub fn add_worker_for_plan_task(
+        &self,
+        session_id: &str,
+        config: AgentConfig,
+        role: WorkerRole,
+        parent_id: Option<String>,
+        expected_index: Option<u8>,
+        plan_task_id: Option<&str>,
+    ) -> Result<AgentInfo, String> {
         // Get session and validate
         let session = {
             let sessions = self.sessions.read();
@@ -13453,6 +14003,7 @@ phases and do EXACTLY this, then stop:
                 .as_ref()
                 .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
                 .unwrap_or(false),
+            plan_task_id,
         ) {
             Ok(task_file) => task_file,
             Err(err) => {
@@ -14339,6 +14890,13 @@ phases and do EXACTLY this, then stop:
             if let Err(e) = state_manager.update_workers_file(&workers) {
                 tracing::warn!("Failed to update workers file: {}", e);
             }
+            // Capture every archivable session while its planner/supervisor
+            // identities are live. Planned launches may already contain future
+            // identities; the merge in this hook preserves those across later
+            // lifecycle stages instead of reconstructing them at completion.
+            if let Err(e) = self.ensure_live_retro_provenance(&session.id, false) {
+                tracing::warn!("Failed to persist launch-time retro provenance: {}", e);
+            }
         }
     }
 
@@ -14678,13 +15236,10 @@ mod tests {
     use super::{
         extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
         AgentInfo, AuthStrategy, CompletionError, DebateDebaterMetadata, DebateSessionMetadata,
-        FusionVariantMetadata, QaWorkerConfig, Session, SessionController, SessionError,
-        SessionState, SessionType,
+        FusionVariantMetadata, HiveLaunchConfig, QaWorkerConfig, Session, SessionController,
+        SessionError, SessionState, SessionType,
     };
-    use super::{heartbeat_cadence_label, CliBehavior, CliRegistry, ACTIVATION_POLL_INTERVAL};
-    use crate::coordination::queue_manager::{
-        HEARTBEAT_MAX_INTERVAL_SECS, HEARTBEAT_MIN_INTERVAL_SECS,
-    };
+    use super::{heartbeat_cadence_label, CliBehavior, CliRegistry};
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::workspace::git::current_head;
@@ -14695,6 +15250,23 @@ mod tests {
     use tempfile::TempDir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn legacy_hive_launch_config_omits_work_graph_selection_exactly() {
+        let legacy = serde_json::json!({
+            "project_path": "D:/repo",
+            "queen_config": AgentConfig::default(),
+            "workers": [],
+            "prompt": null
+        });
+        let decoded: HiveLaunchConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.work_graph_archetype, None);
+        assert!(decoded.work_graph_parameters.is_empty());
+
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert!(encoded.get("work_graph_archetype").is_none());
+        assert!(encoded.get("work_graph_parameters").is_none());
+    }
 
     #[test]
     fn extract_model_arg_reads_short_long_and_equals_forms() {
@@ -15291,8 +15863,8 @@ mod tests {
                 "{behavior:?} ({cli}) prompt carries no heartbeat cadence instruction"
             );
             assert!(
-                prompt.contains(r#""status":"idle""#),
-                "{behavior:?} ({cli}) prompt drops the activation-wait heartbeat command"
+                !prompt.contains(r#""status":"idle""#),
+                "{behavior:?} ({cli}) prompt still carries the obsolete activation-wait heartbeat"
             );
             assert!(
                 prompt.contains(r#""status":"working""#),
@@ -15326,17 +15898,17 @@ mod tests {
                 "{behavior:?} ({cli}) prompt drops the completed heartbeat instruction"
             );
 
-            // The polling section must stand on its own: a worker parked in STANDBY never
-            // reaches the active-work section.
-            let polling = super::get_polling_instructions(
+            let activation = super::get_polling_instructions(
                 cli,
                 "worker-1-task.md",
                 Some("backend"),
                 Some("HEARTBEAT_COMMAND"),
             );
             assert!(
-                polling.contains(&cadence) && polling.contains("HEARTBEAT_COMMAND"),
-                "{behavior:?} ({cli}) polling section omits the heartbeat instruction: {polling}"
+                activation.contains("human-readable mirror")
+                    && !activation.contains("HEARTBEAT_COMMAND")
+                    && !activation.contains("while true"),
+                "{behavior:?} ({cli}) queue activation still depends on markdown polling: {activation}"
             );
         }
     }
@@ -15354,46 +15926,39 @@ mod tests {
                 "cli {cli} prompt carries no heartbeat cadence instruction"
             );
             assert!(
-                prompt.contains(r#""status":"idle""#),
-                "cli {cli} prompt drops the activation-wait heartbeat command"
+                !prompt.contains(r#""status":"idle""#),
+                "cli {cli} prompt still carries the obsolete activation-wait heartbeat"
             );
 
-            // Assert the POLLING SECTION on its own. The whole-prompt check above is ALSO
-            // satisfied by the unconditional "Heartbeat while active" line, which lives
-            // outside the `CliBehavior` match — so on its own it can never see a behavior arm
-            // that drops the cadence. This is also the assertion that covers the
-            // `get_behavior` catch-all: a CLI added to VALID_CLIS with no mapping arm
-            // silently inherits ActionProne, and only a VALID_CLIS-driven loop notices.
-            let polling = super::get_polling_instructions(
+            let activation = super::get_polling_instructions(
                 cli,
                 "worker-1-task.md",
                 Some("backend"),
                 Some("HEARTBEAT_COMMAND"),
             );
             assert!(
-                polling.contains(&cadence) && polling.contains("HEARTBEAT_COMMAND"),
-                "cli {cli} polling section omits the heartbeat instruction: {polling}"
+                activation.contains("durable queue")
+                    && !activation.contains("HEARTBEAT_COMMAND")
+                    && !activation.contains("while true"),
+                "cli {cli} queue activation still depends on markdown polling: {activation}"
             );
         }
     }
 
-    /// The `ExplicitPolling` loop is one of several cadences enforced by code rather than by
-    /// the model obeying prose — the evaluator and prince poll loops in `templates/` are the
-    /// others, and they are guarded by `heartbeat_loops_sleep_within_the_instructed_cadence`.
-    /// Wherever a sleep sits between two heartbeats, it must satisfy the instruction it
-    /// ships with.
+    /// Queue readiness, not a markdown status loop, is the activation mechanism for every CLI.
     #[test]
-    fn activation_poll_loop_obeys_the_instructed_cadence() {
-        assert!(
-            ACTIVATION_POLL_INTERVAL.as_secs() <= HEARTBEAT_MAX_INTERVAL_SECS,
-            "polling loop sleeps {}s, longer than the instructed {HEARTBEAT_MAX_INTERVAL_SECS}s maximum",
-            ACTIVATION_POLL_INTERVAL.as_secs()
-        );
-        assert!(
-            ACTIVATION_POLL_INTERVAL.as_secs() >= HEARTBEAT_MIN_INTERVAL_SECS,
-            "polling loop sleeps {}s, shorter than the instructed {HEARTBEAT_MIN_INTERVAL_SECS}s minimum",
-            ACTIVATION_POLL_INTERVAL.as_secs()
-        );
+    fn queue_activation_never_polls_the_status_mirror() {
+        for behavior in all_cli_behaviors() {
+            let instructions = super::get_polling_instructions(
+                representative_cli_for(&behavior),
+                "worker-1-task.md",
+                Some("backend"),
+                Some("HEARTBEAT_COMMAND"),
+            );
+            assert!(instructions.contains("Queue Activation"));
+            assert!(!instructions.contains("grep \"^## Status:\""));
+            assert!(!instructions.contains("while true"));
+        }
     }
 
     #[test]
@@ -15541,6 +16106,17 @@ mod tests {
         assert!(status_content.contains(
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
+
+        let learning_tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("submit-learning.md");
+        let learning_content =
+            std::fs::read_to_string(learning_tool_path).expect("read learning tool doc");
+        assert!(learning_content.contains("success|partial|failed|unreviewed"));
+        assert!(learning_content.contains("ungraded proposal awaiting authorized review"));
     }
 
     fn shared_meta_harness_policy() -> HiveExecutionPolicy {
@@ -15683,8 +16259,10 @@ mod tests {
         assert!(shared_prompt.contains(r#""agent_id":"session-modern-worker-1""#));
         assert!(shared_prompt.contains(r#""status":"completed""#));
         assert!(shared_prompt.contains("Begin only when Status is ACTIVE"));
-        assert!(shared_prompt.contains("Polling Protocol (MANDATORY)"));
-        assert!(shared_prompt.contains("while true; do"));
+        assert!(shared_prompt.contains("Queue Activation"));
+        assert!(shared_prompt.contains("human-readable mirror"));
+        assert!(!shared_prompt.contains("Polling Protocol (MANDATORY)"));
+        assert!(!shared_prompt.contains("while true; do"));
         assert!(!shared_prompt.contains("full access to Claude Code tools"));
 
         let isolated_policy = HiveExecutionPolicy {

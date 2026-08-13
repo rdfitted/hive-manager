@@ -5,11 +5,19 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use crate::coordination::{CoordinationMessage, StateManager};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::orchestrator::work_graph::review::ReviewExpansionSidecar;
+use crate::orchestrator::work_graph::runtime::{
+    record_review_verdict_and_record, route_failed_verdict_and_record, GraphCompositionState,
+    ReviewVerdict,
+};
+use crate::orchestrator::work_graph::{
+    WorkGraph, WorkGraphOmission, WorkGraphOmissionReason,
+};
 use crate::pty::{AgentConfig, AgentRole};
 use crate::session::{AuthStrategy, SessionController, SessionState};
 
@@ -313,6 +321,10 @@ pub struct DevLoginQuery {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PostVerdictRequest {
     pub verdict: String,
+    /// Exact review-join node this session-wide QA verdict adjudicates. Absent
+    /// remains backward compatible and must never be guessed from the graph.
+    #[serde(default)]
+    pub work_graph_verdict_id: Option<String>,
     #[serde(default)]
     pub commit_sha: Option<String>,
     #[serde(default)]
@@ -507,6 +519,280 @@ fn build_verdict_content(
     Value::Object(content).to_string()
 }
 
+const MISSING_WORK_GRAPH_VERDICT_ID: &str = "qa-verdict:missing-work-graph-verdict-id";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum WorkGraphVerdictRouting {
+    OmittedMissingVerdictId {
+        omission_persisted: bool,
+    },
+    Passed {
+        verdict_id: String,
+        delta_sequence: Option<u64>,
+    },
+    FailedRouted {
+        verdict_id: String,
+        next_verdict_id: String,
+        remediation_id: String,
+        delta_sequence: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkGraphVerdictError {
+    State(String),
+    MissingGraph,
+    MissingSidecar,
+    UnknownVerdict(String),
+    StaleVerdict {
+        requested: String,
+        current: String,
+    },
+    Mutation(String),
+}
+
+impl fmt::Display for WorkGraphVerdictError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::State(message) => formatter.write_str(message),
+            Self::MissingGraph => formatter.write_str(
+                "work_graph_verdict_id was provided, but no persisted work graph exists",
+            ),
+            Self::MissingSidecar => formatter.write_str(
+                "work_graph_verdict_id was provided, but no persisted review expansion sidecar exists",
+            ),
+            Self::UnknownVerdict(verdict_id) => write!(
+                formatter,
+                "work_graph_verdict_id '{verdict_id}' is not present in the review expansion sidecar"
+            ),
+            Self::StaleVerdict { requested, current } => write!(
+                formatter,
+                "work_graph_verdict_id '{requested}' is not the current review verdict '{current}'"
+            ),
+            Self::Mutation(message) => formatter.write_str(message),
+        }
+    }
+}
+
+fn map_work_graph_verdict_error(error: WorkGraphVerdictError) -> ApiError {
+    match error {
+        WorkGraphVerdictError::UnknownVerdict(_) | WorkGraphVerdictError::StaleVerdict { .. } => {
+            ApiError::bad_request(error.to_string())
+        }
+        WorkGraphVerdictError::MissingGraph | WorkGraphVerdictError::MissingSidecar => {
+            ApiError::new(StatusCode::CONFLICT, error.to_string())
+        }
+        WorkGraphVerdictError::State(_) | WorkGraphVerdictError::Mutation(_) => {
+            ApiError::internal(error.to_string())
+        }
+    }
+}
+
+fn load_authoritative_work_graph(
+    state_manager: &StateManager,
+) -> Result<(WorkGraph, Option<GraphCompositionState>), WorkGraphVerdictError> {
+    let composition = state_manager
+        .read_graph_composition_state()
+        .map_err(|error| {
+            WorkGraphVerdictError::State(format!(
+                "Failed to read graph composition for QA verdict: {error}"
+            ))
+        })?;
+    if let Some(composition) = composition {
+        return Ok((composition.graph.clone(), Some(composition)));
+    }
+    let graph = state_manager
+        .read_work_graph()
+        .map_err(|error| {
+            WorkGraphVerdictError::State(format!(
+                "Failed to read work graph for QA verdict: {error}"
+            ))
+        })?
+        .ok_or(WorkGraphVerdictError::MissingGraph)?;
+    Ok((graph, None))
+}
+
+fn persist_work_graph_verdict(
+    state_manager: &StateManager,
+    graph: &WorkGraph,
+    sidecar: &ReviewExpansionSidecar,
+    mut composition: Option<GraphCompositionState>,
+) -> Result<(), WorkGraphVerdictError> {
+    state_manager.write_work_graph(graph).map_err(|error| {
+        WorkGraphVerdictError::State(format!(
+            "Failed to persist work graph after QA verdict: {error}"
+        ))
+    })?;
+    state_manager
+        .write_review_expansion_sidecar(sidecar)
+        .map_err(|error| {
+            WorkGraphVerdictError::State(format!(
+                "Failed to persist review expansion sidecar after QA verdict: {error}"
+            ))
+        })?;
+    if let Some(composition) = composition.as_mut() {
+        composition.graph = graph.clone();
+        composition.reviews = sidecar.clone();
+        state_manager
+            .write_graph_composition_state(composition)
+            .map_err(|error| {
+                WorkGraphVerdictError::State(format!(
+                    "Failed to persist graph composition after QA verdict: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+fn persist_missing_verdict_id_omission(
+    state_manager: &StateManager,
+    graph: &WorkGraph,
+    mut composition: Option<GraphCompositionState>,
+) -> Result<(), WorkGraphVerdictError> {
+    state_manager.write_work_graph(graph).map_err(|error| {
+        WorkGraphVerdictError::State(format!(
+            "Failed to persist missing graph-verdict-id omission: {error}"
+        ))
+    })?;
+    if let Some(composition) = composition.as_mut() {
+        composition.graph = graph.clone();
+        state_manager
+            .write_graph_composition_state(composition)
+            .map_err(|error| {
+                WorkGraphVerdictError::State(format!(
+                    "Failed to persist graph composition omission: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+/// Production graph-verdict boundary called by `post_verdict`. It deliberately
+/// accepts only an explicit verdict id; session-wide QA must never select a
+/// review join by position, kind, or title.
+pub(crate) fn apply_work_graph_verdict(
+    state_manager: &StateManager,
+    session_id: &str,
+    work_graph_verdict_id: Option<&str>,
+    verdict: &str,
+) -> Result<WorkGraphVerdictRouting, WorkGraphVerdictError> {
+    let verdict_id = work_graph_verdict_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if verdict_id.is_none() {
+        let loaded = load_authoritative_work_graph(state_manager);
+        let Ok((mut graph, composition)) = loaded else {
+            tracing::warn!(
+                session_id,
+                omission = MISSING_WORK_GRAPH_VERDICT_ID,
+                "QA verdict has no explicit work-graph verdict id; no graph node was guessed"
+            );
+            return Ok(WorkGraphVerdictRouting::OmittedMissingVerdictId {
+                omission_persisted: false,
+            });
+        };
+        let omission = WorkGraphOmission::new(
+            WorkGraphOmissionReason::ResolutionIncomplete,
+            1,
+            vec![MISSING_WORK_GRAPH_VERDICT_ID.to_string()],
+        );
+        if !graph.omissions.contains(&omission) {
+            graph.omissions.push(omission);
+        }
+        let persisted =
+            persist_missing_verdict_id_omission(state_manager, &graph, composition).is_ok();
+        if !persisted {
+            tracing::warn!(
+                session_id,
+                omission = MISSING_WORK_GRAPH_VERDICT_ID,
+                "Could not persist missing work-graph verdict-id omission"
+            );
+        }
+        return Ok(WorkGraphVerdictRouting::OmittedMissingVerdictId {
+            omission_persisted: persisted,
+        });
+    }
+    let verdict_id = verdict_id.expect("checked above").to_string();
+    let (mut graph, composition) = load_authoritative_work_graph(state_manager)?;
+    let mut sidecar = state_manager
+        .read_review_expansion_sidecar()
+        .map_err(|error| {
+            WorkGraphVerdictError::State(format!(
+                "Failed to read review expansion sidecar for QA verdict: {error}"
+            ))
+        })?
+        .or_else(|| composition.as_ref().map(|state| state.reviews.clone()))
+        .ok_or(WorkGraphVerdictError::MissingSidecar)?;
+
+    if sidecar.record_for_verdict(&verdict_id).is_none() {
+        return Err(WorkGraphVerdictError::UnknownVerdict(verdict_id));
+    }
+
+    let routing = match verdict {
+        "PASS" => {
+            let delta = record_review_verdict_and_record(
+                session_id,
+                &mut graph,
+                &verdict_id,
+                ReviewVerdict::Passed,
+            )
+            .map_err(|error| WorkGraphVerdictError::Mutation(error.to_string()))?;
+            WorkGraphVerdictRouting::Passed {
+                verdict_id: verdict_id.clone(),
+                delta_sequence: delta.map(|delta| delta.sequence),
+            }
+        }
+        "FAIL" => {
+            let record = sidecar
+                .record_for_verdict_mut(&verdict_id)
+                .ok_or_else(|| WorkGraphVerdictError::UnknownVerdict(verdict_id.clone()))?;
+            let current = record
+                .expansion
+                .rounds
+                .last()
+                .map(|round| round.verdict_id.clone())
+                .ok_or_else(|| WorkGraphVerdictError::UnknownVerdict(verdict_id.clone()))?;
+            if current != verdict_id {
+                return Err(WorkGraphVerdictError::StaleVerdict {
+                    requested: verdict_id,
+                    current,
+                });
+            }
+            let (round, delta) = route_failed_verdict_and_record(
+                session_id,
+                &mut graph,
+                &record.template,
+                &mut record.expansion,
+            )
+            .map_err(|error| WorkGraphVerdictError::Mutation(error.to_string()))?;
+            let remediation_id = record
+                .expansion
+                .remediation_ids
+                .last()
+                .cloned()
+                .ok_or_else(|| {
+                    WorkGraphVerdictError::Mutation(
+                        "failed review route did not produce a remediation node".to_string(),
+                    )
+                })?;
+            WorkGraphVerdictRouting::FailedRouted {
+                verdict_id: verdict_id.clone(),
+                next_verdict_id: round.verdict_id,
+                remediation_id,
+                delta_sequence: delta.map(|delta| delta.sequence),
+            }
+        }
+        other => {
+            return Err(WorkGraphVerdictError::Mutation(format!(
+                "Unsupported graph verdict '{other}'"
+            )))
+        }
+    };
+    persist_work_graph_verdict(state_manager, &graph, &sidecar, composition)?;
+    Ok(routing)
+}
+
 pub(crate) fn apply_verdict(
     state: &AppState,
     session_id: &str,
@@ -668,6 +954,18 @@ pub async fn post_verdict(
         );
     }
 
+    // The session verdict and the graph verdict are separate facts. Only an
+    // explicitly supplied join id may mutate the graph; the legacy request
+    // shape records a ResolutionIncomplete omission without selecting a node.
+    let graph_state_manager = StateManager::new(state.storage.session_dir(&session_id));
+    let work_graph_routing = apply_work_graph_verdict(
+        &graph_state_manager,
+        &session_id,
+        req.work_graph_verdict_id.as_deref(),
+        verdict,
+    )
+    .map_err(map_work_graph_verdict_error)?;
+
     let new_state = {
         let controller = state.session_controller.read();
         controller
@@ -684,6 +982,7 @@ pub async fn post_verdict(
         "rationale": rationale,
         "persisted": true,
         "peer_file_written": true,
+        "work_graph": work_graph_routing,
     })))
 }
 

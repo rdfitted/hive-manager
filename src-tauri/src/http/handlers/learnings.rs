@@ -12,20 +12,12 @@ use std::sync::Arc;
 use super::validate_session_id;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
-use crate::storage::{Learning, StorageError};
+use crate::storage::{
+    validate_learning_submission, Learning, LearningSubmission, StorageError,
+};
 
 /// Request to submit a learning
-#[derive(Debug, Deserialize)]
-pub struct SubmitLearningRequest {
-    pub session: String,
-    pub task: String,
-    pub outcome: String,
-    #[serde(default)]
-    pub keywords: Vec<String>,
-    pub insight: String,
-    #[serde(default)]
-    pub files_touched: Vec<String>,
-}
+pub type SubmitLearningRequest = LearningSubmission;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct LearningsFilter {
@@ -59,32 +51,10 @@ fn resolve_project_path(state: &AppState) -> Result<PathBuf, ApiError> {
 /// Validate SubmitLearningRequest fields (session, task, insight, outcome, files_touched).
 /// Shared by submit_learning and submit_learning_for_session.
 fn validate_submit_learning_request(req: &SubmitLearningRequest) -> Result<(), ApiError> {
-    if req.session.trim().is_empty() {
-        return Err(ApiError::bad_request("Session cannot be empty"));
-    }
-    if req.task.trim().is_empty() {
-        return Err(ApiError::bad_request("Task cannot be empty"));
-    }
-    if req.insight.trim().is_empty() {
-        return Err(ApiError::bad_request("Insight cannot be empty"));
-    }
-    match req.outcome.as_str() {
-        "success" | "partial" | "failed" => {}
-        _ => {
-            return Err(ApiError::bad_request(
-                "Outcome must be one of: success, partial, failed",
-            ));
-        }
-    }
-    for file_path in &req.files_touched {
-        if file_path.contains("..") || file_path.starts_with('/') || file_path.contains('\\') {
-            return Err(ApiError::bad_request(format!(
-                "Invalid file path: {}",
-                file_path
-            )));
-        }
-    }
-    Ok(())
+    validate_learning_submission(req).map_err(|error| match error {
+        StorageError::InvalidLearning(message) => ApiError::bad_request(message),
+        other => ApiError::internal(other.to_string()),
+    })
 }
 
 /// Build a Learning from a validated SubmitLearningRequest.
@@ -235,19 +205,21 @@ pub async fn submit_learning_for_session(
     Json(req): Json<SubmitLearningRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     validate_session_id(&session_id)?;
-    validate_submit_learning_request(&req)?;
-    let (learning, learning_id) = learning_from_request(req);
-
-    state
+    let submitted = state
         .storage
-        .append_learning_session(&session_id, &learning)
-        .map_err(|e| ApiError::internal(format!("Failed to save learning: {}", e)))?;
+        .submit_learning_session(&session_id, &req)
+        .map_err(|error| match error {
+            StorageError::InvalidLearning(message) | StorageError::InvalidPath(message) => {
+                ApiError::bad_request(message)
+            }
+            other => ApiError::internal(format!("Failed to save learning: {other}")),
+        })?;
 
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "message": "Learning submitted successfully",
-            "learning_id": learning_id,
+            "learning_id": submitted.learning_id,
         })),
     ))
 }
@@ -314,4 +286,31 @@ pub async fn get_project_dna_for_session(
     Ok(Json(json!({
         "content": content
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_submit_learning_request, SubmitLearningRequest};
+
+    fn request(outcome: &str) -> SubmitLearningRequest {
+        SubmitLearningRequest {
+            session: "retro-session".to_string(),
+            task: "post-run graph retro".to_string(),
+            outcome: outcome.to_string(),
+            keywords: vec!["work-graph".to_string()],
+            insight: "archive-backed promotion proposal".to_string(),
+            files_touched: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn learning_outcome_accepts_unreviewed_but_rejects_unknown_values() {
+        for outcome in ["success", "partial", "failed", "unreviewed"] {
+            assert!(
+                validate_submit_learning_request(&request(outcome)).is_ok(),
+                "{outcome} remains a sanctioned outcome"
+            );
+        }
+        assert!(validate_submit_learning_request(&request("anything-goes")).is_err());
+    }
 }

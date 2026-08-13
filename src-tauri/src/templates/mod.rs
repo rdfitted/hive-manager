@@ -1,7 +1,7 @@
 // Template engine module - infrastructure for future prompt template features
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -114,6 +114,10 @@ pub struct SessionTemplate {
     pub mode: SessionMode,
     pub cells: Vec<CellTemplate>,
     pub workspace_strategy: WorkspaceStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_graph_archetype: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub work_graph_parameters: BTreeMap<String, String>,
     pub is_builtin: bool,
 }
 
@@ -167,6 +171,8 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
             ],
             workspace_strategy: WorkspaceStrategy::SharedCell,
+            work_graph_archetype: None,
+            work_graph_parameters: BTreeMap::new(),
             is_builtin: true,
         },
         // NOTE: Research mode is intentionally NOT exposed as a builtin SessionTemplate.
@@ -210,6 +216,8 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
             ],
             workspace_strategy: WorkspaceStrategy::SharedCell,
+            work_graph_archetype: None,
+            work_graph_parameters: BTreeMap::new(),
             is_builtin: true,
         },
         SessionTemplate {
@@ -241,6 +249,8 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 },
             ],
             workspace_strategy: WorkspaceStrategy::IsolatedCell,
+            work_graph_archetype: None,
+            work_graph_parameters: BTreeMap::new(),
             is_builtin: true,
         },
     ]
@@ -2188,7 +2198,7 @@ impl Default for TemplateEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use crate::pty::WorkerRole;
 
@@ -2200,10 +2210,29 @@ mod tests {
 
     #[test]
     fn session_template_roundtrip() {
-        let template = builtin_session_templates().remove(0);
+        let mut template = builtin_session_templates().remove(0);
+        template.work_graph_archetype = Some("feature-build".to_string());
+        template.work_graph_parameters =
+            BTreeMap::from([("component".to_string(), "billing".to_string())]);
         let json = serde_json::to_string(&template).unwrap();
         let decoded: SessionTemplate = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, template);
+    }
+
+    #[test]
+    fn legacy_session_template_defaults_to_no_work_graph_archetype() {
+        let legacy = r#"{
+            "id":"legacy-hive",
+            "name":"Legacy Hive",
+            "description":"Pre-archetype template",
+            "mode":"hive",
+            "cells":[],
+            "workspace_strategy":"shared_cell",
+            "is_builtin":false
+        }"#;
+        let decoded: SessionTemplate = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.work_graph_archetype, None);
+        assert!(decoded.work_graph_parameters.is_empty());
     }
 
     #[test]
@@ -2216,6 +2245,11 @@ mod tests {
         assert!(catalog.templates.len() >= 3);
         assert!(catalog.role_packs.len() >= 4);
         assert!(catalog.templates.iter().all(|template| template.is_builtin));
+        assert!(catalog
+            .templates
+            .iter()
+            .all(|template| template.work_graph_archetype.is_none()
+                && template.work_graph_parameters.is_empty()));
     }
 
     #[test]
