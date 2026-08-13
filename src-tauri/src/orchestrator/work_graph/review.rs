@@ -99,7 +99,7 @@ impl ReviewTemplate {
 }
 
 /// Generated identifiers for one target's bounded review expansion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewExpansion {
     pub template_id: String,
     pub target_id: TaskId,
@@ -107,10 +107,81 @@ pub struct ReviewExpansion {
     pub remediation_ids: Vec<TaskId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewRoundExpansion {
     pub lens_ids: Vec<TaskId>,
     pub verdict_id: TaskId,
+}
+
+/// Persisted evaluator-boundary state for one template/target expansion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewExpansionRecord {
+    pub template: ReviewTemplate,
+    pub expansion: ReviewExpansion,
+}
+
+/// Serializable sidecar kept beside the authoritative graph. Runtime verdict
+/// handlers load a record by verdict id, mutate it with the graph, then persist
+/// the updated sidecar atomically at their lifecycle boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewExpansionSidecar {
+    #[serde(default)]
+    pub records: Vec<ReviewExpansionRecord>,
+}
+
+impl ReviewExpansionSidecar {
+    pub fn from_expansions(
+        templates: &[ReviewTemplate],
+        expansions: Vec<ReviewExpansion>,
+    ) -> Result<Self, ReviewGraphError> {
+        let templates: BTreeMap<_, _> = templates
+            .iter()
+            .map(|template| (template.id.as_str(), template))
+            .collect();
+        let mut records = Vec::with_capacity(expansions.len());
+        for expansion in expansions {
+            let template = templates.get(expansion.template_id.as_str()).ok_or_else(|| {
+                ReviewGraphError::TemplateMismatch {
+                    expected: expansion.template_id.clone(),
+                    actual: "missing persisted template".to_string(),
+                }
+            })?;
+            records.push(ReviewExpansionRecord {
+                template: (*template).clone(),
+                expansion,
+            });
+        }
+        records.sort_by(|left, right| {
+            left.expansion
+                .target_id
+                .cmp(&right.expansion.target_id)
+                .then(left.template.id.cmp(&right.template.id))
+        });
+        Ok(Self { records })
+    }
+
+    pub fn record_for_verdict(&self, verdict_id: &str) -> Option<&ReviewExpansionRecord> {
+        self.records.iter().find(|record| {
+            record
+                .expansion
+                .rounds
+                .iter()
+                .any(|round| round.verdict_id == verdict_id)
+        })
+    }
+
+    pub fn record_for_verdict_mut(
+        &mut self,
+        verdict_id: &str,
+    ) -> Option<&mut ReviewExpansionRecord> {
+        self.records.iter_mut().find(|record| {
+            record
+                .expansion
+                .rounds
+                .iter()
+                .any(|round| round.verdict_id == verdict_id)
+        })
+    }
 }
 
 /// An optional wave boundary. The false default is load-bearing: ordinary

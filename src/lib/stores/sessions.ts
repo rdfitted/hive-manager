@@ -74,6 +74,8 @@ export interface HiveLaunchConfig {
   queen_config: AgentConfig;
   workers: AgentConfig[];
   execution_policy: HiveLaunchPolicy;
+  work_graph_archetype?: string | null;
+  work_graph_parameters?: Record<string, string>;
   prompt?: string;
   with_planning?: boolean;
   with_evaluator?: boolean;

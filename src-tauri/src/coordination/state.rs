@@ -8,6 +8,8 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::orchestrator::work_graph::WorkGraph;
+use crate::orchestrator::work_graph::review::ReviewExpansionSidecar;
+use crate::orchestrator::work_graph::runtime::GraphCompositionState;
 use crate::pty::WorkerRole;
 
 use super::{parse_sprint_contract, SprintContract};
@@ -410,6 +412,50 @@ impl StateManager {
             return Ok(None);
         }
 
+        let json = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&json)?))
+    }
+
+    /// Persist evaluator-addressable template plus expansion state beside the
+    /// authoritative graph. This sidecar is optional for legacy sessions.
+    pub fn write_review_expansion_sidecar(
+        &self,
+        sidecar: &ReviewExpansionSidecar,
+    ) -> Result<(), StateError> {
+        self.ensure_state_dir()?;
+        let json = serde_json::to_string_pretty(sidecar)?;
+        self.write_atomic_text(self.state_dir().join("work-graph-reviews.json"), &json)
+    }
+
+    pub fn read_review_expansion_sidecar(
+        &self,
+    ) -> Result<Option<ReviewExpansionSidecar>, StateError> {
+        let path = self.state_dir().join("work-graph-reviews.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let json = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&json)?))
+    }
+
+    /// Persist the full phase-A/phase-B composition state without changing the
+    /// legacy `work-graph.json` reader used by existing queue paths.
+    pub fn write_graph_composition_state(
+        &self,
+        state: &GraphCompositionState,
+    ) -> Result<(), StateError> {
+        self.ensure_state_dir()?;
+        let json = serde_json::to_string_pretty(state)?;
+        self.write_atomic_text(self.state_dir().join("work-graph-composition.json"), &json)
+    }
+
+    pub fn read_graph_composition_state(
+        &self,
+    ) -> Result<Option<GraphCompositionState>, StateError> {
+        let path = self.state_dir().join("work-graph-composition.json");
+        if !path.exists() {
+            return Ok(None);
+        }
         let json = fs::read_to_string(path)?;
         Ok(Some(serde_json::from_str(&json)?))
     }

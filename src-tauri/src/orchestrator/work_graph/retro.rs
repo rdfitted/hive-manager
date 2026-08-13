@@ -122,6 +122,7 @@ pub enum RetroOmissionReason {
     UnsupportedSchemaVersion,
     PlanGraphUnavailable,
     TemplateLineageUnavailable,
+    EvaluatorProvenanceUnavailable,
     EventEvidenceUnavailable,
     RunLedgerEvidenceUnavailable,
     MutationEvidenceUnavailable,
@@ -130,6 +131,7 @@ pub enum RetroOmissionReason {
     ResolutionIncomplete,
     InvalidEvidence,
     NoEligibleEdges,
+    LearningSubmissionFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,7 +146,7 @@ pub struct RetroOmission {
 }
 
 impl RetroOmission {
-    fn new(
+    pub(super) fn new(
         reason: RetroOmissionReason,
         metric: impl Into<String>,
         detail: impl Into<String>,
@@ -159,7 +161,7 @@ impl RetroOmission {
         }
     }
 
-    fn for_archive(mut self, archive_id: &str) -> Self {
+    pub(super) fn for_archive(mut self, archive_id: &str) -> Self {
         self.archive_id = Some(archive_id.to_string());
         self
     }
@@ -188,6 +190,41 @@ impl<T> EvidenceMetric<T> {
         match self {
             Self::Available { value } | Self::Partial { value, .. } => Some(value),
             Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn add_omission(&mut self, omission: RetroOmission) {
+        let current = std::mem::replace(
+            self,
+            Self::Unavailable {
+                omissions: Vec::new(),
+            },
+        );
+        *self = match current {
+            Self::Available { value } => Self::Partial {
+                value,
+                omissions: vec![omission],
+            },
+            Self::Partial {
+                value,
+                mut omissions,
+            } => {
+                omissions.push(omission);
+                Self::Partial { value, omissions }
+            }
+            Self::Unavailable { mut omissions } => {
+                omissions.push(omission);
+                Self::Unavailable { omissions }
+            }
+        };
+    }
+
+    fn omissions(&self) -> &[RetroOmission] {
+        match self {
+            Self::Available { .. } => &[],
+            Self::Partial { omissions, .. } | Self::Unavailable { omissions } => {
+                omissions
+            }
         }
     }
 }
@@ -363,10 +400,15 @@ pub struct TemplateAggregate {
     pub additional_attempts_by_node: BTreeMap<String, usize>,
     pub remediation_detours_by_node: BTreeMap<String, usize>,
     pub sibling_barrier_idle_millis_by_checkpoint: BTreeMap<String, i64>,
-    pub caught_defects: Option<usize>,
-    pub escaped_defects: Option<usize>,
+    pub review_efficacy: EvidenceMetric<ReviewEfficacyAggregate>,
     pub gotcha_edges_eligible: Option<usize>,
     pub gotcha_targets_attempted: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReviewEfficacyAggregate {
+    pub caught_defects: usize,
+    pub escaped_defects: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +437,22 @@ pub struct RetroReport {
     pub learning_submissions: Vec<UnreviewedLearningSubmission>,
     #[serde(default)]
     pub omissions: Vec<RetroOmission>,
+}
+
+impl RetroReport {
+    pub(super) fn unavailable(
+        evaluator_id: impl Into<String>,
+        omission: RetroOmission,
+    ) -> Self {
+        Self {
+            evaluator_id: evaluator_id.into(),
+            runs: Vec::new(),
+            template_aggregates: Vec::new(),
+            promotion_proposals: Vec::new(),
+            learning_submissions: Vec::new(),
+            omissions: vec![omission],
+        }
+    }
 }
 
 pub fn evaluate_archive_paths(
@@ -1051,6 +1109,19 @@ fn apply_review_escape_revisions(
                     continue;
                 }
                 let Some(reference) = effect.reference.as_deref() else {
+                    let omission = RetroOmission::new(
+                        RetroOmissionReason::ResolutionIncomplete,
+                        "review_efficacy",
+                        "confirmed review_escape effect has no <archive_id>#<verdict_id> reference; no prior verdict was guessed",
+                        vec![effect.source_ref.clone()],
+                    )
+                    .for_archive(&discovering.archive.archive_id);
+                    downgrade_prior_review_evidence(
+                        runs,
+                        discovering.archive.archived_at,
+                        &omission,
+                    );
+                    omissions.push(omission);
                     continue;
                 };
                 let Some((archive_id, verdict_id)) = reference.split_once('#') else {
@@ -1128,6 +1199,19 @@ fn apply_review_escape_revisions(
                 });
             }
         }
+    }
+}
+
+fn downgrade_prior_review_evidence(
+    runs: &mut [PerRunRetro],
+    discovering_at: DateTime<Utc>,
+    omission: &RetroOmission,
+) {
+    for run in runs
+        .iter_mut()
+        .filter(|run| run.archived_at < discovering_at)
+    {
+        run.reviews.add_omission(omission.clone());
     }
 }
 
@@ -1348,8 +1432,9 @@ fn aggregate_templates(runs: &[PerRunRetro]) -> Vec<TemplateAggregate> {
                 additional_attempts_by_node: BTreeMap::new(),
                 remediation_detours_by_node: BTreeMap::new(),
                 sibling_barrier_idle_millis_by_checkpoint: BTreeMap::new(),
-                caught_defects: None,
-                escaped_defects: None,
+                review_efficacy: EvidenceMetric::Available {
+                    value: ReviewEfficacyAggregate::default(),
+                },
                 gotcha_edges_eligible: None,
                 gotcha_targets_attempted: None,
             });
@@ -1385,9 +1470,14 @@ fn aggregate_templates(runs: &[PerRunRetro]) -> Vec<TemplateAggregate> {
         }
         if let Some(reviews) = run.reviews.value() {
             for review in reviews {
-                *aggregate.caught_defects.get_or_insert(0) += review.caught_defects;
-                *aggregate.escaped_defects.get_or_insert(0) += review.escaped_defects;
+                if let Some(review_aggregate) = aggregate.review_efficacy.value_mut() {
+                    review_aggregate.caught_defects += review.caught_defects;
+                    review_aggregate.escaped_defects += review.escaped_defects;
+                }
             }
+        }
+        for omission in run.reviews.omissions() {
+            aggregate.review_efficacy.add_omission(omission.clone());
         }
         if let Some(gotcha) = run.gotcha_edge_hit_rate.value() {
             if gotcha.rate_defined {

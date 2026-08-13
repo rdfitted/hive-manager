@@ -5,6 +5,15 @@
     import AgentConfigEditor from '../AgentConfigEditor.svelte';
     import { routeFusionTemplateCells } from './templateLaunch';
 
+    type WorkGraphParameterRow = { id: number; key: string; value: string };
+
+    const WORK_GRAPH_ARCHETYPES = [
+        { id: 'feature-build', label: 'Feature build' },
+        { id: 'bug-hunt', label: 'Bug hunt' },
+        { id: 'migration', label: 'Migration' },
+        { id: 'audit', label: 'Audit' },
+    ];
+
     export let template: SessionTemplate | null = null;
 
     const dispatch = createEventDispatcher();
@@ -18,6 +27,11 @@
     // not use custom templates. Normalize historical template values here.
     let workspace_strategy: SessionTemplate['workspace_strategy'] =
         template?.workspace_strategy === 'isolated_cell' ? 'isolated_cell' : 'shared_cell';
+    let work_graph_archetype = template?.work_graph_archetype?.trim() ?? '';
+    let nextWorkGraphParameterId = 0;
+    let workGraphParameterRows: WorkGraphParameterRow[] = Object.entries(
+        template?.work_graph_parameters ?? {},
+    ).map(([key, value]) => ({ id: nextWorkGraphParameterId++, key, value }));
     let is_builtin = template?.is_builtin || false;
     let error = '';
 
@@ -34,6 +48,25 @@
 
     function removeCell(index: number) {
         cells = cells.filter((_, i) => i !== index);
+    }
+
+    function addWorkGraphParameter() {
+        workGraphParameterRows = [
+            ...workGraphParameterRows,
+            { id: nextWorkGraphParameterId++, key: '', value: '' },
+        ];
+    }
+
+    function removeWorkGraphParameter(id: number) {
+        workGraphParameterRows = workGraphParameterRows.filter((parameter) => parameter.id !== id);
+    }
+
+    function workGraphParametersFromRows(): Record<string, string> {
+        return Object.fromEntries(
+            workGraphParameterRows
+                .map(({ key, value }) => [key.trim(), value.trim()] as const)
+                .filter(([key, value]) => key.length > 0 && value.length > 0),
+        );
     }
 
     async function handleSave() {
@@ -55,6 +88,10 @@
             mode,
             cells,
             workspace_strategy: mode === 'hive' ? workspace_strategy : 'isolated_cell',
+            work_graph_archetype: mode === 'hive' ? work_graph_archetype.trim() || null : null,
+            work_graph_parameters: mode === 'hive' && work_graph_archetype.trim()
+                ? workGraphParametersFromRows()
+                : {},
             is_builtin: false // User saved templates are never builtin
         };
 
@@ -117,6 +154,43 @@
                 {/if}
             </div>
         </div>
+
+        {#if mode === 'hive'}
+            <div class="form-group">
+                <label for="template-work-graph-archetype">Work-Graph Archetype (optional)</label>
+                <input
+                    class="lattice-input"
+                    id="template-work-graph-archetype"
+                    list="template-work-graph-archetypes"
+                    bind:value={work_graph_archetype}
+                    placeholder="None — preserve legacy planning"
+                />
+                <datalist id="template-work-graph-archetypes">
+                    {#each WORK_GRAPH_ARCHETYPES as archetype}
+                        <option value={archetype.id}>{archetype.label}</option>
+                    {/each}
+                </datalist>
+            </div>
+
+            {#if work_graph_archetype.trim()}
+                <div class="parameter-editor">
+                    <div class="section-header">
+                        <div>
+                            <h4>Parameter overrides</h4>
+                            <span class="field-hint">Optional string substitutions for the selected archetype.</span>
+                        </div>
+                        <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact" on:click={addWorkGraphParameter}>+ Add Override</button>
+                    </div>
+                    {#each workGraphParameterRows as parameter (parameter.id)}
+                        <div class="parameter-row">
+                            <input class="lattice-input" aria-label="Parameter name" bind:value={parameter.key} placeholder="component" />
+                            <input class="lattice-input" aria-label="Parameter value" bind:value={parameter.value} placeholder="authentication" />
+                            <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--compact" on:click={() => removeWorkGraphParameter(parameter.id)}>Remove</button>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
+        {/if}
     </div>
 
     <div class="cells-section">
@@ -213,6 +287,26 @@
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 12px;
+    }
+
+    .parameter-editor {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .parameter-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+    }
+
+    .field-hint {
+        display: block;
+        margin-top: 4px;
+        color: var(--text-disabled);
+        font-size: 11px;
     }
 
     label {

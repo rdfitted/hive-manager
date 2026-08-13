@@ -23,6 +23,14 @@
   import { defaultRoles } from '$lib/config/clis';
 
   type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'research' | 'debate';
+  type WorkGraphParameterRow = { id: number; key: string; value: string };
+
+  const WORK_GRAPH_ARCHETYPES = [
+    { id: 'feature-build', label: 'Feature build' },
+    { id: 'bug-hunt', label: 'Bug hunt' },
+    { id: 'migration', label: 'Migration' },
+    { id: 'audit', label: 'Audit' },
+  ];
 
   export let show: boolean = false;
   export let launching: boolean = false;
@@ -216,7 +224,33 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let queenMaxDepth = defaultHiveForm.queenMaxDepth;
   let principalMaxChildren = defaultHiveForm.principalMaxChildren;
   let principalMaxDepth = defaultHiveForm.principalMaxDepth;
+  let workGraphArchetype = defaultHiveForm.workGraphArchetype ?? '';
+  let nextWorkGraphParameterId = 0;
+  let workGraphParameterRows: WorkGraphParameterRow[] = [];
   let showHiveAdvanced = false;
+
+  function parameterRowsFromRecord(parameters: Record<string, string>): WorkGraphParameterRow[] {
+    return Object.entries(parameters).map(([key, value]) => ({
+      id: nextWorkGraphParameterId++,
+      key,
+      value,
+    }));
+  }
+
+  function workGraphParametersFromRows(): Record<string, string> {
+    return Object.fromEntries(workGraphParameterRows.map(({ key, value }) => [key, value]));
+  }
+
+  function addWorkGraphParameter() {
+    workGraphParameterRows = [
+      ...workGraphParameterRows,
+      { id: nextWorkGraphParameterId++, key: '', value: '' },
+    ];
+  }
+
+  function removeWorkGraphParameter(id: number) {
+    workGraphParameterRows = workGraphParameterRows.filter((parameter) => parameter.id !== id);
+  }
 
   // Research workers (researchers) - each with its own selectable model
   let researchWorkers: LaunchWorkerConfig[] = [
@@ -265,6 +299,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     sessionName = template.name;
     mode = template.mode as SessionMode;
     workspaceStrategy = template.workspace_strategy === 'isolated_cell' ? 'isolated_cell' : 'shared_cell';
+    workGraphArchetype = template.mode === 'hive'
+      ? template.work_graph_archetype?.trim() ?? ''
+      : '';
+    workGraphParameterRows = template.mode === 'hive'
+      ? parameterRowsFromRecord(template.work_graph_parameters ?? {})
+      : [];
 
     if (template.mode === 'hive') {
       const queenCell = template.cells.find((cell) => cell.role.trim().toLowerCase() === 'queen');
@@ -416,6 +456,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let withPlanning = true;
   let withEvaluator = true;
   let withSoloEvaluator = false;
+  $: if (workGraphArchetype.trim() && !withPlanning) withPlanning = true;
   let evaluatorConfig: AgentConfig = {
     cli: defaultRoles.evaluator.cli,
     model: defaultRoles.evaluator.model,
@@ -493,6 +534,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           queenMaxDepth,
           principalMaxChildren,
           principalMaxDepth,
+          workGraphArchetype: workGraphArchetype.trim() || null,
+          workGraphParameters: workGraphParametersFromRows(),
           prompt: prompt || undefined,
           withPlanning,
           smokeTest,
@@ -793,6 +836,49 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
               </div>
             </fieldset>
 
+            <fieldset class="policy-fieldset">
+              <legend>Work-graph archetype (optional)</legend>
+              <div class="field">
+                <label for="work-graph-archetype">Archetype</label>
+                <input
+                  id="work-graph-archetype"
+                  class="lattice-input"
+                  list="work-graph-archetypes"
+                  bind:value={workGraphArchetype}
+                  placeholder="None — preserve the planner's existing topology"
+                />
+                <datalist id="work-graph-archetypes">
+                  {#each WORK_GRAPH_ARCHETYPES as archetype}
+                    <option value={archetype.id}>{archetype.label}</option>
+                  {/each}
+                </datalist>
+                <span class="field-hint">Choose a built-in ID or enter an institutional catalog ID. Leaving this blank preserves legacy planning behavior.</span>
+              </div>
+
+              {#if workGraphArchetype.trim()}
+                <div class="parameter-editor">
+                  <div class="section-header">
+                    <div>
+                      <h4>Parameter overrides</h4>
+                      <p class="section-description">Optional string substitutions applied when the skeleton is composed.</p>
+                    </div>
+                    <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact lattice-btn--dashed" on:click={addWorkGraphParameter}>
+                      + Add override
+                    </button>
+                  </div>
+                  {#each workGraphParameterRows as parameter (parameter.id)}
+                    <div class="parameter-row">
+                      <input class="lattice-input" aria-label="Parameter name" bind:value={parameter.key} placeholder="component" />
+                      <input class="lattice-input" aria-label="Parameter value" bind:value={parameter.value} placeholder="authentication" />
+                      <button type="button" class="lattice-btn lattice-btn--ghost lattice-btn--danger lattice-btn--compact" on:click={() => removeWorkGraphParameter(parameter.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </fieldset>
+
             <div class="delegation-grid">
               <div class="field">
                 <label for="queen-delegation">Queen delegation</label>
@@ -894,10 +980,14 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
             {#if mode === 'hive' || mode === 'debate'}
               <div class="checkbox-group">
                 <label class="checkbox-label lattice-selectable">
-                  <input type="checkbox" bind:checked={withPlanning} />
+                  <input type="checkbox" bind:checked={withPlanning} disabled={Boolean(workGraphArchetype.trim())} />
                   <div class="checkbox-text">
                     <span class="checkbox-title">Enable Planning Phase</span>
-                    <span class="checkbox-description">Create a scoped plan before implementation begins.</span>
+                    <span class="checkbox-description">
+                      {workGraphArchetype.trim()
+                        ? 'Required so the Master Planner starts from the selected work-graph skeleton.'
+                        : 'Create a scoped plan before implementation begins.'}
+                    </span>
                   </div>
                 </label>
               </div>
@@ -1439,6 +1529,19 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
+  }
+
+  .parameter-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .parameter-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
   }
 
   .section-description {

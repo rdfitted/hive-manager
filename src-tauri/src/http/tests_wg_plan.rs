@@ -1,9 +1,10 @@
 //! Plan-emission and PlanReady-gate tests for issue #211.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use parking_lot::RwLock;
 use tempfile::TempDir;
 
@@ -14,7 +15,7 @@ use crate::orchestrator::work_graph::validate::{
     validate_plan_ready, PlanReadyWarning,
 };
 use crate::orchestrator::work_graph::{
-    EdgeKind, EdgeProvenance, WorkGraphOmissionReason,
+    EdgeKind, EdgeProvenance, NodeStatus, WorkGraphOmissionReason,
 };
 use crate::pty::PtyManager;
 use crate::session::{
@@ -169,6 +170,252 @@ fn valid_plan_persists_queryable_dependency_graph_and_contracts() {
 }
 
 #[test]
+fn no_archetype_preparation_is_an_exact_persistence_noop() {
+    let (_temp, controller, storage) = controller_with_plan(
+        "no-archetype",
+        Some("# Legacy plan\n\n## Tasks\n- [ ] T1: Existing root\n"),
+    );
+    let project_path = controller.get_session("no-archetype").unwrap().project_path;
+
+    let composition = controller
+        .prepare_initial_work_graph(
+            &project_path,
+            "no-archetype",
+            None,
+            &BTreeMap::new(),
+        )
+        .expect("missing archetype keeps the legacy launch path");
+
+    assert!(composition.is_none());
+    assert!(
+        StateManager::new(storage.session_dir("no-archetype"))
+            .read_graph_composition_state()
+            .unwrap()
+            .is_none(),
+        "legacy sessions must not gain a composition sidecar"
+    );
+}
+
+#[test]
+fn selected_archetype_persists_skeleton_and_planner_contract_before_plan_ready() {
+    let (_temp, controller, storage) = controller_with_plan(
+        "phase-a",
+        Some("# Planner output\n\n## Tasks\n- [ ] T1: Planner-specific task\n"),
+    );
+    let project_path = controller.get_session("phase-a").unwrap().project_path;
+    let parameters = BTreeMap::from([("component".to_string(), "billing".to_string())]);
+
+    let composition = controller
+        .prepare_initial_work_graph(
+            &project_path,
+            "phase-a",
+            Some("feature-build"),
+            &parameters,
+        )
+        .expect("selected archetype composes")
+        .expect("selected archetype produces state");
+
+    let persisted = StateManager::new(storage.session_dir("phase-a"))
+        .read_graph_composition_state()
+        .unwrap()
+        .expect("Phase A state is durable before PlanReady");
+    assert_eq!(persisted, composition);
+    assert_eq!(
+        persisted.lineage.as_ref().unwrap().template_id,
+        "feature-build"
+    );
+    assert!(persisted.graph.nodes.iter().any(|node| node.id == "design"));
+    assert!(
+        persisted
+            .graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == crate::orchestrator::work_graph::NodeKind::Task)
+            .any(|node| node.status == NodeStatus::Ready),
+        "initial schedulable nodes are promoted after stamping"
+    );
+
+    let prompt = SessionController::graph_skeleton_prompt_section(&persisted).unwrap();
+    assert!(prompt.contains("Every listed node ID is reserved and stable"));
+    assert!(prompt.contains("\"id\": \"design\""));
+    assert!(prompt.contains("\"contract\""));
+    assert!(prompt.contains("(deps: ...)"));
+}
+
+#[test]
+fn launch_time_retro_provenance_preserves_departed_identity_sets() {
+    let (_temp, controller, storage) = controller_with_plan(
+        "retro-provenance",
+        Some("# Plan\n\n## Tasks\n- [ ] T1: Root\n"),
+    );
+    let project_path = controller
+        .get_session("retro-provenance")
+        .unwrap()
+        .project_path;
+    controller
+        .persist_retro_provenance(
+            &project_path,
+            "retro-provenance",
+            vec!["retro-provenance-master-planner".to_string()],
+            vec![
+                "retro-provenance-queen".to_string(),
+                "retro-provenance-prince".to_string(),
+            ],
+        )
+        .expect("identity provenance is persisted before agents depart");
+
+    let path = storage
+        .session_dir("retro-provenance")
+        .join("state")
+        .join("retro-evaluator-provenance.json");
+    let provenance: crate::orchestrator::work_graph::archive::RetroEvaluatorProvenance =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+        provenance.evaluator_id,
+        "retro-provenance-retro-evaluator"
+    );
+    assert_eq!(
+        provenance.planner_agent_ids,
+        vec!["retro-provenance-master-planner"]
+    );
+    assert_eq!(
+        provenance.supervisor_agent_ids,
+        vec!["retro-provenance-queen", "retro-provenance-prince"]
+    );
+}
+
+#[test]
+fn phase_b_reconciliation_is_idempotent_after_a_persisted_retry() {
+    let (_temp, controller, storage) = controller_with_plan(
+        "phase-b-retry",
+        Some(
+            "# Reconciled plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design) (outputs: integration)\n",
+        ),
+    );
+    let project_path = controller
+        .get_session("phase-b-retry")
+        .unwrap()
+        .project_path;
+    controller
+        .prepare_initial_work_graph(
+            &project_path,
+            "phase-b-retry",
+            Some("feature-build"),
+            &BTreeMap::from([("component".to_string(), "billing".to_string())]),
+        )
+        .unwrap();
+    let planner = parse_plan_markdown_checked(
+        "# Reconciled plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design) (outputs: integration)\n",
+    )
+    .map(|plan| crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan))
+    .unwrap();
+    let state_manager = StateManager::new(storage.session_dir("phase-b-retry"));
+
+    let once = SessionController::reconcile_planner_graph_with_persisted_skeleton(
+        &state_manager,
+        &planner,
+    )
+    .unwrap()
+    .unwrap();
+    state_manager.write_graph_composition_state(&once).unwrap();
+    let twice = SessionController::reconcile_planner_graph_with_persisted_skeleton(
+        &state_manager,
+        &planner,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(once, twice, "Phase B retry must be an exact no-op");
+    assert!(twice.graph.nodes.iter().any(|node| node.id == "design"));
+    assert!(twice.graph.nodes.iter().any(|node| node.id == "T1"));
+    assert!(twice.graph.edges.iter().any(|edge| {
+        edge.source == "design" && edge.target == "T1" && edge.kind == EdgeKind::DependsOn
+    }));
+}
+
+#[test]
+fn mark_plan_ready_persists_one_authoritative_reconciled_graph() {
+    let plan = "# Reconciled plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design) (acceptance: reconciled)\n";
+    let (_temp, controller, storage) =
+        controller_with_plan("composed-plan-ready", Some(plan));
+    let project_path = controller
+        .get_session("composed-plan-ready")
+        .unwrap()
+        .project_path;
+    controller
+        .prepare_initial_work_graph(
+            &project_path,
+            "composed-plan-ready",
+            Some("feature-build"),
+            &BTreeMap::from([("component".to_string(), "billing".to_string())]),
+        )
+        .unwrap();
+
+    controller
+        .mark_plan_ready("composed-plan-ready")
+        .expect("Phase B reaches the real PlanReady boundary");
+
+    let state_manager = StateManager::new(storage.session_dir("composed-plan-ready"));
+    let composition = state_manager
+        .read_graph_composition_state()
+        .unwrap()
+        .unwrap();
+    let authoritative = state_manager.read_work_graph().unwrap().unwrap();
+    assert_eq!(authoritative, composition.graph);
+    assert!(authoritative.nodes.iter().any(|node| node.id == "design"));
+    assert!(authoritative.nodes.iter().any(|node| node.id == "T1"));
+    assert!(composition.lineage.is_some());
+    assert!(
+        !composition.graph.omissions.is_empty(),
+        "missing codegraph/wiki inputs remain explicitly reported"
+    );
+}
+
+#[test]
+fn completed_session_schedules_the_composed_archive_to_retro_hook() {
+    let temp = tempfile::tempdir().expect("temporary completion fixture");
+    let project_path = temp.path().join("project");
+    std::fs::create_dir_all(&project_path).unwrap();
+    let storage = Arc::new(
+        SessionStorage::new_with_base(temp.path().join("storage"))
+            .expect("isolated session storage"),
+    );
+    let mut session = planning_session("retro-completion", &project_path);
+    session.state = SessionState::Running;
+    session.last_activity_at = Utc::now() - Duration::minutes(11);
+    let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+    controller.set_storage(Arc::clone(&storage));
+    controller.insert_test_session(session);
+
+    controller
+        .mark_session_completed("retro-completion")
+        .expect("terminal transition is not reversed by detached retro work");
+
+    let retro_dir = storage
+        .session_dir("retro-completion")
+        .join("archive")
+        .join("work-graph-retros");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let report_exists = std::fs::read_dir(&retro_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"));
+        if report_exists {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "composed archive-to-retro hook did not persist a report"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_session_state(&controller, "retro-completion", SessionState::Completed);
+}
+
+#[test]
 fn explicit_graph_ignores_legacy_bullets_and_numbered_task_details() {
     let plan = r#"# Generated-plan shape
 
@@ -239,6 +486,13 @@ Keep the existing parser behavior.
     assert_eq!(graph.nodes.len(), 2);
     assert!(graph.edges.is_empty());
     assert!(graph.omissions.is_empty());
+    assert!(
+        StateManager::new(storage.session_dir("legacy-plan"))
+            .read_graph_composition_state()
+            .unwrap()
+            .is_none(),
+        "no-archetype PlanReady remains on the exact legacy persistence path"
+    );
 }
 
 #[test]

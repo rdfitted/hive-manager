@@ -266,6 +266,10 @@ pub struct CreateSessionRequest {
     pub evaluator_model: Option<String>,
     pub qa_workers: Option<Vec<QaWorkerConfig>>,
     pub smoke_test: Option<bool>,
+    #[serde(default)]
+    pub work_graph_archetype: Option<String>,
+    #[serde(default)]
+    pub work_graph_parameters: std::collections::BTreeMap<String, String>,
     pub name: Option<String>,
     pub color: Option<String>,
 }
@@ -430,6 +434,8 @@ pub async fn create_session(
                 evaluator_config,
                 qa_workers: req.qa_workers,
                 smoke_test: req.smoke_test.unwrap_or(false),
+                work_graph_archetype: req.work_graph_archetype,
+                work_graph_parameters: req.work_graph_parameters,
             };
 
             let output = dispatch_session_action(
@@ -839,6 +845,8 @@ pub async fn launch_solo(
         evaluator_config,
         qa_workers: None,
         smoke_test: false,
+        work_graph_archetype: None,
+        work_graph_parameters: Default::default(),
     };
 
     let output = dispatch_session_action(

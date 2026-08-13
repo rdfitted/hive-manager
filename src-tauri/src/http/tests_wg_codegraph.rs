@@ -86,7 +86,7 @@ fn absent_artifact_disables_touches_and_reports_omission() {
     );
 
     let report = derive_codegraph_touches(&mut graph, &codegraph);
-    let detection = conflicting_ready_tasks(&graph, None, WorkspaceStrategy::SharedCell);
+    let detection = conflicting_ready_tasks(&graph, &report, WorkspaceStrategy::SharedCell);
 
     assert!(!report.available);
     assert_eq!(report.touch_edge_count, 0);
@@ -128,7 +128,7 @@ fn ready_overlap_returns_logged_serialization_reason() {
 
     let conflicts = conflicting_ready_tasks(
         &graph,
-        Some(&report.touches),
+        &report,
         WorkspaceStrategy::SharedCell,
     );
 
@@ -146,7 +146,7 @@ fn ready_overlap_returns_logged_serialization_reason() {
 
     let isolated = conflicting_ready_tasks(
         &graph,
-        Some(&report.touches),
+        &report,
         WorkspaceStrategy::IsolatedCell,
     );
     assert_eq!(
@@ -199,7 +199,7 @@ fn partial_resolution_reports_uncovered_rust_language() {
     let report = derive_codegraph_touches(&mut graph, &codegraph);
     let conflicts = conflicting_ready_tasks(
         &graph,
-        Some(&report.touches),
+        &report,
         WorkspaceStrategy::SharedCell,
     );
 
@@ -259,7 +259,7 @@ fn explicit_none_is_a_successful_empty_resolution() {
     let report = derive_codegraph_touches(&mut graph, &codegraph);
     let detection = conflicting_ready_tasks(
         &graph,
-        Some(&report.touches),
+        &report,
         WorkspaceStrategy::SharedCell,
     );
 

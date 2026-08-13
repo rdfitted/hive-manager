@@ -14,9 +14,16 @@ use uuid::Uuid;
 use crate::coordination::StateManager;
 use crate::domain::event::Event;
 use crate::domain::run_journal::{LedgerEntry, RunJournalEntry};
-use crate::storage::{RunJournalStore, SessionStorage};
+use crate::storage::{
+    LearningSubmission, RunJournalStore, SessionStorage,
+};
 
 use super::divergence::{compute_divergence, DivergenceSummary};
+use super::retro::{
+    evaluate_archive_paths, evaluate_completed_session, IndependentEvaluator,
+    RetroArchivePath, RetroOmission, RetroOmissionReason, RetroReport,
+    UNREVIEWED_OUTCOME,
+};
 use super::runtime::{
     derive_runtime_graph, mutation_log_snapshot, reconstruct_structural_history,
     record_omission, GraphMutationDelta, RuntimeOutcome,
@@ -73,6 +80,26 @@ pub struct ArchiveCompletion {
     pub created: bool,
 }
 
+/// Independence provenance captured while planner/supervisor identities are
+/// still live. Completion reads this record rather than guessing departed roles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetroEvaluatorProvenance {
+    pub repo_id: String,
+    pub evaluator_id: String,
+    #[serde(default)]
+    pub planner_agent_ids: Vec<String>,
+    #[serde(default)]
+    pub supervisor_agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveRetroCompletion {
+    pub archive: Option<ArchiveCompletion>,
+    pub report_path: PathBuf,
+    pub report: RetroReport,
+    pub submitted_learning_ids: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum ArchiveError {
     Io(std::io::Error),
@@ -106,14 +133,7 @@ impl From<serde_json::Error> for ArchiveError {
     }
 }
 
-/// Complete the terminal archive synchronously. Callers that run on the session
-/// completion path should use `schedule_completed_session_archive`, which moves
-/// this work off that path and logs failures without changing session outcome.
-pub fn archive_completed_session(
-    storage_base_dir: &Path,
-    run_journal: Option<&RunJournalStore>,
-    session_id: &str,
-) -> Result<ArchiveCompletion, ArchiveError> {
+fn validate_session_id(session_id: &str) -> Result<(), ArchiveError> {
     if session_id.is_empty()
         || session_id.contains("..")
         || session_id.contains('/')
@@ -123,17 +143,153 @@ pub fn archive_completed_session(
             "session id cannot be empty or contain path separators".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn archive_id_for_session(session_id: &str) -> String {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("hive-manager:work-graph:{session_id}").as_bytes(),
+    )
+    .to_string()
+}
+
+fn retro_provenance_path(session_dir: &Path) -> PathBuf {
+    session_dir
+        .join("state")
+        .join("retro-evaluator-provenance.json")
+}
+
+fn retro_report_path(session_dir: &Path, archive_id: &str) -> PathBuf {
+    session_dir
+        .join("archive")
+        .join("work-graph-retros")
+        .join(format!("{archive_id}.json"))
+}
+
+fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ArchiveError> {
+    let parent = path.parent().ok_or_else(|| {
+        ArchiveError::InvalidArchive(format!("no parent directory for {}", path.display()))
+    })?;
+    fs::create_dir_all(parent)?;
+    let mut temp = NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut temp, value)?;
+    temp.persist(path)
+        .map_err(|error| ArchiveError::Io(error.error))?;
+    Ok(())
+}
+
+fn evaluate_archive_corpus(
+    evaluator: &IndependentEvaluator,
+    storage: &SessionStorage,
+    completed_session_dir: &Path,
+    completed_provenance: &RetroEvaluatorProvenance,
+) -> Result<RetroReport, super::retro::RetroError> {
+    let mut paths = Vec::new();
+    let mut provenance_omissions = Vec::new();
+    if let Ok(entries) = fs::read_dir(storage.sessions_dir()) {
+        let mut session_dirs = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        session_dirs.sort();
+        for session_dir in session_dirs {
+            let provenance_path = retro_provenance_path(&session_dir);
+            let provenance = fs::read_to_string(&provenance_path)
+                .ok()
+                .and_then(|json| serde_json::from_str::<RetroEvaluatorProvenance>(&json).ok());
+            let Some(provenance) = provenance else {
+                continue;
+            };
+            if provenance.evaluator_id != completed_provenance.evaluator_id {
+                provenance_omissions.push(RetroOmission::new(
+                    RetroOmissionReason::EvaluatorProvenanceUnavailable,
+                    "retro_corpus",
+                    "archive used a different evaluator identity and was excluded from this corpus",
+                    vec![provenance_path.display().to_string()],
+                ));
+                continue;
+            }
+            if IndependentEvaluator::new(
+                provenance.evaluator_id.clone(),
+                provenance.planner_agent_ids.clone(),
+                provenance.supervisor_agent_ids.clone(),
+            )
+            .is_err()
+            {
+                provenance_omissions.push(RetroOmission::new(
+                    RetroOmissionReason::EvaluatorProvenanceUnavailable,
+                    "retro_corpus",
+                    "archive provenance does not prove evaluator independence and was excluded",
+                    vec![provenance_path.display().to_string()],
+                ));
+                continue;
+            }
+            if let Ok(archive_paths) = list_archives(&session_dir) {
+                paths.extend(archive_paths.into_iter().map(|path| RetroArchivePath {
+                    repo_id: provenance.repo_id.clone(),
+                    path,
+                }));
+            }
+        }
+    }
+    if paths.len() <= 1 {
+        return evaluate_completed_session(
+            evaluator,
+            &completed_provenance.repo_id,
+            completed_session_dir,
+        );
+    }
+    let mut report = evaluate_archive_paths(evaluator, &paths)?;
+    report.omissions.extend(provenance_omissions);
+    Ok(report)
+}
+
+/// Persist the identities needed to prove that the post-run evaluator neither
+/// planned nor supervised this session. The lifecycle owner calls this before
+/// the planner launches, while the complete identity set is still available.
+pub fn persist_retro_evaluator_provenance(
+    storage_base_dir: &Path,
+    session_id: &str,
+    provenance: &RetroEvaluatorProvenance,
+) -> Result<PathBuf, ArchiveError> {
+    validate_session_id(session_id)?;
+    if provenance.repo_id.trim().is_empty() {
+        return Err(ArchiveError::InvalidArchive(
+            "retro provenance repo id cannot be empty".to_string(),
+        ));
+    }
+    IndependentEvaluator::new(
+        provenance.evaluator_id.clone(),
+        provenance.planner_agent_ids.clone(),
+        provenance.supervisor_agent_ids.clone(),
+    )
+    .map_err(|error| ArchiveError::InvalidArchive(error.to_string()))?;
+    let storage = SessionStorage::new_with_base(storage_base_dir.to_path_buf())
+        .map_err(|error| ArchiveError::Storage(error.to_string()))?;
+    let path = retro_provenance_path(&storage.session_dir(session_id));
+    write_atomic_json(&path, provenance)?;
+    Ok(path)
+}
+
+/// Complete the terminal archive synchronously. Callers that run on the session
+/// completion path should use `schedule_completed_session_archive_and_retro`,
+/// which moves this work off that path and logs failures without changing the
+/// session outcome.
+pub fn archive_completed_session(
+    storage_base_dir: &Path,
+    run_journal: Option<&RunJournalStore>,
+    session_id: &str,
+) -> Result<ArchiveCompletion, ArchiveError> {
+    validate_session_id(session_id)?;
     let storage = SessionStorage::new_with_base(storage_base_dir.to_path_buf())
         .map_err(|error| ArchiveError::Storage(error.to_string()))?;
     let session_dir = storage.session_dir(session_id);
     let archive_dir = session_dir.join("archive").join("work-graphs");
     fs::create_dir_all(&archive_dir)?;
 
-    let archive_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("hive-manager:work-graph:{session_id}").as_bytes(),
-    )
-    .to_string();
+    let archive_id = archive_id_for_session(session_id);
     let target = archive_dir.join(format!("{archive_id}.json"));
     if target.exists() {
         return Ok(ArchiveCompletion {
@@ -284,16 +440,174 @@ pub fn archive_completed_session(
     }
 }
 
-/// One-line, non-blocking terminal hook for SessionController. Archive failure
-/// is logged and can never change the completed session state.
-pub fn schedule_completed_session_archive(
+/// Synchronously run the ordered terminal pipeline used by the detached hook:
+/// archive -> retro evaluation -> idempotent learning submission -> atomic report.
+/// Every archive/evaluator/submission failure is represented in the report when
+/// the report path remains writable.
+pub fn complete_session_archive_and_retro(
+    storage_base_dir: &Path,
+    run_journal: Option<&RunJournalStore>,
+    session_id: &str,
+) -> Result<ArchiveRetroCompletion, ArchiveError> {
+    validate_session_id(session_id)?;
+    let storage = SessionStorage::new_with_base(storage_base_dir.to_path_buf())
+        .map_err(|error| ArchiveError::Storage(error.to_string()))?;
+    let session_dir = storage.session_dir(session_id);
+    let archive_result = archive_completed_session(
+        storage_base_dir,
+        run_journal,
+        session_id,
+    );
+    let archive_id = archive_result
+        .as_ref()
+        .map(|completion| completion.archive.archive_id.clone())
+        .unwrap_or_else(|_| archive_id_for_session(session_id));
+
+    let provenance_path = retro_provenance_path(&session_dir);
+    let provenance = fs::read_to_string(&provenance_path)
+        .map_err(ArchiveError::Io)
+        .and_then(|json| serde_json::from_str::<RetroEvaluatorProvenance>(&json).map_err(ArchiveError::Json));
+
+    let mut report = match (&archive_result, provenance) {
+        (Ok(_), Ok(provenance)) => match IndependentEvaluator::new(
+            provenance.evaluator_id.clone(),
+            provenance.planner_agent_ids.clone(),
+            provenance.supervisor_agent_ids.clone(),
+        ) {
+            Ok(evaluator) => evaluate_archive_corpus(
+                &evaluator,
+                &storage,
+                &session_dir,
+                &provenance,
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(session_id, "Post-run work-graph evaluation failed: {error}");
+                RetroReport::unavailable(
+                    provenance.evaluator_id,
+                    RetroOmission::new(
+                        RetroOmissionReason::ArchiveUnreadable,
+                        "retro_completion",
+                        format!("post-run evaluation failed: {error}"),
+                        vec![session_id.to_string()],
+                    )
+                    .for_archive(&archive_id),
+                )
+            }),
+            Err(error) => {
+                tracing::warn!(session_id, "Retro evaluator provenance is not independent: {error}");
+                RetroReport::unavailable(
+                    provenance.evaluator_id,
+                    RetroOmission::new(
+                    RetroOmissionReason::EvaluatorProvenanceUnavailable,
+                    "retro_completion",
+                    error.to_string(),
+                    vec![provenance_path.display().to_string()],
+                )
+                    .for_archive(&archive_id),
+                )
+            }
+        },
+        (Ok(_), Err(error)) => {
+            tracing::warn!(session_id, "Retro evaluator provenance could not be read: {error}");
+            RetroReport::unavailable(
+                "unavailable",
+                RetroOmission::new(
+                RetroOmissionReason::EvaluatorProvenanceUnavailable,
+                "retro_completion",
+                format!("retro evaluator provenance could not be read: {error}"),
+                vec![provenance_path.display().to_string()],
+            )
+                .for_archive(&archive_id),
+            )
+        }
+        (Err(error), _) => {
+            tracing::warn!(session_id, "Work-graph archival failed before retro evaluation: {error}");
+            RetroReport::unavailable(
+                "unavailable",
+                RetroOmission::new(
+                RetroOmissionReason::ArchiveUnreadable,
+                "retro_completion",
+                format!("work-graph archival failed before retro evaluation: {error}"),
+                vec![session_id.to_string()],
+            )
+                .for_archive(&archive_id),
+            )
+        }
+    };
+
+    let mut submitted_learning_ids = Vec::new();
+    for submission in report.learning_submissions.clone() {
+        let serialized = serde_json::to_string(&submission)?;
+        let learning_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("hive-manager:work-graph-retro-learning:{serialized}").as_bytes(),
+        )
+        .to_string();
+        if submission.outcome != UNREVIEWED_OUTCOME {
+            tracing::warn!(
+                session_id,
+                outcome = %submission.outcome,
+                "Retro learning submission was not unreviewed"
+            );
+            report.omissions.push(
+                RetroOmission::new(
+                    RetroOmissionReason::LearningSubmissionFailed,
+                    "learning_submission",
+                    "retro learning outcome was not unreviewed and was not submitted",
+                    vec![learning_id],
+                )
+                .for_archive(&archive_id),
+            );
+            continue;
+        }
+        let request = LearningSubmission {
+            session: submission.session,
+            task: submission.task,
+            outcome: submission.outcome,
+            keywords: submission.keywords,
+            insight: submission.insight,
+            files_touched: submission.files_touched,
+        };
+        match storage.submit_learning_session_with_id(
+            &request.session,
+            &request,
+            &learning_id,
+        ) {
+            Ok(result) => submitted_learning_ids.push(result.learning_id),
+            Err(error) => {
+                tracing::warn!(session_id, "Retro learning submission failed: {error}");
+                report.omissions.push(RetroOmission::new(
+                    RetroOmissionReason::LearningSubmissionFailed,
+                    "learning_submission",
+                    format!("unreviewed retro learning was not submitted: {error}"),
+                    vec![learning_id],
+                )
+                .for_archive(&archive_id));
+            }
+        }
+    }
+
+    let report_path = retro_report_path(&session_dir, &archive_id);
+    write_atomic_json(&report_path, &report)?;
+    Ok(ArchiveRetroCompletion {
+        archive: archive_result.ok(),
+        report_path,
+        report,
+        submitted_learning_ids,
+    })
+}
+
+/// One-line, non-blocking terminal hook for SessionController. The archive and
+/// retro run sequentially inside this thread, so evaluation cannot race archive
+/// persistence. Failure is logged and can never change the completed session.
+pub fn schedule_completed_session_archive_and_retro(
     storage_base_dir: PathBuf,
     run_journal: Option<RunJournalStore>,
     session_id: String,
 ) {
-    let thread_name = format!("work-graph-archive-{session_id}");
+    let thread_name = format!("work-graph-archive-retro-{session_id}");
     let spawn = std::thread::Builder::new().name(thread_name).spawn(move || {
-        if let Err(error) = archive_completed_session(
+        if let Err(error) = complete_session_archive_and_retro(
             &storage_base_dir,
             run_journal.as_ref(),
             &session_id,
@@ -304,6 +618,20 @@ pub fn schedule_completed_session_archive(
     if let Err(error) = spawn {
         tracing::warn!("Failed to schedule completed work-graph archive: {error}");
     }
+}
+
+/// Backward-compatible entry point. Production callers should use the composed
+/// name above; retaining this wrapper keeps older integrations race-free.
+pub fn schedule_completed_session_archive(
+    storage_base_dir: PathBuf,
+    run_journal: Option<RunJournalStore>,
+    session_id: String,
+) {
+    schedule_completed_session_archive_and_retro(
+        storage_base_dir,
+        run_journal,
+        session_id,
+    );
 }
 
 pub fn read_archive(path: &Path) -> Result<WorkGraphArchive, ArchiveError> {

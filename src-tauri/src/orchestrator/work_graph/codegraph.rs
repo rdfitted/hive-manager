@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::domain::WorkspaceStrategy;
 
 use super::archetypes::{RepoShapeFacts, RepoShapeFactsProvider};
-use super::context::TouchesResolver;
+use super::context::{TouchCoverageReport, TouchesResolver};
 use super::review::checkpoint_aware_claimable_nodes;
 use super::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
@@ -188,11 +188,24 @@ impl TouchesResolver for ArtifactCodegraph {
     fn resolve_touches(
         &self,
         graph: &TaskGraph,
-    ) -> Result<Option<BTreeMap<TaskId, BTreeSet<String>>>, String> {
+    ) -> Result<TouchCoverageReport, String> {
         if !self.available {
-            return Ok(None);
+            return Ok(TouchCoverageReport::unavailable());
         }
-        Ok(Some(self.resolve_graph(graph)))
+        let touches = self.resolve_graph(graph);
+        let unresolved_task_ids = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Task)
+            .map(|node| node.id.clone())
+            .filter(|task_id| !touches.contains_key(task_id))
+            .collect();
+        Ok(TouchCoverageReport {
+            available: true,
+            artifact_languages: self.covered_languages.clone(),
+            touches,
+            unresolved_task_ids,
+        })
     }
 }
 
@@ -216,10 +229,23 @@ impl RepoShapeFactsProvider for ArtifactCodegraph {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodegraphDerivationReport {
     pub available: bool,
+    #[serde(default)]
+    pub artifact_languages: BTreeSet<String>,
     pub touches: BTreeMap<TaskId, BTreeSet<String>>,
     pub unresolved_task_ids: Vec<TaskId>,
     pub module_node_count: usize,
     pub touch_edge_count: usize,
+}
+
+impl CodegraphDerivationReport {
+    pub fn coverage(&self) -> TouchCoverageReport {
+        TouchCoverageReport {
+            available: self.available,
+            artifact_languages: self.artifact_languages.clone(),
+            touches: self.touches.clone(),
+            unresolved_task_ids: self.unresolved_task_ids.clone(),
+        }
+    }
 }
 
 /// Rebuild module nodes and Codegraph-provenance `Touches` edges. Missing
@@ -230,9 +256,9 @@ pub fn derive_codegraph_touches<R: TouchesResolver>(
     resolver: &R,
 ) -> CodegraphDerivationReport {
     clear_derived_codegraph(graph);
-    let touches = match resolver.resolve_touches(graph) {
-        Ok(Some(touches)) => touches,
-        Ok(None) => {
+    let coverage = match resolver.resolve_touches(graph) {
+        Ok(coverage) if coverage.available => coverage,
+        Ok(_) => {
             graph.omissions.push(WorkGraphOmission::new(
                 WorkGraphOmissionReason::CodegraphUnavailable,
                 1,
@@ -240,6 +266,7 @@ pub fn derive_codegraph_touches<R: TouchesResolver>(
             ));
             return CodegraphDerivationReport {
                 available: false,
+                artifact_languages: BTreeSet::new(),
                 touches: BTreeMap::new(),
                 unresolved_task_ids: Vec::new(),
                 module_node_count: 0,
@@ -254,6 +281,7 @@ pub fn derive_codegraph_touches<R: TouchesResolver>(
             ));
             return CodegraphDerivationReport {
                 available: false,
+                artifact_languages: BTreeSet::new(),
                 touches: BTreeMap::new(),
                 unresolved_task_ids: Vec::new(),
                 module_node_count: 0,
@@ -268,14 +296,11 @@ pub fn derive_codegraph_touches<R: TouchesResolver>(
         .filter(|node| node.kind == NodeKind::Task)
         .map(|node| (node.id.clone(), node.clone()))
         .collect();
-    let unresolved_task_ids: Vec<_> = tasks
-        .keys()
-        .filter(|task_id| !touches.contains_key(*task_id))
-        .cloned()
-        .collect();
+    let unresolved_task_ids = coverage.unresolved_task_ids.clone();
     add_resolution_omissions(graph, &tasks, &unresolved_task_ids);
 
-    let unknown: Vec<_> = touches
+    let unknown: Vec<_> = coverage
+        .touches
         .keys()
         .filter(|task_id| !tasks.contains_key(*task_id))
         .cloned()
@@ -288,7 +313,8 @@ pub fn derive_codegraph_touches<R: TouchesResolver>(
         ));
     }
 
-    let modules: BTreeSet<_> = touches
+    let modules: BTreeSet<_> = coverage
+        .touches
         .iter()
         .filter(|(task_id, _)| tasks.contains_key(*task_id))
         .flat_map(|(_, modules)| modules.iter().cloned())
@@ -298,7 +324,7 @@ pub fn derive_codegraph_touches<R: TouchesResolver>(
     }
 
     let mut touch_edge_count = 0;
-    for (task_id, task_modules) in &touches {
+    for (task_id, task_modules) in &coverage.touches {
         if !tasks.contains_key(task_id) {
             continue;
         }
@@ -318,7 +344,8 @@ pub fn derive_codegraph_touches<R: TouchesResolver>(
 
     CodegraphDerivationReport {
         available: true,
-        touches,
+        artifact_languages: coverage.artifact_languages,
+        touches: coverage.touches,
         unresolved_task_ids,
         module_node_count: modules.len(),
         touch_edge_count,
@@ -358,34 +385,28 @@ pub struct ConflictDetectionReport {
     pub unresolved_ready_task_ids: Vec<TaskId>,
 }
 
-/// Pure claim-boundary conflict policy. `None` disables detection explicitly;
-/// `Some(empty)` is a complete clean result. Only checkpoint-aware claimable
-/// tasks participate. The returned reason is the logging/persistence payload;
-/// queue enforcement is intentionally outside this owned module.
+/// Pure claim-boundary conflict policy. An unavailable derivation disables
+/// detection explicitly; an available report with resolved empty touches is a
+/// complete clean result. Only checkpoint-aware claimable tasks participate.
+/// The returned reason is the logging/persistence payload; queue enforcement
+/// is intentionally outside this owned module.
 pub fn conflicting_ready_tasks(
     graph: &TaskGraph,
-    resolved_touches: Option<&BTreeMap<TaskId, BTreeSet<String>>>,
+    derivation: &CodegraphDerivationReport,
     workspace_strategy: WorkspaceStrategy,
 ) -> ConflictDetectionReport {
-    let Some(resolved_touches) = resolved_touches else {
+    if !derivation.available {
         return ConflictDetectionReport {
             state: ConflictDetectionState::Disabled,
             decisions: Vec::new(),
             unresolved_ready_task_ids: Vec::new(),
         };
-    };
-    let ready = checkpoint_aware_claimable_nodes(graph);
-    if resolved_touches.is_empty() {
-        return ConflictDetectionReport {
-            state: ConflictDetectionState::Complete,
-            decisions: Vec::new(),
-            unresolved_ready_task_ids: Vec::new(),
-        };
     }
-
+    let ready = checkpoint_aware_claimable_nodes(graph);
+    let unresolved: BTreeSet<_> = derivation.unresolved_task_ids.iter().cloned().collect();
     let unresolved_ready_task_ids: Vec<_> = ready
         .iter()
-        .filter(|task_id| !resolved_touches.contains_key(*task_id))
+        .filter(|task_id| unresolved.contains(*task_id))
         .cloned()
         .collect();
     let state = if unresolved_ready_task_ids.is_empty() {
@@ -399,7 +420,7 @@ pub fn conflicting_ready_tasks(
             let first = &ready[left_index];
             let second = &ready[right_index];
             let (Some(first_touches), Some(second_touches)) =
-                (resolved_touches.get(first), resolved_touches.get(second))
+                (derivation.touches.get(first), derivation.touches.get(second))
             else {
                 continue;
             };

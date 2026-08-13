@@ -99,7 +99,76 @@ pub struct QueueSnapshot {
     pub finalized: usize,
     pub failed: usize,
     pub blocked: usize,
+    /// Explicit task bindings that could not be resolved against an authoritative DAG.
+    pub resolution_incomplete: Vec<QueueResolutionIssue>,
+    /// Latest persisted codegraph conflict coverage for this session.
+    pub conflict_coverage: Option<QueueConflictCoverage>,
     pub rows: Vec<QueueRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueResolutionIssue {
+    pub queue_id: String,
+    pub task_id: String,
+    pub reason: String,
+}
+
+/// How an enqueue transaction reconciles a task's persisted resolution record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueResolutionUpdate {
+    /// Legacy/no-graph/degraded/edgeless input does not claim to resolve prior uncertainty.
+    Preserve,
+    /// The explicit task is present in the authoritative graph.
+    Resolved,
+    /// The graph is dependency-constrained but does not contain the explicit task.
+    ResolutionIncomplete { task_id: String, reason: String },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueConflictAction {
+    Serialize,
+    WorktreeIsolate,
+}
+
+impl QueueConflictAction {
+    fn as_tag(self) -> &'static str {
+        match self {
+            Self::Serialize => "serialize",
+            Self::WorktreeIsolate => "worktree_isolate",
+        }
+    }
+}
+
+/// One directed materialized conflict. Known pairs are stored in both directions so either
+/// task's claim can correlate against a running peer without normalizing IDs at claim time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueConflictRow {
+    pub session_id: String,
+    pub task_id: String,
+    pub conflicting_task_id: String,
+    pub action: QueueConflictAction,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueConflictCoverage {
+    pub state: String,
+    pub unresolved_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueueConflictWait {
+    pub task_id: String,
+    pub reason: String,
+}
+
+/// Result of atomically ending a still-owned claim after worker spawning failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnFailureRelease {
+    Requeued { failures: i64 },
+    Exhausted { failures: i64 },
+    NotHeld,
 }
 
 /// Create the `agent_run_queue` table (+ indexes) if absent.
@@ -163,6 +232,49 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             reason             TEXT NOT NULL,
             created_at         INTEGER NOT NULL,
             FOREIGN KEY (queue_id) REFERENCES agent_run_queue(id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_run_queue_spawn_failures (
+            queue_id TEXT PRIMARY KEY,
+            failures INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (queue_id) REFERENCES agent_run_queue(id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_run_queue_resolution (
+            queue_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (queue_id) REFERENCES agent_run_queue(id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_run_queue_conflicts (
+            session_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            conflicting_task_id TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('serialize', 'worktree_isolate')),
+            reason TEXT NOT NULL,
+            PRIMARY KEY (session_id, task_id, conflicting_task_id)
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_conflicts_peer
+         ON agent_run_queue_conflicts(session_id, conflicting_task_id, action)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_run_queue_conflict_coverage (
+            session_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK (state IN ('disabled', 'complete', 'partial')),
+            unresolved_task_ids TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
         )",
         [],
     )?;
@@ -254,14 +366,194 @@ impl QueueRepo {
         })
     }
 
+    /// Atomically insert/reconcile a queue intent with dependencies, task resolution, and
+    /// known conflict decisions.
+    ///
+    /// A newly visible row can never temporarily lack its scheduling facts. An idempotent
+    /// duplicate may reconcile facts only while the exact same `(session_id, task_id)` row is
+    /// still queued; a stale queue ID with another/null binding is left untouched because a
+    /// wrong graph binding is more dangerous than an explicit omission.
+    pub fn enqueue_with_scheduling(
+        &self,
+        row: &QueueRow,
+        prerequisite_task_ids: &[String],
+        resolution: &QueueResolutionUpdate,
+        conflicts: &[QueueConflictRow],
+        conflict_coverage: Option<&QueueConflictCoverage>,
+        reconcile_conflict_task_id: Option<&str>,
+    ) -> Result<(), StorageError> {
+        if conflicts.iter().any(|conflict| {
+            conflict.session_id != row.session_id || conflict.task_id == conflict.conflicting_task_id
+        }) {
+            return Err(StorageError::Database(rusqlite::Error::InvalidParameterName(
+                "conflict rows must be same-session pairs of distinct task ids".to_string(),
+            )));
+        }
+        if conflict_coverage.is_some_and(|coverage| {
+            !matches!(coverage.state.as_str(), "disabled" | "complete" | "partial")
+        }) {
+            return Err(StorageError::Database(rusqlite::Error::InvalidParameterName(
+                "unknown conflict coverage state".to_string(),
+            )));
+        }
+        if let QueueResolutionUpdate::ResolutionIncomplete { task_id, .. } = resolution {
+            if row.task_id.as_deref() != Some(task_id.as_str()) {
+                return Err(StorageError::Database(rusqlite::Error::InvalidParameterName(
+                    "resolution task id must equal the queue row binding".to_string(),
+                )));
+            }
+        }
+        if reconcile_conflict_task_id.is_some_and(|task_id| row.task_id.as_deref() != Some(task_id)) {
+            return Err(StorageError::Database(rusqlite::Error::InvalidParameterName(
+                "conflict reconciliation task id must equal the queue row binding".to_string(),
+            )));
+        }
+        let payload_text = serde_json::to_string(&row.payload)?;
+        let unresolved_json = conflict_coverage
+            .map(|coverage| serde_json::to_string(&coverage.unresolved_task_ids))
+            .transpose()?;
+        self.db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let inserted = tx.execute(
+                "INSERT INTO agent_run_queue
+                    (id, task_id, session_id, worker_id, role_type, cli, status, payload,
+                     attempts, continuation_count, no_progress_count, last_status,
+                     heartbeat_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 ON CONFLICT(id) DO NOTHING",
+                params![
+                    row.id,
+                    row.task_id,
+                    row.session_id,
+                    row.worker_id,
+                    row.role_type,
+                    row.cli,
+                    row.status.as_tag(),
+                    payload_text,
+                    row.attempts,
+                    row.continuation_count,
+                    row.no_progress_count,
+                    row.last_status,
+                    row.heartbeat_at,
+                    row.created_at,
+                    row.updated_at,
+                ],
+            )?;
+            let exact_queued_identity = if inserted == 1 {
+                true
+            } else {
+                tx.query_row(
+                    "SELECT session_id, task_id, status FROM agent_run_queue WHERE id = ?1",
+                    params![row.id],
+                    |existing| {
+                        let session_id: String = existing.get(0)?;
+                        let task_id: Option<String> = existing.get(1)?;
+                        let status: String = existing.get(2)?;
+                        Ok(session_id == row.session_id
+                            && task_id == row.task_id
+                            && status == "queued")
+                    },
+                )
+                .optional()?
+                .unwrap_or(false)
+            };
+            if !exact_queued_identity {
+                tx.commit()?;
+                return Ok(());
+            }
+
+            match resolution {
+                QueueResolutionUpdate::Preserve => {
+                    if inserted == 1 {
+                        insert_dependencies(&tx, row, prerequisite_task_ids)?;
+                    }
+                }
+                QueueResolutionUpdate::Resolved => {
+                    tx.execute(
+                        "DELETE FROM agent_run_queue_resolution WHERE queue_id = ?1",
+                        params![row.id],
+                    )?;
+                    replace_dependencies(&tx, row, prerequisite_task_ids)?;
+                }
+                QueueResolutionUpdate::ResolutionIncomplete { task_id, reason } => {
+                    if let Some(bound_task_id) = row.task_id.as_deref() {
+                        tx.execute(
+                            "DELETE FROM agent_run_queue_deps
+                             WHERE session_id = ?1 AND task_id = ?2",
+                            params![row.session_id, bound_task_id],
+                        )?;
+                    }
+                    tx.execute(
+                        "INSERT INTO agent_run_queue_resolution
+                            (queue_id, task_id, reason, created_at)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(queue_id) DO UPDATE SET
+                            task_id = excluded.task_id,
+                            reason = excluded.reason",
+                        params![row.id, task_id, reason, row.updated_at],
+                    )?;
+                }
+            }
+
+            if let Some(task_id) = reconcile_conflict_task_id.filter(|_| {
+                conflict_coverage.is_some_and(|coverage| coverage.state == "complete")
+            }) {
+                // Replace only the active exact task's incident pairs. Deleting the whole
+                // session report from a pre-transaction projection would race a peer becoming
+                // ready. Partial/disabled coverage cannot prove an omitted decision is stale,
+                // so it must preserve every prior conservative serialize pair.
+                tx.execute(
+                    "DELETE FROM agent_run_queue_conflicts
+                     WHERE session_id = ?1
+                       AND (task_id = ?2 OR conflicting_task_id = ?2)",
+                    params![row.session_id, task_id],
+                )?;
+            }
+            for conflict in conflicts {
+                tx.execute(
+                    "INSERT INTO agent_run_queue_conflicts
+                        (session_id, task_id, conflicting_task_id, action, reason)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(session_id, task_id, conflicting_task_id) DO UPDATE SET
+                        action = excluded.action,
+                        reason = excluded.reason",
+                    params![
+                        conflict.session_id,
+                        conflict.task_id,
+                        conflict.conflicting_task_id,
+                        conflict.action.as_tag(),
+                        conflict.reason,
+                    ],
+                )?;
+            }
+            if let (Some(coverage), Some(unresolved_json)) =
+                (conflict_coverage, unresolved_json.as_deref())
+            {
+                tx.execute(
+                    "INSERT INTO agent_run_queue_conflict_coverage
+                        (session_id, state, unresolved_task_ids, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(session_id) DO UPDATE SET
+                        state = excluded.state,
+                        unresolved_task_ids = excluded.unresolved_task_ids,
+                        updated_at = excluded.updated_at",
+                    params![row.session_id, coverage.state, unresolved_json, row.updated_at],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
     /// THE atomic claim. A single `UPDATE ... WHERE` flips a claimable row to `running`.
     ///
     /// A row is claimable when it is `queued`, OR it is `running` but its heartbeat is
-    /// stale (older than `stuck_cutoff_ms`) or absent, AND every dependency recorded for its
-    /// task has at least one finalized queue row in the same session. Returns `true` iff THIS
-    /// call won the claim (`conn.changes() == 1`). Because readiness is a correlated subquery
-    /// inside the atomic statement, exactly one of N concurrent claimers wins without a
-    /// check-then-claim race.
+    /// stale (older than `stuck_cutoff_ms`) or absent, its explicit task binding is resolved,
+    /// every dependency recorded for its task has at least one finalized queue row in the same
+    /// session, and no materialized `serialize` peer is running. Returns `true` iff THIS call
+    /// won the claim (`conn.changes() == 1`). Resolution, readiness, and conflicts are
+    /// correlated `NOT EXISTS` predicates inside this same atomic statement; none is authorized
+    /// by a check-then-claim pre-read.
     ///
     /// The claim STAMPS `heartbeat_at = now_ms` on the won row. This is load-bearing for
     /// the no-double-spawn invariant: without it, a just-claimed row keeps `heartbeat_at`
@@ -319,6 +611,11 @@ impl QueueRepo {
                    ))
                    AND NOT EXISTS (
                        SELECT 1
+                       FROM agent_run_queue_resolution AS unresolved
+                       WHERE unresolved.queue_id = agent_run_queue.id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
                        FROM agent_run_queue_deps AS dependency
                        WHERE dependency.session_id = agent_run_queue.session_id
                          AND dependency.task_id = agent_run_queue.task_id
@@ -329,6 +626,17 @@ impl QueueRepo {
                                AND prerequisite.task_id = dependency.prerequisite_task_id
                                AND prerequisite.status = 'finalized'
                          )
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM agent_run_queue_conflicts AS conflict
+                       JOIN agent_run_queue AS conflicting_run
+                         ON conflicting_run.session_id = conflict.session_id
+                        AND conflicting_run.task_id = conflict.conflicting_task_id
+                        AND conflicting_run.status = 'running'
+                       WHERE conflict.session_id = agent_run_queue.session_id
+                         AND conflict.task_id = agent_run_queue.task_id
+                         AND conflict.action = 'serialize'
                    )",
                 params![id, now_ms, stuck_cutoff_ms, worker_id],
             )?;
@@ -372,6 +680,87 @@ impl QueueRepo {
                 .query_map(params![id], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(pending)
+        })
+    }
+
+    /// Explain an atomic claim loss caused by an unresolved explicit graph binding.
+    /// Diagnostic only: callers must invoke this after `try_claim_for_worker` returned `None`.
+    pub fn resolution_issue(&self, id: &str) -> Result<Option<QueueResolutionIssue>, StorageError> {
+        self.db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT queue_id, task_id, reason
+                 FROM agent_run_queue_resolution
+                 WHERE queue_id = ?1",
+                params![id],
+                |row| {
+                    Ok(QueueResolutionIssue {
+                        queue_id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        reason: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// Explain an atomic claim loss caused by currently running serialized peers.
+    /// Advisory by construction: peer status may change immediately after this read.
+    pub fn pending_conflicts(&self, id: &str) -> Result<Vec<QueueConflictWait>, StorageError> {
+        self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT conflict.conflicting_task_id, conflict.reason
+                 FROM agent_run_queue AS candidate
+                 JOIN agent_run_queue_conflicts AS conflict
+                   ON conflict.session_id = candidate.session_id
+                  AND conflict.task_id = candidate.task_id
+                  AND conflict.action = 'serialize'
+                 WHERE candidate.id = ?1
+                   AND EXISTS (
+                       SELECT 1
+                       FROM agent_run_queue AS conflicting_run
+                       WHERE conflicting_run.session_id = conflict.session_id
+                         AND conflicting_run.task_id = conflict.conflicting_task_id
+                         AND conflicting_run.status = 'running'
+                   )
+                 ORDER BY conflict.conflicting_task_id",
+            )?;
+            let waits = stmt
+                .query_map(params![id], |row| {
+                    Ok(QueueConflictWait {
+                        task_id: row.get(0)?,
+                        reason: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(waits)
+        })
+    }
+
+    /// Refresh the heartbeat for exactly one still-owned spawn claim.
+    ///
+    /// This is the durable half of the in-process spawn reservation. All identity fields are
+    /// fences: a stale epoch or a worker slot rebound by a newer claim must update zero rows.
+    /// The method never changes status or attempts, so it cannot acquire or resurrect a claim.
+    pub fn refresh_claimed_spawn(
+        &self,
+        id: &str,
+        expected_attempts: i64,
+        worker_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, StorageError> {
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE agent_run_queue
+                 SET heartbeat_at = ?4, updated_at = ?4
+                 WHERE id = ?1
+                   AND status = 'running'
+                   AND attempts = ?2
+                   AND worker_id = ?3",
+                params![id, expected_attempts, worker_id, now_ms],
+            )?;
+            Ok(conn.changes() == 1)
         })
     }
 
@@ -438,6 +827,84 @@ impl QueueRepo {
         })
     }
 
+    /// Atomically release an exact spawn claim while advancing its independent failure budget.
+    ///
+    /// `attempts` remains a monotone fencing epoch for the lifetime of the queue row. Spawn
+    /// failures therefore use a separate counter: resetting an epoch after manual recovery
+    /// would make an old `(id, attempts, worker_id)` reservation valid again (ABA).
+    pub fn release_failed_spawn(
+        &self,
+        id: &str,
+        expected_attempts: i64,
+        worker_id: &str,
+        max_failures: i64,
+        now_ms: i64,
+    ) -> Result<SpawnFailureRelease, StorageError> {
+        self.db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let held: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT session_id, task_id
+                     FROM agent_run_queue
+                     WHERE id = ?1
+                       AND status = 'running'
+                       AND attempts = ?2
+                       AND worker_id = ?3",
+                    params![id, expected_attempts, worker_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((session_id, task_id)) = held else {
+                tx.commit()?;
+                return Ok(SpawnFailureRelease::NotHeld);
+            };
+
+            tx.execute(
+                "INSERT INTO agent_run_queue_spawn_failures (queue_id, failures)
+                 VALUES (?1, 1)
+                 ON CONFLICT(queue_id) DO UPDATE SET failures = failures + 1",
+                params![id],
+            )?;
+            let failures: i64 = tx.query_row(
+                "SELECT failures FROM agent_run_queue_spawn_failures WHERE queue_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+
+            let (status, result) = if failures >= max_failures {
+                ("failed", SpawnFailureRelease::Exhausted { failures })
+            } else {
+                ("queued", SpawnFailureRelease::Requeued { failures })
+            };
+            let changed = tx.execute(
+                "UPDATE agent_run_queue
+                 SET status = ?4,
+                     worker_id = CASE
+                         WHEN ?4 = 'queued' AND task_id IS NOT NULL
+                         THEN 'pending:' || id ELSE worker_id END,
+                     updated_at = ?5
+                 WHERE id = ?1
+                   AND status = 'running'
+                   AND attempts = ?2
+                   AND worker_id = ?3",
+                params![id, expected_attempts, worker_id, status, now_ms],
+            )?;
+            if changed != 1 {
+                tx.rollback()?;
+                return Ok(SpawnFailureRelease::NotHeld);
+            }
+
+            if status == "failed" {
+                if let Some(task_id) = task_id {
+                    let reason = format!("dependency task {task_id} failed");
+                    block_task_subtree(&tx, &session_id, &task_id, false, &reason, now_ms)?;
+                }
+            }
+            tx.commit()?;
+            Ok(result)
+        })
+    }
+
     /// Cancel one task and block every transitive dependent with a persisted reason.
     /// Finalized/failed rows remain terminal and are never rewritten.
     pub fn cancel_task_and_descendants(
@@ -464,21 +931,45 @@ impl QueueRepo {
     }
 
     /// Operator/agent recovery: force a stuck or failed row back to claimable and
-    /// reset its spawn budget. Unfenced by design — this is the documented exit
-    /// from a row that no automatic path can recover.
+    /// reset its spawn-failure budget. Unfenced by design — this is the documented
+    /// exit from a row that no automatic path can recover.
+    ///
+    /// The claim `attempts` epoch is deliberately never reset. Once epoch 2 has
+    /// existed, no recovery path may make a delayed epoch-1 operation valid again.
     pub fn release_claim_manual(&self, id: &str, now_ms: i64) -> Result<bool, StorageError> {
         self.db.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
                 "UPDATE agent_run_queue
                  SET status = 'queued',
                      worker_id = CASE
                          WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
-                     attempts = 0,
                      updated_at = ?2
                  WHERE id = ?1 AND status IN ('running', 'failed')",
                 params![id, now_ms],
             )?;
-            Ok(conn.changes() == 1)
+            if changed == 1 {
+                tx.execute(
+                    "DELETE FROM agent_run_queue_spawn_failures WHERE queue_id = ?1",
+                    params![id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(changed == 1)
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn_failure_count(&self, id: &str) -> Result<i64, StorageError> {
+        self.db.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT failures FROM agent_run_queue_spawn_failures WHERE queue_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(0))
         })
     }
 
@@ -656,6 +1147,52 @@ impl QueueRepo {
     /// Build a [`QueueSnapshot`] (counts + rows) for a session.
     pub fn snapshot(&self, session_id: &str) -> Result<QueueSnapshot, StorageError> {
         let rows = self.rows_for_session(session_id)?;
+        let (resolution_incomplete, conflict_coverage) = self.db.with_conn(|conn| {
+            let mut resolution_stmt = conn.prepare(
+                "SELECT resolution.queue_id, resolution.task_id, resolution.reason
+                 FROM agent_run_queue_resolution AS resolution
+                 JOIN agent_run_queue AS queue ON queue.id = resolution.queue_id
+                 WHERE queue.session_id = ?1
+                 ORDER BY resolution.task_id, resolution.queue_id",
+            )?;
+            let issues = resolution_stmt
+                .query_map(params![session_id], |row| {
+                    Ok(QueueResolutionIssue {
+                        queue_id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        reason: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(resolution_stmt);
+
+            let coverage = conn
+                .query_row(
+                    "SELECT state, unresolved_task_ids
+                     FROM agent_run_queue_conflict_coverage
+                     WHERE session_id = ?1",
+                    params![session_id],
+                    |row| {
+                        let state: String = row.get(0)?;
+                        let unresolved_json: String = row.get(1)?;
+                        let unresolved_task_ids = serde_json::from_str(&unresolved_json).map_err(
+                            |error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            },
+                        )?;
+                        Ok(QueueConflictCoverage {
+                            state,
+                            unresolved_task_ids,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok((issues, coverage))
+        })?;
         let mut queued = 0;
         let mut running = 0;
         let mut finalized = 0;
@@ -676,6 +1213,8 @@ impl QueueRepo {
             finalized,
             failed,
             blocked,
+            resolution_incomplete,
+            conflict_coverage,
             rows,
         })
     }
@@ -705,6 +1244,40 @@ fn row_to_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
         updated_at: row.get(14)?,
         blocked_reason: row.get(15)?,
     })
+}
+
+fn insert_dependencies(
+    conn: &Connection,
+    row: &QueueRow,
+    prerequisite_task_ids: &[String],
+) -> rusqlite::Result<()> {
+    let Some(task_id) = row.task_id.as_deref() else {
+        return Ok(());
+    };
+    for prerequisite_task_id in prerequisite_task_ids {
+        conn.execute(
+            "INSERT INTO agent_run_queue_deps
+                (session_id, task_id, prerequisite_task_id)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, task_id, prerequisite_task_id) DO NOTHING",
+            params![row.session_id, task_id, prerequisite_task_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn replace_dependencies(
+    conn: &Connection,
+    row: &QueueRow,
+    prerequisite_task_ids: &[String],
+) -> rusqlite::Result<()> {
+    if let Some(task_id) = row.task_id.as_deref() {
+        conn.execute(
+            "DELETE FROM agent_run_queue_deps WHERE session_id = ?1 AND task_id = ?2",
+            params![row.session_id, task_id],
+        )?;
+    }
+    insert_dependencies(conn, row, prerequisite_task_ids)
 }
 
 fn block_task_subtree(

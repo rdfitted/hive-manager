@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -82,6 +82,71 @@ pub struct Learning {
     pub files_touched: Vec<String>,
 }
 
+/// Validated payload shared by the authorized session-learning HTTP endpoint
+/// and internal producers such as the post-run work-graph retro.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningSubmission {
+    pub session: String,
+    pub task: String,
+    pub outcome: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    pub insight: String,
+    #[serde(default)]
+    pub files_touched: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearningSubmissionResult {
+    pub learning_id: String,
+    pub created: bool,
+}
+
+static LEARNING_SUBMISSION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn learning_submission_lock() -> &'static Mutex<()> {
+    LEARNING_SUBMISSION_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub fn validate_learning_submission(
+    submission: &LearningSubmission,
+) -> Result<(), StorageError> {
+    if submission.session.trim().is_empty() {
+        return Err(StorageError::InvalidLearning(
+            "Session cannot be empty".to_string(),
+        ));
+    }
+    if submission.task.trim().is_empty() {
+        return Err(StorageError::InvalidLearning(
+            "Task cannot be empty".to_string(),
+        ));
+    }
+    if submission.insight.trim().is_empty() {
+        return Err(StorageError::InvalidLearning(
+            "Insight cannot be empty".to_string(),
+        ));
+    }
+    if !matches!(
+        submission.outcome.as_str(),
+        "success" | "partial" | "failed" | "unreviewed"
+    ) {
+        return Err(StorageError::InvalidLearning(
+            "Outcome must be one of: success, partial, failed, unreviewed".to_string(),
+        ));
+    }
+    for file_path in &submission.files_touched {
+        if file_path.contains("..")
+            || file_path.starts_with('/')
+            || file_path.contains('\\')
+        {
+            return Err(StorageError::InvalidLearning(format!(
+                "Invalid file path: {file_path}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub timestamp: DateTime<Utc>,
@@ -99,6 +164,8 @@ pub enum StorageError {
     SessionNotFound(String),
     #[error("Invalid path: {0}")]
     InvalidPath(String),
+    #[error("Invalid learning: {0}")]
+    InvalidLearning(String),
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 }
@@ -993,6 +1060,99 @@ impl SessionStorage {
 
     /// Append a learning to the session-scoped lessons directory
     /// Stores in .hive-manager/{session_id}/lessons/learnings.jsonl
+    pub fn submit_learning_session(
+        &self,
+        session_id: &str,
+        submission: &LearningSubmission,
+    ) -> Result<LearningSubmissionResult, StorageError> {
+        self.submit_learning_session_with_id(
+            session_id,
+            submission,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    /// Submit through the same validated session-learning service with a stable
+    /// producer-owned id. The JSONL update is serialized in-process, deduped by
+    /// id, and atomically replaced so retried archive hooks cannot double-submit.
+    pub fn submit_learning_session_with_id(
+        &self,
+        session_id: &str,
+        submission: &LearningSubmission,
+        learning_id: &str,
+    ) -> Result<LearningSubmissionResult, StorageError> {
+        validate_learning_submission(submission)?;
+        if session_id.is_empty()
+            || session_id.contains("..")
+            || session_id.contains('/')
+            || session_id.contains('\\')
+        {
+            return Err(StorageError::InvalidPath(
+                "session id cannot be empty or contain path separators".to_string(),
+            ));
+        }
+        if learning_id.trim().is_empty()
+            || learning_id.contains('\n')
+            || learning_id.contains('\r')
+        {
+            return Err(StorageError::InvalidLearning(
+                "learning id cannot be empty or contain a newline".to_string(),
+            ));
+        }
+
+        let _guard = learning_submission_lock().lock();
+        let lessons_dir = self.session_lessons_dir(session_id);
+        fs::create_dir_all(&lessons_dir)?;
+        fs::create_dir_all(lessons_dir.join("archive"))?;
+        let learnings_file = lessons_dir.join("learnings.jsonl");
+        let mut content = if learnings_file.exists() {
+            fs::read_to_string(&learnings_file)?
+        } else {
+            String::new()
+        };
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            if let Ok(mut learning) = serde_json::from_str::<Learning>(line) {
+                if learning.id.is_empty() {
+                    learning.id = stable_learning_id(&learning);
+                }
+                if learning.id == learning_id {
+                    return Ok(LearningSubmissionResult {
+                        learning_id: learning_id.to_string(),
+                        created: false,
+                    });
+                }
+            }
+        }
+
+        let learning = Learning {
+            id: learning_id.to_string(),
+            date: Utc::now().format("%Y-%m-%d").to_string(),
+            session: submission.session.clone(),
+            task: submission.task.clone(),
+            outcome: submission.outcome.clone(),
+            keywords: submission.keywords.clone(),
+            insight: submission.insight.clone(),
+            files_touched: submission.files_touched.clone(),
+        };
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&serde_json::to_string(&learning)?);
+        content.push('\n');
+
+        let mut temp =
+            tempfile::NamedTempFile::new_in(&lessons_dir).map_err(StorageError::Io)?;
+        temp.write_all(content.as_bytes())?;
+        temp.persist(&learnings_file)
+            .map_err(|error| StorageError::Io(error.error))?;
+        Ok(LearningSubmissionResult {
+            learning_id: learning_id.to_string(),
+            created: true,
+        })
+    }
+
+    /// Append a learning to the session-scoped lessons directory.
+    /// Prefer `submit_learning_session` for validated request-path writes.
     pub fn append_learning_session(
         &self,
         session_id: &str,

@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use crate::orchestrator::work_graph::archetypes::GotchaAttachmentProvider;
 use crate::orchestrator::work_graph::context::{
     context_node_is_stale, derive_project_context, ContextDerivationReport,
-    NoTouchesResolver, ProjectKnowledgeGotchaProvider, TouchesResolver,
+    NoTouchesResolver, ProjectKnowledgeGotchaProvider, TouchCoverageReport, TouchesResolver,
     ANTI_HUB_TASK_FRACTION, DERIVED_CONTEXT_TEMPLATE, MAX_CONTEXT_SCOPES_PER_GOTCHA,
     MAX_CONTEXT_SUMMARY_CHARS, MAX_DERIVED_CONTEXT_NODES,
 };
@@ -23,9 +23,25 @@ struct FakeTouches(BTreeMap<TaskId, BTreeSet<String>>);
 impl TouchesResolver for FakeTouches {
     fn resolve_touches(
         &self,
-        _graph: &TaskGraph,
-    ) -> Result<Option<BTreeMap<TaskId, BTreeSet<String>>>, String> {
-        Ok(Some(self.0.clone()))
+        graph: &TaskGraph,
+    ) -> Result<TouchCoverageReport, String> {
+        let unresolved_task_ids = if self.0.is_empty() {
+            Vec::new()
+        } else {
+            graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::Task)
+                .map(|node| node.id.clone())
+                .filter(|task_id| !self.0.contains_key(task_id))
+                .collect()
+        };
+        Ok(TouchCoverageReport {
+            available: true,
+            artifact_languages: BTreeSet::from(["fixture".to_string()]),
+            touches: self.0.clone(),
+            unresolved_task_ids,
+        })
     }
 }
 
@@ -481,8 +497,9 @@ fn content_hash_makes_existing_context_node_detectably_stale() {
 #[test]
 fn project_knowledge_provider_implements_frozen_archetype_seam() {
     let fixture = context_fixture();
+    let graph = two_task_graph();
     let provider = ProjectKnowledgeGotchaProvider {
-        graph: two_task_graph(),
+        graph: &graph,
         resolver: fixture.touches,
     };
 

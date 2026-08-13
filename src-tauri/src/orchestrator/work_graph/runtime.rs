@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::domain::event::{Event, EventType};
 use crate::domain::run_journal::{
@@ -20,8 +21,17 @@ use crate::domain::run_journal::{
 use super::review::{
     instantiate_checkpoint_wave, instantiate_review_templates, route_failed_verdict,
     CheckpointWave, ReviewExpansion, ReviewGraphError, ReviewRoundExpansion,
-    ReviewTemplate,
+    ReviewExpansionSidecar, ReviewTemplate,
 };
+use super::archetypes::{
+    instantiate_named_archetype_into, reconcile_planner_graph, stamp_checkpoint_waves,
+    ArchetypeError, ArchetypeLineage, RepoShapeFactsProvider,
+};
+use super::codegraph::{derive_codegraph_touches, CodegraphDerivationReport};
+use super::context::{
+    derive_project_context_from_coverage, ContextDerivationReport, TouchesResolver,
+};
+use super::plan_parse::promote_initial_ready_nodes;
 use super::schema::{
     BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
     TaskGraph, TaskId, WorkEdge, WorkGraph, WorkGraphOmission,
@@ -30,6 +40,120 @@ use super::schema::{
 
 pub const RUNTIME_OBSERVATION_PREFIX: &str = "runtime:";
 const MAX_OMISSION_EXAMPLES: usize = 5;
+
+/// One authoritative composition value passed through every plan-time stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphCompositionState {
+    pub graph: TaskGraph,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<ArchetypeLineage>,
+    pub codegraph: CodegraphDerivationReport,
+    pub context: ContextDerivationReport,
+    pub reviews: ReviewExpansionSidecar,
+}
+
+#[derive(Debug)]
+pub enum GraphCompositionError {
+    Archetype(ArchetypeError),
+    Review(ReviewGraphError),
+}
+
+impl fmt::Display for GraphCompositionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Archetype(error) => write!(formatter, "graph archetype composition failed: {error}"),
+            Self::Review(error) => write!(formatter, "graph review composition failed: {error}"),
+        }
+    }
+}
+
+impl Error for GraphCompositionError {}
+
+impl From<ArchetypeError> for GraphCompositionError {
+    fn from(error: ArchetypeError) -> Self {
+        Self::Archetype(error)
+    }
+}
+
+impl From<ReviewGraphError> for GraphCompositionError {
+    fn from(error: ReviewGraphError) -> Self {
+        Self::Review(error)
+    }
+}
+
+/// Compose the complete plan-time graph in the required order. The resolver
+/// is the already-loaded artifact/coverage source and also supplies repo facts.
+pub fn compose_initial_work_graph<R>(
+    base_graph: TaskGraph,
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    archetype_id: Option<&str>,
+    session_parameters: &BTreeMap<String, String>,
+    resolver: &R,
+) -> Result<GraphCompositionState, GraphCompositionError>
+where
+    R: TouchesResolver + RepoShapeFactsProvider,
+{
+    let (mut graph, lineage, review_templates, checkpoints) = if let Some(archetype_id) = archetype_id {
+        let stage = instantiate_named_archetype_into(
+            base_graph,
+            project_path,
+            institutional_wiki_root,
+            archetype_id,
+            session_parameters,
+            resolver,
+        )?;
+        (
+            stage.instance.graph,
+            Some(stage.instance.lineage),
+            stage.review_templates,
+            stage.checkpoints,
+        )
+    } else {
+        (base_graph, None, Vec::new(), Vec::new())
+    };
+    let codegraph = derive_codegraph_touches(&mut graph, resolver);
+    let context = derive_project_context_from_coverage(
+        &mut graph,
+        project_path,
+        &codegraph.coverage(),
+    );
+    let expansions = instantiate_review_templates(&mut graph, &review_templates)?;
+    let reviews = ReviewExpansionSidecar::from_expansions(&review_templates, expansions)?;
+    stamp_checkpoint_waves(&mut graph, &checkpoints)?;
+    promote_initial_ready_nodes(&mut graph);
+    dedupe_graph_omissions(&mut graph);
+    Ok(GraphCompositionState {
+        graph,
+        lineage,
+        codegraph,
+        context,
+        reviews,
+    })
+}
+
+/// Idempotently overlay planner output onto the persisted skeleton while
+/// retaining lineage, derived nodes, omissions, coverage and review sidecars.
+pub fn reconcile_composed_work_graph(
+    persisted: &GraphCompositionState,
+    planner_graph: &TaskGraph,
+) -> Result<GraphCompositionState, GraphCompositionError> {
+    let mut reconciled = persisted.clone();
+    reconciled.graph = reconcile_planner_graph(&persisted.graph, planner_graph)?;
+    promote_initial_ready_nodes(&mut reconciled.graph);
+    dedupe_graph_omissions(&mut reconciled.graph);
+    Ok(reconciled)
+}
+
+fn dedupe_graph_omissions(graph: &mut TaskGraph) {
+    let mut unique = Vec::new();
+    for omission in graph.omissions.drain(..) {
+        if !unique.contains(&omission) {
+            unique.push(omission);
+        }
+    }
+    graph.omissions = unique;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

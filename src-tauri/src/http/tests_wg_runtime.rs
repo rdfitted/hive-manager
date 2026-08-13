@@ -431,6 +431,20 @@ fn archive_round_trip_preserves_corpus_and_never_mutates_runtime_sources() {
         .expect("terminal archive thread creates the archive");
     assert_eq!(paths.len(), 1);
     let archived = read_archive(&paths[0]).unwrap();
+    let retro_report_path = session_dir
+        .join("archive")
+        .join("work-graph-retros")
+        .join(format!("{}.json", archived.archive_id));
+    for _ in 0..250 {
+        if retro_report_path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        retro_report_path.exists(),
+        "the detached terminal pipeline must finish retro persistence before the test drops its storage"
+    );
     assert_eq!(archived.schema_version, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION);
     assert_eq!(archived.plan_graph, Some(plan.clone()));
     assert_eq!(archived.runtime_graph, expected_runtime.runtime_graph);
@@ -480,8 +494,8 @@ fn archive_round_trip_preserves_corpus_and_never_mutates_runtime_sources() {
     assert_eq!(repeated.path, paths[0]);
     assert_eq!(repeated.archive, archived);
 
-    // G9: the terminal archive is the only new write. Derivation and archival
-    // leave both existing hot-path sources byte/value-identical.
+    // G9: the terminal pipeline writes only its archive and stated retro report.
+    // Derivation leaves both existing hot-path sources byte/value-identical.
     assert_eq!(fs::read(event_path).unwrap(), events_before);
     assert_eq!(journal.read_journal(session_id).unwrap(), journal_before);
     assert_eq!(journal.read_ledger(session_id).unwrap(), ledger_before);

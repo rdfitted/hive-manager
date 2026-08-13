@@ -3,9 +3,10 @@
 use crate::actions::coordination::SessionPlan;
 
 use super::schema::{
-    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph,
+    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, TaskId,
     WorkEdge, WorkNode,
 };
+use super::review::JUDGE_PRINCE_REMEDIATION_TEMPLATE;
 
 /// Convert parsed plan tasks into schedulable nodes and planner-provenance edges.
 ///
@@ -66,4 +67,40 @@ pub fn task_graph_from_plan(plan: &SessionPlan) -> TaskGraph {
         .collect();
 
     TaskGraph::new(nodes, edges)
+}
+
+/// Promote only the initial plan-time frontier after every structural stage
+/// has been stamped. Runtime remediation is excluded even if a retry invokes
+/// reconciliation after its prerequisite verdict completed.
+pub fn promote_initial_ready_nodes(graph: &mut TaskGraph) -> Vec<TaskId> {
+    let completed: std::collections::BTreeSet<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.status == NodeStatus::Completed)
+        .map(|node| node.id.clone())
+        .collect();
+    let ready_ids: std::collections::BTreeSet<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.status == NodeStatus::Pending)
+        .filter(|node| {
+            !node.expansion.as_ref().is_some_and(|expansion| {
+                expansion.template == JUDGE_PRINCE_REMEDIATION_TEMPLATE
+            })
+        })
+        .filter(|node| {
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::DependsOn && edge.target == node.id)
+                .all(|edge| completed.contains(&edge.source))
+        })
+        .map(|node| node.id.clone())
+        .collect();
+    for node in &mut graph.nodes {
+        if ready_ids.contains(&node.id) {
+            node.status = NodeStatus::Ready;
+        }
+    }
+    ready_ids.into_iter().collect()
 }

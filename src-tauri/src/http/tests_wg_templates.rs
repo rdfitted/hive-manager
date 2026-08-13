@@ -14,8 +14,15 @@ use crate::orchestrator::work_graph::archetypes::{
     NoRepoShapeFacts, PromotionTier, RepoShapeFacts, RepoShapeFactsProvider,
     INSTITUTIONAL_ARCHETYPE_CATALOG, PROJECT_ARCHETYPE_OVERRIDES,
 };
+use crate::orchestrator::work_graph::context::{TouchCoverageReport, TouchesResolver};
+use crate::orchestrator::work_graph::plan_parse::promote_initial_ready_nodes;
+use crate::orchestrator::work_graph::review::JUDGE_PRINCE_REMEDIATION_TEMPLATE;
+use crate::orchestrator::work_graph::runtime::{
+    compose_initial_work_graph, reconcile_composed_work_graph,
+};
 use crate::orchestrator::work_graph::{
-    BindingRef, NodeContract, NodeKind, WorkGraphOmissionReason,
+    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
+    NodeStatus, TaskGraph, WorkEdge, WorkGraphOmissionReason, WorkNode,
 };
 
 #[derive(Clone)]
@@ -26,6 +33,33 @@ impl RepoShapeFactsProvider for StaticFacts {
         Ok(Some(RepoShapeFacts {
             facts: self.0.iter().map(|fact| (*fact).to_string()).collect(),
         }))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CompositionResolver;
+
+impl RepoShapeFactsProvider for CompositionResolver {
+    fn facts(&self, _project_path: &Path) -> Result<Option<RepoShapeFacts>, String> {
+        Ok(Some(RepoShapeFacts {
+            facts: BTreeSet::from(["backend".to_string(), "frontend".to_string()]),
+        }))
+    }
+}
+
+impl TouchesResolver for CompositionResolver {
+    fn resolve_touches(&self, graph: &TaskGraph) -> Result<TouchCoverageReport, String> {
+        Ok(TouchCoverageReport {
+            available: true,
+            artifact_languages: BTreeSet::from(["fixture".to_string()]),
+            touches: graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::Task)
+                .map(|node| (node.id.clone(), BTreeSet::new()))
+                .collect(),
+            unresolved_task_ids: Vec::new(),
+        })
     }
 }
 
@@ -290,6 +324,123 @@ fn registry_exposes_four_distinct_named_archetypes() {
     let ids: BTreeSet<_> = archetypes.iter().map(|item| item.id.as_str()).collect();
     assert_eq!(ids, BTreeSet::from(["audit", "bug-hunt", "feature-build", "migration"]));
     assert!(archetypes.iter().all(|item| item.version > 0));
+}
+
+#[test]
+fn composition_reconciliation_is_idempotent_and_preserves_sidecars() {
+    let fixture = TempDir::new().unwrap();
+    let project = fixture.path().join("project");
+    fs::create_dir_all(project.join(".ai-docs")).unwrap();
+
+    let initial = compose_initial_work_graph(
+        TaskGraph::default(),
+        &project,
+        None,
+        Some("feature-build"),
+        &BTreeMap::from([("component".to_string(), "billing".to_string())]),
+        &CompositionResolver,
+    )
+    .unwrap();
+
+    assert_eq!(initial.lineage.as_ref().unwrap().template_id, "feature-build");
+    assert_eq!(
+        initial
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "design")
+            .unwrap()
+            .status,
+        NodeStatus::Ready
+    );
+    assert!(!initial.reviews.records.is_empty());
+    assert_eq!(
+        serde_json::from_str::<crate::orchestrator::work_graph::runtime::GraphCompositionState>(
+            &serde_json::to_string(&initial).unwrap(),
+        )
+        .unwrap(),
+        initial,
+        "lineage, coverage, context, and review state survive persistence"
+    );
+
+    let planner = TaskGraph::new(
+        vec![
+            WorkNode::new(
+                "design",
+                NodeKind::Task,
+                "Planner-confirmed design",
+                NodeContract::default(),
+                BindingRef::Role("planner".to_string()),
+                NodeStatus::Completed,
+            ),
+            WorkNode::new(
+                "planner-extra",
+                NodeKind::Task,
+                "Planner extra",
+                NodeContract::default(),
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Pending,
+            ),
+        ],
+        vec![WorkEdge::new(
+            "design",
+            "planner-extra",
+            EdgeKind::DependsOn,
+            EdgeProvenance::Planner,
+        )],
+    );
+    let once = reconcile_composed_work_graph(&initial, &planner).unwrap();
+    let twice = reconcile_composed_work_graph(&once, &planner).unwrap();
+
+    assert_eq!(once, twice, "reconciliation retries are exact no-ops");
+    assert_eq!(once.lineage, initial.lineage);
+    assert_eq!(once.reviews, initial.reviews);
+    assert_eq!(once.graph.omissions, initial.graph.omissions);
+    assert_eq!(
+        once.graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "planner-extra")
+            .unwrap()
+            .status,
+        NodeStatus::Ready
+    );
+}
+
+#[test]
+fn initial_promotion_never_activates_runtime_remediation() {
+    let mut remediation = WorkNode::new(
+        "remediation",
+        NodeKind::Task,
+        "Runtime remediation",
+        NodeContract::default(),
+        BindingRef::Role("prince".to_string()),
+        NodeStatus::Pending,
+    );
+    remediation.expansion = Some(CompositeExpansion {
+        template: JUDGE_PRINCE_REMEDIATION_TEMPLATE.to_string(),
+        parameters: BTreeMap::new(),
+    });
+    let mut graph = TaskGraph::new(
+        vec![
+            WorkNode::new(
+                "root",
+                NodeKind::Task,
+                "Root",
+                NodeContract::default(),
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Pending,
+            ),
+            remediation,
+        ],
+        Vec::new(),
+    );
+
+    assert_eq!(promote_initial_ready_nodes(&mut graph), vec!["root"]);
+    assert_eq!(
+        graph.nodes.iter().find(|node| node.id == "remediation").unwrap().status,
+        NodeStatus::Pending
+    );
 }
 
 fn feature_build() -> GraphArchetype {

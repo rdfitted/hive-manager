@@ -25,15 +25,42 @@ pub const ANTI_HUB_TASK_FRACTION: f64 = 0.75;
 pub const ANTI_HUB_MIN_TASKS: usize = 2;
 const MAX_OMISSION_EXAMPLES: usize = 5;
 
-/// Future codegraph integration seam implemented by WS-8 (#215).
-///
-/// `Ok(None)` means codegraph/touches data was unavailable. `Ok(Some(empty))`
-/// means resolution ran successfully and found no touched modules.
+/// Lossless codegraph/touches coverage shared by enrichment, context, and
+/// claim-time conflict projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TouchCoverageReport {
+    pub available: bool,
+    #[serde(default)]
+    pub artifact_languages: BTreeSet<String>,
+    #[serde(default)]
+    pub touches: BTreeMap<TaskId, BTreeSet<String>>,
+    #[serde(default)]
+    pub unresolved_task_ids: Vec<TaskId>,
+}
+
+impl TouchCoverageReport {
+    pub fn unavailable() -> Self {
+        Self {
+            available: false,
+            artifact_languages: BTreeSet::new(),
+            touches: BTreeMap::new(),
+            unresolved_task_ids: Vec::new(),
+        }
+    }
+}
+
+impl Default for TouchCoverageReport {
+    fn default() -> Self {
+        Self::unavailable()
+    }
+}
+
+/// Codegraph integration seam implemented by WS-8 (#215).
 pub trait TouchesResolver {
     fn resolve_touches(
         &self,
         graph: &TaskGraph,
-    ) -> Result<Option<BTreeMap<TaskId, BTreeSet<String>>>, String>;
+    ) -> Result<TouchCoverageReport, String>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,8 +70,8 @@ impl TouchesResolver for NoTouchesResolver {
     fn resolve_touches(
         &self,
         _graph: &TaskGraph,
-    ) -> Result<Option<BTreeMap<TaskId, BTreeSet<String>>>, String> {
-        Ok(None)
+    ) -> Result<TouchCoverageReport, String> {
+        Ok(TouchCoverageReport::unavailable())
     }
 }
 
@@ -104,9 +131,9 @@ pub fn derive_project_context<R: TouchesResolver>(
         };
     }
 
-    let touches = match resolver.resolve_touches(graph) {
-        Ok(Some(touches)) => touches,
-        Ok(None) => {
+    let coverage = match resolver.resolve_touches(graph) {
+        Ok(coverage) if coverage.available => coverage,
+        Ok(_) => {
             graph.omissions.push(WorkGraphOmission::new(
                 WorkGraphOmissionReason::CodegraphUnavailable,
                 1,
@@ -147,18 +174,7 @@ pub fn derive_project_context<R: TouchesResolver>(
         .filter(|node| node.kind == NodeKind::Task)
         .map(|node| node.id.clone())
         .collect();
-    // `Some(empty)` is the interface's successful repo-wide "nothing
-    // touched" result. Once any task facts are present, omitted task IDs are
-    // instead partial resolution and must be reported.
-    let missing_task_ids: Vec<_> = if touches.is_empty() {
-        Vec::new()
-    } else {
-        all_task_ids
-            .iter()
-            .filter(|task_id| !touches.contains_key(*task_id))
-            .cloned()
-            .collect()
-    };
+    let missing_task_ids = coverage.unresolved_task_ids.clone();
     if !missing_task_ids.is_empty() {
         graph.omissions.push(WorkGraphOmission::new(
             WorkGraphOmissionReason::ResolutionIncomplete,
@@ -178,7 +194,7 @@ pub fn derive_project_context<R: TouchesResolver>(
     for gotcha in &load.gotchas {
         let context_id = context_node_id(&gotcha.id);
         for task_id in &task_ids {
-            let Some(task_touches) = touches.get(task_id) else {
+            let Some(task_touches) = coverage.touches.get(task_id) else {
                 continue;
             };
             if scope_intersects(&gotcha.scope, task_touches) {
@@ -242,17 +258,36 @@ pub fn derive_project_context<R: TouchesResolver>(
     }
 }
 
+/// Attach context from the exact coverage report already produced by the
+/// preceding touch-derivation stage; no second analyzer call or inference.
+pub fn derive_project_context_from_coverage(
+    graph: &mut TaskGraph,
+    project_path: &Path,
+    coverage: &TouchCoverageReport,
+) -> ContextDerivationReport {
+    struct BorrowedCoverage<'a>(&'a TouchCoverageReport);
+    impl TouchesResolver for BorrowedCoverage<'_> {
+        fn resolve_touches(
+            &self,
+            _graph: &TaskGraph,
+        ) -> Result<TouchCoverageReport, String> {
+            Ok(self.0.clone())
+        }
+    }
+    derive_project_context(graph, project_path, &BorrowedCoverage(coverage))
+}
+
 /// A real adapter for the WS-7 `GotchaAttachmentProvider` seam. The provider
 /// derives scoped graph context on demand and returns only non-hub task
 /// attachments. Missing project knowledge remains `Ok(None)`.
-pub struct ProjectKnowledgeGotchaProvider<R> {
-    pub graph: TaskGraph,
+pub struct ProjectKnowledgeGotchaProvider<'a, R> {
+    pub graph: &'a TaskGraph,
     pub resolver: R,
 }
 
-impl<R: TouchesResolver> GotchaAttachmentProvider for ProjectKnowledgeGotchaProvider<R> {
+impl<R: TouchesResolver> GotchaAttachmentProvider for ProjectKnowledgeGotchaProvider<'_, R> {
     fn gotchas(&self, project_path: &Path) -> Result<Option<Vec<GotchaAttachment>>, String> {
-        let mut graph = self.graph.clone();
+        let mut graph = (*self.graph).clone();
         let report = derive_project_context(&mut graph, project_path, &self.resolver);
         if !report.knowledge_available {
             return Ok(None);

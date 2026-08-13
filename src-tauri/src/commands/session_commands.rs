@@ -338,6 +338,8 @@ pub async fn launch_solo(
         evaluator_config,
         qa_workers: None,
         smoke_test: false,
+        work_graph_archetype: None,
+        work_graph_parameters: Default::default(),
     };
 
     let input = serde_json::to_value(config).map_err(|e| e.to_string())?;

@@ -22,6 +22,8 @@ export interface DefaultHiveFormState {
   queenMaxDepth: number;
   principalMaxChildren: number;
   principalMaxDepth: number;
+  workGraphArchetype: string | null;
+  workGraphParameters: Record<string, string>;
 }
 
 export function createDefaultCodingPrincipal(index: number): CodingPrincipalFormConfig {
@@ -109,6 +111,8 @@ export function createDefaultHiveFormState(): DefaultHiveFormState {
     queenMaxDepth: 1,
     principalMaxChildren: 2,
     principalMaxDepth: 1,
+    workGraphArchetype: null,
+    workGraphParameters: {},
   };
 }
 
@@ -138,6 +142,8 @@ export interface BuildHiveLaunchConfigInput {
   queenMaxDepth: number;
   principalMaxChildren: number;
   principalMaxDepth: number;
+  workGraphArchetype: string | null;
+  workGraphParameters: Record<string, string>;
   prompt?: string;
   withPlanning: boolean;
   smokeTest: boolean;
@@ -147,6 +153,15 @@ export interface BuildHiveLaunchConfigInput {
 }
 
 export function buildHiveLaunchConfig(input: BuildHiveLaunchConfigInput): HiveLaunchConfig {
+  const workGraphArchetype = input.workGraphArchetype?.trim() || null;
+  const workGraphParameters = workGraphArchetype
+    ? Object.fromEntries(
+        Object.entries(input.workGraphParameters)
+          .map(([key, value]) => [key.trim(), value.trim()] as const)
+          .filter(([key, value]) => key.length > 0 && value.length > 0),
+      )
+    : {};
+
   return {
     name: input.name,
     color: input.color,
@@ -167,8 +182,10 @@ export function buildHiveLaunchConfig(input: BuildHiveLaunchConfigInput): HiveLa
         input.principalMaxDepth,
       ),
     },
+    work_graph_archetype: workGraphArchetype,
+    work_graph_parameters: workGraphParameters,
     prompt: input.prompt,
-    with_planning: input.withPlanning,
+    with_planning: workGraphArchetype ? true : input.withPlanning,
     smoke_test: input.smokeTest,
     with_evaluator: input.withEvaluator,
     evaluator_config: input.withEvaluator ? input.evaluatorConfig : undefined,

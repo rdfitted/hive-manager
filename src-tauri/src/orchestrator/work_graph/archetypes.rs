@@ -120,6 +120,15 @@ pub struct GraphArchetypeInstance {
     pub lineage: ArchetypeLineage,
 }
 
+/// Skeleton-stage output. Reviews and checkpoints are deliberately returned
+/// unstamped so touch/context enrichment can run before those plan-time stages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchetypeCompositionStage {
+    pub instance: GraphArchetypeInstance,
+    pub review_templates: Vec<ReviewTemplate>,
+    pub checkpoints: Vec<CheckpointWave>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoShapeFacts {
     pub facts: BTreeSet<String>,
@@ -204,6 +213,110 @@ where
     R: RepoShapeFactsProvider,
     G: GotchaAttachmentProvider,
 {
+    let mut prepared = prepare_named_archetype(
+        project_path,
+        institutional_wiki_root,
+        archetype_id,
+        session_parameters,
+        repo_shape,
+    )?;
+    match gotcha_provider.gotchas(project_path) {
+        Ok(Some(gotchas)) => {
+            attach_gotchas(&mut prepared.archetype, gotchas, &mut prepared.omissions)
+        }
+        Ok(None) => prepared.omissions.push(WorkGraphOmission::new(
+            WorkGraphOmissionReason::ProjectKnowledgeUnavailable,
+            1,
+            vec!["gotcha-attachments".to_string()],
+        )),
+        Err(error) => prepared.omissions.push(WorkGraphOmission::new(
+            WorkGraphOmissionReason::SourceUnreadable,
+            1,
+            vec![format!("gotcha-attachments: {error}")],
+        )),
+    }
+    let mut graph = build_lane_graph(
+        &prepared.archetype,
+        &prepared.lineage,
+        &mut prepared.omissions,
+    )?;
+    instantiate_review_templates(&mut graph, &prepared.archetype.review_templates)?;
+    instantiate_checkpoints(
+        &mut graph,
+        &prepared.archetype.checkpoints,
+        &mut prepared.omissions,
+    )?;
+    graph.omissions.extend(prepared.omissions);
+    Ok(GraphArchetypeInstance {
+        graph,
+        lineage: prepared.lineage,
+    })
+}
+
+/// Compose a selected/pruned/overridden/parameterized skeleton onto the graph
+/// already under construction. No context clone and no separate graph escapes.
+pub fn instantiate_named_archetype_into<R>(
+    mut graph: TaskGraph,
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    archetype_id: &str,
+    session_parameters: &BTreeMap<String, String>,
+    repo_shape: &R,
+) -> Result<ArchetypeCompositionStage, ArchetypeError>
+where
+    R: RepoShapeFactsProvider,
+{
+    let mut prepared = prepare_named_archetype(
+        project_path,
+        institutional_wiki_root,
+        archetype_id,
+        session_parameters,
+        repo_shape,
+    )?;
+    let skeleton = build_lane_graph(
+        &prepared.archetype,
+        &prepared.lineage,
+        &mut prepared.omissions,
+    )?;
+    let mut known: BTreeSet<_> = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    for node in skeleton.nodes {
+        if !known.insert(node.id.clone()) {
+            return Err(ArchetypeError::DuplicateLane(node.id));
+        }
+        graph.nodes.push(node);
+    }
+    for edge in skeleton.edges {
+        if !graph.edges.contains(&edge) {
+            graph.edges.push(edge);
+        }
+    }
+    graph.omissions.extend(prepared.omissions);
+    Ok(ArchetypeCompositionStage {
+        instance: GraphArchetypeInstance {
+            graph,
+            lineage: prepared.lineage,
+        },
+        review_templates: prepared.archetype.review_templates,
+        checkpoints: prepared.archetype.checkpoints,
+    })
+}
+
+struct PreparedArchetype {
+    archetype: GraphArchetype,
+    lineage: ArchetypeLineage,
+    omissions: Vec<WorkGraphOmission>,
+}
+
+fn prepare_named_archetype<R>(
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    archetype_id: &str,
+    session_parameters: &BTreeMap<String, String>,
+    repo_shape: &R,
+) -> Result<PreparedArchetype, ArchetypeError>
+where
+    R: RepoShapeFactsProvider,
+{
     let (catalog, catalog_source, mut omissions) =
         load_institutional_catalog(institutional_wiki_root);
     let institutional_match = catalog
@@ -281,20 +394,6 @@ where
         }
     }
 
-    match gotcha_provider.gotchas(project_path) {
-        Ok(Some(gotchas)) => attach_gotchas(&mut archetype, gotchas, &mut omissions),
-        Ok(None) => omissions.push(WorkGraphOmission::new(
-            WorkGraphOmissionReason::ProjectKnowledgeUnavailable,
-            1,
-            vec!["gotcha-attachments".to_string()],
-        )),
-        Err(error) => omissions.push(WorkGraphOmission::new(
-            WorkGraphOmissionReason::SourceUnreadable,
-            1,
-            vec![format!("gotcha-attachments: {error}")],
-        )),
-    }
-
     fill_archetype_holes(&mut archetype);
     let lineage = ArchetypeLineage {
         template_id: archetype.id.clone(),
@@ -302,12 +401,77 @@ where
         source,
         applied_override_ids,
     };
-    let mut graph = build_lane_graph(&archetype, &lineage, &mut omissions)?;
-    instantiate_review_templates(&mut graph, &archetype.review_templates)?;
-    instantiate_checkpoints(&mut graph, &archetype.checkpoints, &mut omissions)?;
-    graph.omissions.extend(omissions);
+    Ok(PreparedArchetype {
+        archetype,
+        lineage,
+        omissions,
+    })
+}
 
-    Ok(GraphArchetypeInstance { graph, lineage })
+/// Deterministically reconcile planner output onto the persisted enriched
+/// skeleton. Stable skeleton/derived nodes, lineage, and omissions survive;
+/// retrying the same planner graph is an exact no-op.
+pub fn reconcile_planner_graph(
+    persisted: &TaskGraph,
+    planner_graph: &TaskGraph,
+) -> Result<TaskGraph, ArchetypeError> {
+    let mut reconciled = persisted.clone();
+    let mut planner_nodes = planner_graph.nodes.clone();
+    planner_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut planner_ids = BTreeSet::new();
+    for planner_node in planner_nodes {
+        if !planner_ids.insert(planner_node.id.clone()) {
+            return Err(ArchetypeError::DuplicateLane(planner_node.id));
+        }
+        if let Some(existing) = reconciled
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == planner_node.id)
+        {
+            existing.title = planner_node.title;
+            existing.contract = planner_node.contract;
+            existing.binding = planner_node.binding;
+            if planner_node.status == NodeStatus::Completed {
+                existing.status = NodeStatus::Completed;
+            }
+        } else {
+            reconciled.nodes.push(planner_node);
+        }
+    }
+    for edge in &planner_graph.edges {
+        if !reconciled.edges.contains(edge) {
+            reconciled.edges.push(edge.clone());
+        }
+    }
+    for omission in &planner_graph.omissions {
+        if !reconciled.omissions.contains(omission) {
+            reconciled.omissions.push(omission.clone());
+        }
+    }
+    reconciled.nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    reconciled.edges.sort_by(|left, right| {
+        left.source
+            .cmp(&right.source)
+            .then(left.target.cmp(&right.target))
+            .then(format!("{:?}", left.kind).cmp(&format!("{:?}", right.kind)))
+            .then(
+                format!("{:?}", left.provenance)
+                    .cmp(&format!("{:?}", right.provenance)),
+            )
+            .then(left.rationale.cmp(&right.rationale))
+    });
+    Ok(reconciled)
+}
+
+/// Stamp opt-in checkpoint declarations after touch/context enrichment.
+pub fn stamp_checkpoint_waves(
+    graph: &mut TaskGraph,
+    checkpoints: &[CheckpointWave],
+) -> Result<(), ArchetypeError> {
+    let mut omissions = Vec::new();
+    instantiate_checkpoints(graph, checkpoints, &mut omissions)?;
+    graph.omissions.extend(omissions);
+    Ok(())
 }
 
 fn load_institutional_catalog(

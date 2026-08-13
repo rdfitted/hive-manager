@@ -2,13 +2,18 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::thread;
+use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use tempfile::TempDir;
 
 use crate::domain::run_journal::Confidence;
 use crate::orchestrator::work_graph::archive::{
-    ArchiveSourceKind, ArchiveSourceReport, WorkGraphArchive,
+    archive_completed_session, complete_session_archive_and_retro,
+    persist_retro_evaluator_provenance,
+    schedule_completed_session_archive_and_retro, ArchiveSourceKind,
+    ArchiveSourceReport, RetroEvaluatorProvenance, WorkGraphArchive,
     WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
 };
 use crate::orchestrator::work_graph::divergence::{
@@ -29,6 +34,7 @@ use crate::orchestrator::work_graph::{
     NodeKind, NodeStatus, TaskGraph, WorkEdge, WorkNode,
 };
 use crate::orchestrator::work_graph::review::JUDGE_PRINCE_REMEDIATION_TEMPLATE;
+use crate::storage::SessionStorage;
 
 fn instant(seconds: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(1_900_000_000 + seconds, 0)
@@ -176,20 +182,7 @@ fn added_node_archive(
 }
 
 #[test]
-fn completed_retro_returns_metrics_and_unreviewed_submissions_without_writes() {
-    let temp = TempDir::new().expect("temp workspace");
-    let template_path = temp.path().join("template.json");
-    let wiki_path = temp.path().join("wiki.md");
-    let learning_path = temp.path().join("learnings.jsonl");
-    fs::write(&template_path, b"template-before").expect("seed template");
-    fs::write(&wiki_path, b"wiki-before").expect("seed wiki");
-    fs::write(&learning_path, b"learning-before\n").expect("seed learnings");
-    let snapshots = [
-        fs::read(&template_path).expect("template snapshot"),
-        fs::read(&wiki_path).expect("wiki snapshot"),
-        fs::read(&learning_path).expect("learning snapshot"),
-    ];
-
+fn pure_retro_returns_metrics_and_unreviewed_submission_proposals() {
     let inputs = vec![
         RetroRunInput {
             repo_id: "repo-a".to_string(),
@@ -213,9 +206,157 @@ fn completed_retro_returns_metrics_and_unreviewed_submissions_without_writes() {
             && learning.endpoint_path()
                 == format!("/api/sessions/{}/learnings", learning.session)
     }));
-    assert_eq!(fs::read(template_path).expect("template after"), snapshots[0]);
-    assert_eq!(fs::read(wiki_path).expect("wiki after"), snapshots[1]);
-    assert_eq!(fs::read(learning_path).expect("learning after"), snapshots[2]);
+}
+
+#[test]
+fn production_completion_hook_changes_only_retro_report_and_session_learning_paths() {
+    let temp = TempDir::new().expect("temp storage root");
+    let storage = SessionStorage::new_with_base(temp.path().to_path_buf())
+        .expect("session storage");
+    let sessions = [
+        ("hook-session-a", "hook-archive-a", instant(10)),
+        ("hook-session-b", "hook-archive-b", instant(20)),
+    ];
+    let mut archived_paths = Vec::new();
+    for (session_id, archive_id, archived_at) in sessions {
+        storage
+            .create_session_dir(session_id)
+            .expect("session paths");
+        let completion = archive_completed_session(temp.path(), None, session_id)
+            .expect("seed canonical archive path");
+        let fixture = added_node_archive(
+            archive_id,
+            session_id,
+            archived_at,
+            "hook-feature",
+            1,
+        );
+        fs::write(
+            &completion.path,
+            serde_json::to_vec_pretty(&fixture).expect("fixture JSON"),
+        )
+        .expect("replace seeded archive with deterministic fixture");
+        archived_paths.push(completion.path);
+        persist_retro_evaluator_provenance(
+            temp.path(),
+            session_id,
+            &RetroEvaluatorProvenance {
+                repo_id: "repo-hook".to_string(),
+                evaluator_id: "independent-retro-service".to_string(),
+                planner_agent_ids: vec![format!("{session_id}-planner")],
+                supervisor_agent_ids: vec![format!("{session_id}-supervisor")],
+            },
+        )
+        .expect("persist launch-time provenance");
+    }
+
+    let source_paths = vec![
+        temp.path().join("config.json"),
+        storage
+            .session_dir("hook-session-a")
+            .join("state")
+            .join("work-graph.json"),
+        storage
+            .session_dir("hook-session-b")
+            .join("state")
+            .join("work-graph.json"),
+        storage
+            .session_dir("hook-session-a")
+            .join("state")
+            .join("retro-evaluator-provenance.json"),
+        storage
+            .session_dir("hook-session-b")
+            .join("state")
+            .join("retro-evaluator-provenance.json"),
+        archived_paths[0].clone(),
+        archived_paths[1].clone(),
+    ];
+    let source_snapshots: Vec<_> = source_paths
+        .iter()
+        .map(|path| fs::read(path).expect("source snapshot"))
+        .collect();
+    let lessons_path = storage
+        .session_dir("hook-session-b")
+        .join("lessons")
+        .join("learnings.jsonl");
+    assert!(!lessons_path.exists());
+
+    let report_path = storage
+        .session_dir("hook-session-b")
+        .join("archive")
+        .join("work-graph-retros")
+        .join("hook-archive-b.json");
+    schedule_completed_session_archive_and_retro(
+        temp.path().to_path_buf(),
+        None,
+        "hook-session-b".to_string(),
+    );
+    for _ in 0..250 {
+        if report_path.exists() && lessons_path.exists() {
+            break;
+        }
+        thread::sleep(StdDuration::from_millis(20));
+    }
+    assert!(report_path.exists(), "detached hook did not persist its report");
+    assert!(lessons_path.exists());
+    let first_report: crate::orchestrator::work_graph::retro::RetroReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(first_report.runs.len(), 2);
+    assert_eq!(first_report.promotion_proposals.len(), 1);
+    assert_eq!(first_report.learning_submissions.len(), 1);
+    for (path, before) in source_paths.iter().zip(&source_snapshots) {
+        assert_eq!(
+            fs::read(path).expect("source after hook"),
+            *before,
+            "completion hook mutated source path {}",
+            path.display()
+        );
+    }
+    let report_bytes = fs::read(&report_path).expect("retro report bytes");
+    let learning_bytes = fs::read(&lessons_path).expect("learning bytes");
+    assert_eq!(storage.read_learnings_session("hook-session-b").unwrap().len(), 1);
+
+    let retry = complete_session_archive_and_retro(
+        temp.path(),
+        None,
+        "hook-session-b",
+    )
+    .expect("idempotent retry");
+    assert_eq!(retry.submitted_learning_ids.len(), 1);
+    assert_eq!(fs::read(&retry.report_path).unwrap(), report_bytes);
+    assert_eq!(fs::read(&lessons_path).unwrap(), learning_bytes);
+    assert_eq!(storage.read_learnings_session("hook-session-b").unwrap().len(), 1);
+    for (path, before) in source_paths.iter().zip(&source_snapshots) {
+        assert_eq!(fs::read(path).unwrap(), *before);
+    }
+}
+
+#[test]
+fn completion_hook_persists_stated_absence_when_provenance_is_missing() {
+    let temp = TempDir::new().expect("temp storage root");
+    let storage = SessionStorage::new_with_base(temp.path().to_path_buf())
+        .expect("session storage");
+    storage
+        .create_session_dir("legacy-no-provenance")
+        .expect("legacy session paths");
+
+    let completion = complete_session_archive_and_retro(
+        temp.path(),
+        None,
+        "legacy-no-provenance",
+    )
+    .expect("missing provenance is persisted, not propagated");
+
+    assert!(completion.archive.is_some());
+    assert!(completion.report_path.exists());
+    assert!(completion.report.runs.is_empty());
+    assert!(completion.report.omissions.iter().any(|omission| {
+        omission.reason == RetroOmissionReason::EvaluatorProvenanceUnavailable
+            && omission.metric == "retro_completion"
+    }));
+    let persisted: crate::orchestrator::work_graph::retro::RetroReport =
+        serde_json::from_slice(&fs::read(completion.report_path).unwrap()).unwrap();
+    assert_eq!(persisted, completion.report);
 }
 
 #[test]
@@ -356,6 +497,96 @@ fn later_explicit_escape_evidence_revises_an_earlier_review_verdict() {
         reviews[0].revisions[0].discovering_archive_id,
         "archive-later"
     );
+}
+
+#[test]
+fn confirmed_escape_without_reference_downgrades_review_evidence_without_guessing() {
+    let before = review_plan(NodeStatus::Pending);
+    let after = review_plan(NodeStatus::Completed);
+    let old = archive(
+        "missing-ref-old",
+        "missing-ref-session-old",
+        instant(10),
+        Some(before.clone()),
+        after.clone(),
+        vec![GraphMutationDelta {
+            sequence: 1,
+            observed_at: instant(9),
+            mutation_type: GraphMutationType::ReviewVerdictRecorded,
+            before,
+            after,
+            source_refs: vec!["verdict:verdict".to_string()],
+        }],
+        Vec::new(),
+        DivergenceSummary::default(),
+    );
+    let later_plan = TaskGraph::new(
+        vec![lineage(node("target", NodeKind::Task), "reviewed-feature", 1)],
+        Vec::new(),
+    );
+    let mut later_outcome = outcome(
+        "target",
+        RuntimeOutcomeStatus::Failed,
+        Some(instant(19)),
+        Some(instant(20)),
+        1,
+    );
+    later_outcome.effects.push(RuntimeEffect {
+        kind: "review_escape".to_string(),
+        reference: None,
+        confirmed: true,
+        confidence: Confidence::High,
+        source_ref: "ledger:escape-without-reference".to_string(),
+    });
+    let later = archive(
+        "missing-ref-later",
+        "missing-ref-session-later",
+        instant(20),
+        Some(later_plan.clone()),
+        later_plan,
+        Vec::new(),
+        vec![later_outcome],
+        DivergenceSummary::default(),
+    );
+
+    let report = evaluate_archives(
+        &evaluator(),
+        &[
+            RetroRunInput {
+                repo_id: "repo-a".to_string(),
+                archive: old,
+            },
+            RetroRunInput {
+                repo_id: "repo-a".to_string(),
+                archive: later,
+            },
+        ],
+    )
+    .expect("missing-reference evidence is reported, not fatal");
+
+    let old_reviews = match &report.runs[0].reviews {
+        EvidenceMetric::Partial { value, omissions } => {
+            assert!(omissions.iter().any(|omission| {
+                omission.reason == RetroOmissionReason::ResolutionIncomplete
+                    && omission
+                        .examples
+                        .iter()
+                        .any(|example| example == "ledger:escape-without-reference")
+            }));
+            value
+        }
+        other => panic!("expected downgraded review evidence, got {other:?}"),
+    };
+    assert_eq!(old_reviews[0].state, ReviewEvidenceState::PassedNoKnownEscape);
+    assert_eq!(old_reviews[0].escaped_defects, 0);
+    assert!(matches!(
+        report.template_aggregates[0].review_efficacy,
+        EvidenceMetric::Partial { .. }
+    ));
+    assert!(report.omissions.iter().any(|omission| {
+        omission.reason == RetroOmissionReason::ResolutionIncomplete
+            && omission.metric == "review_efficacy"
+    }));
 }
 
 #[test]

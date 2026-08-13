@@ -2,7 +2,7 @@ use crate::tauri_shim::{AppHandle, Emitter};
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -401,6 +401,16 @@ pub struct HiveLaunchConfig {
     pub smoke_test: bool, // If true, create a minimal test plan without real investigation
     #[serde(default)]
     pub execution_policy: HiveExecutionPolicy,
+    /// Optional plan-time work-graph archetype. Missing remains the exact
+    /// legacy checkbox-plan path; no composition sidecar or prompt section is
+    /// created for old callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_graph_archetype: Option<String>,
+    /// Per-session values used to fill archetype holes (for example
+    /// `component`). Empty parameters are omitted from persisted legacy launch
+    /// configs so old sessions retain their prior serialized shape.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub work_graph_parameters: BTreeMap<String, String>,
 }
 
 /// Launch config for **Research** mode.
@@ -2367,7 +2377,7 @@ impl SessionController {
             self.emit_cell_status_changes(session_id, changes);
             self.emit_session_update(session_id);
             if let Some(storage) = self.storage.as_ref() {
-                crate::orchestrator::work_graph::archive::schedule_completed_session_archive(
+                crate::orchestrator::work_graph::archive::schedule_completed_session_archive_and_retro(
                     storage.base_dir().clone(),
                     self.run_journal.clone(),
                     session_id.to_string(),
@@ -2389,7 +2399,7 @@ impl SessionController {
         storage.save_session(&persisted).map_err(|e| {
             CompletionError::storage(format!("Failed to persist session completion: {}", e))
         })?;
-        crate::orchestrator::work_graph::archive::schedule_completed_session_archive(
+        crate::orchestrator::work_graph::archive::schedule_completed_session_archive_and_retro(
             storage.base_dir().clone(),
             self.run_journal.clone(),
             session_id.to_string(),
@@ -7318,7 +7328,7 @@ Content-Type: application/json
   "session": "{{session_id}}",
   "task": "Description of the task you completed",
   "insight": "What you learned or discovered",
-  "outcome": "success|partial|failed",
+  "outcome": "success|partial|failed|unreviewed",
   "keywords": ["keyword1", "keyword2"],
   "files_touched": ["path/to/file.rs"]
 }
@@ -7331,7 +7341,7 @@ Content-Type: application/json
 | session | string | Current session ID |
 | task | string | What task was being performed |
 | insight | string | The learning or discovery |
-| outcome | string | Category: success, partial, failed |
+| outcome | string | Category: success, partial, failed, or unreviewed. `unreviewed` is an ungraded proposal awaiting authorized review. |
 | keywords | string[] | Relevant keywords for filtering |
 | files_touched | string[] | Files involved in this learning |
 
@@ -8046,12 +8056,28 @@ Last updated: {timestamp}
         let mut created_cells = Vec::new();
         let mut spawned_agent_ids = Vec::new();
 
+        if config.work_graph_archetype.is_some() && !config.with_planning {
+            return Err(
+                "A work-graph archetype requires the Master Planner so it can start from the persisted skeleton"
+                    .to_string(),
+            );
+        }
+
         let topology = SessionOrchestrator::plan_hive_launch(
             &config.execution_policy,
             config.workers.len(),
             !use_worktrees,
         )
         .map_err(|error| error.to_string())?;
+
+        if config.work_graph_archetype.is_some()
+            && topology.launch_kind == HiveLaunchKind::Solo
+        {
+            return Err(
+                "A work-graph archetype requires a Hive planning topology and cannot be coerced to Solo"
+                    .to_string(),
+            );
+        }
 
         if topology.launch_kind == HiveLaunchKind::Solo
             && (pre_spawn_workers || config.execution_policy.launch_kind == HiveLaunchKind::Solo)
@@ -8444,13 +8470,16 @@ Last updated: {timestamp}
         // Initialize session storage
         self.init_session_storage(&session);
         self.ensure_task_watcher(&session.id, &session.project_path);
-        self.spawn_launch_evaluator_agents(
-            &session.id,
-            config.with_evaluator,
-            config.evaluator_config.clone(),
-            config.qa_workers.as_deref(),
-            config.smoke_test,
-        )
+        self.ensure_live_retro_provenance(&session.id, config.with_evaluator)
+            .and_then(|_| {
+                self.spawn_launch_evaluator_agents(
+                    &session.id,
+                    config.with_evaluator,
+                    config.evaluator_config.clone(),
+                    config.qa_workers.as_deref(),
+                    config.smoke_test,
+                )
+            })
         .map_err(|err| {
             {
                 let mut watchers = self.task_watchers.lock();
@@ -8522,6 +8551,8 @@ Last updated: {timestamp}
                 workspace_strategy: WorkspaceStrategy::None,
                 ..HiveExecutionPolicy::default()
             },
+            work_graph_archetype: None,
+            work_graph_parameters: BTreeMap::new(),
         };
 
         // Resolve the global wiki path from AppConfig (falls back to the documented
@@ -9297,6 +9328,244 @@ phases and do EXACTLY this, then stop:
         Ok(())
     }
 
+    fn configured_institutional_wiki_root(&self) -> Option<PathBuf> {
+        self.storage
+            .as_ref()
+            .and_then(|storage| storage.load_config().ok())
+            .and_then(|config| config.global_wiki_path)
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| PathBuf::from(expand_tilde(&path)))
+    }
+
+    fn planning_codegraph_artifact_path(project_path: &Path, session_id: &str) -> PathBuf {
+        Self::session_root_path(project_path, session_id)
+            .join("artifacts")
+            .join("codegraph.json")
+    }
+
+    fn discard_initial_work_graph(&self, session_id: &str) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let path = storage
+            .session_dir(session_id)
+            .join("state")
+            .join("work-graph-composition.json");
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    session_id,
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to discard an unlaunched work-graph skeleton"
+                );
+            }
+        }
+        let provenance_path = storage
+            .session_dir(session_id)
+            .join("state")
+            .join("retro-evaluator-provenance.json");
+        if let Err(error) = std::fs::remove_file(&provenance_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    session_id,
+                    path = %provenance_path.display(),
+                    error = %error,
+                    "Failed to discard unlaunched retro evaluator provenance"
+                );
+            }
+        }
+    }
+
+    fn normalized_retro_repo_id(project_path: &Path) -> String {
+        std::fs::canonicalize(project_path)
+            .unwrap_or_else(|_| project_path.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    pub(crate) fn persist_retro_provenance(
+        &self,
+        project_path: &Path,
+        session_id: &str,
+        planner_agent_ids: Vec<String>,
+        supervisor_agent_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let Some(storage) = self.storage.as_ref() else {
+            // Preserve storage-free unit/legacy launch behavior. The completion
+            // hook reports missing provenance instead of inventing identities.
+            return Ok(());
+        };
+        crate::orchestrator::work_graph::archive::persist_retro_evaluator_provenance(
+            storage.base_dir(),
+            session_id,
+            &crate::orchestrator::work_graph::archive::RetroEvaluatorProvenance {
+                repo_id: Self::normalized_retro_repo_id(project_path),
+                evaluator_id: format!("{session_id}-retro-evaluator"),
+                planner_agent_ids,
+                supervisor_agent_ids,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| format!("Failed to persist retro evaluator provenance: {error}"))
+    }
+
+    fn ensure_live_retro_provenance(
+        &self,
+        session_id: &str,
+        include_prince: bool,
+    ) -> Result<(), String> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(());
+        };
+        let path = storage
+            .session_dir(session_id)
+            .join("state")
+            .join("retro-evaluator-provenance.json");
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+        let mut planner_agent_ids: Vec<String> = session
+            .agents
+            .iter()
+            .filter(|agent| {
+                matches!(agent.role, AgentRole::MasterPlanner | AgentRole::Planner { .. })
+            })
+            .map(|agent| agent.id.clone())
+            .collect();
+        let mut supervisor_agent_ids: Vec<String> = session
+            .agents
+            .iter()
+            .filter(|agent| matches!(agent.role, AgentRole::Queen | AgentRole::Prince))
+            .map(|agent| agent.id.clone())
+            .collect();
+        if path.exists() {
+            let existing: crate::orchestrator::work_graph::archive::RetroEvaluatorProvenance =
+                serde_json::from_str(
+                    &std::fs::read_to_string(&path).map_err(|error| {
+                        format!("Failed to read existing retro evaluator provenance: {error}")
+                    })?,
+                )
+                .map_err(|error| {
+                    format!("Failed to parse existing retro evaluator provenance: {error}")
+                })?;
+            planner_agent_ids.extend(existing.planner_agent_ids);
+            supervisor_agent_ids.extend(existing.supervisor_agent_ids);
+        }
+        if include_prince {
+            let expected_prince = format!("{session_id}-prince");
+            if !supervisor_agent_ids.contains(&expected_prince) {
+                supervisor_agent_ids.push(expected_prince);
+            }
+        }
+        planner_agent_ids.sort();
+        planner_agent_ids.dedup();
+        supervisor_agent_ids.sort();
+        supervisor_agent_ids.dedup();
+        self.persist_retro_provenance(
+            &session.project_path,
+            session_id,
+            planner_agent_ids,
+            supervisor_agent_ids,
+        )
+    }
+
+    /// Phase A of named work-graph composition. This method is deliberately a
+    /// strict no-op for `None`: old/edgeless launches neither write a sidecar
+    /// nor gain omission nodes or prompt bytes.
+    pub(crate) fn prepare_initial_work_graph(
+        &self,
+        project_path: &Path,
+        session_id: &str,
+        archetype_id: Option<&str>,
+        session_parameters: &BTreeMap<String, String>,
+    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String> {
+        let Some(archetype_id) = archetype_id else {
+            return Ok(None);
+        };
+        let archetype_id = archetype_id.trim();
+        if archetype_id.is_empty() {
+            return Err("Work-graph archetype cannot be blank".to_string());
+        }
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            "Session storage is required to persist a selected work-graph archetype".to_string()
+        })?;
+        let resolver = crate::orchestrator::work_graph::codegraph::ArtifactCodegraph::load(
+            project_path,
+            &Self::planning_codegraph_artifact_path(project_path, session_id),
+        )
+        .map_err(|error| format!("Failed to load the planning codegraph artifact: {error}"))?;
+        let institutional_wiki_root = self.configured_institutional_wiki_root();
+        let composition =
+            crate::orchestrator::work_graph::runtime::compose_initial_work_graph(
+                crate::orchestrator::work_graph::TaskGraph::default(),
+                project_path,
+                institutional_wiki_root.as_deref(),
+                Some(archetype_id),
+                session_parameters,
+                &resolver,
+            )
+            .map_err(|error| format!("Failed to compose initial work graph: {error}"))?;
+        StateManager::new(storage.session_dir(session_id))
+            .write_graph_composition_state(&composition)
+            .map_err(|error| format!("Failed to persist initial work-graph skeleton: {error}"))?;
+        Ok(Some(composition))
+    }
+
+    pub(crate) fn graph_skeleton_prompt_section(
+        composition: &crate::orchestrator::work_graph::runtime::GraphCompositionState,
+    ) -> Result<String, String> {
+        let payload = serde_json::to_string_pretty(&serde_json::json!({
+            "lineage": &composition.lineage,
+            "nodes": &composition.graph.nodes,
+            "edges": &composition.graph.edges,
+            "omissions": &composition.graph.omissions,
+        }))
+        .map_err(|error| format!("Failed to serialize work-graph skeleton: {error}"))?;
+        Ok(format!(
+            r#"
+
+## Required Instantiated Work-Graph Skeleton
+
+The backend composed and persisted the following authoritative skeleton before launching you. Start from it; do not invent a replacement topology.
+
+- Every listed node ID is reserved and stable. Do not rename it, remove it, or create a `T<number>` duplicate for the same work.
+- The listed node contracts and dependency edges already exist and will be reconciled with your plan rather than replaced by it.
+- Add only genuinely plan-specific `T<number>` tasks. Their `(deps: ...)` values may reference the exact skeleton IDs below.
+- Do not emit a checkbox line that attempts to redefine a non-`T<number>` skeleton node. Describe any rationale in prose and preserve the stable ID in dependency metadata.
+
+```json
+{payload}
+```
+"#,
+        ))
+    }
+
+    /// Phase B reads the latest persisted composition value, so a retry after
+    /// writing the reconciled sidecar is an exact no-op. `None` is the legacy
+    /// path and leaves the planner graph byte-for-value unchanged.
+    pub(crate) fn reconcile_planner_graph_with_persisted_skeleton(
+        state_manager: &StateManager,
+        planner_graph: &crate::orchestrator::work_graph::TaskGraph,
+    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String> {
+        let Some(persisted) = state_manager
+            .read_graph_composition_state()
+            .map_err(|error| format!("Failed to read initial work-graph skeleton: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let mut reconciled =
+            crate::orchestrator::work_graph::runtime::reconcile_composed_work_graph(
+                &persisted,
+                planner_graph,
+            )
+            .map_err(|error| format!("Failed to reconcile planner work graph: {error}"))?;
+        crate::orchestrator::work_graph::plan_parse::promote_initial_ready_nodes(
+            &mut reconciled.graph,
+        );
+        Ok(Some(reconciled))
+    }
+
     /// Launch the planning phase - spawns Master Planner only
     fn launch_planning_phase(
         &self,
@@ -9330,8 +9599,38 @@ phases and do EXACTLY this, then stop:
         let worktree_path = Some(cwd.clone());
         let worktree_branch = Some(branch);
 
+        // Phase A must finish durably before the Master Planner receives a
+        // prompt or a PTY. A selected archetype without a persisted skeleton is
+        // not allowed to degrade into the legacy planner-invents-topology path.
+        let initial_composition = match self.prepare_initial_work_graph(
+            &project_path,
+            &session_id,
+            config.work_graph_archetype.as_deref(),
+            &config.work_graph_parameters,
+        ) {
+            Ok(composition) => composition,
+            Err(error) => {
+                self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &[]);
+                return Err(error);
+            }
+        };
+        let mut supervisor_agent_ids = vec![format!("{session_id}-queen")];
+        if config.with_evaluator {
+            supervisor_agent_ids.push(format!("{session_id}-prince"));
+        }
+        if let Err(error) = self.persist_retro_provenance(
+            &project_path,
+            &session_id,
+            vec![format!("{session_id}-master-planner")],
+            supervisor_agent_ids,
+        ) {
+            self.discard_initial_work_graph(&session_id);
+            self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &[]);
+            return Err(error);
+        }
+
         // Build the appropriate prompt based on mode
-        let planner_prompt = if config.smoke_test {
+        let mut planner_prompt = if config.smoke_test {
             tracing::info!("Running in SMOKE TEST mode - skipping real investigation");
             Self::build_smoke_test_prompt(
                 &session_id,
@@ -9351,6 +9650,21 @@ phases and do EXACTLY this, then stop:
                 Path::new(&cwd),
             )
         };
+        if let Some(composition) = initial_composition.as_ref() {
+            match Self::graph_skeleton_prompt_section(composition) {
+                Ok(section) => planner_prompt.push_str(&section),
+                Err(error) => {
+                    self.discard_initial_work_graph(&session_id);
+                    self.rollback_launch_allocations(
+                        &project_path,
+                        &session_id,
+                        &created_cells,
+                        &[],
+                    );
+                    return Err(error);
+                }
+            }
+        }
 
         // Persist continuation input before spawning the planner. A failure here
         // must not leave a live PTY or an orphaned planning worktree.
@@ -9367,6 +9681,7 @@ phases and do EXACTLY this, then stop:
                 .map_err(|e| format!("Failed to write pending config: {}", e))
         })();
         if let Err(error) = pending_result {
+            self.discard_initial_work_graph(&session_id);
             self.rollback_launch_allocations(&project_path, &session_id, &created_cells, &[]);
             return Err(error);
         }
@@ -9388,6 +9703,7 @@ phases and do EXACTLY this, then stop:
                 Ok(prompt_file) => prompt_file,
                 Err(error) => {
                     let _ = std::fs::remove_file(&pending_config_path);
+                    self.discard_initial_work_graph(&session_id);
                     self.rollback_launch_allocations(
                         &project_path,
                         &session_id,
@@ -9414,6 +9730,7 @@ phases and do EXACTLY this, then stop:
                 )
                 .map_err(|e| {
                     let _ = std::fs::remove_file(&pending_config_path);
+                    self.discard_initial_work_graph(&session_id);
                     self.rollback_launch_allocations(
                         &project_path,
                         &session_id,
@@ -12550,6 +12867,19 @@ phases and do EXACTLY this, then stop:
             }
         };
 
+        // Phase B is opt-in by persisted state rather than by a live launch
+        // config. That makes a crash/retry deterministic and lets resumed
+        // planning sessions finish without reconstructing departed agents.
+        let reconciled_composition = if let Some(storage) = self.storage.as_ref() {
+            let state_manager = StateManager::new(storage.session_dir(session_id));
+            Self::reconcile_planner_graph_with_persisted_skeleton(&state_manager, &graph)?
+        } else {
+            None
+        };
+        if let Some(composition) = reconciled_composition.as_ref() {
+            graph = composition.graph.clone();
+        }
+
         let validation = crate::orchestrator::work_graph::validate::validate_plan_ready(&graph)
             .map_err(|error| error.to_string())?;
         for warning in validation.warnings {
@@ -12579,7 +12909,15 @@ phases and do EXACTLY this, then stop:
                 ));
             }
             if let Some(storage) = self.storage.as_ref() {
-                StateManager::new(storage.session_dir(session_id))
+                let state_manager = StateManager::new(storage.session_dir(session_id));
+                if let Some(composition) = reconciled_composition.as_ref() {
+                    state_manager
+                        .write_graph_composition_state(composition)
+                        .map_err(|error| {
+                            format!("Failed to persist reconciled work-graph state: {error}")
+                        })?;
+                }
+                state_manager
                     .write_work_graph(&graph)
                     .map_err(|error| format!("Failed to persist plan work graph: {error}"))?;
             }
@@ -13207,6 +13545,11 @@ phases and do EXACTLY this, then stop:
         if !with_evaluator {
             return Ok(());
         }
+
+        // New direct launches capture the live planner/supervisor set here.
+        // Planned launches already wrote the complete future identity set
+        // before the Master Planner PTY and are deliberately not overwritten.
+        self.ensure_live_retro_provenance(session_id, true)?;
 
         let evaluator_config = evaluator_config.unwrap_or(AgentConfig {
             cli: String::new(),
@@ -14547,6 +14890,13 @@ phases and do EXACTLY this, then stop:
             if let Err(e) = state_manager.update_workers_file(&workers) {
                 tracing::warn!("Failed to update workers file: {}", e);
             }
+            // Capture every archivable session while its planner/supervisor
+            // identities are live. Planned launches may already contain future
+            // identities; the merge in this hook preserves those across later
+            // lifecycle stages instead of reconstructing them at completion.
+            if let Err(e) = self.ensure_live_retro_provenance(&session.id, false) {
+                tracing::warn!("Failed to persist launch-time retro provenance: {}", e);
+            }
         }
     }
 
@@ -14886,8 +15236,8 @@ mod tests {
     use super::{
         extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
         AgentInfo, AuthStrategy, CompletionError, DebateDebaterMetadata, DebateSessionMetadata,
-        FusionVariantMetadata, QaWorkerConfig, Session, SessionController, SessionError,
-        SessionState, SessionType,
+        FusionVariantMetadata, HiveLaunchConfig, QaWorkerConfig, Session, SessionController,
+        SessionError, SessionState, SessionType,
     };
     use super::{heartbeat_cadence_label, CliBehavior, CliRegistry};
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
@@ -14900,6 +15250,23 @@ mod tests {
     use tempfile::TempDir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn legacy_hive_launch_config_omits_work_graph_selection_exactly() {
+        let legacy = serde_json::json!({
+            "project_path": "D:/repo",
+            "queen_config": AgentConfig::default(),
+            "workers": [],
+            "prompt": null
+        });
+        let decoded: HiveLaunchConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.work_graph_archetype, None);
+        assert!(decoded.work_graph_parameters.is_empty());
+
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert!(encoded.get("work_graph_archetype").is_none());
+        assert!(encoded.get("work_graph_parameters").is_none());
+    }
 
     #[test]
     fn extract_model_arg_reads_short_long_and_equals_forms() {
@@ -15739,6 +16106,17 @@ mod tests {
         assert!(status_content.contains(
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
+
+        let learning_tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("submit-learning.md");
+        let learning_content =
+            std::fs::read_to_string(learning_tool_path).expect("read learning tool doc");
+        assert!(learning_content.contains("success|partial|failed|unreviewed"));
+        assert!(learning_content.contains("ungraded proposal awaiting authorized review"));
     }
 
     fn shared_meta_harness_policy() -> HiveExecutionPolicy {
