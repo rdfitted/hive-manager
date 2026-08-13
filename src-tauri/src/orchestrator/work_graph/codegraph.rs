@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,6 +20,7 @@ use super::{
 
 pub const CODEGRAPH_MODULE_TEMPLATE: &str = "codegraph-module";
 pub const MAX_ARTIFACT_MODULES: usize = 50_000;
+pub const MAX_REPO_SHAPE_FILES: usize = 100_000;
 pub const MAX_TOUCH_MODULES_PER_TASK: usize = 256;
 pub const MAX_MODULE_PATH_CHARS: usize = 512;
 const MAX_OMISSION_EXAMPLES: usize = 5;
@@ -49,6 +50,8 @@ pub struct ArtifactCodegraph {
     language: Option<String>,
     modules: BTreeSet<String>,
     module_aliases: BTreeMap<String, BTreeSet<String>>,
+    covered_languages: BTreeSet<String>,
+    repo_facts: RepoShapeFacts,
     available: bool,
 }
 
@@ -62,6 +65,8 @@ impl ArtifactCodegraph {
                 language: None,
                 modules: BTreeSet::new(),
                 module_aliases: BTreeMap::new(),
+                covered_languages: BTreeSet::new(),
+                repo_facts: RepoShapeFacts::default(),
                 available: false,
             }),
             Err(error) => Err(format!(
@@ -109,11 +114,24 @@ impl ArtifactCodegraph {
             }
         }
 
+        let language = raw.language.to_ascii_lowercase();
+        let covered_languages = modules
+            .iter()
+            .filter_map(|module| source_language(module).map(str::to_string))
+            .collect();
+        let repo_facts = repo_shape_facts(
+            &language,
+            &covered_languages,
+            &modules,
+            &project_root,
+        )?;
         Ok(Self {
             project_root,
-            language: Some(raw.language.to_ascii_lowercase()),
+            language: Some(language),
             modules,
             module_aliases,
+            covered_languages,
+            repo_facts,
             available: true,
         })
     }
@@ -124,6 +142,13 @@ impl ArtifactCodegraph {
 
     pub fn indexed_modules(&self) -> &BTreeSet<String> {
         &self.modules
+    }
+
+    /// Languages actually represented by indexed module paths in this
+    /// artifact. This is deliberately derived from content rather than from
+    /// the analyzer's declared language name.
+    pub fn covered_languages(&self) -> &BTreeSet<String> {
+        &self.covered_languages
     }
 
     pub fn is_available(&self) -> bool {
@@ -184,10 +209,7 @@ impl RepoShapeFactsProvider for ArtifactCodegraph {
                 self.project_root.display()
             ));
         }
-        Ok(Some(repo_shape_facts(
-            self.language.as_deref(),
-            &self.modules,
-        )))
+        Ok(Some(self.repo_facts.clone()))
     }
 }
 
@@ -549,8 +571,8 @@ fn add_resolution_omissions(
     let mut uncovered = Vec::new();
     let mut uncovered_languages = BTreeSet::new();
     for task_id in unresolved_task_ids {
-        let node = tasks[task_id];
-        let intents = explicit_touch_intents(&node);
+        let node = &tasks[task_id];
+        let intents = explicit_touch_intents(node);
         if intents.is_empty() {
             undeclared.push(task_id.clone());
             continue;
@@ -602,19 +624,25 @@ fn source_language(path: &str) -> Option<&'static str> {
         "rs" => Some("rust"),
         "py" | "pyi" => Some("python"),
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => Some("typescript/javascript"),
+        "svelte" => Some("svelte"),
         "go" => Some("go"),
         "java" | "kt" | "kts" => Some("jvm"),
         "cs" => Some("csharp"),
         "c" | "cc" | "cpp" | "h" | "hpp" => Some("c/cpp"),
-        other if !other.is_empty() => Some("other"),
         _ => None,
     }
 }
 
-fn repo_shape_facts(language: Option<&str>, modules: &BTreeSet<String>) -> RepoShapeFacts {
+fn repo_shape_facts(
+    artifact_language: &str,
+    covered_languages: &BTreeSet<String>,
+    modules: &BTreeSet<String>,
+    project_root: &Path,
+) -> Result<RepoShapeFacts, String> {
     let mut facts = BTreeSet::new();
-    if let Some(language) = language {
-        facts.insert(format!("codegraph:{language}"));
+    facts.insert(format!("codegraph:{artifact_language}"));
+    for language in covered_languages {
+        facts.insert(format!("codegraph-covered:{language}"));
     }
     for module in modules {
         if let Some(language) = source_language(module) {
@@ -637,7 +665,82 @@ fn repo_shape_facts(language: Option<&str>, modules: &BTreeSet<String>) -> RepoS
             facts.insert("tests".to_string());
         }
     }
-    RepoShapeFacts { facts }
+    let mut file_count = 0;
+    scan_repo_shape(
+        project_root,
+        Path::new(""),
+        covered_languages,
+        &mut facts,
+        &mut file_count,
+    )?;
+    Ok(RepoShapeFacts { facts })
+}
+
+fn scan_repo_shape(
+    project_root: &Path,
+    relative: &Path,
+    covered_languages: &BTreeSet<String>,
+    facts: &mut BTreeSet<String>,
+    file_count: &mut usize,
+) -> Result<(), String> {
+    let directory = project_root.join(relative);
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|error| format!("cannot read repo-shape directory {}: {error}", directory.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("cannot enumerate {}: {error}", directory.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let child = relative.join(entry.file_name());
+        let normalized = child
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(value) => Some(value.to_string_lossy().to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        if path_is_excluded(&normalized) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|error| {
+            format!("cannot inspect repo-shape path {}: {error}", entry.path().display())
+        })?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            scan_repo_shape(project_root, &child, covered_languages, facts, file_count)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        *file_count += 1;
+        if *file_count > MAX_REPO_SHAPE_FILES {
+            return Err(format!(
+                "repo-shape file cap {MAX_REPO_SHAPE_FILES} exceeded under {}",
+                project_root.display()
+            ));
+        }
+        let Some(language) = source_language(&normalized) else {
+            continue;
+        };
+        facts.insert(format!("language:{language}"));
+        if !covered_languages.contains(language) {
+            facts.insert(format!("codegraph-uncovered:{language}"));
+        }
+        if matches!(language, "rust" | "python" | "go" | "jvm" | "csharp" | "c/cpp")
+            || has_path_component(&normalized, &["backend", "server", "api", "src-tauri"])
+        {
+            facts.insert("backend".to_string());
+        }
+        if matches!(language, "typescript/javascript" | "svelte")
+            || has_path_component(&normalized, &["frontend", "client", "web", "routes"])
+        {
+            facts.insert("frontend".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn has_path_component(module: &str, expected: &[&str]) -> bool {

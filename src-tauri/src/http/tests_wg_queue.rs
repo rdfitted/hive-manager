@@ -709,7 +709,16 @@ async fn http_retry_spawns_dependent_without_reusing_another_tasks_queue_identit
     // Retrying the same task request now claims its preserved row, atomically rebinds it to
     // the roster's current worker-2 slot, and reaches the real controller/PTy spawn path.
     let spawned_b = post_task_worker(&app, "B").await;
-    assert_eq!(spawned_b.status(), StatusCode::CREATED);
+    let spawned_b_status = spawned_b.status();
+    let spawned_b_body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(spawned_b.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(spawned_b_status, StatusCode::CREATED);
+    let task_file = spawned_b_body["task_file"].as_str().unwrap();
+    let task_file_body = std::fs::read_to_string(task_file).unwrap();
+    assert!(task_file_body.contains("## Plan Task ID"));
+    assert!(task_file_body.contains("\"B\""));
     let session = controller.read().get_session(session_id).unwrap();
     assert_eq!(session.agents.len(), 2);
     assert!(session.agents.iter().any(|agent| agent.id.ends_with("worker-2")));
@@ -751,6 +760,26 @@ async fn unreadable_authoritative_graph_fails_closed_before_enqueue() {
         .unwrap()
         .rows
         .is_empty());
+}
+
+#[tokio::test]
+async fn absent_legacy_graph_keeps_edgeless_http_spawn_behavior() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state, controller) = dependency_http_fixture(&temp);
+    let session_id = "http-dependency-session";
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let session_dir = state.storage.create_session_dir(session_id).unwrap();
+    std::fs::remove_file(session_dir.join("state").join("work-graph.json")).unwrap();
+    controller
+        .read()
+        .insert_test_session(quiet_hive_session(session_id, &project));
+
+    let response = post_task_worker(&app, "legacy-task").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
+    assert_eq!(snapshot.running, 1);
+    assert_eq!(snapshot.rows[0].task_id.as_deref(), Some("legacy-task"));
 }
 
 fn queue_test_node(id: &str, status: NodeStatus) -> WorkNode {

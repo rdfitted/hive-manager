@@ -903,7 +903,8 @@ fn get_polling_instructions(
 
 The backend's durable queue launched you only after every declared input dependency was finalized.
 `## Status:` in `{task_file}` is a human-readable mirror, not the activation mechanism. Do not
-poll or grep that line and do not use it to decide dependency readiness. {read_instruction}
+poll or grep that line and do not use it to decide dependency readiness. If the task file contains
+`## Plan Task ID`, preserve and report that exact ID in status and completion messages. {read_instruction}
 "#,
         task_file = task_file,
         read_instruction = read_instruction,
@@ -7610,7 +7611,14 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         read_only: bool,
     ) -> Result<PathBuf, String> {
         let file_path = Self::task_file_path_for_worker(worktree_path, worker_index as usize);
-        Self::write_task_file_at_path(&file_path, worker_index, initial_task, status, read_only)
+        Self::write_task_file_at_path(
+            &file_path,
+            worker_index,
+            initial_task,
+            status,
+            read_only,
+            None,
+        )
     }
 
     fn write_task_file_at_path(
@@ -7619,6 +7627,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         initial_task: Option<&str>,
         status: Option<&str>,
         read_only: bool,
+        plan_task_id: Option<&str>,
     ) -> Result<PathBuf, String> {
         let tasks_dir = file_path
             .parent()
@@ -7647,6 +7656,11 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
         } else {
             "Awaiting task assignment. Monitor this file for updates.".to_string()
         };
+        let plan_task_block = plan_task_id.map_or_else(String::new, |task_id| {
+            let encoded = serde_json::to_string(task_id)
+                .unwrap_or_else(|_| "\"<unserializable>\"".to_string());
+            format!("## Plan Task ID\n\n{encoded}\n\n")
+        });
 
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let content = format!(
@@ -7656,7 +7670,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/planners"
 
 > Status is a human-readable mirror. Durable queue dependencies control activation.
 
-## Role Constraints
+{plan_task_block}## Role Constraints
 
 {role_constraints}
 
@@ -7679,6 +7693,7 @@ Last updated: {timestamp}
 ",
             worker_index = worker_index,
             status = status,
+            plan_task_block = plan_task_block,
             role_constraints = role_constraints,
             scope_block = scope_block,
             task_content = task_content,
@@ -13524,6 +13539,27 @@ phases and do EXACTLY this, then stop:
         parent_id: Option<String>,
         expected_index: Option<u8>,
     ) -> Result<AgentInfo, String> {
+        self.add_worker_for_plan_task(
+            session_id,
+            config,
+            role,
+            parent_id,
+            expected_index,
+            None,
+        )
+    }
+
+    /// Add a worker with an explicit work-graph binding. The ID is transported verbatim;
+    /// callers must never infer it from task prose or reject it for failing graph resolution.
+    pub fn add_worker_for_plan_task(
+        &self,
+        session_id: &str,
+        config: AgentConfig,
+        role: WorkerRole,
+        parent_id: Option<String>,
+        expected_index: Option<u8>,
+        plan_task_id: Option<&str>,
+    ) -> Result<AgentInfo, String> {
         // Get session and validate
         let session = {
             let sessions = self.sessions.read();
@@ -13624,6 +13660,7 @@ phases and do EXACTLY this, then stop:
                 .as_ref()
                 .map(|r| r.role_type.eq_ignore_ascii_case("researcher"))
                 .unwrap_or(false),
+            plan_task_id,
         ) {
             Ok(task_file) => task_file,
             Err(err) => {

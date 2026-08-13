@@ -278,6 +278,8 @@ pub struct PlanActualEditDistance {
 pub struct NodeExecutionMetric {
     pub node_id: String,
     /// Additional event-backed attempts beyond the first observed attempt.
+    /// The frozen runtime schema increments this on claims and claim failures;
+    /// it does not preserve raw reclaim events as a separate typed count.
     pub additional_attempts: Option<usize>,
     /// Structured `RemediationDetour` deltas targeted at this node.
     pub remediation_detours: Option<usize>,
@@ -661,6 +663,12 @@ fn node_metrics(
             "node_execution",
             "event evidence is unavailable, so additional attempts are not reported as zero",
         ));
+    } else {
+        metric_omissions.extend(source_report_omissions(
+            archive,
+            ArchiveSourceKind::EventLog,
+            "node_execution",
+        ));
     }
     if !mutation_available {
         metric_omissions.push(source_omission(
@@ -668,6 +676,12 @@ fn node_metrics(
             RetroOmissionReason::MutationEvidenceUnavailable,
             "node_execution",
             "mutation evidence is unavailable, so remediation detours are not reported as zero",
+        ));
+    } else {
+        metric_omissions.extend(source_report_omissions(
+            archive,
+            ArchiveSourceKind::MutationLog,
+            "node_execution",
         ));
     }
     if graph_resolution_incomplete(archive) {
@@ -907,6 +921,11 @@ fn review_metrics(
             review.evidence_refs.dedup();
         }
     }
+    omissions.extend(source_report_omissions(
+        archive,
+        ArchiveSourceKind::MutationLog,
+        "review_efficacy",
+    ));
     let value = reviews.into_values().collect();
     if omissions.is_empty() {
         EvidenceMetric::Available { value }
@@ -962,7 +981,7 @@ fn gotcha_hit_rate(
         return EvidenceMetric::Unavailable {
             omissions: vec![source_omission(
                 archive,
-                RetroOmissionReason::RunLedgerEvidenceUnavailable,
+                RetroOmissionReason::EventEvidenceUnavailable,
                 "gotcha_edge_hit_rate",
                 "event evidence is unavailable, so target attempts cannot be observed",
             )],
@@ -983,15 +1002,23 @@ fn gotcha_hit_rate(
         targets_attempted,
         rate_defined: true,
     };
+    let mut omissions = source_report_omissions(
+        archive,
+        ArchiveSourceKind::EventLog,
+        "gotcha_edge_hit_rate",
+    );
     if graph_resolution_incomplete(archive) {
+        omissions.push(source_omission(
+            archive,
+            RetroOmissionReason::ResolutionIncomplete,
+            "gotcha_edge_hit_rate",
+            "unresolved runtime observations may undercount attempted informed targets",
+        ));
+    }
+    if !omissions.is_empty() {
         EvidenceMetric::Partial {
             value,
-            omissions: vec![source_omission(
-                archive,
-                RetroOmissionReason::ResolutionIncomplete,
-                "gotcha_edge_hit_rate",
-                "unresolved runtime observations may undercount attempted informed targets",
-            )],
+            omissions,
         }
     } else {
         EvidenceMetric::Available { value }
@@ -1013,7 +1040,7 @@ fn apply_review_escape_revisions(
         if !source_available(&discovering.archive, ArchiveSourceKind::RunLedger) {
             omissions.push(source_omission(
                 &discovering.archive,
-                RetroOmissionReason::EventEvidenceUnavailable,
+                RetroOmissionReason::RunLedgerEvidenceUnavailable,
                 "review_efficacy",
                 "run-ledger evidence is unavailable, so later review escapes may be absent",
             ));

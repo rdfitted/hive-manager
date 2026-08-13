@@ -315,12 +315,13 @@ pub async fn add_worker(
     // before the release await below — it is !Send and cannot cross an await.
     let add_result = {
         let controller = state.session_controller.write();
-        controller.add_worker(
+        controller.add_worker_for_plan_task(
             &session_id,
             config,
             role.clone(),
             parent_id,
             Some(reservation.index),
+            task_id.as_deref(),
         )
     };
 
