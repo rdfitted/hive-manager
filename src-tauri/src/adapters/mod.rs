@@ -12,6 +12,7 @@ mod qwen;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,57 @@ pub const VALID_CLIS: &[&str] = &[
     "droid",
     "qwen",
 ];
+
+/// Unvalidated default spacing between a PTY payload and its discrete Enter write.
+///
+/// Under load, measured payload/Enter separations of 1.2-2.7 s failed twice,
+/// while roughly 4-5 s succeeded twice and 65 s succeeded once. Agent busy
+/// state was uncontrolled, so those observations do not justify replacing the
+/// compiled 50 ms default with another guess.
+pub const DEFAULT_PTY_SUBMIT_GAP: Duration = Duration::from_millis(50);
+
+/// Submit timing selected for one PTY session.
+///
+/// Adapter identity stays explicit even while all adapters retain the same
+/// unvalidated default, so later measured tuning remains adapter-local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtySubmitPolicy {
+    pub adapter: Option<&'static str>,
+    pub default_gap: Duration,
+}
+
+/// Resolve the policy from the executable that is actually handed to the PTY.
+/// Cursor launches through `wsl`, so that executable is normalized back to the
+/// Cursor adapter instead of silently using the unknown-command fallback.
+pub fn pty_submit_policy(command: &str) -> PtySubmitPolicy {
+    let executable = command
+        .rsplit(|character| character == '/' || character == '\\')
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    let executable = executable.strip_suffix(".exe").unwrap_or(&executable);
+    let adapter_name = if executable == "wsl" {
+        Some("cursor")
+    } else {
+        VALID_CLIS
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == executable)
+    };
+
+    let Some(adapter_name) = adapter_name else {
+        return PtySubmitPolicy {
+            adapter: None,
+            default_gap: DEFAULT_PTY_SUBMIT_GAP,
+        };
+    };
+    let adapter = get_adapter(adapter_name)
+        .expect("every VALID_CLIS entry must have a matching adapter implementation");
+    PtySubmitPolicy {
+        adapter: Some(adapter.cli_name()),
+        default_gap: adapter.pty_submit_gap(),
+    }
+}
 
 /// Validate a CLI name against the allowlist.
 pub fn is_valid_cli(cli: &str) -> bool {
@@ -182,6 +234,11 @@ pub trait CliAdapter: Send + Sync {
     fn prompt_flag(&self) -> Option<&'static str> {
         None
     }
+
+    /// Default payload-to-Enter spacing for this adapter's interactive PTY.
+    fn pty_submit_gap(&self) -> Duration {
+        DEFAULT_PTY_SUBMIT_GAP
+    }
 }
 
 /// Get the appropriate adapter for a CLI name.
@@ -259,5 +316,37 @@ mod tests {
         // run GPT-5.6 tiers (sol/terra/luna) through the codex adapter.
         assert!(get_adapter("gemini").is_err());
         assert!(get_adapter("antigravity").is_err());
+    }
+
+    #[test]
+    fn pty_submit_policy_resolves_every_spawnable_adapter() {
+        for cli in VALID_CLIS {
+            let policy = pty_submit_policy(cli);
+            assert_eq!(policy.adapter, Some(*cli), "policy mismatch for {cli}");
+            assert_eq!(policy.default_gap, DEFAULT_PTY_SUBMIT_GAP);
+        }
+
+        assert_eq!(pty_submit_policy("wsl").adapter, Some("cursor"));
+        assert_eq!(pty_submit_policy("WSL.EXE").adapter, Some("cursor"));
+        assert_eq!(
+            pty_submit_policy(r"C:\\tools\\codex.exe").adapter,
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn codex_and_claude_submit_policies_resolve_independently() {
+        let codex = pty_submit_policy("codex");
+        let claude = pty_submit_policy("claude");
+
+        assert_eq!(codex.adapter, Some("codex"));
+        assert_eq!(claude.adapter, Some("claude"));
+        assert_ne!(codex.adapter, claude.adapter);
+        assert_eq!(codex.default_gap, Duration::from_millis(50));
+        assert_eq!(claude.default_gap, Duration::from_millis(50));
+
+        let fallback = pty_submit_policy("test-shell");
+        assert_eq!(fallback.adapter, None);
+        assert_eq!(fallback.default_gap, DEFAULT_PTY_SUBMIT_GAP);
     }
 }

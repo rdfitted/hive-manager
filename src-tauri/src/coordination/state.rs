@@ -7,9 +7,15 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::orchestrator::work_graph::WorkGraph;
+use crate::orchestrator::org_graph::definitions::role_prompt_template;
+use crate::orchestrator::org_graph::ownership::{
+    derive_path_ownership, LivePrincipal, OrchestratorWriteAttempt, OrchestratorWriteOutcome,
+    OwnershipSessionState,
+};
+use crate::orchestrator::work_graph::divergence::DivergenceSummary;
 use crate::orchestrator::work_graph::review::ReviewExpansionSidecar;
 use crate::orchestrator::work_graph::runtime::GraphCompositionState;
+use crate::orchestrator::work_graph::WorkGraph;
 use crate::pty::WorkerRole;
 
 use super::{parse_sprint_contract, SprintContract};
@@ -84,6 +90,16 @@ pub enum AssignmentStatus {
 /// Manages state files for a session
 pub struct StateManager {
     session_path: PathBuf,
+}
+
+/// Durable evidence that a lifecycle transition refreshed the graph artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkGraphLifecycleSnapshot {
+    pub lifecycle_stage: String,
+    pub emitted_at: DateTime<Utc>,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub artifact: String,
 }
 
 impl StateManager {
@@ -218,9 +234,10 @@ impl StateManager {
                     id: n.id,
                     role: WorkerRole {
                         role_type: n.role.clone(),
-                        label: n.role,
+                        label: n.role.clone(),
                         default_cli: "claude".to_string(),
-                        prompt_template: None,
+                        prompt_template: Some(role_prompt_template(&n.role)),
+                        resolved_definition: None,
                     },
                     cli: "claude".to_string(),
                     status: "Running".to_string(),
@@ -416,6 +433,107 @@ impl StateManager {
         Ok(Some(serde_json::from_str(&json)?))
     }
 
+    /// Refresh transition evidence and the standalone graph view from the current
+    /// authoritative graph. This never writes `state/work-graph.json`; the scheduler
+    /// remains its sole writer.
+    pub fn emit_work_graph_snapshot(
+        &self,
+        lifecycle_stage: &str,
+    ) -> Result<Option<PathBuf>, StateError> {
+        let Some(graph) = self.read_work_graph()? else {
+            return Ok(None);
+        };
+        let artifact = self.write_portable_work_graph_artifact(
+            lifecycle_stage,
+            &graph,
+            None,
+        )?;
+        let snapshot = WorkGraphLifecycleSnapshot {
+            lifecycle_stage: lifecycle_stage.to_string(),
+            emitted_at: Utc::now(),
+            node_count: graph.nodes.len(),
+            edge_count: graph.edges.len(),
+            artifact: "work-graph.html".to_string(),
+        };
+        self.ensure_state_dir()?;
+        let json = serde_json::to_string_pretty(&snapshot)?;
+        self.write_atomic_text(
+            self.state_dir().join("work-graph-lifecycle.json"),
+            &json,
+        )?;
+        Ok(Some(artifact))
+    }
+
+    pub fn read_work_graph_snapshot(
+        &self,
+    ) -> Result<Option<WorkGraphLifecycleSnapshot>, StateError> {
+        let path = self.state_dir().join("work-graph-lifecycle.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let json = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&json)?))
+    }
+
+    /// Write a browser-renderable, dependency-free graph artifact at the stable
+    /// session-root path used by headless and post-crash operators.
+    pub fn write_portable_work_graph_artifact(
+        &self,
+        lifecycle_stage: &str,
+        graph: &WorkGraph,
+        divergence: Option<&DivergenceSummary>,
+    ) -> Result<PathBuf, StateError> {
+        let nodes = graph
+            .nodes
+            .iter()
+            .map(|node| {
+                serde_json::json!({
+                    "id": node.id,
+                    "status": node.status,
+                    "lane": node.binding,
+                    "contract_summary": {
+                        "input_count": node.contract.inputs.len(),
+                        "output_count": node.contract.outputs.len(),
+                        "acceptance_count": node.contract.acceptance.len(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let edges = graph
+            .edges
+            .iter()
+            .map(|edge| {
+                serde_json::json!({
+                    "source": edge.source,
+                    "target": edge.target,
+                    "kind": edge.kind,
+                    "provenance": edge.provenance,
+                })
+            })
+            .collect::<Vec<_>>();
+        let session_id = self
+            .session_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown-session");
+        let payload = serde_json::json!({
+            "session_id": session_id,
+            "lifecycle_stage": lifecycle_stage,
+            "generated_at": Utc::now(),
+            "nodes": nodes,
+            "edges": edges,
+            "divergence": divergence,
+        });
+        let payload_json = serde_json::to_string(&payload)?
+            .replace('&', "\\u0026")
+            .replace('<', "\\u003c")
+            .replace('>', "\\u003e");
+        let html = PORTABLE_WORK_GRAPH_HTML.replace("__GRAPH_DATA__", &payload_json);
+        let path = self.session_path.join("work-graph.html");
+        self.write_atomic_text(path.clone(), &html)?;
+        Ok(path)
+    }
+
     /// Persist evaluator-addressable template plus expansion state beside the
     /// authoritative graph. This sidecar is optional for legacy sessions.
     pub fn write_review_expansion_sidecar(
@@ -458,6 +576,49 @@ impl StateManager {
         }
         let json = fs::read_to_string(path)?;
         Ok(Some(serde_json::from_str(&json)?))
+    }
+
+    /// Persist the visible orchestrator footprints, authority scopes, live
+    /// principal ownership and surfaced write collisions for this session.
+    pub fn write_ownership_session_state(
+        &self,
+        state: &OwnershipSessionState,
+    ) -> Result<(), StateError> {
+        self.ensure_state_dir()?;
+        let json = serde_json::to_string_pretty(state)?;
+        self.write_atomic_text(self.state_dir().join("orchestrator-ownership.json"), &json)
+    }
+
+    pub fn read_ownership_session_state(
+        &self,
+    ) -> Result<Option<OwnershipSessionState>, StateError> {
+        let path = self.state_dir().join("orchestrator-ownership.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let json = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&json)?))
+    }
+
+    /// Check and durably surface a collision before the caller mutates a path.
+    /// Process write-capability is supplied explicitly; a task-status mirror is
+    /// not accepted as a substitute for liveness (the d1e86179 failure mode).
+    pub fn record_orchestrator_write_attempt(
+        &self,
+        graph: &WorkGraph,
+        live_principals: &[LivePrincipal],
+        attempt: OrchestratorWriteAttempt,
+    ) -> Result<OrchestratorWriteOutcome, StateError> {
+        let mut state = self.read_ownership_session_state()?.ok_or_else(|| {
+            StateError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "orchestrator ownership state is unavailable",
+            ))
+        })?;
+        state.live_principal_ownership = derive_path_ownership(graph, live_principals);
+        let outcome = state.record_write_attempt(attempt);
+        self.write_ownership_session_state(&state)?;
+        Ok(outcome)
     }
 
     /// Record a task assignment
@@ -578,6 +739,99 @@ impl StateManager {
     }
 
 }
+
+const PORTABLE_WORK_GRAPH_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hive work graph</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    body { margin: 0; padding: 24px; background: #090b10; color: #e7eaf0; }
+    header { margin-bottom: 24px; }
+    h1, h2, h3 { margin: 0 0 10px; }
+    #meta { color: #9ca5b5; }
+    #waves { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .wave { padding: 14px; border: 1px solid #303747; border-radius: 10px; background: #121620; }
+    .node { margin-top: 10px; padding: 10px; border-left: 4px solid #6aa9ff; background: #191f2c; }
+    .node[data-status="blocked"], .node[data-status="failed"] { border-left-color: #ff6b6b; }
+    .node small { display: block; margin-top: 6px; color: #aeb7c7; }
+    table { width: 100%; margin-top: 12px; border-collapse: collapse; }
+    th, td { padding: 8px; border-bottom: 1px solid #303747; text-align: left; }
+    section { margin-top: 28px; }
+    pre { overflow: auto; padding: 12px; background: #121620; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <header><h1>Work graph</h1><div id="meta"></div></header>
+  <main>
+    <div id="waves"></div>
+    <section><h2>Edges</h2><table><thead><tr><th>Source</th><th>Target</th><th>Kind</th><th>Provenance</th></tr></thead><tbody id="edges"></tbody></table></section>
+    <section><h2>Divergence</h2><pre id="divergence"></pre></section>
+  </main>
+  <script id="graph-data" type="application/json">__GRAPH_DATA__</script>
+  <script>
+    const data = JSON.parse(document.getElementById('graph-data').textContent);
+    document.getElementById('meta').textContent = `${data.session_id} · ${data.lifecycle_stage} · ${data.generated_at}`;
+    const nodeById = new Map(data.nodes.map(node => [node.id, node]));
+    const indegree = new Map(data.nodes.map(node => [node.id, 0]));
+    const dependents = new Map(data.nodes.map(node => [node.id, []]));
+    for (const edge of data.edges.filter(edge => edge.kind === 'depends_on')) {
+      if (!nodeById.has(edge.source) || !nodeById.has(edge.target)) continue;
+      indegree.set(edge.target, indegree.get(edge.target) + 1);
+      dependents.get(edge.source).push(edge.target);
+    }
+    let ready = [...indegree].filter(([, degree]) => degree === 0).map(([id]) => id).sort();
+    const waves = [];
+    while (ready.length) {
+      const wave = ready;
+      waves.push(wave);
+      const next = new Set();
+      for (const id of wave) {
+        for (const target of dependents.get(id).sort()) {
+          indegree.set(target, indegree.get(target) - 1);
+          if (indegree.get(target) === 0) next.add(target);
+        }
+      }
+      ready = [...next].sort();
+    }
+    const wavesRoot = document.getElementById('waves');
+    waves.forEach((wave, index) => {
+      const column = document.createElement('section');
+      column.className = 'wave';
+      const heading = document.createElement('h2');
+      heading.textContent = `Wave ${index + 1}`;
+      column.appendChild(heading);
+      wave.forEach(id => {
+        const node = nodeById.get(id);
+        const card = document.createElement('article');
+        card.className = 'node';
+        card.dataset.status = node.status;
+        const title = document.createElement('strong');
+        title.textContent = `${node.id} · ${node.status}`;
+        const detail = document.createElement('small');
+        detail.textContent = `${node.lane.kind}:${node.lane.value} · ${node.contract_summary.input_count} in / ${node.contract_summary.output_count} out / ${node.contract_summary.acceptance_count} acceptance`;
+        card.append(title, detail);
+        column.appendChild(card);
+      });
+      wavesRoot.appendChild(column);
+    });
+    const edgeRoot = document.getElementById('edges');
+    data.edges.forEach(edge => {
+      const row = document.createElement('tr');
+      [edge.source, edge.target, edge.kind, edge.provenance].forEach(value => {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.appendChild(cell);
+      });
+      edgeRoot.appendChild(row);
+    });
+    document.getElementById('divergence').textContent = JSON.stringify(data.divergence || {}, null, 2);
+  </script>
+</body>
+</html>
+"##;
 
 #[cfg(test)]
 mod tests {

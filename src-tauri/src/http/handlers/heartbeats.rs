@@ -18,6 +18,10 @@ pub struct PostHeartbeatRequest {
     pub status: String,
     #[serde(default)]
     pub summary: Option<String>,
+    /// Durable queue assignment identity. Older prompts omit this and use the server-side
+    /// deterministic fallback; a supplied identity is always treated as an exact fence.
+    #[serde(default)]
+    pub assignment_id: Option<i64>,
 }
 
 /// Response for POST heartbeat
@@ -65,6 +69,11 @@ pub async fn post_heartbeat(
     if !VALID_HEARTBEAT_STATUSES.contains(&req.status.as_str()) {
         return Err(ApiError::bad_request(
             "Status must be one of: working, idle, completed",
+        ));
+    }
+    if req.assignment_id.is_some_and(|assignment_id| assignment_id <= 0) {
+        return Err(ApiError::bad_request(
+            "assignment_id must be a positive server-issued identity",
         ));
     }
 
@@ -143,7 +152,12 @@ pub async fn post_heartbeat(
     // Queen) is simply a no-op here.
     state
         .queue_manager
-        .record_heartbeat(&session_id, &agent_id, &req.status)
+        .record_heartbeat_for_assignment(
+            &session_id,
+            &agent_id,
+            req.assignment_id,
+            &req.status,
+        )
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 

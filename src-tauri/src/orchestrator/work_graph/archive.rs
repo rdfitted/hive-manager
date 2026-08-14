@@ -292,8 +292,16 @@ pub fn archive_completed_session(
     let archive_id = archive_id_for_session(session_id);
     let target = archive_dir.join(format!("{archive_id}.json"));
     if target.exists() {
+        let archive = read_archive(&target)?;
+        StateManager::new(session_dir)
+            .write_portable_work_graph_artifact(
+                "archived",
+                &archive.runtime_graph,
+                Some(&archive.divergence),
+            )
+            .map_err(|error| ArchiveError::Storage(error.to_string()))?;
         return Ok(ArchiveCompletion {
-            archive: read_archive(&target)?,
+            archive,
             path: target,
             created: false,
         });
@@ -425,19 +433,27 @@ pub fn archive_completed_session(
 
     let mut temp = NamedTempFile::new_in(&archive_dir)?;
     serde_json::to_writer_pretty(&mut temp, &archive)?;
-    match temp.persist_noclobber(&target) {
-        Ok(_) => Ok(ArchiveCompletion {
+    let completion = match temp.persist_noclobber(&target) {
+        Ok(_) => ArchiveCompletion {
             path: target,
             archive,
             created: true,
-        }),
-        Err(_error) if target.exists() => Ok(ArchiveCompletion {
+        },
+        Err(_error) if target.exists() => ArchiveCompletion {
             archive: read_archive(&target)?,
             path: target,
             created: false,
-        }),
-        Err(error) => Err(ArchiveError::Io(error.error)),
-    }
+        },
+        Err(error) => return Err(ArchiveError::Io(error.error)),
+    };
+    StateManager::new(session_dir)
+        .write_portable_work_graph_artifact(
+            "archived",
+            &completion.archive.runtime_graph,
+            Some(&completion.archive.divergence),
+        )
+        .map_err(|error| ArchiveError::Storage(error.to_string()))?;
+    Ok(completion)
 }
 
 /// Synchronously run the ordered terminal pipeline used by the detached hook:

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::orchestrator::org_graph::definitions::role_prompt_template;
 use crate::pty::{AgentConfig, AgentRole};
 use super::{validate_session_id, validate_cli};
 
@@ -99,7 +100,8 @@ pub async fn add_planner(
                     role_type: w.role_type.clone(),
                     label: w.label.clone().unwrap_or_else(|| w.role_type.clone()),
                     default_cli: w.cli.clone().unwrap_or(cli.clone()),
-                    prompt_template: None,
+                    prompt_template: Some(role_prompt_template(&w.role_type)),
+                    resolved_definition: None,
                 }),
                 initial_prompt: None,
             }
@@ -119,7 +121,8 @@ pub async fn add_planner(
                     role_type: "general".to_string(),
                     label: format!("Worker {}", i + 1),
                     default_cli: cli.clone(),
-                    prompt_template: None,
+                    prompt_template: Some(role_prompt_template("general")),
+                    resolved_definition: None,
                 }),
                 initial_prompt: None,
             }

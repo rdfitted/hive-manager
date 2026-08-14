@@ -291,6 +291,10 @@ pub struct PersistedAgentInfo {
     pub role: String,
     pub config: PersistedAgentConfig,
     pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_definition_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_definition_version: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     pub commit_sha: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
@@ -1763,6 +1767,8 @@ mod tests {
                     initial_prompt: None,
                 },
                 parent_id: Some(format!("{session_id}-queen")),
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             }],
@@ -1937,6 +1943,8 @@ mod tests {
 
         let agent: PersistedAgentInfo = serde_json::from_str(json).unwrap();
         assert_eq!(agent.commit_sha, None);
+        assert_eq!(agent.role_definition_id, None);
+        assert_eq!(agent.role_definition_version, None);
     }
 
     #[test]

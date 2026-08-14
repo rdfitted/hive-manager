@@ -11,6 +11,11 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::orchestrator::org_graph::adjudication::{
+    AdjudicationDeclaration, AdjudicationPolicy, DeclaredAdjudicator, VerificationDuty,
+};
+use crate::orchestrator::org_graph::{ContextBoundary, SignalClass};
+
 use super::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
     NodeStatus, TaskGraph, TaskId, WorkEdge, WorkNode,
@@ -18,6 +23,8 @@ use super::{
 
 pub const MULTI_LENS_REVIEW_TEMPLATE: &str = "multi-lens-review";
 pub const JUDGE_PRINCE_REMEDIATION_TEMPLATE: &str = "judge-prince-remediation";
+pub const VERIFICATION_DUTY_PARAMETER: &str = "verification_duty";
+pub const ADJUDICATION_DECLARATION_PARAMETER: &str = "adjudication";
 const MAX_REMEDIATION_ITERATIONS: u8 = 8;
 
 /// One deliberately distinct way to inspect a target.
@@ -57,6 +64,10 @@ pub struct ReviewTemplate {
     pub rubric: Vec<String>,
     pub verdict_binding: BindingRef,
     pub remediation_binding: BindingRef,
+    #[serde(default)]
+    pub verification_duty: VerificationDuty,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjudication: Option<AdjudicationDeclaration>,
     #[serde(default = "default_remediation_iterations")]
     pub remediation_iterations: u8,
 }
@@ -93,6 +104,15 @@ impl ReviewTemplate {
             ],
             verdict_binding: BindingRef::Role("evaluator".to_string()),
             remediation_binding: BindingRef::Role("prince".to_string()),
+            verification_duty: VerificationDuty {
+                signal_name: Some("review findings against the declared rubric".to_string()),
+                signal_class: Some(SignalClass::Judgmental),
+                context_boundary: ContextBoundary::Artifact,
+            },
+            adjudication: Some(AdjudicationDeclaration {
+                policy: AdjudicationPolicy::Consensus { required: 2 },
+                adjudicator: Some(DeclaredAdjudicator::new("prince")),
+            }),
             remediation_iterations: default_remediation_iterations(),
         }
     }
@@ -488,8 +508,8 @@ fn append_review_round(
             lens.binding.clone(),
             NodeStatus::Pending,
         );
-        lens_node.expansion = Some(expansion_metadata(
-            MULTI_LENS_REVIEW_TEMPLATE,
+        lens_node.expansion = Some(review_expansion_metadata(
+            template,
             &target.id,
             round,
             Some((&lens.id, &lens.focus)),
@@ -538,8 +558,8 @@ fn append_review_round(
         template.verdict_binding.clone(),
         NodeStatus::Pending,
     );
-    verdict_node.expansion = Some(expansion_metadata(
-        MULTI_LENS_REVIEW_TEMPLATE,
+    verdict_node.expansion = Some(review_expansion_metadata(
+        template,
         &target.id,
         round,
         None,
@@ -633,6 +653,28 @@ fn expansion_metadata(
         template: template.to_string(),
         parameters,
     }
+}
+
+fn review_expansion_metadata(
+    template: &ReviewTemplate,
+    target: &str,
+    round: u8,
+    lens: Option<(&str, &str)>,
+) -> CompositeExpansion {
+    let mut metadata = expansion_metadata(MULTI_LENS_REVIEW_TEMPLATE, target, round, lens);
+    metadata.parameters.insert(
+        VERIFICATION_DUTY_PARAMETER.to_string(),
+        serde_json::to_string(&template.verification_duty)
+            .expect("verification duty has a serializable schema"),
+    );
+    if let Some(adjudication) = template.adjudication.as_ref() {
+        metadata.parameters.insert(
+            ADJUDICATION_DECLARATION_PARAMETER.to_string(),
+            serde_json::to_string(adjudication)
+                .expect("adjudication declaration has a serializable schema"),
+        );
+    }
+    metadata
 }
 
 fn push_node(

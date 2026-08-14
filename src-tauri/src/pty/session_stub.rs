@@ -9,6 +9,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+use crate::adapters::PtySubmitPolicy;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
     MasterPlanner,
@@ -33,12 +35,20 @@ pub enum AgentStatus {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RoleDefinitionRef {
+    pub id: String,
+    pub version: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerRole {
     pub role_type: String,
     pub label: String,
     pub default_cli: String,
     pub prompt_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_definition: Option<RoleDefinitionRef>,
 }
 
 impl WorkerRole {
@@ -48,6 +58,7 @@ impl WorkerRole {
             label: label.to_string(),
             default_cli: default_cli.to_string(),
             prompt_template: None,
+            resolved_definition: None,
         }
     }
 }
@@ -114,35 +125,36 @@ unsafe impl Send for SendWriter {}
 unsafe impl Sync for SendWriter {}
 
 const CHUNK_SIZE: usize = 16 * 1024;
-/// Unvalidated default; override with `HIVE_PTY_SUBMIT_GAP_MS` for the #226 sweep.
-///
-/// Under load, measured payload/Enter separations of 1.2-2.7 s failed twice,
-/// while roughly 4-5 s succeeded twice and 65 s succeeded once. Agent busy
-/// state was uncontrolled, so those observations do not justify replacing the
-/// compiled 50 ms default with another guess.
-const SUBMIT_GAP: Duration = Duration::from_millis(50);
 const SUBMIT_GAP_ENV: &str = "HIVE_PTY_SUBMIT_GAP_MS";
-static RUNTIME_SUBMIT_GAP: OnceLock<Duration> = OnceLock::new();
+static RUNTIME_SUBMIT_GAP: OnceLock<Option<Duration>> = OnceLock::new();
 const SUBMIT_GAP_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
-fn submit_gap_from_override(value: Option<&str>) -> Duration {
+fn submit_gap_from_override(value: Option<&str>) -> Option<Duration> {
     value
         .and_then(|milliseconds| milliseconds.trim().parse::<u64>().ok())
         .map(Duration::from_millis)
-        .unwrap_or(SUBMIT_GAP)
 }
 
-fn submit_gap() -> Duration {
-    *RUNTIME_SUBMIT_GAP.get_or_init(|| {
+fn resolve_submit_gap(
+    policy: PtySubmitPolicy,
+    override_gap: Option<Duration>,
+) -> Duration {
+    override_gap.unwrap_or(policy.default_gap)
+}
+
+fn submit_gap(policy: PtySubmitPolicy) -> Duration {
+    let override_gap = *RUNTIME_SUBMIT_GAP.get_or_init(|| {
         let override_value = std::env::var(SUBMIT_GAP_ENV).ok();
         submit_gap_from_override(override_value.as_deref())
-    })
+    });
+    resolve_submit_gap(policy, override_gap)
 }
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 struct RecordingWriter {
     writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    recent_output: Arc<Mutex<VecDeque<u8>>>,
 }
 
 #[derive(Default)]
@@ -155,6 +167,13 @@ struct SubmitGapControl {
 impl Write for RecordingWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.writes.lock().push(buf.to_vec());
+        let mut recent_output = self.recent_output.lock();
+        for byte in buf {
+            if recent_output.len() == RECENT_OUTPUT_CAPACITY {
+                recent_output.pop_front();
+            }
+            recent_output.push_back(*byte);
+        }
         Ok(buf.len())
     }
 
@@ -202,6 +221,7 @@ const RECENT_OUTPUT_CAPACITY: usize = 8 * 1024;
 pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
+    submit_policy: PtySubmitPolicy,
     writer: Arc<Mutex<SendWriter>>,
     write_records: Arc<Mutex<Vec<Vec<u8>>>>,
     submit_gap_control: Arc<(Mutex<SubmitGapControl>, Condvar)>,
@@ -231,17 +251,23 @@ impl PtySession {
         _id: String,
         role: AgentRole,
         _command: &str,
+        submit_policy: PtySubmitPolicy,
         args: &[&str],
         _cwd: Option<&str>,
         _cols: u16,
         _rows: u16,
     ) -> Result<Self, PtyError> {
         let write_records = Arc::new(Mutex::new(Vec::new()));
+        let recent_output = Arc::new(Mutex::new(VecDeque::with_capacity(
+            RECENT_OUTPUT_CAPACITY,
+        )));
         let session = Self {
             role,
             status: Arc::new(parking_lot::RwLock::new(AgentStatus::Starting)),
+            submit_policy,
             writer: Arc::new(Mutex::new(SendWriter(Box::new(RecordingWriter {
                 writes: Arc::clone(&write_records),
+                recent_output: Arc::clone(&recent_output),
             })))),
             write_records,
             submit_gap_control: Arc::new((Mutex::new(SubmitGapControl::default()), Condvar::new())),
@@ -249,9 +275,7 @@ impl PtySession {
                 Vec::new(),
             ))))),
             args: args.iter().map(|arg| arg.to_string()).collect(),
-            recent_output: Arc::new(Mutex::new(VecDeque::with_capacity(
-                RECENT_OUTPUT_CAPACITY,
-            ))),
+            recent_output,
         };
 
         // #207 test fixture: a flag-borne sentinel is the only way an integration test
@@ -320,6 +344,14 @@ impl PtySession {
         changed.notify_all();
     }
 
+    pub fn submit_policy_for_test(&self) -> PtySubmitPolicy {
+        self.submit_policy
+    }
+
+    pub fn writer_locked_for_test(&self) -> bool {
+        self.writer.try_lock().is_none()
+    }
+
     fn pause_submit_after_payload_if_requested(&self) {
         let (control, changed) = &*self.submit_gap_control;
         let mut control = control.lock();
@@ -349,7 +381,7 @@ impl PtySession {
         let mut writer = self.writer.lock();
         Self::write_locked(&mut writer, data)?;
         self.pause_submit_after_payload_if_requested();
-        std::thread::sleep(submit_gap());
+        std::thread::sleep(submit_gap(self.submit_policy));
         Self::write_locked(&mut writer, b"\r")
     }
 
@@ -420,24 +452,36 @@ pub fn read_from_reader(
 #[cfg(test)]
 mod tests {
     use super::{
-        sanitize_bracketed_paste, submit_gap_from_override, BRACKETED_PASTE_END, SUBMIT_GAP,
+        resolve_submit_gap, sanitize_bracketed_paste, submit_gap_from_override,
+        BRACKETED_PASTE_END,
     };
+    use crate::adapters::PtySubmitPolicy;
     use std::time::Duration;
 
     #[test]
     fn submit_gap_override_parses_milliseconds() {
         assert_eq!(
             submit_gap_from_override(Some(" 4500 ")),
-            Duration::from_millis(4_500)
+            Some(Duration::from_millis(4_500))
         );
-        assert_eq!(submit_gap_from_override(Some("0")), Duration::ZERO);
+        assert_eq!(submit_gap_from_override(Some("0")), Some(Duration::ZERO));
     }
 
     #[test]
-    fn invalid_submit_gap_override_falls_back_to_default() {
-        assert_eq!(submit_gap_from_override(Some("not-a-number")), SUBMIT_GAP);
-        assert_eq!(submit_gap_from_override(Some("-1")), SUBMIT_GAP);
-        assert_eq!(submit_gap_from_override(None), SUBMIT_GAP);
+    fn invalid_submit_gap_override_defers_to_the_session_policy() {
+        assert_eq!(submit_gap_from_override(Some("not-a-number")), None);
+        assert_eq!(submit_gap_from_override(Some("-1")), None);
+        assert_eq!(submit_gap_from_override(None), None);
+
+        let adapter_policy = PtySubmitPolicy {
+            adapter: Some("future-tuned-adapter"),
+            default_gap: Duration::from_millis(123),
+        };
+        assert_eq!(resolve_submit_gap(adapter_policy, None), Duration::from_millis(123));
+        assert_eq!(
+            resolve_submit_gap(adapter_policy, Some(Duration::from_millis(4_500))),
+            Duration::from_millis(4_500)
+        );
     }
 
     #[test]

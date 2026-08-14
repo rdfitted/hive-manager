@@ -12,11 +12,13 @@ pub mod inject;
 pub mod knowledge;
 pub mod learnings;
 pub mod planners;
+pub mod pty_buffer;
 pub mod queue;
 pub mod resolver;
 pub mod session_files;
 pub mod sessions;
 pub mod templates;
+pub mod work_graph;
 pub mod workers;
 
 use crate::http::error::ApiError;

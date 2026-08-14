@@ -17,6 +17,7 @@ use crate::coordination::{InjectionManager, StateManager};
 use crate::domain::event::{EventType, Severity};
 use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
+use crate::http::handlers::heartbeats::PostHeartbeatRequest;
 use crate::http::handlers::workers::AddWorkerRequest;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
@@ -75,6 +76,7 @@ fn queue_row(
         no_progress_count: 0,
         last_status: None,
         heartbeat_at: None,
+        assignment_id: 0,
         blocked_reason: None,
         created_at,
         updated_at: created_at,
@@ -899,6 +901,202 @@ fn distinct_tasks_cannot_concurrently_claim_the_same_worker_slot() {
     );
 }
 
+#[test]
+fn assignment_ids_advance_across_claim_rebind_and_release_paths() {
+    let repo = queue_repo();
+    repo.enqueue(&queued_row("run-a", "pending:run-a", Some("A"), 1))
+        .unwrap();
+
+    let epoch_1 = repo
+        .try_claim_for_worker("run-a", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    let claim_1 = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(claim_1 > 0, "a won claim must mint an assignment identity");
+
+    assert!(repo.requeue_claimed("run-a", epoch_1, 10).unwrap());
+    let released = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(
+        released > claim_1,
+        "a fenced release must invalidate the prior assignment even in the same millisecond"
+    );
+
+    let epoch_2 = repo
+        .try_claim_for_worker("run-a", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    let claim_2 = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(
+        claim_2 > released,
+        "a rebind must mint a new identity without relying on wall-clock ordering"
+    );
+
+    assert!(repo.fail_claimed("run-a", epoch_2, 10).unwrap());
+    let failed = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(failed > claim_2, "terminal claim failure invalidates its identity");
+    assert!(repo.release_claim_manual("run-a", 10).unwrap());
+    let manual_release = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(manual_release > failed, "manual recovery mints a new identity");
+
+    repo.try_claim_for_worker("run-a", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    let before_reclaim = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert_eq!(
+        repo.reclaim_stuck(11, 10).unwrap(),
+        vec!["run-a".to_string()]
+    );
+    let reclaimed = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(reclaimed > before_reclaim, "stale reclaim invalidates the assignment");
+
+    let epoch_4 = repo
+        .try_claim_for_worker("run-a", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    let before_spawn_release = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(matches!(
+        repo.release_failed_spawn("run-a", epoch_4, "worker-1", 3, 10)
+            .unwrap(),
+        crate::storage::queue::SpawnFailureRelease::Requeued { .. }
+    ));
+    assert!(
+        repo.get_row("run-a").unwrap().unwrap().assignment_id > before_spawn_release,
+        "failed-spawn release must fence the abandoned assignment"
+    );
+
+    repo.try_claim_for_worker("run-a", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    let before_resume_requeue = repo.get_row("run-a").unwrap().unwrap().assignment_id;
+    assert!(repo.requeue_running("run-a", 10).unwrap());
+    assert!(
+        repo.get_row("run-a").unwrap().unwrap().assignment_id > before_resume_requeue,
+        "resume reconciliation must invalidate the orphaned assignment"
+    );
+}
+
+#[test]
+fn heartbeat_updates_only_the_current_finalized_assignment_for_a_reused_slot() {
+    let repo = queue_repo();
+    repo.enqueue(&queued_row("zz-old", "pending:zz-old", Some("OLD"), 1))
+        .unwrap();
+    repo.try_claim_for_worker("zz-old", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    repo.record_heartbeat(SESSION_ID, "worker-1", "completed", 20)
+        .unwrap();
+
+    repo.enqueue(&queued_row("aa-current", "pending:aa-current", Some("CURRENT"), 2))
+        .unwrap();
+    repo.try_claim_for_worker("aa-current", Some("worker-1"), -90_000, 30)
+        .unwrap()
+        .unwrap();
+    repo.record_heartbeat(SESSION_ID, "worker-1", "completed", 40)
+        .unwrap();
+
+    let old_before = repo.get_row("zz-old").unwrap().unwrap();
+    let current_before = repo.get_row("aa-current").unwrap().unwrap();
+    assert!(current_before.assignment_id > old_before.assignment_id);
+    assert_eq!(
+        repo.record_heartbeat_for_assignment(SESSION_ID, "worker-1", None, "working", 999)
+            .unwrap(),
+        Some("aa-current".to_string()),
+        "the legacy fallback must resolve the greatest durable assignment, not row order"
+    );
+
+    let old_after = repo.get_row("zz-old").unwrap().unwrap();
+    let current_after = repo.get_row("aa-current").unwrap().unwrap();
+    assert_eq!(
+        (old_after.heartbeat_at, old_after.updated_at),
+        (old_before.heartbeat_at, old_before.updated_at),
+        "the sibling's historical liveness bytes must remain unchanged"
+    );
+    assert_eq!((current_after.heartbeat_at, current_after.updated_at), (Some(999), 999));
+
+    let impossible_assignment = current_after.assignment_id + 100;
+    assert_eq!(
+        repo.record_heartbeat_for_assignment(
+            SESSION_ID,
+            "worker-1",
+            Some(impossible_assignment),
+            "working",
+            1_111,
+        )
+        .unwrap(),
+        None,
+        "an explicit stale identity must not cascade into the fallback"
+    );
+    assert_eq!(repo.get_row("zz-old").unwrap().unwrap(), old_after);
+    assert_eq!(repo.get_row("aa-current").unwrap().unwrap(), current_after);
+}
+
+#[test]
+fn heartbeat_body_keeps_assignment_identity_optional_for_legacy_prompts() {
+    let legacy: PostHeartbeatRequest = serde_json::from_value(json!({
+        "agent_id": "worker-1",
+        "status": "working"
+    }))
+    .unwrap();
+    assert_eq!(legacy.assignment_id, None);
+
+    let scoped: PostHeartbeatRequest = serde_json::from_value(json!({
+        "agent_id": "worker-1",
+        "status": "working",
+        "assignment_id": 42
+    }))
+    .unwrap();
+    assert_eq!(scoped.assignment_id, Some(42));
+}
+
+#[tokio::test]
+async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(queue_repo());
+    repo.enqueue(&queued_row("old-run", "pending:old-run", Some("old-task"), 1))
+        .unwrap();
+    repo.try_claim_for_worker("old-run", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    repo.record_heartbeat(SESSION_ID, "worker-1", "completed", 20)
+        .unwrap();
+    let old_assignment = repo.get_row("old-run").unwrap().unwrap().assignment_id;
+
+    repo.enqueue(&queued_row("current-run", "pending:current-run", Some("current-task"), 2))
+        .unwrap();
+    repo.try_claim_for_worker("current-run", Some("worker-1"), -90_000, 30)
+        .unwrap()
+        .unwrap();
+    let current_assignment = repo
+        .get_row("current-run")
+        .unwrap()
+        .unwrap()
+        .assignment_id;
+    assert!(current_assignment > old_assignment);
+
+    let event_bus = EventBus::new(temp.path().to_path_buf());
+    let mut events = event_bus.subscribe();
+    let manager = QueueManager::new(Arc::clone(&repo), event_bus);
+    assert!(manager
+        .record_heartbeat(SESSION_ID, "worker-1", "completed")
+        .await
+        .unwrap());
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("completion heartbeat must emit WorkerFinalized promptly")
+        .unwrap();
+    assert_eq!(event.event_type, EventType::WorkerFinalized);
+    assert_eq!(event.payload["task_id"], "current-task");
+    assert_eq!(
+        repo.get_row("current-run").unwrap().unwrap().status,
+        QueueStatus::Finalized
+    );
+    assert_eq!(
+        repo.get_row("old-run").unwrap().unwrap().status,
+        QueueStatus::Finalized
+    );
+}
+
 #[tokio::test]
 async fn recovery_prioritizes_live_claim_over_older_terminal_slot_history() {
     let temp = tempfile::tempdir().unwrap();
@@ -1182,20 +1380,31 @@ async fn post_heartbeat(
     agent_id: &str,
     status: &str,
 ) -> axum::response::Response {
+    post_heartbeat_with_assignment(app, session_id, agent_id, status, None).await
+}
+
+async fn post_heartbeat_with_assignment(
+    app: &axum::Router,
+    session_id: &str,
+    agent_id: &str,
+    status: &str,
+    assignment_id: Option<i64>,
+) -> axum::response::Response {
+    let mut payload = json!({
+        "agent_id": agent_id,
+        "status": status,
+        "summary": format!("HTTP {status} heartbeat")
+    });
+    if let Some(assignment_id) = assignment_id {
+        payload["assignment_id"] = json!(assignment_id);
+    }
     app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri(format!("/api/sessions/{session_id}/heartbeat"))
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&json!({
-                        "agent_id": agent_id,
-                        "status": status,
-                        "summary": format!("HTTP {status} heartbeat")
-                    }))
-                    .unwrap(),
-                ))
+                .body(Body::from(serde_json::to_vec(&payload).unwrap()))
                 .unwrap(),
         )
         .await
@@ -1260,6 +1469,8 @@ async fn http_reassignment_refreshes_finalized_liveness_and_restores_stall_cover
         parent_id: Some(queen_id.clone()),
         commit_sha: None,
         base_commit_sha: None,
+        role_definition_id: None,
+        role_definition_version: None,
     });
     controller.read().insert_test_session(session);
     state
@@ -1351,9 +1562,15 @@ async fn http_reassignment_refreshes_finalized_liveness_and_restores_stall_cover
     );
 
     assert_eq!(
-        post_heartbeat(&app, session_id, "worker-1", "working")
-            .await
-            .status(),
+        post_heartbeat_with_assignment(
+            &app,
+            session_id,
+            "worker-1",
+            "working",
+            Some(completed_row.assignment_id),
+        )
+        .await
+        .status(),
         StatusCode::OK
     );
     let refreshed_row = state

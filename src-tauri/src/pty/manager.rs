@@ -6,6 +6,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 
 use super::session::{AgentRole, AgentStatus, PtyError, PtySession, read_from_reader};
+use crate::adapters::pty_submit_policy;
 use crate::cli::agent_store;
 use crate::tauri_shim::{AppHandle, Emitter};
 
@@ -145,6 +146,7 @@ impl PtyManager {
             id.clone(),
             role,
             command,
+            pty_submit_policy(command),
             &effective_args,
             cwd,
             cols,
@@ -334,6 +336,17 @@ impl PtyManager {
         sessions.get(id).map(|session| session.write_records())
     }
 
+    #[cfg(all(test, windows))]
+    pub fn submit_policy_for_test(
+        &self,
+        id: &str,
+    ) -> Option<crate::adapters::PtySubmitPolicy> {
+        let sessions = self.sessions.read();
+        sessions
+            .get(id)
+            .map(|session| session.submit_policy_for_test())
+    }
+
     pub fn list_sessions(&self) -> Vec<(String, AgentRole, AgentStatus)> {
         let sessions = self.sessions.read();
         sessions
@@ -354,11 +367,101 @@ impl Default for PtyManager {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use crate::pty::{RoleDefinitionRef, WorkerRole};
 
     fn worker_role() -> AgentRole {
         AgentRole::Worker {
             index: 1,
             parent: None,
+        }
+    }
+
+    fn public_struct_fields(source: &str, struct_name: &str) -> Vec<String> {
+        let marker = format!("pub struct {struct_name} {{");
+        let body = source
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing {struct_name}"))
+            .1;
+
+        body.lines()
+            .take_while(|line| line.trim() != "}")
+            .filter_map(|line| {
+                line.split("//")
+                    .next()
+                    .map(str::trim)
+                    .and_then(|line| line.strip_prefix("pub "))
+                    .map(|field| field.trim_end_matches(',').to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn worker_position_and_resolved_identity_are_independent() {
+        let position = AgentRole::Worker {
+            index: 7,
+            parent: Some("queen".to_string()),
+        };
+        let mut identity = WorkerRole::new("reviewer", "Reviewer", "codex");
+        identity.resolved_definition = Some(RoleDefinitionRef {
+            id: "security-reviewer".to_string(),
+            version: 3,
+        });
+
+        match position {
+            AgentRole::Worker { index, parent } => {
+                assert_eq!(index, 7);
+                assert_eq!(parent.as_deref(), Some("queen"));
+            }
+            other => panic!("expected worker position, got {other:?}"),
+        }
+        assert_eq!(identity.role_type, "reviewer");
+        assert_eq!(
+            identity.resolved_definition,
+            Some(RoleDefinitionRef {
+                id: "security-reviewer".to_string(),
+                version: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn worker_role_shape_matches_the_windows_test_stub() {
+        let production = public_struct_fields(include_str!("session.rs"), "WorkerRole");
+        let test_stub = public_struct_fields(include_str!("session_stub.rs"), "WorkerRole");
+        let expected = vec![
+            "role_type: String",
+            "label: String",
+            "default_cli: String",
+            "prompt_template: Option<String>",
+            "resolved_definition: Option<RoleDefinitionRef>",
+        ];
+
+        assert_eq!(production, expected);
+        assert_eq!(test_stub, expected);
+    }
+
+    #[test]
+    fn manager_binds_submit_policy_per_adapter_session() {
+        let manager = PtyManager::new();
+        for (id, command, expected_adapter) in [
+            ("codex-policy-agent", "codex", "codex"),
+            ("claude-policy-agent", "claude", "claude"),
+            ("cursor-policy-agent", "wsl", "cursor"),
+        ] {
+            manager
+                .create_session(
+                    id.to_string(),
+                    worker_role(),
+                    command,
+                    &[],
+                    None,
+                    80,
+                    24,
+                )
+                .unwrap();
+            let policy = manager.submit_policy_for_test(id).unwrap();
+            assert_eq!(policy.adapter, Some(expected_adapter));
+            assert_eq!(policy.default_gap, Duration::from_millis(50));
         }
     }
 
@@ -411,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_writes_payload_then_bare_enter_separately() {
+    fn submit_writes_one_multiline_payload_then_one_bare_enter() {
         let manager = PtyManager::new();
         manager
             .create_session(
@@ -425,14 +528,48 @@ mod tests {
             )
             .unwrap();
 
-        manager.submit("submit-agent", b"hello").unwrap();
+        manager
+            .submit("submit-agent", b"line one\nline two\nline three")
+            .unwrap();
 
         let writes = manager.write_records_for_test("submit-agent").unwrap();
-        assert_eq!(writes, vec![b"hello".to_vec(), b"\r".to_vec()]);
+        assert_eq!(
+            writes,
+            vec![b"line one\nline two\nline three".to_vec(), b"\r".to_vec()]
+        );
         assert!(!writes[0].ends_with(b"\r"));
         assert!(!writes[0].ends_with(b"\n"));
         assert_eq!(writes[1], b"\r");
         assert!(!writes[1].contains(&b'\n'));
+    }
+
+    #[test]
+    fn unsubmitted_stub_write_is_visible_in_recent_output() {
+        const SENTINEL: &[u8] = b"UNSUBMITTED_SENTINEL";
+
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "unsubmitted-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        manager.write("unsubmitted-agent", SENTINEL).unwrap();
+
+        assert_eq!(
+            manager.recent_output("unsubmitted-agent").as_deref(),
+            Some("UNSUBMITTED_SENTINEL")
+        );
+        assert_eq!(
+            manager.write_records_for_test("unsubmitted-agent").unwrap(),
+            vec![SENTINEL.to_vec()]
+        );
     }
 
     #[test]
@@ -460,7 +597,6 @@ mod tests {
 
         let (start_writer_tx, start_writer_rx) = std::sync::mpsc::channel();
         let (writer_attempted_tx, writer_attempted_rx) = std::sync::mpsc::channel();
-        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
         let concurrent_manager = Arc::clone(&manager);
         let concurrent_writer = thread::spawn(move || {
             start_writer_rx.recv().unwrap();
@@ -468,7 +604,6 @@ mod tests {
             concurrent_manager
                 .write("atomic-submit-agent", b"interloper")
                 .unwrap();
-            writer_done_tx.send(()).unwrap();
         });
 
         let submit_manager = Arc::clone(&manager);
@@ -481,12 +616,14 @@ mod tests {
         assert!(session.wait_for_submit_payload_for_test());
         start_writer_tx.send(()).unwrap();
         writer_attempted_rx.recv().unwrap();
-        let interleaved = writer_done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        assert!(
+            session.writer_locked_for_test(),
+            "submit must retain the writer lock between payload and Enter"
+        );
         session.resume_submit_for_test();
         submitter.join().unwrap();
         concurrent_writer.join().unwrap();
 
-        assert!(!interleaved, "concurrent write completed before Enter");
         assert_eq!(
             manager
                 .write_records_for_test("atomic-submit-agent")

@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::domain::{CapabilityCard, CapabilitySupport, DelegationPolicy, NativeDelegationMode};
+use crate::orchestrator::org_graph::RoleDefinition;
 use crate::pty::AgentConfig;
 use crate::storage::{AppConfig, CliConfig};
 
 /// CLI behavioral profiles for characterizing how different CLI tools behave
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CliBehavior {
     /// Highly proactive - will "help" by taking action. Needs strong constraints.
     ActionProne,
@@ -250,13 +254,15 @@ impl CliRegistry {
         matches!(Self::get_behavior(cli), CliBehavior::ActionProne)
     }
 
-    /// Evaluators should default to a skeptical, instruction-following profile
-    /// even when the underlying CLI is more action-prone in other roles.
-    pub fn get_behavior_for_role(cli: &str, role_type: Option<&str>) -> CliBehavior {
-        match role_type.map(str::to_ascii_lowercase).as_deref() {
-            Some("evaluator") => CliBehavior::InstructionFollowing,
-            _ => Self::get_behavior(cli),
-        }
+    /// A role may declare a behavior override; otherwise capability inheritance
+    /// preserves the CLI's existing behavior exactly.
+    pub fn get_behavior_for_role(
+        cli: &str,
+        definition: Option<&RoleDefinition>,
+    ) -> CliBehavior {
+        definition
+            .and_then(|definition| definition.behavior)
+            .unwrap_or_else(|| Self::get_behavior(cli))
     }
 }
 
@@ -558,12 +564,14 @@ mod tests {
 
     #[test]
     fn test_get_behavior_for_evaluator_role() {
+        let evaluator = crate::orchestrator::org_graph::evaluator_role_definition();
         assert!(matches!(
-            CliRegistry::get_behavior_for_role("claude", Some("evaluator")),
+            CliRegistry::get_behavior_for_role("claude", Some(&evaluator)),
             CliBehavior::InstructionFollowing
         ));
+        let backend = crate::orchestrator::org_graph::RoleDefinition::empty("backend");
         assert!(matches!(
-            CliRegistry::get_behavior_for_role("claude", Some("backend")),
+            CliRegistry::get_behavior_for_role("claude", Some(&backend)),
             CliBehavior::ActionProne
         ));
     }

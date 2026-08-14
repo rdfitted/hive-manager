@@ -7,6 +7,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use thiserror::Error;
 
+use crate::adapters::PtySubmitPolicy;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
     MasterPlanner,  // Initial planning agent that generates plan.md
@@ -36,12 +38,20 @@ pub enum AgentStatus {
 }
 
 /// Worker role configuration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RoleDefinitionRef {
+    pub id: String,
+    pub version: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerRole {
     pub role_type: String,          // "backend", "frontend", "coherence", "simplify", or custom
     pub label: String,              // Display name
     pub default_cli: String,        // Default CLI for this role
     pub prompt_template: Option<String>, // Path to template or inline prompt
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_definition: Option<RoleDefinitionRef>,
 }
 
 impl WorkerRole {
@@ -51,6 +61,7 @@ impl WorkerRole {
             label: label.to_string(),
             default_cli: default_cli.to_string(),
             prompt_template: None,
+            resolved_definition: None,
         }
     }
 }
@@ -143,28 +154,28 @@ impl MasterPtyHandle {
 /// Maximum chunk size for PTY writes (16KB) - respects Windows pipe buffer limits
 const CHUNK_SIZE: usize = 16 * 1024;
 
-/// Unvalidated default; override with `HIVE_PTY_SUBMIT_GAP_MS` for the #226 sweep.
-///
-/// Under load, measured payload/Enter separations of 1.2-2.7 s failed twice,
-/// while roughly 4-5 s succeeded twice and 65 s succeeded once. Agent busy
-/// state was uncontrolled, so those observations do not justify replacing the
-/// compiled 50 ms default with another guess.
-const SUBMIT_GAP: Duration = Duration::from_millis(50);
 const SUBMIT_GAP_ENV: &str = "HIVE_PTY_SUBMIT_GAP_MS";
-static RUNTIME_SUBMIT_GAP: OnceLock<Duration> = OnceLock::new();
+static RUNTIME_SUBMIT_GAP: OnceLock<Option<Duration>> = OnceLock::new();
 
-fn submit_gap_from_override(value: Option<&str>) -> Duration {
+fn submit_gap_from_override(value: Option<&str>) -> Option<Duration> {
     value
         .and_then(|milliseconds| milliseconds.trim().parse::<u64>().ok())
         .map(Duration::from_millis)
-        .unwrap_or(SUBMIT_GAP)
 }
 
-fn submit_gap() -> Duration {
-    *RUNTIME_SUBMIT_GAP.get_or_init(|| {
+fn resolve_submit_gap(
+    policy: PtySubmitPolicy,
+    override_gap: Option<Duration>,
+) -> Duration {
+    override_gap.unwrap_or(policy.default_gap)
+}
+
+fn submit_gap(policy: PtySubmitPolicy) -> Duration {
+    let override_gap = *RUNTIME_SUBMIT_GAP.get_or_init(|| {
         let override_value = std::env::var(SUBMIT_GAP_ENV).ok();
         submit_gap_from_override(override_value.as_deref())
-    })
+    });
+    resolve_submit_gap(policy, override_gap)
 }
 
 /// Bracketed paste mode escape sequences
@@ -211,6 +222,7 @@ const RECENT_OUTPUT_CAPACITY: usize = 8 * 1024;
 pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
+    submit_policy: PtySubmitPolicy,
     writer: Arc<Mutex<SendWriter>>,
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
@@ -252,6 +264,7 @@ impl PtySession {
         _id: String,
         role: AgentRole,
         command: &str,
+        submit_policy: PtySubmitPolicy,
         args: &[&str],
         cwd: Option<&str>,
         cols: u16,
@@ -328,6 +341,7 @@ impl PtySession {
         Ok(Self {
             role,
             status: Arc::new(parking_lot::RwLock::new(AgentStatus::Starting)),
+            submit_policy,
             writer: Arc::new(Mutex::new(SendWriter(writer))),
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
@@ -373,7 +387,7 @@ impl PtySession {
         Self::write_locked(&mut writer, data)?;
         // Keep the per-session writer locked so no concurrent write can be
         // interleaved and accidentally submitted by this Enter.
-        std::thread::sleep(submit_gap());
+        std::thread::sleep(submit_gap(self.submit_policy));
         Self::write_locked(&mut writer, b"\r")
     }
 
