@@ -269,11 +269,6 @@ impl OwnershipSessionState {
         attempt: OrchestratorWriteAttempt,
     ) -> OrchestratorWriteOutcome {
         let path = normalize_path(&attempt.path);
-        let Some(actor) = self.orchestrators.iter().find(|node| {
-            node.principal_id == attempt.actor_id && node.role == attempt.role
-        }) else {
-            return OrchestratorWriteOutcome::Proceed;
-        };
         let Some(owner) = self
             .live_principal_ownership
             .iter()
@@ -282,17 +277,27 @@ impl OwnershipSessionState {
             return OrchestratorWriteOutcome::Proceed;
         };
 
-        let override_authorized = actor.ownership_authority.may_override_live_ownership
-            && actor.ownership_authority.may_mutate_mid_flight;
+        let actor = self.orchestrators.iter().find(|node| {
+            node.principal_id == attempt.actor_id && node.role == attempt.role
+        });
+        let (within_declared_footprint, override_authorized) = actor
+            .map(|actor| {
+                (
+                    actor.declares(&attempt.path, attempt.operation),
+                    actor.ownership_authority.may_override_live_ownership
+                        && actor.ownership_authority.may_mutate_mid_flight,
+                )
+            })
+            .unwrap_or((false, false));
         let collision = OwnershipCollision {
-            actor_id: actor.principal_id.clone(),
-            actor_role: actor.role,
+            actor_id: attempt.actor_id,
+            actor_role: attempt.role,
             owner_principal_id: owner.principal_id.clone(),
             owner_task_id: owner.task_id.clone(),
             owner_write_capable: owner.write_capable,
             path,
             operation: attempt.operation,
-            within_declared_footprint: actor.declares(&attempt.path, attempt.operation),
+            within_declared_footprint,
             override_authorized,
             disposition: if override_authorized {
                 CollisionDisposition::SurfacedAuthorizedOverride
@@ -469,9 +474,20 @@ pub fn verification_duty_gaps(graph: &TaskGraph) -> Vec<VerificationDutyGap> {
 }
 
 fn normalize_path(path: &str) -> String {
-    let mut normalized = path.trim().replace('\\', "/");
-    while let Some(stripped) = normalized.strip_prefix("./") {
-        normalized = stripped.to_string();
+    let normalized_separators = path.trim().replace('\\', "/");
+    let rooted = normalized_separators.starts_with('/');
+    let normalized = normalized_separators
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+
+    // Ownership paths are normally repository-relative. Preserve an explicit
+    // root marker when one is supplied, but deliberately retain `..` segments:
+    // resolving them would require a declared containment root and policy.
+    if rooted {
+        format!("/{normalized}")
+    } else {
+        normalized
     }
-    normalized
 }

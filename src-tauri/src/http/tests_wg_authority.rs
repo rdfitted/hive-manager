@@ -280,6 +280,171 @@ fn ownership_sidecar_round_trips_and_prewrite_collision_is_durable() {
 }
 
 #[test]
+fn undeclared_or_role_mismatched_actor_cannot_bypass_a_live_owner() {
+    let graph = incident_graph();
+    for (actor_id, role) in [
+        ("unregistered-orchestrator", OrchestratorRole::Queen),
+        ("queen", OrchestratorRole::Evaluator),
+    ] {
+        let mut state = OwnershipSessionState::from_plan(
+            &graph,
+            declared_orchestrators(),
+            &[LivePrincipal {
+                principal_id: W4_ID.to_string(),
+                task_id: "T14/T15".to_string(),
+                write_capable: true,
+            }],
+        )
+        .expect("live ownership state");
+
+        let outcome = state.record_write_attempt(OrchestratorWriteAttempt {
+            actor_id: actor_id.to_string(),
+            role,
+            path: INCIDENT_PATH.to_string(),
+            operation: OrchestratorOperation::Restore,
+            attempted_at: incident_time(),
+        });
+        let OrchestratorWriteOutcome::Collision { collision } = outcome else {
+            panic!("{actor_id:?} with role {role:?} bypassed a write-capable owner");
+        };
+        assert_eq!(collision.actor_id, actor_id);
+        assert_eq!(collision.actor_role, role);
+        assert_eq!(collision.owner_principal_id, W4_ID);
+        assert!(!collision.within_declared_footprint);
+        assert!(!collision.override_authorized);
+        assert_eq!(
+            collision.disposition,
+            CollisionDisposition::RequiresSerialization
+        );
+        assert_eq!(state.collisions, vec![collision]);
+    }
+}
+
+#[test]
+fn ownership_sidecar_persists_an_undeclared_actor_collision() {
+    let temp = TempDir::new().expect("ownership sidecar root");
+    let manager = StateManager::new(temp.path().join("ownership-session"));
+    let graph = incident_graph();
+    let initial = OwnershipSessionState::from_plan(&graph, declared_orchestrators(), &[])
+        .expect("initial ownership state");
+    manager
+        .write_ownership_session_state(&initial)
+        .expect("persist visible ownership state");
+
+    let outcome = manager
+        .record_orchestrator_write_attempt(
+            &graph,
+            &[LivePrincipal {
+                principal_id: W4_ID.to_string(),
+                task_id: "T14/T15".to_string(),
+                write_capable: true,
+            }],
+            OrchestratorWriteAttempt {
+                actor_id: "unregistered-orchestrator".to_string(),
+                role: OrchestratorRole::Queen,
+                path: INCIDENT_PATH.to_string(),
+                operation: OrchestratorOperation::Restore,
+                attempted_at: incident_time(),
+            },
+        )
+        .expect("pre-write check persists its result");
+    assert!(matches!(outcome, OrchestratorWriteOutcome::Collision { .. }));
+
+    let persisted = manager
+        .read_ownership_session_state()
+        .expect("read surfaced collision")
+        .expect("ownership sidecar exists");
+    assert_eq!(persisted.collisions.len(), 1);
+    assert_eq!(persisted.collisions[0].actor_id, "unregistered-orchestrator");
+    assert_eq!(
+        persisted.collisions[0].disposition,
+        CollisionDisposition::RequiresSerialization
+    );
+    assert!(!persisted.collisions[0].override_authorized);
+}
+
+#[test]
+fn undeclared_actor_without_a_live_owner_proceeds_without_collision_evidence() {
+    let mut state = OwnershipSessionState::from_plan(
+        &incident_graph(),
+        declared_orchestrators(),
+        &[],
+    )
+    .expect("ownership state without live principals");
+    assert_eq!(
+        state.record_write_attempt(OrchestratorWriteAttempt {
+            actor_id: "unregistered-orchestrator".to_string(),
+            role: OrchestratorRole::Queen,
+            path: INCIDENT_PATH.to_string(),
+            operation: OrchestratorOperation::Restore,
+            attempted_at: incident_time(),
+        }),
+        OrchestratorWriteOutcome::Proceed
+    );
+    assert!(state.collisions.is_empty());
+}
+
+#[test]
+fn lexically_equivalent_path_spellings_surface_the_same_live_owner_collision() {
+    let graph = incident_graph();
+    for equivalent_path in [
+        "src-tauri/src/session/./controller.rs",
+        "src-tauri//src//session//controller.rs",
+        "src-tauri/src/session/controller.rs///",
+    ] {
+        let mut state = OwnershipSessionState::from_plan(
+            &graph,
+            declared_orchestrators(),
+            &[LivePrincipal {
+                principal_id: W4_ID.to_string(),
+                task_id: "T14/T15".to_string(),
+                write_capable: true,
+            }],
+        )
+        .expect("live ownership state");
+        let outcome = state.record_write_attempt(OrchestratorWriteAttempt {
+            actor_id: "queen".to_string(),
+            role: OrchestratorRole::Queen,
+            path: equivalent_path.to_string(),
+            operation: OrchestratorOperation::Restore,
+            attempted_at: incident_time(),
+        });
+        let OrchestratorWriteOutcome::Collision { collision } = outcome else {
+            panic!("equivalent spelling {equivalent_path:?} bypassed live ownership");
+        };
+        assert_eq!(collision.path, INCIDENT_PATH);
+        assert!(collision.within_declared_footprint);
+        assert_eq!(state.collisions, vec![collision]);
+    }
+}
+
+#[test]
+fn parent_segments_are_not_resolved_without_a_containment_policy() {
+    let graph = incident_graph();
+    let mut state = OwnershipSessionState::from_plan(
+        &graph,
+        declared_orchestrators(),
+        &[LivePrincipal {
+            principal_id: W4_ID.to_string(),
+            task_id: "T14/T15".to_string(),
+            write_capable: true,
+        }],
+    )
+    .expect("live ownership state");
+    assert_eq!(
+        state.record_write_attempt(OrchestratorWriteAttempt {
+            actor_id: "queen".to_string(),
+            role: OrchestratorRole::Queen,
+            path: "src-tauri/src/session/../session/controller.rs".to_string(),
+            operation: OrchestratorOperation::Restore,
+            attempted_at: incident_time(),
+        }),
+        OrchestratorWriteOutcome::Proceed
+    );
+    assert!(state.collisions.is_empty());
+}
+
+#[test]
 fn inactive_owner_and_unowned_path_do_not_create_false_collisions() {
     let mut inactive = OwnershipSessionState::from_plan(
         &incident_graph(),

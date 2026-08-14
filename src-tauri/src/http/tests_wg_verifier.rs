@@ -385,7 +385,13 @@ fn role_attribution(
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> String {
+    let empty_hooks = repo.join(".hive-manager-test-empty-hooks");
+    fs::create_dir_all(&empty_hooks).expect("empty repository-local hooks directory");
     let output = Command::new("git")
+        .arg("-c")
+        .arg("commit.gpgSign=false")
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", empty_hooks.to_string_lossy()))
         .args(args)
         .current_dir(repo)
         .output()
@@ -397,6 +403,38 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn review_6_git_fixture_ignores_hostile_signing_and_hooks() {
+    let temp = TempDir::new().expect("hostile git fixture root");
+    git_output(temp.path(), &["init"]);
+    git_output(temp.path(), &["config", "user.email", "retro@example.invalid"]);
+    git_output(temp.path(), &["config", "user.name", "Retro Fixture"]);
+
+    let hostile_hooks = temp.path().join("hostile-hooks");
+    fs::create_dir_all(&hostile_hooks).expect("hostile hooks directory");
+    fs::write(
+        hostile_hooks.join("pre-commit"),
+        "#!/bin/sh\necho hostile-hook >&2\nexit 73\n",
+    )
+    .expect("hostile pre-commit hook");
+    let hostile_hooks = hostile_hooks.to_string_lossy().to_string();
+    git_output(temp.path(), &["config", "commit.gpgSign", "true"]);
+    git_output(
+        temp.path(),
+        &["config", "core.hooksPath", &hostile_hooks],
+    );
+
+    fs::write(temp.path().join("fixture.txt"), "hermetic fixture")
+        .expect("fixture content");
+    git_output(temp.path(), &["add", "fixture.txt"]);
+    git_output(temp.path(), &["commit", "-m", "hermetic fixture"]);
+
+    assert_eq!(
+        git_output(temp.path(), &["log", "-1", "--pretty=%s"]),
+        "hermetic fixture"
+    );
 }
 
 #[test]
@@ -431,6 +469,128 @@ fn a30_retro_attribution_separates_versions_of_the_same_role_definition() {
         .iter()
         .all(|aggregate| aggregate.run_count == 1));
     assert!(report.role_refinement_proposals.is_empty());
+}
+
+#[test]
+fn review_6_scope_gaps_count_once_per_definition_and_preserve_contributors() {
+    let mut shared = role_input(
+        "repo-a",
+        "archive-shared",
+        "session-shared",
+        "agent-a",
+        1,
+        true,
+    );
+    shared.archive.outcomes[0]
+        .agent_ids
+        .push("agent-b".to_string());
+    let shared_report = evaluate_archives_with_role_attributions(
+        &verifier_evaluator(),
+        &[shared],
+        &[
+            role_attribution("session-shared", "agent-a", 11),
+            role_attribution("session-shared", "agent-b", 11),
+        ],
+    )
+    .expect("shared-definition scope-gap retro");
+
+    let shared_metric = &shared_report.runs[0].role_definitions[0];
+    assert_eq!(shared_metric.confirmed_scope_gaps, 1);
+    assert_eq!(shared_metric.agent_ids, vec!["agent-a", "agent-b"]);
+    assert!(shared_metric
+        .evidence_refs
+        .iter()
+        .any(|reference| reference == "event:archive-shared"));
+    assert!(shared_metric
+        .evidence_refs
+        .iter()
+        .any(|reference| reference == "ledger:archive-shared:scope-gap"));
+    assert!(shared_report.role_refinement_proposals.is_empty());
+
+    let mut distinct = role_input(
+        "repo-a",
+        "archive-distinct",
+        "session-distinct",
+        "agent-c",
+        1,
+        true,
+    );
+    distinct.archive.outcomes[0]
+        .agent_ids
+        .push("agent-d".to_string());
+    let distinct_report = evaluate_archives_with_role_attributions(
+        &verifier_evaluator(),
+        &[distinct],
+        &[
+            role_attribution("session-distinct", "agent-c", 21),
+            role_attribution("session-distinct", "agent-d", 22),
+        ],
+    )
+    .expect("distinct-definition scope-gap retro");
+    assert_eq!(
+        distinct_report.runs[0]
+            .role_definitions
+            .iter()
+            .map(|metric| (
+                metric.definition.definition_version,
+                metric.confirmed_scope_gaps,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(21, 1), (22, 1)]
+    );
+}
+
+#[test]
+fn review_6_optional_totals_serialize_their_contributing_run_counts() {
+    let complete = role_input(
+        "repo-a",
+        "archive-complete",
+        "session-complete",
+        "agent-complete",
+        2,
+        false,
+    );
+    let mut unavailable = role_input(
+        "repo-a",
+        "archive-unavailable",
+        "session-unavailable",
+        "agent-unavailable",
+        2,
+        false,
+    );
+    unavailable.archive.plan_graph = None;
+    for source in &mut unavailable.archive.sources {
+        if matches!(
+            source.kind,
+            ArchiveSourceKind::EventLog | ArchiveSourceKind::MutationLog
+        ) {
+            source.available = false;
+            source.record_count = 0;
+        }
+    }
+    let report = evaluate_archives_with_role_attributions(
+        &verifier_evaluator(),
+        &[complete, unavailable],
+        &[
+            role_attribution("session-complete", "agent-complete", 31),
+            role_attribution("session-unavailable", "agent-unavailable", 31),
+        ],
+    )
+    .expect("partially available role aggregates");
+
+    let aggregate = &report.role_definition_aggregates[0];
+    assert_eq!(aggregate.run_count, 2);
+    let serialized = serde_json::to_value(aggregate).expect("serialized role aggregate");
+    for field in [
+        "additional_attempts_contributing_runs",
+        "remediation_detours_contributing_runs",
+        "caught_defects_contributing_runs",
+        "escaped_defects_contributing_runs",
+        "gotcha_edges_eligible_contributing_runs",
+        "gotcha_targets_attempted_contributing_runs",
+    ] {
+        assert_eq!(serialized[field], serde_json::json!(1), "{field}");
+    }
 }
 
 #[test]

@@ -6,9 +6,19 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use parking_lot::RwLock;
+use tower::ServiceExt;
+
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 
 use crate::cli::{CliBehavior, CliRegistry};
+use crate::coordination::{HierarchyNode, InjectionManager, QueueManager, StateManager};
 use crate::domain::{HiveExecutionPolicy, WorkspaceStrategy};
+use crate::events::EventBus;
+use crate::http::routes::create_router;
+use crate::http::state::AppState;
 use crate::orchestrator::org_graph::composition::{
     compose_context, lint_role_knowledge_hubs, render_composed_context, ContextBudget,
     spawn_context_from_work_graph_task, ContextOrigin, SpawnContext,
@@ -29,6 +39,7 @@ use crate::session::{
     AuthStrategy, Session, SessionController, SessionState, SessionType,
     DEFAULT_MAX_QA_ITERATIONS,
 };
+use crate::storage::{ApplicationStateDb, QueueRepo, SessionStorage};
 use crate::templates::CellTemplate;
 
 #[test]
@@ -209,6 +220,47 @@ fn role_test_session(id: &str, project_path: PathBuf) -> Session {
     }
 }
 
+fn role_test_app(
+    base_dir: PathBuf,
+) -> (
+    axum::Router,
+    Arc<RwLock<SessionController>>,
+    Arc<SessionStorage>,
+) {
+    let storage = Arc::new(
+        SessionStorage::new_with_base(base_dir.clone()).expect("create isolated session storage"),
+    );
+    let config = Arc::new(tokio::sync::RwLock::new(
+        storage.load_config().expect("load isolated config"),
+    ));
+    let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    let controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
+    controller.write().set_storage(storage.clone());
+    let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+        pty_manager.clone(),
+        SessionStorage::new_with_base(base_dir).expect("create injection storage"),
+    )));
+    let event_bus = EventBus::new(storage.base_dir().clone());
+    let app_state_db =
+        Arc::new(ApplicationStateDb::open(storage.base_dir()).expect("open queue database"));
+    let queue_repo = Arc::new(QueueRepo::new(app_state_db.clone()));
+    queue_repo.ensure_schema().expect("create queue schema");
+    let queue_manager = Arc::new(QueueManager::new(queue_repo, event_bus.clone()));
+    let state = Arc::new(AppState::new(
+        config,
+        pty_manager,
+        controller.clone(),
+        injection_manager,
+        storage.clone(),
+        event_bus,
+        app_state_db,
+        queue_manager,
+        None,
+    ));
+
+    (create_router(state), controller, storage)
+}
+
 #[test]
 fn a14_reviewer_spawn_records_resolved_definition_and_version() {
     let project = tempfile::tempdir().expect("temp project");
@@ -323,7 +375,214 @@ fn a15_project_path_override_wins_without_mutating_institutional_definition() {
 }
 
 #[test]
-fn a16_prompt_templates_are_explicit_and_absence_is_reported() {
+fn a33_semantically_invalid_project_override_retains_valid_base() {
+    let project = tempfile::tempdir().expect("temp project");
+    let institutional = tempfile::tempdir().expect("temp institutional wiki");
+    std::fs::create_dir_all(project.path().join(".ai-docs/roles"))
+        .expect("create project role directory");
+    std::fs::create_dir_all(institutional.path().join("roles"))
+        .expect("create institutional role directory");
+
+    std::fs::write(
+        institutional.path().join("roles/reviewer.md"),
+        r#"---
+{"id":"reviewer","version":3,"domain":"Institutional review","knowledge_scope":[{"source":"institutional","pointer":"review/base.md","summary":"Institutional base guidance.","priority":50}],"lens":{"id":"base","question":"What does the shared standard require?"},"authority":{},"context_boundary":"artifact","signal_class":"judgmental","prompt_template":"roles/reviewer","non_goals":[]}
+---
+# Institutional reviewer
+"#,
+    )
+    .expect("write institutional definition");
+    let override_path = project.path().join(".ai-docs/roles/reviewer.md");
+    std::fs::write(
+        &override_path,
+        r#"---
+{"id":"tester","version":9,"knowledge_scope":[{"source":"project","pointer":"wrong/review.md","summary":"Must not replace the reviewer base.","priority":100}]}
+---
+# Invalid reviewer override
+"#,
+    )
+    .expect("write semantically invalid project override");
+
+    let resolved = resolve_role_definition(
+        project.path(),
+        Some(institutional.path()),
+        "reviewer",
+    );
+    let definition = resolved
+        .definition
+        .as_ref()
+        .expect("a rejected override must retain the valid base definition");
+
+    assert_eq!(resolved.base_source, Some(RoleDefinitionSource::Institutional));
+    assert_eq!(definition.id, "reviewer");
+    assert_eq!(definition.version, 3);
+    assert_eq!(definition.knowledge_scope[0].pointer, "review/base.md");
+    assert!(
+        resolved.applied_override.is_none(),
+        "a rejected override must not be recorded as applied"
+    );
+    assert!(resolved.issues.iter().any(|issue| {
+        issue.kind == RoleResolutionIssueKind::SourceUnreadable
+            && PathBuf::from(&issue.source_ref) == override_path
+            && issue.detail.contains("declares role tester, expected reviewer")
+    }));
+    assert!(
+        !resolved
+            .issues
+            .iter()
+            .any(|issue| issue.kind == RoleResolutionIssueKind::DefinitionNotFound),
+        "rejecting a project override must not manufacture base-definition absence"
+    );
+}
+
+#[tokio::test]
+async fn a16_role_construction_paths_produce_explicit_template_keys() {
+    let fixture = tempfile::tempdir().expect("temp role-construction fixture");
+    let (app, controller, storage) = role_test_app(fixture.path().join("storage"));
+
+    let worker_session_id = "role-template-worker";
+    let worker_session =
+        role_test_session(worker_session_id, fixture.path().join("worker-project"));
+    std::fs::create_dir_all(&worker_session.project_path).expect("create worker project");
+    controller.write().insert_test_session(worker_session);
+
+    let worker_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{worker_session_id}/workers"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"role_type":"reviewer","cli":"claude"}"#))
+                .expect("worker request"),
+        )
+        .await
+        .expect("worker response");
+    let worker_status = worker_response.status();
+    let worker_body = axum::body::to_bytes(worker_response.into_body(), usize::MAX)
+        .await
+        .expect("read worker response body");
+    assert_eq!(
+        worker_status,
+        StatusCode::CREATED,
+        "unexpected worker response: {}",
+        String::from_utf8_lossy(&worker_body)
+    );
+    let worker = controller
+        .read()
+        .get_session(worker_session_id)
+        .expect("worker session")
+        .agents
+        .into_iter()
+        .find(|agent| matches!(agent.role, crate::pty::AgentRole::Worker { .. }))
+        .expect("spawned worker");
+    assert_eq!(
+        worker
+            .config
+            .role
+            .as_ref()
+            .and_then(|role| role.prompt_template.as_deref()),
+        Some("roles/reviewer"),
+        "the worker HTTP construction path must carry its explicit template key"
+    );
+
+    let planner_session_id = "role-template-planner";
+    let mut planner_session =
+        role_test_session(planner_session_id, fixture.path().join("planner-project"));
+    planner_session.session_type = SessionType::Swarm { planner_count: 1 };
+    planner_session.no_git = true;
+    std::fs::create_dir_all(&planner_session.project_path).expect("create planner project");
+    let planner_project = planner_session.project_path.clone();
+    controller.write().insert_test_session(planner_session);
+
+    let planner_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{planner_session_id}/planners"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"domain":"backend","cli":"claude","workers":[{"role_type":"backend","label":"Backend","cli":"claude"}]}"#,
+                ))
+                .expect("planner request"),
+        )
+        .await
+        .expect("planner response");
+    let planner_status = planner_response.status();
+    let planner_body = axum::body::to_bytes(planner_response.into_body(), usize::MAX)
+        .await
+        .expect("read planner response body");
+    assert_eq!(
+        planner_status,
+        StatusCode::CREATED,
+        "unexpected planner response: {}",
+        String::from_utf8_lossy(&planner_body)
+    );
+    let planner_workers: Vec<AgentConfig> = serde_json::from_slice(
+        &std::fs::read(
+            planner_project
+                .join(".hive-manager")
+                .join(planner_session_id)
+                .join("planner-1-workers.json"),
+        )
+        .expect("read planner worker roster"),
+    )
+    .expect("decode planner worker roster");
+    assert_eq!(
+        planner_workers[0]
+            .role
+            .as_ref()
+            .and_then(|role| role.prompt_template.as_deref()),
+        Some("roles/backend"),
+        "the planner HTTP construction path must carry its explicit worker template key"
+    );
+
+    let state_manager = StateManager::new(storage.session_dir("role-template-coordination"));
+    state_manager
+        .update_workers_file(&[])
+        .expect("create coordination worker roster marker");
+    state_manager
+        .update_hierarchy(&[HierarchyNode {
+            id: "coordination-reviewer".to_string(),
+            role: "Reviewer".to_string(),
+            parent_id: Some("coordination-queen".to_string()),
+            children: Vec::new(),
+        }])
+        .expect("write hierarchy fixture");
+    let coordination_workers = state_manager
+        .read_workers_file()
+        .expect("read coordination roster");
+    assert_eq!(
+        coordination_workers
+            .first()
+            .expect("constructed coordination worker")
+            .role
+            .prompt_template
+            .as_deref(),
+        Some("roles/reviewer"),
+        "the coordination roster construction path must carry its explicit template key"
+    );
+}
+
+#[test]
+fn a16_absent_definition_is_reported() {
+    let project = tempfile::tempdir().expect("temp project");
+    std::fs::create_dir_all(project.path().join(".ai-docs/roles"))
+        .expect("create known-empty project role directory");
+    let missing = resolve_role_definition(project.path(), None, "not-a-declared-role");
+    assert!(
+        missing.definition.is_none(),
+        "an unknown role must not resolve to RoleDefinition::empty"
+    );
+    assert!(missing.issues.iter().any(|issue| {
+        issue.kind == RoleResolutionIssueKind::DefinitionNotFound
+            && issue.source_ref == "not-a-declared-role"
+    }));
+}
+
+#[test]
+fn a16_secondary_source_guards_reject_implicit_template_literals() {
     for (site, source) in [
         ("workers", include_str!("handlers/workers.rs")),
         ("planners", include_str!("handlers/planners.rs")),
@@ -338,19 +597,6 @@ fn a16_prompt_templates_are_explicit_and_absence_is_reported() {
             "{site} does not declare which role template it intends to resolve"
         );
     }
-
-    let project = tempfile::tempdir().expect("temp project");
-    std::fs::create_dir_all(project.path().join(".ai-docs/roles"))
-        .expect("create known-empty project role directory");
-    let missing = resolve_role_definition(project.path(), None, "not-a-declared-role");
-    assert!(
-        missing.definition.is_none(),
-        "an unknown role must not resolve to RoleDefinition::empty"
-    );
-    assert!(missing.issues.iter().any(|issue| {
-        issue.kind == RoleResolutionIssueKind::DefinitionNotFound
-            && issue.source_ref == "not-a-declared-role"
-    }));
 }
 
 #[test]

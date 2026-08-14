@@ -1948,6 +1948,39 @@ mod tests {
     }
 
     #[test]
+    fn a33_populated_persisted_agent_role_reference_round_trips() {
+        let agent = PersistedAgentInfo {
+            id: "agent-reviewer".to_string(),
+            role: "Worker(1)".to_string(),
+            config: PersistedAgentConfig {
+                cli: "codex".to_string(),
+                model: Some("gpt-5.6-sol".to_string()),
+                flags: vec!["--search".to_string()],
+                label: Some("Independent Reviewer".to_string()),
+                name: None,
+                description: Some("Review the implementation".to_string()),
+                role_type: Some("reviewer".to_string()),
+                initial_prompt: None,
+            },
+            parent_id: Some("session-queen".to_string()),
+            role_definition_id: Some("reviewer".to_string()),
+            role_definition_version: Some(7),
+            commit_sha: Some("abc123".to_string()),
+            base_commit_sha: Some("def456".to_string()),
+        };
+
+        let encoded = serde_json::to_value(&agent).expect("serialize populated agent");
+        assert_eq!(encoded["role_definition_id"], "reviewer");
+        assert_eq!(encoded["role_definition_version"], 7);
+
+        let decoded: PersistedAgentInfo =
+            serde_json::from_value(encoded).expect("deserialize populated agent");
+        assert_eq!(decoded.role_definition_id.as_deref(), Some("reviewer"));
+        assert_eq!(decoded.role_definition_version, Some(7));
+        assert_eq!(decoded.config.role_type.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
     fn test_load_session_if_newer_and_clean_uses_cached_hash() {
         let (storage, _temp_dir) = create_test_storage();
         let session = sample_persisted_session("refresh-hash-session");

@@ -125,14 +125,86 @@ unsafe impl Send for SendWriter {}
 unsafe impl Sync for SendWriter {}
 
 const CHUNK_SIZE: usize = 16 * 1024;
+// BEGIN SHARED SUBMIT GAP OVERRIDE POLICY
 const SUBMIT_GAP_ENV: &str = "HIVE_PTY_SUBMIT_GAP_MS";
+/// Safety ceiling for the operator override, not a submit-gap default.
+///
+/// Five minutes bounds how long `submit` can hold the per-session writer mutex while preserving
+/// the known successful 65-second observation for the future U1 sweep.
+const MAX_PTY_SUBMIT_GAP_OVERRIDE_MS: u64 = 300_000;
 static RUNTIME_SUBMIT_GAP: OnceLock<Option<Duration>> = OnceLock::new();
-const SUBMIT_GAP_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
-fn submit_gap_from_override(value: Option<&str>) -> Option<Duration> {
-    value
-        .and_then(|milliseconds| milliseconds.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitGapOverride {
+    Unset,
+    Valid(Duration),
+    Invalid(SubmitGapInvalidReason),
+    OverLimit { requested_ms: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitGapInvalidReason {
+    NonUnicode,
+    NotUnsignedInteger,
+    Overflow,
+}
+
+fn parse_submit_gap_override(value: Option<&std::ffi::OsStr>) -> SubmitGapOverride {
+    let Some(value) = value else {
+        return SubmitGapOverride::Unset;
+    };
+    let Some(milliseconds) = value.to_str() else {
+        return SubmitGapOverride::Invalid(SubmitGapInvalidReason::NonUnicode);
+    };
+
+    match milliseconds.trim().parse::<u64>() {
+        Ok(requested_ms) if requested_ms <= MAX_PTY_SUBMIT_GAP_OVERRIDE_MS => {
+            SubmitGapOverride::Valid(Duration::from_millis(requested_ms))
+        }
+        Ok(requested_ms) => SubmitGapOverride::OverLimit { requested_ms },
+        Err(error)
+            if matches!(
+                error.kind(),
+                &std::num::IntErrorKind::PosOverflow | &std::num::IntErrorKind::NegOverflow
+            ) =>
+        {
+            SubmitGapOverride::Invalid(SubmitGapInvalidReason::Overflow)
+        }
+        Err(_) => SubmitGapOverride::Invalid(SubmitGapInvalidReason::NotUnsignedInteger),
+    }
+}
+
+fn cached_submit_gap_override<F>(
+    cache: &OnceLock<Option<Duration>>,
+    value: Option<&std::ffi::OsStr>,
+    warn: F,
+) -> Option<Duration>
+where
+    F: FnOnce(SubmitGapOverride),
+{
+    *cache.get_or_init(|| match parse_submit_gap_override(value) {
+        SubmitGapOverride::Unset => None,
+        SubmitGapOverride::Valid(duration) => Some(duration),
+        rejected @ (SubmitGapOverride::Invalid(_) | SubmitGapOverride::OverLimit { .. }) => {
+            warn(rejected);
+            None
+        }
+    })
+}
+
+fn warn_rejected_submit_gap_override(override_value: SubmitGapOverride) {
+    match override_value {
+        SubmitGapOverride::Invalid(reason) => tracing::warn!(
+            ?reason,
+            "Ignoring invalid {SUBMIT_GAP_ENV} override; using the adapter default"
+        ),
+        SubmitGapOverride::OverLimit { requested_ms } => tracing::warn!(
+            requested_ms,
+            safety_ceiling_ms = MAX_PTY_SUBMIT_GAP_OVERRIDE_MS,
+            "Rejecting over-limit {SUBMIT_GAP_ENV} override; using the adapter default"
+        ),
+        SubmitGapOverride::Unset | SubmitGapOverride::Valid(_) => {}
+    }
 }
 
 fn resolve_submit_gap(
@@ -143,12 +215,17 @@ fn resolve_submit_gap(
 }
 
 fn submit_gap(policy: PtySubmitPolicy) -> Duration {
-    let override_gap = *RUNTIME_SUBMIT_GAP.get_or_init(|| {
-        let override_value = std::env::var(SUBMIT_GAP_ENV).ok();
-        submit_gap_from_override(override_value.as_deref())
-    });
+    let override_value = std::env::var_os(SUBMIT_GAP_ENV);
+    let override_gap = cached_submit_gap_override(
+        &RUNTIME_SUBMIT_GAP,
+        override_value.as_deref(),
+        warn_rejected_submit_gap_override,
+    );
     resolve_submit_gap(policy, override_gap)
 }
+// END SHARED SUBMIT GAP OVERRIDE POLICY
+
+const SUBMIT_GAP_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
@@ -452,35 +529,176 @@ pub fn read_from_reader(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_submit_gap, sanitize_bracketed_paste, submit_gap_from_override,
-        BRACKETED_PASTE_END,
+        cached_submit_gap_override, parse_submit_gap_override, resolve_submit_gap,
+        sanitize_bracketed_paste, SubmitGapInvalidReason, SubmitGapOverride,
+        BRACKETED_PASTE_END, MAX_PTY_SUBMIT_GAP_OVERRIDE_MS,
     };
     use crate::adapters::PtySubmitPolicy;
+    use std::cell::Cell;
+    use std::ffi::OsStr;
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     #[test]
-    fn submit_gap_override_parses_milliseconds() {
+    fn submit_gap_override_distinguishes_all_supported_and_rejected_inputs() {
+        assert_eq!(parse_submit_gap_override(None), SubmitGapOverride::Unset);
         assert_eq!(
-            submit_gap_from_override(Some(" 4500 ")),
-            Some(Duration::from_millis(4_500))
+            parse_submit_gap_override(Some(OsStr::new("0"))),
+            SubmitGapOverride::Valid(Duration::ZERO)
         );
-        assert_eq!(submit_gap_from_override(Some("0")), Some(Duration::ZERO));
+        assert_eq!(
+            parse_submit_gap_override(Some(OsStr::new(" 4500 "))),
+            SubmitGapOverride::Valid(Duration::from_millis(4_500))
+        );
+        assert_eq!(
+            parse_submit_gap_override(Some(OsStr::new("65000"))),
+            SubmitGapOverride::Valid(Duration::from_secs(65))
+        );
+        assert_eq!(
+            parse_submit_gap_override(Some(OsStr::new("not-a-number"))),
+            SubmitGapOverride::Invalid(SubmitGapInvalidReason::NotUnsignedInteger)
+        );
+        assert_eq!(
+            parse_submit_gap_override(Some(OsStr::new("18446744073709551616"))),
+            SubmitGapOverride::Invalid(SubmitGapInvalidReason::Overflow)
+        );
+        assert_eq!(
+            parse_submit_gap_override(Some(OsStr::new("300001"))),
+            SubmitGapOverride::OverLimit {
+                requested_ms: 300_001
+            }
+        );
     }
 
     #[test]
-    fn invalid_submit_gap_override_defers_to_the_session_policy() {
-        assert_eq!(submit_gap_from_override(Some("not-a-number")), None);
-        assert_eq!(submit_gap_from_override(Some("-1")), None);
-        assert_eq!(submit_gap_from_override(None), None);
-
+    fn rejected_submit_gap_override_warns_once_and_defers_to_the_session_policy() {
         let adapter_policy = PtySubmitPolicy {
             adapter: Some("future-tuned-adapter"),
             default_gap: Duration::from_millis(123),
         };
-        assert_eq!(resolve_submit_gap(adapter_policy, None), Duration::from_millis(123));
+
+        for (raw, expected_warning) in [
+            (
+                "not-a-number",
+                SubmitGapOverride::Invalid(SubmitGapInvalidReason::NotUnsignedInteger),
+            ),
+            (
+                "18446744073709551616",
+                SubmitGapOverride::Invalid(SubmitGapInvalidReason::Overflow),
+            ),
+            (
+                "300001",
+                SubmitGapOverride::OverLimit {
+                    requested_ms: 300_001,
+                },
+            ),
+        ] {
+            let cache = OnceLock::new();
+            let warning_count = Cell::new(0);
+            let warning = Cell::new(None);
+            let override_gap = cached_submit_gap_override(
+                &cache,
+                Some(OsStr::new(raw)),
+                |rejected| {
+                    warning_count.set(warning_count.get() + 1);
+                    warning.set(Some(rejected));
+                },
+            );
+
+            assert_eq!(override_gap, None);
+            assert_eq!(warning.get(), Some(expected_warning));
+            assert_eq!(resolve_submit_gap(adapter_policy, override_gap), adapter_policy.default_gap);
+
+            let second = cached_submit_gap_override(
+                &cache,
+                Some(OsStr::new("65000")),
+                |_| warning_count.set(warning_count.get() + 1),
+            );
+            assert_eq!(second, None, "a rejected process override stays rejected");
+            assert_eq!(warning_count.get(), 1, "a rejected override warns once");
+        }
+
+        let valid_cache = OnceLock::new();
+        let valid_warning_count = Cell::new(0);
+        let valid = cached_submit_gap_override(
+            &valid_cache,
+            Some(OsStr::new("65000")),
+            |_| valid_warning_count.set(valid_warning_count.get() + 1),
+        );
+        assert_eq!(valid, Some(Duration::from_secs(65)));
+        assert_eq!(valid_warning_count.get(), 0);
+
+        let unset_cache = OnceLock::new();
+        let unset_warning_count = Cell::new(0);
+        let unset = cached_submit_gap_override(&unset_cache, None, |_| {
+            unset_warning_count.set(unset_warning_count.get() + 1)
+        });
+        assert_eq!(unset, None);
+        assert_eq!(unset_warning_count.get(), 0);
+    }
+
+    #[test]
+    fn review_fix_submit_gap_override_rejects_values_above_the_safety_ceiling() {
         assert_eq!(
-            resolve_submit_gap(adapter_policy, Some(Duration::from_millis(4_500))),
-            Duration::from_millis(4_500)
+            parse_submit_gap_override(Some(OsStr::new("65000"))),
+            SubmitGapOverride::Valid(Duration::from_secs(65)),
+            "the known 65-second success must remain representable"
+        );
+        assert_eq!(
+            parse_submit_gap_override(Some(OsStr::new("300000"))),
+            SubmitGapOverride::Valid(Duration::from_millis(
+                MAX_PTY_SUBMIT_GAP_OVERRIDE_MS
+            )),
+            "the named safety ceiling itself remains valid"
+        );
+        assert_eq!(
+            parse_submit_gap_override(Some(OsStr::new("300001"))),
+            SubmitGapOverride::OverLimit {
+                requested_ms: 300_001
+            },
+            "an override above the 300-second safety ceiling must be rejected, not clamped"
+        );
+    }
+
+    #[test]
+    fn submit_gap_override_policy_matches_the_production_session() {
+        fn policy_block(source: &str) -> String {
+            source
+                .split_once("// BEGIN SHARED SUBMIT GAP OVERRIDE POLICY")
+                .expect("policy start marker")
+                .1
+                .split_once("// END SHARED SUBMIT GAP OVERRIDE POLICY")
+                .expect("policy end marker")
+                .0
+                .replace("\r\n", "\n")
+        }
+
+        let production = policy_block(include_str!("session.rs"));
+        let test_stub = policy_block(include_str!("session_stub.rs"));
+        assert_eq!(production, test_stub, "the Windows shim must not drift");
+    }
+
+    #[test]
+    fn review_fix_documented_pty_buffer_sample_byte_count_matches_output() {
+        let document = include_str!("../../../docs/pty-submit-sweep.md");
+        let json_sample = document
+            .split_once("```json")
+            .expect("documented JSON sample")
+            .1
+            .split_once("```")
+            .expect("closed JSON sample")
+            .0;
+        let sample: serde_json::Value =
+            serde_json::from_str(json_sample).expect("valid documented JSON sample");
+        let output = sample["output"].as_str().expect("sample output string");
+        let byte_count = sample["byte_count"]
+            .as_u64()
+            .expect("sample byte_count") as usize;
+
+        assert_eq!(
+            byte_count,
+            output.len(),
+            "documented byte_count must equal the UTF-8 byte length of output"
         );
     }
 

@@ -18,7 +18,7 @@ A successful read returns HTTP 200 with the existing bounded PTY tail:
   "session_id": "{session_id}",
   "agent_id": "{agent_id}",
   "output": "recent PTY bytes decoded as text",
-  "byte_count": 31
+  "byte_count": 32
 }
 ```
 
@@ -35,7 +35,9 @@ keep `byte_count` directly comparable to the fixture byte length.
   payload, not one Enter per line.
 - `pty.paste` remains bracketed input with no automatic submit.
 - The compiled fallback is 50 ms for every adapter until measurements justify a change.
-- `HIVE_PTY_SUBMIT_GAP_MS` overrides the adapter policy for the sweep.
+- `HIVE_PTY_SUBMIT_GAP_MS` values from 0 through 300,000 ms override the adapter policy for the
+  sweep. Invalid, overflowed, and larger values are rejected with one warning and fall back to the
+  adapter default; they are never silently clamped. The 300,000 ms safety ceiling is not a default.
 
 The 50 ms value is intentionally unchanged. Existing uncontrolled observations report two
 failures around 1.2-2.7 seconds, two successes around 4-5 seconds, and one success around

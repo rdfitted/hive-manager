@@ -511,11 +511,23 @@ pub struct RoleDefinitionAggregate {
     pub session_ids: Vec<String>,
     pub archive_ids: Vec<String>,
     pub additional_attempts: Option<usize>,
+    #[serde(default)]
+    pub additional_attempts_contributing_runs: usize,
     pub remediation_detours: Option<usize>,
+    #[serde(default)]
+    pub remediation_detours_contributing_runs: usize,
     pub caught_defects: Option<usize>,
+    #[serde(default)]
+    pub caught_defects_contributing_runs: usize,
     pub escaped_defects: Option<usize>,
+    #[serde(default)]
+    pub escaped_defects_contributing_runs: usize,
     pub gotcha_edges_eligible: Option<usize>,
+    #[serde(default)]
+    pub gotcha_edges_eligible_contributing_runs: usize,
     pub gotcha_targets_attempted: Option<usize>,
+    #[serde(default)]
+    pub gotcha_targets_attempted_contributing_runs: usize,
     pub confirmed_scope_gaps: usize,
 }
 
@@ -996,24 +1008,25 @@ fn role_definition_metrics(
     let mut missing_agents = BTreeSet::new();
     for outcome in &archive.outcomes {
         let mut outcome_definitions = BTreeSet::new();
+        let confirmed_scope_gaps = outcome
+            .effects
+            .iter()
+            .filter(|effect| effect.confirmed && effect.kind == ROLE_SCOPE_GAP_EFFECT_KIND)
+            .count();
         for agent_id in &outcome.agent_ids {
             let Some(definition) = by_agent.get(agent_id) else {
                 missing_agents.insert(agent_id.clone());
                 continue;
             };
-            outcome_definitions.insert(definition.clone());
+            let newly_inserted_definition = outcome_definitions.insert(definition.clone());
             let accumulator = accumulators.entry(definition.clone()).or_default();
             accumulator.agent_ids.insert(agent_id.clone());
             accumulator
                 .evidence_refs
                 .extend(outcome.source_refs.iter().cloned());
-            accumulator.confirmed_scope_gaps += outcome
-                .effects
-                .iter()
-                .filter(|effect| {
-                    effect.confirmed && effect.kind == ROLE_SCOPE_GAP_EFFECT_KIND
-                })
-                .count();
+            if newly_inserted_definition {
+                accumulator.confirmed_scope_gaps += confirmed_scope_gaps;
+            }
             accumulator.evidence_refs.extend(
                 outcome
                     .effects
@@ -2088,9 +2101,14 @@ fn role_refinement_learnings(
         .collect()
 }
 
-fn add_optional(total: &mut Option<usize>, value: Option<usize>) {
+fn add_optional(
+    total: &mut Option<usize>,
+    contributing_runs: &mut usize,
+    value: Option<usize>,
+) {
     if let Some(value) = value {
         *total.get_or_insert(0) += value;
+        *contributing_runs += 1;
     }
 }
 
@@ -2107,11 +2125,17 @@ fn aggregate_role_definitions(runs: &[PerRunRetro]) -> Vec<RoleDefinitionAggrega
                     session_ids: Vec::new(),
                     archive_ids: Vec::new(),
                     additional_attempts: None,
+                    additional_attempts_contributing_runs: 0,
                     remediation_detours: None,
+                    remediation_detours_contributing_runs: 0,
                     caught_defects: None,
+                    caught_defects_contributing_runs: 0,
                     escaped_defects: None,
+                    escaped_defects_contributing_runs: 0,
                     gotcha_edges_eligible: None,
+                    gotcha_edges_eligible_contributing_runs: 0,
                     gotcha_targets_attempted: None,
+                    gotcha_targets_attempted_contributing_runs: 0,
                     confirmed_scope_gaps: 0,
                 });
             aggregate.run_count += 1;
@@ -2120,20 +2144,32 @@ fn aggregate_role_definitions(runs: &[PerRunRetro]) -> Vec<RoleDefinitionAggrega
             aggregate.archive_ids.push(run.archive_id.clone());
             add_optional(
                 &mut aggregate.additional_attempts,
+                &mut aggregate.additional_attempts_contributing_runs,
                 metric.additional_attempts,
             );
             add_optional(
                 &mut aggregate.remediation_detours,
+                &mut aggregate.remediation_detours_contributing_runs,
                 metric.remediation_detours,
             );
-            add_optional(&mut aggregate.caught_defects, metric.caught_defects);
-            add_optional(&mut aggregate.escaped_defects, metric.escaped_defects);
+            add_optional(
+                &mut aggregate.caught_defects,
+                &mut aggregate.caught_defects_contributing_runs,
+                metric.caught_defects,
+            );
+            add_optional(
+                &mut aggregate.escaped_defects,
+                &mut aggregate.escaped_defects_contributing_runs,
+                metric.escaped_defects,
+            );
             add_optional(
                 &mut aggregate.gotcha_edges_eligible,
+                &mut aggregate.gotcha_edges_eligible_contributing_runs,
                 metric.gotcha_edges_eligible,
             );
             add_optional(
                 &mut aggregate.gotcha_targets_attempted,
+                &mut aggregate.gotcha_targets_attempted_contributing_runs,
                 metric.gotcha_targets_attempted,
             );
             aggregate.confirmed_scope_gaps += metric.confirmed_scope_gaps;

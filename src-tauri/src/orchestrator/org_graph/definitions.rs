@@ -154,7 +154,7 @@ pub fn resolve_role_definition(
                 .map_err(|error| error.to_string())
                 .and_then(|source| parse_document::<RoleDefinitionOverride>(&source))
                 .and_then(|patch| {
-                    apply_project_override(definition.take(), &normalized_id, patch)
+                    apply_project_override(definition.clone(), &normalized_id, patch)
                 }) {
                 Ok(overridden) => {
                     definition = Some(overridden);
