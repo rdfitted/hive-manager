@@ -5,8 +5,11 @@ use schemars::schema::RootSchema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
-use crate::coordination::{CoordinationMessage, MessageType, StateManager, WorkerStateInfo};
+use crate::coordination::{
+    CoordinationMessage, InjectionError, MessageType, StateManager, WorkerStateInfo,
+};
 use crate::orchestrator::work_graph::TaskId;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
 use crate::tauri_shim::Emitter;
@@ -151,6 +154,17 @@ fn require_frontend(ctx: &ActionContext) -> Result<(), ActionError> {
     }
 }
 
+async fn run_blocking_injection<T, F>(operation: F) -> Result<T, ActionError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, InjectionError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| ActionError::internal(format!("Injection task failed: {error}")))?
+        .map_err(|error| ActionError::internal(error.to_string()))
+}
+
 struct QueenInject;
 
 #[async_trait]
@@ -166,16 +180,17 @@ impl Action for QueenInject {
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
         require_frontend(ctx)?;
         let request: QueenInjectRequest = deserialize_input(input)?;
-        let manager = ctx.state.injection_manager.read();
-        manager
-            .queen_inject(
+        let manager = Arc::clone(&ctx.state.injection_manager);
+        run_blocking_injection(move || {
+            manager.read().queen_inject(
                 &request.session_id,
                 &request.queen_id,
                 &request.target_worker_id,
                 &request.message,
                 true,
             )
-            .map_err(|e| ActionError::internal(e.to_string()))?;
+        })
+        .await?;
         Ok(Value::Null)
     }
 }
@@ -209,15 +224,16 @@ impl Action for QueenSwitchBranch {
                 .ok_or_else(|| ActionError::not_found("Session not found"))?
         };
 
-        let manager = ctx.state.injection_manager.read();
-        let results = manager
-            .queen_switch_branch(
+        let manager = Arc::clone(&ctx.state.injection_manager);
+        let results = run_blocking_injection(move || {
+            manager.read().queen_switch_branch(
                 &parsed.session_id,
                 &parsed.queen_id,
                 &worker_ids,
                 &parsed.branch,
             )
-            .map_err(|e| ActionError::internal(e.to_string()))?;
+        })
+        .await?;
 
         serialize_output(
             results
@@ -244,15 +260,16 @@ impl Action for OperatorInject {
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
         require_frontend(ctx)?;
         let request: OperatorInjectRequest = deserialize_input(input)?;
-        let manager = ctx.state.injection_manager.read();
-        manager
-            .operator_inject(
+        let manager = Arc::clone(&ctx.state.injection_manager);
+        run_blocking_injection(move || {
+            manager.read().operator_inject(
                 &request.session_id,
                 &request.target_agent_id,
                 &request.message,
                 true,
             )
-            .map_err(|e| ActionError::internal(e.to_string()))?;
+        })
+        .await?;
         Ok(Value::Null)
     }
 }
@@ -472,16 +489,21 @@ impl Action for AssignTask {
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
         require_frontend(ctx)?;
         let parsed: AssignTaskInput = deserialize_input(input)?;
-        let coord_manager = ctx.state.injection_manager.read();
-        coord_manager
-            .queen_inject(
-                &parsed.session_id,
-                &parsed.queen_id,
-                &parsed.worker_id,
-                &parsed.task,
+        let manager = Arc::clone(&ctx.state.injection_manager);
+        let injection_session_id = parsed.session_id.clone();
+        let queen_id = parsed.queen_id.clone();
+        let worker_id = parsed.worker_id.clone();
+        let task = parsed.task.clone();
+        run_blocking_injection(move || {
+            manager.read().queen_inject(
+                &injection_session_id,
+                &queen_id,
+                &worker_id,
+                &task,
                 true,
             )
-            .map_err(|e| ActionError::internal(e.to_string()))?;
+        })
+        .await?;
 
         let session_path = ctx.state.storage.session_dir(&parsed.session_id);
         let state_manager = StateManager::new(session_path);
@@ -969,7 +991,22 @@ fn extract_assignee(text: &str) -> (String, Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_assignee, extract_priority, parse_task_line};
+    use super::{
+        extract_assignee, extract_priority, parse_task_line, run_blocking_injection,
+    };
+    use crate::coordination::InjectionError;
+
+    #[tokio::test]
+    async fn blocking_injection_preserves_operation_error_message() {
+        let expected = InjectionError::NotAuthorized("denied".to_string());
+        let expected_message = expected.to_string();
+
+        let error = run_blocking_injection(move || Err::<(), _>(expected))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.message, expected_message);
+    }
 
     #[test]
     fn extract_priority_strips_detected_token_case_insensitively() {

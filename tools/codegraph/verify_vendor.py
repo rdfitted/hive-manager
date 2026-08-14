@@ -14,7 +14,12 @@ ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "vendor-manifest.json"
 HEADER_HASH = re.compile(rb"source SHA-256 ([0-9a-fA-F]{64})")
 SHA256 = re.compile(r"[0-9a-fA-F]{64}")
-HASH_FIELDS = {"upstream_sha256", "vendored_sha256"}
+HASH_FIELDS = {"upstream_sha256", "normalized_sha256"}
+
+
+def normalize_line_endings(content: bytes) -> bytes:
+    """Return content with CRLF and lone CR line endings normalized to LF."""
+    return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
 def load_manifest(path: Path) -> dict[str, dict[str, str]] | None:
@@ -36,7 +41,7 @@ def load_manifest(path: Path) -> dict[str, dict[str, str]] | None:
         return None
 
     files = manifest.get("files")
-    if manifest.get("version") != 1 or not isinstance(files, dict) or not files:
+    if manifest.get("version") != 2 or not isinstance(files, dict) or not files:
         print(f"{path.name}: invalid schema", file=sys.stderr)
         return None
 
@@ -103,25 +108,26 @@ def main() -> int:
             continue
 
         content = path.read_bytes()
-        vendored_hash = hashlib.sha256(content).hexdigest()
-        expected_vendored = hashes.get("vendored_sha256", "").lower()
+        normalized_hash = hashlib.sha256(normalize_line_endings(content)).hexdigest()
+        expected_normalized = hashes.get("normalized_sha256", "").lower()
         expected_upstream = hashes.get("upstream_sha256", "").lower()
         header_match = HEADER_HASH.search(content[:512])
         header_upstream = header_match.group(1).decode("ascii").lower() if header_match else ""
 
         file_failures = []
-        if vendored_hash != expected_vendored:
-            file_failures.append("vendored bytes differ")
+        if normalized_hash != expected_normalized:
+            file_failures.append("normalized content differs")
         if header_upstream != expected_upstream:
             file_failures.append("header upstream hash differs from manifest")
 
         if file_failures:
             failures.append(f"{name}: {', '.join(file_failures)}")
             print(
-                f"{name}: FAIL vendored={vendored_hash} upstream={header_upstream or 'missing'}"
+                f"{name}: FAIL normalized={normalized_hash} "
+                f"upstream={header_upstream or 'missing'}"
             )
         else:
-            print(f"{name}: OK vendored={vendored_hash} upstream={header_upstream}")
+            print(f"{name}: OK normalized={normalized_hash} upstream={header_upstream}")
 
     if failures:
         for failure in failures:

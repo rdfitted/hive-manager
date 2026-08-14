@@ -1,17 +1,17 @@
 {
-  "version": 1,
+  "version": 2,
   "files": {
     "codegraph.py": {
       "upstream_sha256": "8b5ae7cd70bd4ac2a5af11d2a05aee9cd608af8e00a545c9b65d52ef53e77a0c",
-      "vendored_sha256": "6d0e6a01955d421bdc2780f986999841bf64b4c571f189abd445fa0a4bd67536"
+      "normalized_sha256": "6d0e6a01955d421bdc2780f986999841bf64b4c571f189abd445fa0a4bd67536"
     },
     "codegraph_rs.py": {
       "upstream_sha256": "7d6f6ed1d8171ef382313ae284cef692aa2ae5eb654833173e3a11064b942460",
-      "vendored_sha256": "54107c4a98615fe8e9a680a09fe068347c916d3075b85d6332f70ace9c38bbf2"
+      "normalized_sha256": "54107c4a98615fe8e9a680a09fe068347c916d3075b85d6332f70ace9c38bbf2"
     },
     "codegraph_ts.py": {
       "upstream_sha256": "474860d54f1db3b5de2054b0889842a0580102cabd5559c926863c397f9da7a1",
-      "vendored_sha256": "78002e38b40f99abc24d69ebe8fda16c79397b24e53a6fa7de510f025f0dda97"
+      "normalized_sha256": "78002e38b40f99abc24d69ebe8fda16c79397b24e53a6fa7de510f025f0dda97"
     }
   }
 }

@@ -499,6 +499,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn abandoned_submit_pause_times_out_after_test_thread_panics() {
+        let manager = Arc::new(PtyManager::new());
+        manager
+            .create_session(
+                "abandoned-submit-pause-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        let session = manager
+            .sessions
+            .read()
+            .get("abandoned-submit-pause-agent")
+            .cloned()
+            .unwrap();
+        session.pause_submit_after_payload_for_test();
+
+        let (submit_done_tx, submit_done_rx) = std::sync::mpsc::channel();
+        let submit_manager = Arc::clone(&manager);
+        let submitter = thread::spawn(move || {
+            submit_manager
+                .submit("abandoned-submit-pause-agent", b"payload")
+                .unwrap();
+            submit_done_tx.send(()).unwrap();
+        });
+
+        let pause_controller = thread::spawn(move || {
+            assert!(session.wait_for_submit_payload_for_test());
+            panic!("simulated test panic before resume");
+        });
+        assert!(pause_controller.join().is_err());
+        submit_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("submit stayed blocked after the test-side resume was abandoned");
+        submitter.join().unwrap();
+
+        assert_eq!(
+            manager
+                .write_records_for_test("abandoned-submit-pause-agent")
+                .unwrap(),
+            vec![b"payload".to_vec(), b"\r".to_vec()]
+        );
+    }
+
     /// #207: a session that dies during startup reports dead and keeps its final output
     /// available for diagnostics until it is killed/removed.
     #[test]

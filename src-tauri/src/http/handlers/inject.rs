@@ -2,12 +2,14 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use std::sync::Arc;
-use serde_json::{json, Value};
 use serde::Deserialize;
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+use super::{validate_agent_id, validate_session_id};
+use crate::coordination::InjectionError;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
-use super::{validate_agent_id, validate_session_id};
 
 fn default_submit() -> bool {
     true
@@ -47,15 +49,19 @@ pub async fn operator_inject(
     validate_session_id(&id)?;
     validate_agent_id(&payload.target_agent_id)?;
 
-    let manager = state.injection_manager.read();
-    manager
-        .operator_inject(
-            &id,
+    let manager = Arc::clone(&state.injection_manager);
+    let injection_session_id = id.clone();
+    let injection_result = tokio::task::spawn_blocking(move || {
+        manager.read().operator_inject(
+            &injection_session_id,
             &payload.target_agent_id,
             &payload.message,
             payload.submit,
         )
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
+    injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
 
     Ok(Json(json!({
         "status": "success",
@@ -72,16 +78,20 @@ pub async fn queen_inject(
     validate_agent_id(&payload.queen_id)?;
     validate_agent_id(&payload.target_worker_id)?;
 
-    let manager = state.injection_manager.read();
-    manager
-        .queen_inject(
-            &id,
+    let manager = Arc::clone(&state.injection_manager);
+    let injection_session_id = id.clone();
+    let injection_result = tokio::task::spawn_blocking(move || {
+        manager.read().queen_inject(
+            &injection_session_id,
             &payload.queen_id,
             &payload.target_worker_id,
             &payload.message,
             payload.submit,
         )
-        .map_err(map_injection_error)?;
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
+    injection_result.map_err(map_injection_error)?;
 
     Ok(Json(json!({
         "status": "success",
@@ -98,16 +108,20 @@ pub async fn evaluator_inject(
     validate_agent_id(&payload.evaluator_id)?;
     validate_agent_id(&payload.target_agent_id)?;
 
-    let manager = state.injection_manager.read();
-    manager
-        .evaluator_inject(
-            &id,
+    let manager = Arc::clone(&state.injection_manager);
+    let injection_session_id = id.clone();
+    let injection_result = tokio::task::spawn_blocking(move || {
+        manager.read().evaluator_inject(
+            &injection_session_id,
             &payload.evaluator_id,
             &payload.target_agent_id,
             &payload.message,
             payload.submit,
         )
-        .map_err(map_injection_error)?;
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
+    injection_result.map_err(map_injection_error)?;
 
     Ok(Json(json!({
         "status": "success",
@@ -115,13 +129,14 @@ pub async fn evaluator_inject(
     })))
 }
 
-fn map_injection_error(error: crate::coordination::InjectionError) -> ApiError {
+fn map_injection_error(error: InjectionError) -> ApiError {
     match error {
-        crate::coordination::InjectionError::NotAuthorized(message) => {
+        InjectionError::NotAuthorized(message) => {
             ApiError::new(axum::http::StatusCode::FORBIDDEN, message)
         }
-        crate::coordination::InjectionError::AgentNotFound(message)
-        | crate::coordination::InjectionError::SessionNotFound(message) => ApiError::not_found(message),
+        InjectionError::AgentNotFound(message) | InjectionError::SessionNotFound(message) => {
+            ApiError::not_found(message)
+        }
         other => ApiError::internal(other.to_string()),
     }
 }
@@ -282,5 +297,18 @@ mod tests {
         assert_eq!(writes, vec![b"line one\nline two".to_vec(), b"\r".to_vec()]);
         assert_eq!(writes.iter().filter(|write| write.as_slice() == b"\r").count(), 1);
         assert!(!writes[1].contains(&b'\n'));
+    }
+
+    #[tokio::test]
+    async fn operator_inject_blocking_path_preserves_pty_error_status() {
+        let (_temp_dir, app, _state) = setup_test_app();
+
+        let status = post_operator_inject(
+            app,
+            json!({ "target_agent_id": "missing-agent", "message": "hello" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

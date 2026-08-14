@@ -123,6 +123,7 @@ const CHUNK_SIZE: usize = 16 * 1024;
 const SUBMIT_GAP: Duration = Duration::from_millis(50);
 const SUBMIT_GAP_ENV: &str = "HIVE_PTY_SUBMIT_GAP_MS";
 static RUNTIME_SUBMIT_GAP: OnceLock<Duration> = OnceLock::new();
+const SUBMIT_GAP_TEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn submit_gap_from_override(value: Option<&str>) -> Duration {
     value
@@ -300,7 +301,7 @@ impl PtySession {
     pub fn wait_for_submit_payload_for_test(&self) -> bool {
         let (control, changed) = &*self.submit_gap_control;
         let mut control = control.lock();
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + SUBMIT_GAP_TEST_TIMEOUT;
 
         while !control.payload_written {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -326,10 +327,15 @@ impl PtySession {
             return;
         }
 
+        let deadline = Instant::now() + SUBMIT_GAP_TEST_TIMEOUT;
         control.payload_written = true;
         changed.notify_all();
         while !control.resume {
-            changed.wait(&mut control);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            changed.wait_for(&mut control, remaining);
         }
         *control = SubmitGapControl::default();
     }

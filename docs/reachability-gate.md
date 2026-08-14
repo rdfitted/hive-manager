@@ -30,7 +30,12 @@ The underlying limitation is structural: the analyzer sees 69 `.ts` files but do
 
 ## Updating the analyzer
 
-The three analyzer files are vendored from `~/.claude/tools/codegraph/`, and each provenance header records its source path, copy date, and the SHA-256 of the original upstream bytes. The repository copy deliberately uses LF line endings, so its whole-file hash can differ from that upstream hash even when the analyzer body has not drifted. `tools/codegraph/vendor-manifest.json` records both identities: the original upstream-byte hash and the exact LF-vendored-file hash.
+The three analyzer files are vendored from `~/.claude/tools/codegraph/`, and each provenance header records its source path, copy date, and the SHA-256 of the original upstream bytes. Manifest schema v2 records two deliberately different identities:
+
+- `upstream_sha256` is the exact original upstream byte stream, including its original line endings. It cross-checks the provenance header.
+- `normalized_sha256` is the complete vendored file after converting CRLF and lone CR line endings to LF. It detects content changes consistently even when Git materializes CRLF on Windows.
+
+The repository authors the files with LF, but verification does not depend on checkout settings. Python line endings are not semantic, so the verifier normalizes them before hashing while retaining every other byte, including the repository provenance header.
 
 Verify all three files and cross-check each header against the manifest with one command from the repository root:
 
@@ -38,6 +43,6 @@ Verify all three files and cross-check each header against the manifest with one
 python tools/codegraph/verify_vendor.py
 ```
 
-A clean run prints `OK` for all three files and `Verified 3 vendored files.` Do not patch vendored analyzer logic in this repository. Replace the copies from upstream as a unit, retain LF line endings, update both hashes in the manifest, and keep repository-specific exit policy in `ci_gate.py`.
+A clean run prints `OK` for all three files and `Verified 3 vendored files.` Do not patch vendored analyzer logic in this repository. Replace the copies from upstream as a unit, author them with LF line endings, update the raw-upstream and normalized-content hashes in the manifest, and keep repository-specific exit policy in `ci_gate.py`.
 
 The verifier discovers vendored analyzers independently from their provenance headers and requires that set to match the manifest exactly. This fails closed when a vendored file is omitted from the manifest or a stale manifest entry remains. Missing or malformed manifests, unsafe paths, and invalid SHA-256 values produce concise errors rather than tracebacks.

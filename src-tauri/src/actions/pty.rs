@@ -5,6 +5,9 @@ use schemars::schema::RootSchema;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use crate::pty::{AgentRole, PtyManager};
 
@@ -313,6 +316,20 @@ fn inject_to_pty(
     result.map_err(|e| ActionError::internal(e.to_string()))
 }
 
+async fn inject_to_pty_blocking(
+    pty_manager: Arc<RwLock<PtyManager>>,
+    id: String,
+    message: Vec<u8>,
+    send_enter: bool,
+) -> Result<(), ActionError> {
+    tokio::task::spawn_blocking(move || {
+        let pty_manager = pty_manager.read();
+        inject_to_pty(&pty_manager, &id, &message, send_enter)
+    })
+    .await
+    .map_err(|error| ActionError::internal(format!("PTY injection task failed: {error}")))?
+}
+
 #[async_trait]
 impl Action for InjectPty {
     fn name(&self) -> &'static str {
@@ -331,7 +348,6 @@ impl Action for InjectPty {
     async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
         require_frontend(ctx)?;
         let parsed: InjectInput = deserialize_input(input)?;
-        let pty_manager = ctx.state.pty_manager.read();
 
         tracing::info!(
             "inject_to_pty: id={}, message_len={}, send_enter={}",
@@ -340,12 +356,13 @@ impl Action for InjectPty {
             parsed.send_enter
         );
 
-        inject_to_pty(
-            &pty_manager,
-            &parsed.id,
-            parsed.message.as_bytes(),
+        inject_to_pty_blocking(
+            Arc::clone(&ctx.state.pty_manager),
+            parsed.id,
+            parsed.message.into_bytes(),
             parsed.send_enter,
-        )?;
+        )
+        .await?;
 
         Ok(Value::Null)
     }
@@ -456,8 +473,10 @@ pub fn register(registry: &mut ActionRegistry) {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::{inject_to_pty, paste_to_pty};
+    use super::{inject_to_pty, inject_to_pty_blocking, paste_to_pty};
     use crate::pty::{AgentRole, PtyManager};
+    use parking_lot::RwLock;
+    use std::sync::Arc;
 
     const AGENT_ID: &str = "pty-action-test-worker";
     const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -514,5 +533,19 @@ mod tests {
             ]
         );
         assert_ne!(writes.last().unwrap().as_slice(), b"\r");
+    }
+
+    #[tokio::test]
+    async fn blocking_pty_inject_preserves_operation_error_message() {
+        let error = inject_to_pty_blocking(
+            Arc::new(RwLock::new(PtyManager::new())),
+            "missing-agent".to_string(),
+            b"hello".to_vec(),
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.message, "PTY session not found: missing-agent");
     }
 }
