@@ -973,15 +973,16 @@ impl QueueRepo {
         })
     }
 
-    /// Record a heartbeat for a nonterminal row and advance the progress counters.
+    /// Record a heartbeat for an active or finalized row, advancing progress only while active.
     ///
     /// State machine: if the incoming `status` equals the stored `last_status`, the worker
     /// made no progress → `no_progress_count += 1`. If it changed (or there was no prior
     /// status), it is a continuation → `continuation_count += 1`, `no_progress_count = 0`,
     /// and `last_status` is updated. A `completed` heartbeat atomically moves a queued or
     /// running row to the existing terminal `finalized` state so stale-run maintenance cannot
-    /// reclaim verified work. Failed rows are never overwritten. Always refreshes
-    /// `heartbeat_at`. Returns `true` if a row was updated.
+    /// reclaim verified work. A finalized row keeps its lifecycle fields frozen while its
+    /// liveness timestamps remain fresh. Failed and blocked rows are never overwritten. Returns
+    /// `true` if an active or finalized row was updated.
     pub fn record_heartbeat(
         &self,
         session_id: &str,
@@ -998,14 +999,19 @@ impl QueueRepo {
                      heartbeat_at = ?3,
                      updated_at = ?3,
                      no_progress_count = CASE
-                         WHEN last_status IS NOT NULL AND last_status = ?4
-                         THEN no_progress_count + 1 ELSE 0 END,
+                         WHEN status IN ('queued', 'running')
+                              AND last_status IS NOT NULL AND last_status = ?4
+                         THEN no_progress_count + 1
+                         WHEN status IN ('queued', 'running') THEN 0
+                         ELSE no_progress_count END,
                      continuation_count = CASE
-                         WHEN last_status IS NULL OR last_status <> ?4
+                         WHEN status IN ('queued', 'running')
+                              AND (last_status IS NULL OR last_status <> ?4)
                          THEN continuation_count + 1 ELSE continuation_count END,
-                     last_status = ?4
+                     last_status = CASE
+                         WHEN status IN ('queued', 'running') THEN ?4 ELSE last_status END
                  WHERE session_id = ?1 AND worker_id = ?2
-                   AND status IN ('queued', 'running')",
+                    AND status IN ('queued', 'running', 'finalized')",
                 params![session_id, worker_id, now_ms, status],
             )?;
             Ok(conn.changes() >= 1)
@@ -1536,11 +1542,16 @@ mod tests {
         assert!(repo
             .record_heartbeat("s1", "s1-worker-1", "completed", 200)
             .unwrap());
+        assert!(repo
+            .record_heartbeat("s1", "s1-worker-1", "working", 300)
+            .unwrap());
 
         let completed = repo.get_row("r1").unwrap().unwrap();
         assert_eq!(completed.status, QueueStatus::Finalized);
         assert_eq!(completed.last_status.as_deref(), Some("completed"));
-        assert_eq!(completed.heartbeat_at, Some(200));
+        assert_eq!(completed.heartbeat_at, Some(300));
+        assert_eq!(completed.continuation_count, 1);
+        assert_eq!(completed.no_progress_count, 0);
         assert!(repo.reclaim_stuck(1_000, 2_000).unwrap().is_empty());
         assert!(repo.try_claim("r1", 1_000, 2_000).unwrap().is_none());
 

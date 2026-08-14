@@ -744,7 +744,12 @@ pub struct SessionController {
 unsafe impl Send for SessionController {}
 unsafe impl Sync for SessionController {}
 
-fn is_terminal_session_state(state: &SessionState) -> bool {
+/// Answers "has this session state stopped accepting new work?"
+///
+/// `validate_scratch_pty_session_locked` uses this alongside its explicit
+/// `Closing` check. `session_from_persisted` and
+/// `session_to_persisted_snapshot` use it to normalize the auth strategy.
+pub(super) fn session_state_has_stopped_accepting_work(state: &SessionState) -> bool {
     super::transitions::has_rule(
         state.kind(),
         state.kind(),
@@ -1694,6 +1699,11 @@ impl SessionController {
     }
 
     /// Get agents with no activity for longer than threshold.
+    ///
+    /// A `completed` heartbeat retires only the assignment that produced it. The task file is
+    /// the standing channel for later assignments, so a newer task-file modification proves that
+    /// the same worker has been reassigned even if the wake-up injection never submits. Keeping
+    /// completed agents exempt until that proof exists makes the never-reassigned case silent.
     pub fn get_stalled_agents(
         &self,
         session_id: &str,
@@ -1701,6 +1711,30 @@ impl SessionController {
     ) -> Vec<(String, DateTime<Utc>)> {
         let now = Utc::now();
         let threshold_secs = threshold.as_secs() as i64;
+        let task_file_updates = {
+            let sessions = self.sessions.read();
+            sessions
+                .get(session_id)
+                .map(|session| {
+                    session
+                        .agents
+                        .iter()
+                        .filter_map(|agent| {
+                            let AgentRole::Worker { index, .. } = &agent.role else {
+                                return None;
+                            };
+                            let task_file = Self::task_file_path_for_session_worker(
+                                session,
+                                *index as usize,
+                            )
+                            .ok()?;
+                            let modified = std::fs::metadata(task_file).ok()?.modified().ok()?;
+                            Some((agent.id.clone(), DateTime::<Utc>::from(modified)))
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default()
+        };
         let heartbeats = self.agent_heartbeats.read();
         let Some(agents) = heartbeats.get(session_id) else {
             return vec![];
@@ -1709,7 +1743,13 @@ impl SessionController {
             .iter()
             .filter_map(|(agent_id, info)| {
                 let elapsed = (now - info.last_activity).num_seconds();
-                if elapsed > threshold_secs && info.status != "completed" {
+                let reassigned_after_completion = info.status == "completed"
+                    && task_file_updates
+                        .get(agent_id)
+                        .is_some_and(|modified| modified > &info.last_activity);
+                if elapsed > threshold_secs
+                    && (info.status != "completed" || reassigned_after_completion)
+                {
                     Some((agent_id.clone(), info.last_activity))
                 } else {
                     None
@@ -2224,7 +2264,7 @@ impl SessionController {
         let session = sessions
             .get(session_id)
             .ok_or_else(|| format!("Session {session_id} not found for scratch PTY"))?;
-        if is_terminal_session_state(&session.state)
+        if session_state_has_stopped_accepting_work(&session.state)
             || matches!(session.state, SessionState::Closing)
         {
             return Err(format!(
@@ -6171,6 +6211,32 @@ Managed principals are visible Hive agents with their own lifecycle and task con
 
 Heartbeat while coordinating:
 {queen_heartbeat}
+
+## Messaging a Running Agent (inject)
+
+`POST /api/sessions/{session_id}/inject` writes a message into a running agent's terminal.
+
+**Known defect on builds at or below v0.43.0 (issues #221, #226): the message does NOT submit.** The payload and its newline share one PTY write, so the text lands in the agent's composer and waits for a keypress that never comes.
+
+**Workaround: send a second, empty message.** It writes only the newline, with no payload, which is a standalone Enter delivered as its own discrete write. That submits whatever is buffered:
+
+```bash
+# 1. the real message - lands in the composer, does NOT submit
+curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
+
+# 2. empty message == standalone Enter - THIS submits it
+curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"target_agent_id":"{session_id}-worker-N","message":""}}'
+```
+
+Measured against a live codex agent, operator-confirmed with no keypress: step 1 alone did not submit after 60 seconds; step 2 submitted it. Drop step 2 once the fix ships.
+
+**Never verify an inject by watching whether the agent acts.** With an operator present at the terminal, that observable cannot distinguish an auto-submit from a human pressing Enter. Either have the operator confirm no keypress, or use the two-step form and treat submission as caused by step 2.
+
+**Task files remain the primary channel for assignments.** Inject is for nudges and mid-flight corrections; workers re-read their task file, so durable direction belongs there.
 
 {topology_instructions}
 
@@ -13165,7 +13231,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .collect();
 
         let state = parse_persisted_session_state(&persisted.state);
-        let auth_strategy = if is_terminal_session_state(&state) {
+        let auth_strategy = if session_state_has_stopped_accepting_work(&state) {
             AuthStrategy::None
         } else {
             AuthStrategy::from_persisted(&persisted.auth_strategy)
@@ -14797,7 +14863,7 @@ The backend composed and persisted the following authoritative skeleton before l
             .collect();
 
         let state_str = serialize_session_state(&session.state);
-        let auth_strategy = if is_terminal_session_state(&session.state) {
+        let auth_strategy = if session_state_has_stopped_accepting_work(&session.state) {
             AuthStrategy::None
         } else {
             session.auth_strategy.clone()
@@ -16214,6 +16280,16 @@ mod tests {
         assert!(prompt.contains("supported; encouraged (authorized)"));
         assert!(prompt.contains("do not drop effort or reasoning settings"));
         assert!(prompt.contains("Shared Cell Integration"));
+        // Inject workaround section (issues #221/#226): assert it renders AND that the
+        // literal JSON braces survive format! as SINGLE braces. A brace-escaping slip
+        // compiles fine but emits a broken command, so assert the rendered text.
+        assert!(prompt.contains("## Messaging a Running Agent (inject)"));
+        assert!(prompt.contains("the message does NOT submit"));
+        assert!(prompt.contains(
+            r#"-d '{"target_agent_id":"session-modern-worker-N","message":""}'"#
+        ));
+        assert!(!prompt.contains("{{"));
+        assert!(prompt.contains("Never verify an inject by watching whether the agent acts"));
         assert!(prompt.contains("Principals do not commit"));
         assert!(prompt.contains("backend-created hive/session-modern/primary branch"));
         assert!(prompt.contains("Managed principals are visible Hive agents"));

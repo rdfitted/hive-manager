@@ -115,22 +115,31 @@ pub async fn send_agent_input(
         }
     }
 
-    state
-        .injection_manager
-        .read()
-        .operator_inject(&session_id, &agent_id, &req.input)
-        .map_err(|error| match error {
-            InjectionError::SessionNotFound(id) => {
-                ApiError::not_found(format!("Session {} not found", id))
-            }
-            InjectionError::AgentNotFound(id) => {
-                ApiError::not_found(format!("Agent {} not found", id))
-            }
-            InjectionError::NotAuthorized(msg) => ApiError::bad_request(msg),
-            InjectionError::PtyError(msg) | InjectionError::StorageError(msg) => {
-                ApiError::internal(msg)
-            }
-        })?;
+    let manager = Arc::clone(&state.injection_manager);
+    let injection_session_id = session_id.clone();
+    let injection_agent_id = agent_id.clone();
+    let injection_result = tokio::task::spawn_blocking(move || {
+        manager.read().operator_inject(
+            &injection_session_id,
+            &injection_agent_id,
+            &req.input,
+            true,
+        )
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
+    injection_result.map_err(|error| match error {
+        InjectionError::SessionNotFound(id) => {
+            ApiError::not_found(format!("Session {} not found", id))
+        }
+        InjectionError::AgentNotFound(id) => {
+            ApiError::not_found(format!("Agent {} not found", id))
+        }
+        InjectionError::NotAuthorized(msg) => ApiError::bad_request(msg),
+        InjectionError::PtyError(msg) | InjectionError::StorageError(msg) => {
+            ApiError::internal(msg)
+        }
+    })?;
 
     Ok((
         StatusCode::CREATED,

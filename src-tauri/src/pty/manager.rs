@@ -246,6 +246,16 @@ impl PtyManager {
         session.write(data)
     }
 
+    /// Write a payload and then a discrete bare Enter to submit it.
+    pub fn submit(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PtyManager::submit called for session: {}", id);
+        let sessions = self.sessions.read();
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        session.submit(data)
+    }
+
     /// Write with bracketed paste mode wrapping for large pastes
     pub fn write_bracketed(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
         tracing::debug!("PtyManager::write_bracketed called for session: {} ({} bytes)", id, data.len());
@@ -316,6 +326,12 @@ impl PtyManager {
     pub fn spawn_args_for_test(&self, id: &str) -> Option<Vec<String>> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|session| session.args().to_vec())
+    }
+
+    #[cfg(all(test, windows))]
+    pub fn write_records_for_test(&self, id: &str) -> Option<Vec<Vec<u8>>> {
+        let sessions = self.sessions.read();
+        sessions.get(id).map(|session| session.write_records())
     }
 
     pub fn list_sessions(&self) -> Vec<(String, AgentRole, AgentStatus)> {
@@ -392,6 +408,145 @@ mod tests {
 
         let args = manager.spawn_args_for_test("plain-claude-agent").unwrap();
         assert_eq!(args, vec!["-p".to_string(), "hello".to_string()]);
+    }
+
+    #[test]
+    fn submit_writes_payload_then_bare_enter_separately() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "submit-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        manager.submit("submit-agent", b"hello").unwrap();
+
+        let writes = manager.write_records_for_test("submit-agent").unwrap();
+        assert_eq!(writes, vec![b"hello".to_vec(), b"\r".to_vec()]);
+        assert!(!writes[0].ends_with(b"\r"));
+        assert!(!writes[0].ends_with(b"\n"));
+        assert_eq!(writes[1], b"\r");
+        assert!(!writes[1].contains(&b'\n'));
+    }
+
+    #[test]
+    fn submit_blocks_a_concurrent_writer_until_after_enter() {
+        let manager = Arc::new(PtyManager::new());
+        manager
+            .create_session(
+                "atomic-submit-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        let session = manager
+            .sessions
+            .read()
+            .get("atomic-submit-agent")
+            .cloned()
+            .unwrap();
+        session.pause_submit_after_payload_for_test();
+
+        let (start_writer_tx, start_writer_rx) = std::sync::mpsc::channel();
+        let (writer_attempted_tx, writer_attempted_rx) = std::sync::mpsc::channel();
+        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
+        let concurrent_manager = Arc::clone(&manager);
+        let concurrent_writer = thread::spawn(move || {
+            start_writer_rx.recv().unwrap();
+            writer_attempted_tx.send(()).unwrap();
+            concurrent_manager
+                .write("atomic-submit-agent", b"interloper")
+                .unwrap();
+            writer_done_tx.send(()).unwrap();
+        });
+
+        let submit_manager = Arc::clone(&manager);
+        let submitter = thread::spawn(move || {
+            submit_manager
+                .submit("atomic-submit-agent", b"payload")
+                .unwrap();
+        });
+
+        assert!(session.wait_for_submit_payload_for_test());
+        start_writer_tx.send(()).unwrap();
+        writer_attempted_rx.recv().unwrap();
+        let interleaved = writer_done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        session.resume_submit_for_test();
+        submitter.join().unwrap();
+        concurrent_writer.join().unwrap();
+
+        assert!(!interleaved, "concurrent write completed before Enter");
+        assert_eq!(
+            manager
+                .write_records_for_test("atomic-submit-agent")
+                .unwrap(),
+            vec![
+                b"payload".to_vec(),
+                b"\r".to_vec(),
+                b"interloper".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn abandoned_submit_pause_times_out_after_test_thread_panics() {
+        let manager = Arc::new(PtyManager::new());
+        manager
+            .create_session(
+                "abandoned-submit-pause-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        let session = manager
+            .sessions
+            .read()
+            .get("abandoned-submit-pause-agent")
+            .cloned()
+            .unwrap();
+        session.pause_submit_after_payload_for_test();
+
+        let (submit_done_tx, submit_done_rx) = std::sync::mpsc::channel();
+        let submit_manager = Arc::clone(&manager);
+        let submitter = thread::spawn(move || {
+            submit_manager
+                .submit("abandoned-submit-pause-agent", b"payload")
+                .unwrap();
+            submit_done_tx.send(()).unwrap();
+        });
+
+        let pause_controller = thread::spawn(move || {
+            assert!(session.wait_for_submit_payload_for_test());
+            panic!("simulated test panic before resume");
+        });
+        assert!(pause_controller.join().is_err());
+        submit_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("submit stayed blocked after the test-side resume was abandoned");
+        submitter.join().unwrap();
+
+        assert_eq!(
+            manager
+                .write_records_for_test("abandoned-submit-pause-agent")
+                .unwrap(),
+            vec![b"payload".to_vec(), b"\r".to_vec()]
+        );
     }
 
     /// #207: a session that dies during startup reports dead and keeps its final output
