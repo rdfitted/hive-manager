@@ -10,9 +10,13 @@ Rust reachability is a blocking check in `.github/workflows/rust-tests.yml`:
 python tools/codegraph/ci_gate.py --lang rs --root .
 ```
 
+The reachability analysis is language-specific: the blocking invocation graphs Rust modules only. It cannot prove that Python helpers such as `verify_vendor.py` are called by a workflow. The Rust workflow therefore runs vendor verification as a separate, explicitly named blocking step before reachability. Separate steps make provenance drift and unreachable Rust code distinct CI failures.
+
 Only a `certain` finding fails the check. `certain` means the analyzer found no importer, no entrypoint, and no repository-wide textual reference (or, for Rust, a source file is never mounted into a crate). The lower-confidence `unwired`, `likely`, and `suspect` tiers remain visible for review but do not block CI because dynamic loading, framework conventions, and incomplete static evidence can make them false positives.
 
 An empty parse is a failure, not a clean result. A zero-module graph or a `NO <LANG> MODULES FOUND` sentinel usually means the wrong root or parser was selected. Treating that result as success would silently disable the gate.
+
+Each analyzer subprocess has a 120-second timeout. Current graphs complete well inside that bound, while two minutes leaves substantial room for slower hosted runners and still turns a stalled scan into a named gate error. The wrapper currently runs `stats` and `dead --json` separately, rebuilding the graph twice; consolidating those upstream operations is a possible performance follow-up, not part of the repository wrapper's correctness policy.
 
 ## Worktree exclusion is correctness
 
@@ -35,3 +39,5 @@ python tools/codegraph/verify_vendor.py
 ```
 
 A clean run prints `OK` for all three files and `Verified 3 vendored files.` Do not patch vendored analyzer logic in this repository. Replace the copies from upstream as a unit, retain LF line endings, update both hashes in the manifest, and keep repository-specific exit policy in `ci_gate.py`.
+
+The verifier discovers vendored analyzers independently from their provenance headers and requires that set to match the manifest exactly. This fails closed when a vendored file is omitted from the manifest or a stale manifest entry remains. Missing or malformed manifests, unsafe paths, and invalid SHA-256 values produce concise errors rather than tracebacks.

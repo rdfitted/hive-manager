@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -143,8 +143,29 @@ impl MasterPtyHandle {
 /// Maximum chunk size for PTY writes (16KB) - respects Windows pipe buffer limits
 const CHUNK_SIZE: usize = 16 * 1024;
 
-/// Provisional until the live CLI matrix in #226 determines whether a gap is needed.
+/// Unvalidated default; override with `HIVE_PTY_SUBMIT_GAP_MS` for the #226 sweep.
+///
+/// Under load, measured payload/Enter separations of 1.2-2.7 s failed twice,
+/// while roughly 4-5 s succeeded twice and 65 s succeeded once. Agent busy
+/// state was uncontrolled, so those observations do not justify replacing the
+/// compiled 50 ms default with another guess.
 const SUBMIT_GAP: Duration = Duration::from_millis(50);
+const SUBMIT_GAP_ENV: &str = "HIVE_PTY_SUBMIT_GAP_MS";
+static RUNTIME_SUBMIT_GAP: OnceLock<Duration> = OnceLock::new();
+
+fn submit_gap_from_override(value: Option<&str>) -> Duration {
+    value
+        .and_then(|milliseconds| milliseconds.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(SUBMIT_GAP)
+}
+
+fn submit_gap() -> Duration {
+    *RUNTIME_SUBMIT_GAP.get_or_init(|| {
+        let override_value = std::env::var(SUBMIT_GAP_ENV).ok();
+        submit_gap_from_override(override_value.as_deref())
+    })
+}
 
 /// Bracketed paste mode escape sequences
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -209,6 +230,24 @@ unsafe impl Send for PtySession {}
 unsafe impl Sync for PtySession {}
 
 impl PtySession {
+    fn write_locked(writer: &mut SendWriter, data: &[u8]) -> Result<(), PtyError> {
+        // Write in chunks to respect Windows pipe buffer limits.
+        for chunk in data.chunks(CHUNK_SIZE) {
+            let result = writer.0.write_all(chunk);
+            if let Err(ref e) = result {
+                tracing::error!("PTY write_all failed: {}", e);
+                return Err(into_io_error(e));
+            }
+            let flush_result = writer.0.flush();
+            if let Err(ref e) = flush_result {
+                tracing::error!("PTY flush failed: {}", e);
+                return Err(into_io_error(e));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn new(
         _id: String,
         role: AgentRole,
@@ -322,20 +361,7 @@ impl PtySession {
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
         tracing::debug!("PTY write: {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
         let mut writer = self.writer.lock();
-
-        // Write in chunks to respect Windows pipe buffer limits
-        for chunk in data.chunks(CHUNK_SIZE) {
-            let result = writer.0.write_all(chunk);
-            if let Err(ref e) = result {
-                tracing::error!("PTY write_all failed: {}", e);
-                return Err(into_io_error(e));
-            }
-            let flush_result = writer.0.flush();
-            if let Err(ref e) = flush_result {
-                tracing::error!("PTY flush failed: {}", e);
-                return Err(into_io_error(e));
-            }
-        }
+        Self::write_locked(&mut writer, data)?;
 
         tracing::debug!("PTY write complete");
         Ok(())
@@ -343,11 +369,12 @@ impl PtySession {
 
     /// Write a payload, then deliver Enter as a discrete bare carriage return.
     pub fn submit(&self, data: &[u8]) -> Result<(), PtyError> {
-        self.write(data)?;
-        // `write` releases the writer mutex before returning, so the gap never
-        // holds that exclusive lock and the Enter is a distinct PTY write.
-        std::thread::sleep(SUBMIT_GAP);
-        self.write(b"\r")
+        let mut writer = self.writer.lock();
+        Self::write_locked(&mut writer, data)?;
+        // Keep the per-session writer locked so no concurrent write can be
+        // interleaved and accidentally submitted by this Enter.
+        std::thread::sleep(submit_gap());
+        Self::write_locked(&mut writer, b"\r")
     }
 
     /// Write with bracketed paste mode wrapping - used for paste operations

@@ -13,6 +13,7 @@ from typing import Any
 
 
 ANALYZER = Path(__file__).with_name("codegraph.py")
+ANALYZER_TIMEOUT_SECONDS = 120
 MODULE_COUNT = re.compile(r"^modules:\s*(\d+)\s*$", re.MULTILINE)
 EMPTY_PARSE = re.compile(r"NO .+ MODULES FOUND")
 
@@ -29,7 +30,13 @@ def run_codegraph(command: str, *, root: Path, lang: str) -> subprocess.Complete
     ]
     if command == "dead":
         arguments.append("--json")
-    return subprocess.run(arguments, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        arguments,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=ANALYZER_TIMEOUT_SECONDS,
+    )
 
 
 def combined_output(process: subprocess.CompletedProcess[str]) -> str:
@@ -68,8 +75,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    stats = run_codegraph("stats", root=args.root, lang=args.lang)
-    dead = run_codegraph("dead", root=args.root, lang=args.lang)
+    try:
+        stats = run_codegraph("stats", root=args.root, lang=args.lang)
+        dead = run_codegraph("dead", root=args.root, lang=args.lang)
+    except subprocess.TimeoutExpired as error:
+        command = error.cmd[2]
+        return report_error(
+            f"{command} timed out after {error.timeout:g} seconds",
+            advisory=args.advisory,
+        )
     stats_output = combined_output(stats)
     dead_output = combined_output(dead)
     empty_parse = bool(EMPTY_PARSE.search(stats_output) or EMPTY_PARSE.search(dead_output))

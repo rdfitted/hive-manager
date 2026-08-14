@@ -13,19 +13,86 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "vendor-manifest.json"
 HEADER_HASH = re.compile(rb"source SHA-256 ([0-9a-fA-F]{64})")
-EXPECTED_FILES = {"codegraph.py", "codegraph_rs.py", "codegraph_ts.py"}
+SHA256 = re.compile(r"[0-9a-fA-F]{64}")
+HASH_FIELDS = {"upstream_sha256", "vendored_sha256"}
+
+
+def load_manifest(path: Path) -> dict[str, dict[str, str]] | None:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        print(f"{path.name}: cannot read manifest: {error}", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as error:
+        print(
+            f"{path.name}: invalid JSON at line {error.lineno}, column {error.colno}: "
+            f"{error.msg}",
+            file=sys.stderr,
+        )
+        return None
+
+    if not isinstance(manifest, dict):
+        print(f"{path.name}: invalid schema", file=sys.stderr)
+        return None
+
+    files = manifest.get("files")
+    if manifest.get("version") != 1 or not isinstance(files, dict) or not files:
+        print(f"{path.name}: invalid schema", file=sys.stderr)
+        return None
+
+    for name, hashes in files.items():
+        relative = Path(name) if isinstance(name, str) else None
+        if (
+            relative is None
+            or relative.is_absolute()
+            or relative.name != name
+            or name in (".", "..")
+            or "/" in name
+            or "\\" in name
+        ):
+            print(f"{path.name}: unsafe vendored path: {name!r}", file=sys.stderr)
+            return None
+        if not isinstance(hashes, dict) or set(hashes) != HASH_FIELDS:
+            print(f"{path.name}: invalid hash fields for {name}", file=sys.stderr)
+            return None
+        if any(
+            not isinstance(value, str) or SHA256.fullmatch(value) is None
+            for value in hashes.values()
+        ):
+            print(f"{path.name}: invalid SHA-256 for {name}", file=sys.stderr)
+            return None
+
+    return files
+
+
+def discover_vendored_files() -> set[str]:
+    return {
+        path.name
+        for path in ROOT.glob("*.py")
+        if HEADER_HASH.search(path.read_bytes()[:512])
+    }
 
 
 def main() -> int:
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    files = manifest.get("files")
-    if (
-        manifest.get("version") != 1
-        or not isinstance(files, dict)
-        or set(files) != EXPECTED_FILES
-        or any(not isinstance(hashes, dict) for hashes in files.values())
-    ):
-        print("vendor-manifest.json: invalid schema", file=sys.stderr)
+    files = load_manifest(MANIFEST)
+    if files is None:
+        return 1
+
+    discovered = discover_vendored_files()
+    declared = set(files)
+    if discovered != declared:
+        omitted = sorted(discovered - declared)
+        stale = sorted(declared - discovered)
+        if omitted:
+            print(
+                "vendor-manifest.json: unmanifested vendored files: " + ", ".join(omitted),
+                file=sys.stderr,
+            )
+        if stale:
+            print(
+                "vendor-manifest.json: entries without vendored files: " + ", ".join(stale),
+                file=sys.stderr,
+            )
         return 1
 
     failures: list[str] = []

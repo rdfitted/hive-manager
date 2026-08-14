@@ -31,6 +31,11 @@ jobs:
         with:
           python-version: '3.13'
 
+      # Analyzer provenance and update policy: docs/reachability-gate.md
+      - name: Verify vendored codegraph
+        working-directory: ${{ github.workspace }}
+        run: python tools/codegraph/verify_vendor.py
+
       # Reachability policy and rationale: docs/reachability-gate.md
       - name: Reachability
         working-directory: ${{ github.workspace }}

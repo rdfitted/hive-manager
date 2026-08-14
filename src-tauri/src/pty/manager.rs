@@ -435,6 +435,70 @@ mod tests {
         assert!(!writes[1].contains(&b'\n'));
     }
 
+    #[test]
+    fn submit_blocks_a_concurrent_writer_until_after_enter() {
+        let manager = Arc::new(PtyManager::new());
+        manager
+            .create_session(
+                "atomic-submit-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        let session = manager
+            .sessions
+            .read()
+            .get("atomic-submit-agent")
+            .cloned()
+            .unwrap();
+        session.pause_submit_after_payload_for_test();
+
+        let (start_writer_tx, start_writer_rx) = std::sync::mpsc::channel();
+        let (writer_attempted_tx, writer_attempted_rx) = std::sync::mpsc::channel();
+        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
+        let concurrent_manager = Arc::clone(&manager);
+        let concurrent_writer = thread::spawn(move || {
+            start_writer_rx.recv().unwrap();
+            writer_attempted_tx.send(()).unwrap();
+            concurrent_manager
+                .write("atomic-submit-agent", b"interloper")
+                .unwrap();
+            writer_done_tx.send(()).unwrap();
+        });
+
+        let submit_manager = Arc::clone(&manager);
+        let submitter = thread::spawn(move || {
+            submit_manager
+                .submit("atomic-submit-agent", b"payload")
+                .unwrap();
+        });
+
+        assert!(session.wait_for_submit_payload_for_test());
+        start_writer_tx.send(()).unwrap();
+        writer_attempted_rx.recv().unwrap();
+        let interleaved = writer_done_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        session.resume_submit_for_test();
+        submitter.join().unwrap();
+        concurrent_writer.join().unwrap();
+
+        assert!(!interleaved, "concurrent write completed before Enter");
+        assert_eq!(
+            manager
+                .write_records_for_test("atomic-submit-agent")
+                .unwrap(),
+            vec![
+                b"payload".to_vec(),
+                b"\r".to_vec(),
+                b"interloper".to_vec()
+            ]
+        );
+    }
+
     /// #207: a session that dies during startup reports dead and keeps its final output
     /// available for diagnostics until it is killed/removed.
     #[test]

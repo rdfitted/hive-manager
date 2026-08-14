@@ -1,12 +1,12 @@
 //! Unit-test PTY session stub that avoids linking portable-pty on Windows.
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,13 +114,41 @@ unsafe impl Send for SendWriter {}
 unsafe impl Sync for SendWriter {}
 
 const CHUNK_SIZE: usize = 16 * 1024;
-/// Provisional until the live CLI matrix in #226 determines whether a gap is needed.
+/// Unvalidated default; override with `HIVE_PTY_SUBMIT_GAP_MS` for the #226 sweep.
+///
+/// Under load, measured payload/Enter separations of 1.2-2.7 s failed twice,
+/// while roughly 4-5 s succeeded twice and 65 s succeeded once. Agent busy
+/// state was uncontrolled, so those observations do not justify replacing the
+/// compiled 50 ms default with another guess.
 const SUBMIT_GAP: Duration = Duration::from_millis(50);
+const SUBMIT_GAP_ENV: &str = "HIVE_PTY_SUBMIT_GAP_MS";
+static RUNTIME_SUBMIT_GAP: OnceLock<Duration> = OnceLock::new();
+
+fn submit_gap_from_override(value: Option<&str>) -> Duration {
+    value
+        .and_then(|milliseconds| milliseconds.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(SUBMIT_GAP)
+}
+
+fn submit_gap() -> Duration {
+    *RUNTIME_SUBMIT_GAP.get_or_init(|| {
+        let override_value = std::env::var(SUBMIT_GAP_ENV).ok();
+        submit_gap_from_override(override_value.as_deref())
+    })
+}
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 struct RecordingWriter {
     writes: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+#[derive(Default)]
+struct SubmitGapControl {
+    pause: bool,
+    payload_written: bool,
+    resume: bool,
 }
 
 impl Write for RecordingWriter {
@@ -175,6 +203,7 @@ pub struct PtySession {
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
     writer: Arc<Mutex<SendWriter>>,
     write_records: Arc<Mutex<Vec<Vec<u8>>>>,
+    submit_gap_control: Arc<(Mutex<SubmitGapControl>, Condvar)>,
     reader: Arc<Mutex<SendReader>>,
     /// The argv this session was created with. The real session hands these to the OS and
     /// forgets them; retaining them here is what lets tests assert that per-agent store
@@ -188,6 +217,15 @@ unsafe impl Send for PtySession {}
 unsafe impl Sync for PtySession {}
 
 impl PtySession {
+    fn write_locked(writer: &mut SendWriter, data: &[u8]) -> Result<(), PtyError> {
+        for chunk in data.chunks(CHUNK_SIZE) {
+            writer.0.write_all(chunk)?;
+            writer.0.flush()?;
+        }
+
+        Ok(())
+    }
+
     pub fn new(
         _id: String,
         role: AgentRole,
@@ -205,6 +243,7 @@ impl PtySession {
                 writes: Arc::clone(&write_records),
             })))),
             write_records,
+            submit_gap_control: Arc::new((Mutex::new(SubmitGapControl::default()), Condvar::new())),
             reader: Arc::new(Mutex::new(SendReader(Box::new(std::io::Cursor::new(
                 Vec::new(),
             ))))),
@@ -250,21 +289,62 @@ impl PtySession {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
-        let mut writer = self.writer.lock();
+    pub fn pause_submit_after_payload_for_test(&self) {
+        let (control, _) = &*self.submit_gap_control;
+        let mut control = control.lock();
+        control.pause = true;
+        control.payload_written = false;
+        control.resume = false;
+    }
 
-        for chunk in data.chunks(CHUNK_SIZE) {
-            writer.0.write_all(chunk)?;
-            writer.0.flush()?;
+    pub fn wait_for_submit_payload_for_test(&self) -> bool {
+        let (control, changed) = &*self.submit_gap_control;
+        let mut control = control.lock();
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        while !control.payload_written {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            changed.wait_for(&mut control, remaining);
         }
 
-        Ok(())
+        true
+    }
+
+    pub fn resume_submit_for_test(&self) {
+        let (control, changed) = &*self.submit_gap_control;
+        control.lock().resume = true;
+        changed.notify_all();
+    }
+
+    fn pause_submit_after_payload_if_requested(&self) {
+        let (control, changed) = &*self.submit_gap_control;
+        let mut control = control.lock();
+        if !control.pause {
+            return;
+        }
+
+        control.payload_written = true;
+        changed.notify_all();
+        while !control.resume {
+            changed.wait(&mut control);
+        }
+        *control = SubmitGapControl::default();
+    }
+
+    pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
+        let mut writer = self.writer.lock();
+        Self::write_locked(&mut writer, data)
     }
 
     pub fn submit(&self, data: &[u8]) -> Result<(), PtyError> {
-        self.write(data)?;
-        std::thread::sleep(SUBMIT_GAP);
-        self.write(b"\r")
+        let mut writer = self.writer.lock();
+        Self::write_locked(&mut writer, data)?;
+        self.pause_submit_after_payload_if_requested();
+        std::thread::sleep(submit_gap());
+        Self::write_locked(&mut writer, b"\r")
     }
 
     pub fn write_records(&self) -> Vec<Vec<u8>> {
@@ -333,7 +413,26 @@ pub fn read_from_reader(
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_bracketed_paste, BRACKETED_PASTE_END};
+    use super::{
+        sanitize_bracketed_paste, submit_gap_from_override, BRACKETED_PASTE_END, SUBMIT_GAP,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn submit_gap_override_parses_milliseconds() {
+        assert_eq!(
+            submit_gap_from_override(Some(" 4500 ")),
+            Duration::from_millis(4_500)
+        );
+        assert_eq!(submit_gap_from_override(Some("0")), Duration::ZERO);
+    }
+
+    #[test]
+    fn invalid_submit_gap_override_falls_back_to_default() {
+        assert_eq!(submit_gap_from_override(Some("not-a-number")), SUBMIT_GAP);
+        assert_eq!(submit_gap_from_override(Some("-1")), SUBMIT_GAP);
+        assert_eq!(submit_gap_from_override(None), SUBMIT_GAP);
+    }
 
     #[test]
     fn sanitize_bracketed_paste_removes_end_sequence_from_payload() {
