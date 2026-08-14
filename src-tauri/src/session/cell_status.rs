@@ -121,7 +121,7 @@ pub(crate) fn aggregate_cell_status_for_state(
         return CellStatus::Summarizing;
     }
 
-    if is_terminal_session_state(state) {
+    if session_state_overrides_agent_cell_status(state) {
         return session_state_to_cell_status(state);
     }
 
@@ -221,7 +221,11 @@ fn fusion_agent_matches_cell(
     }
 }
 
-fn is_terminal_session_state(state: &SessionState) -> bool {
+/// Answers "should this session state override per-agent cell-status aggregation?"
+///
+/// `aggregate_cell_status_for_state` calls this after handling `Closing` as a
+/// distinct summarizing display state.
+fn session_state_overrides_agent_cell_status(state: &SessionState) -> bool {
     matches!(
         state,
         SessionState::QaPassed
@@ -329,6 +333,85 @@ mod tests {
             aggregate_cell_status(&session, "variant:alpha"),
             CellStatus::Completed
         );
+    }
+
+    #[test]
+    fn terminal_state_concepts_have_exhaustive_distinct_memberships() {
+        use super::super::controller::session_state_has_stopped_accepting_work;
+        use super::super::transitions::SessionStateKind;
+
+        let states = [
+            SessionState::Planning,
+            SessionState::PlanReady,
+            SessionState::Starting,
+            SessionState::SpawningWorker(1),
+            SessionState::WaitingForWorker(1),
+            SessionState::SpawningPlanner(1),
+            SessionState::WaitingForPlanner(1),
+            SessionState::SpawningFusionVariant(1),
+            SessionState::WaitingForFusionVariants,
+            SessionState::SpawningDebateRound(1),
+            SessionState::WaitingForDebateRound(1),
+            SessionState::SpawningJudge,
+            SessionState::Judging,
+            SessionState::AwaitingVerdictSelection,
+            SessionState::MergingWinner,
+            SessionState::SpawningEvaluator,
+            SessionState::QaInProgress { iteration: Some(1) },
+            SessionState::QaPassed,
+            SessionState::QaFailed { iteration: 1 },
+            SessionState::QaMaxRetriesExceeded,
+            SessionState::PrinceRemediation,
+            SessionState::QaInconclusive,
+            SessionState::Running,
+            SessionState::Paused,
+            SessionState::Completed,
+            SessionState::Closing,
+            SessionState::Closed,
+            SessionState::Failed("test failure".to_string()),
+        ];
+
+        for state in states {
+            let expected = match state.kind() {
+                SessionStateKind::QaMaxRetriesExceeded
+                | SessionStateKind::Completed
+                | SessionStateKind::Closed
+                | SessionStateKind::Failed => (true, true),
+                SessionStateKind::QaPassed | SessionStateKind::QaFailed => (false, true),
+                SessionStateKind::Planning
+                | SessionStateKind::PlanReady
+                | SessionStateKind::Starting
+                | SessionStateKind::SpawningWorker
+                | SessionStateKind::WaitingForWorker
+                | SessionStateKind::SpawningPlanner
+                | SessionStateKind::WaitingForPlanner
+                | SessionStateKind::SpawningFusionVariant
+                | SessionStateKind::WaitingForFusionVariants
+                | SessionStateKind::SpawningDebateRound
+                | SessionStateKind::WaitingForDebateRound
+                | SessionStateKind::SpawningJudge
+                | SessionStateKind::Judging
+                | SessionStateKind::AwaitingVerdictSelection
+                | SessionStateKind::MergingWinner
+                | SessionStateKind::SpawningEvaluator
+                | SessionStateKind::QaInProgress
+                | SessionStateKind::PrinceRemediation
+                | SessionStateKind::QaInconclusive
+                | SessionStateKind::Running
+                | SessionStateKind::Paused
+                | SessionStateKind::Closing => (false, false),
+            };
+
+            assert_eq!(
+                (
+                    session_state_has_stopped_accepting_work(&state),
+                    session_state_overrides_agent_cell_status(&state),
+                ),
+                expected,
+                "predicate membership drifted for {:?}",
+                state.kind()
+            );
+        }
     }
 
     #[test]

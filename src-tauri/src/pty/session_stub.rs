@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,8 +114,25 @@ unsafe impl Send for SendWriter {}
 unsafe impl Sync for SendWriter {}
 
 const CHUNK_SIZE: usize = 16 * 1024;
+/// Provisional until the live CLI matrix in #226 determines whether a gap is needed.
+const SUBMIT_GAP: Duration = Duration::from_millis(50);
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
+struct RecordingWriter {
+    writes: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Write for RecordingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes.lock().push(buf.to_vec());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn find_subslice(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() || start >= haystack.len() {
@@ -156,6 +174,7 @@ pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
     writer: Arc<Mutex<SendWriter>>,
+    write_records: Arc<Mutex<Vec<Vec<u8>>>>,
     reader: Arc<Mutex<SendReader>>,
     /// The argv this session was created with. The real session hands these to the OS and
     /// forgets them; retaining them here is what lets tests assert that per-agent store
@@ -178,10 +197,14 @@ impl PtySession {
         _cols: u16,
         _rows: u16,
     ) -> Result<Self, PtyError> {
+        let write_records = Arc::new(Mutex::new(Vec::new()));
         let session = Self {
             role,
             status: Arc::new(parking_lot::RwLock::new(AgentStatus::Starting)),
-            writer: Arc::new(Mutex::new(SendWriter(Box::new(std::io::sink())))),
+            writer: Arc::new(Mutex::new(SendWriter(Box::new(RecordingWriter {
+                writes: Arc::clone(&write_records),
+            })))),
+            write_records,
             reader: Arc::new(Mutex::new(SendReader(Box::new(std::io::Cursor::new(
                 Vec::new(),
             ))))),
@@ -236,6 +259,16 @@ impl PtySession {
         }
 
         Ok(())
+    }
+
+    pub fn submit(&self, data: &[u8]) -> Result<(), PtyError> {
+        self.write(data)?;
+        std::thread::sleep(SUBMIT_GAP);
+        self.write(b"\r")
+    }
+
+    pub fn write_records(&self) -> Vec<Vec<u8>> {
+        self.write_records.lock().clone()
     }
 
     pub fn write_bracketed(&self, data: &[u8]) -> Result<(), PtyError> {

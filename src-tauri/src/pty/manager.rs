@@ -246,6 +246,16 @@ impl PtyManager {
         session.write(data)
     }
 
+    /// Write a payload and then a discrete bare Enter to submit it.
+    pub fn submit(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PtyManager::submit called for session: {}", id);
+        let sessions = self.sessions.read();
+        let session = sessions
+            .get(id)
+            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        session.submit(data)
+    }
+
     /// Write with bracketed paste mode wrapping for large pastes
     pub fn write_bracketed(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
         tracing::debug!("PtyManager::write_bracketed called for session: {} ({} bytes)", id, data.len());
@@ -316,6 +326,12 @@ impl PtyManager {
     pub fn spawn_args_for_test(&self, id: &str) -> Option<Vec<String>> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|session| session.args().to_vec())
+    }
+
+    #[cfg(all(test, windows))]
+    pub fn write_records_for_test(&self, id: &str) -> Option<Vec<Vec<u8>>> {
+        let sessions = self.sessions.read();
+        sessions.get(id).map(|session| session.write_records())
     }
 
     pub fn list_sessions(&self) -> Vec<(String, AgentRole, AgentStatus)> {
@@ -392,6 +408,31 @@ mod tests {
 
         let args = manager.spawn_args_for_test("plain-claude-agent").unwrap();
         assert_eq!(args, vec!["-p".to_string(), "hello".to_string()]);
+    }
+
+    #[test]
+    fn submit_writes_payload_then_bare_enter_separately() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "submit-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        manager.submit("submit-agent", b"hello").unwrap();
+
+        let writes = manager.write_records_for_test("submit-agent").unwrap();
+        assert_eq!(writes, vec![b"hello".to_vec(), b"\r".to_vec()]);
+        assert!(!writes[0].ends_with(b"\r"));
+        assert!(!writes[0].ends_with(b"\n"));
+        assert_eq!(writes[1], b"\r");
+        assert!(!writes[1].contains(&b'\n'));
     }
 
     /// #207: a session that dies during startup reports dead and keeps its final output

@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -141,6 +142,9 @@ impl MasterPtyHandle {
 
 /// Maximum chunk size for PTY writes (16KB) - respects Windows pipe buffer limits
 const CHUNK_SIZE: usize = 16 * 1024;
+
+/// Provisional until the live CLI matrix in #226 determines whether a gap is needed.
+const SUBMIT_GAP: Duration = Duration::from_millis(50);
 
 /// Bracketed paste mode escape sequences
 const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
@@ -335,6 +339,15 @@ impl PtySession {
 
         tracing::debug!("PTY write complete");
         Ok(())
+    }
+
+    /// Write a payload, then deliver Enter as a discrete bare carriage return.
+    pub fn submit(&self, data: &[u8]) -> Result<(), PtyError> {
+        self.write(data)?;
+        // `write` releases the writer mutex before returning, so the gap never
+        // holds that exclusive lock and the Enter is a distinct PTY write.
+        std::thread::sleep(SUBMIT_GAP);
+        self.write(b"\r")
     }
 
     /// Write with bracketed paste mode wrapping - used for paste operations

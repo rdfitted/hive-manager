@@ -25,9 +25,9 @@ use crate::orchestrator::work_graph::{
     BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph,
     WorkEdge, WorkNode,
 };
-use crate::pty::PtyManager;
+use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager};
 use crate::session::{
-    AuthStrategy, Session, SessionController, SessionState, SessionType,
+    AgentInfo, AuthStrategy, Session, SessionController, SessionState, SessionType,
 };
 use crate::storage::queue::{
     QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate,
@@ -1174,6 +1174,222 @@ async fn post_task_worker(app: &axum::Router, task_id: &str) -> axum::response::
         )
         .await
         .unwrap()
+}
+
+async fn post_heartbeat(
+    app: &axum::Router,
+    session_id: &str,
+    agent_id: &str,
+    status: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "agent_id": agent_id,
+                        "status": status,
+                        "summary": format!("HTTP {status} heartbeat")
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn post_queen_injection(
+    app: &axum::Router,
+    session_id: &str,
+    queen_id: &str,
+    worker_id: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/inject/queen"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "queen_id": queen_id,
+                        "target_worker_id": worker_id,
+                        "message": "The task file contains a released follow-up assignment",
+                        "submit": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn http_reassignment_refreshes_finalized_liveness_and_restores_stall_coverage() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state, controller) = dependency_http_fixture(&temp);
+    let session_id = "http-heartbeat-reassignment";
+    let worker_id = format!("{session_id}-worker-1");
+    let queen_id = format!("{session_id}-queen");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    state.storage.create_session_dir(session_id).unwrap();
+
+    let task_file = project
+        .join(".hive-manager")
+        .join(session_id)
+        .join("tasks")
+        .join("worker-1-task.md");
+    std::fs::create_dir_all(task_file.parent().unwrap()).unwrap();
+    std::fs::write(&task_file, "# Task\n\n## Status: COMPLETED\n").unwrap();
+
+    let mut session = quiet_hive_session(session_id, &project);
+    session.agents.push(AgentInfo {
+        id: worker_id.clone(),
+        role: AgentRole::Worker {
+            index: 1,
+            parent: Some(queen_id.clone()),
+        },
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: Some(queen_id.clone()),
+        commit_sha: None,
+        base_commit_sha: None,
+    });
+    controller.read().insert_test_session(session);
+    state
+        .pty_manager
+        .write()
+        .create_session(
+            worker_id.clone(),
+            AgentRole::Worker {
+                index: 1,
+                parent: Some(queen_id.clone()),
+            },
+            "claude",
+            &[],
+            project.to_str(),
+            80,
+            24,
+        )
+        .unwrap();
+
+    state
+        .queue_manager
+        .enqueue_worker(
+            "run-reassignment",
+            session_id,
+            &worker_id,
+            "backend",
+            "claude",
+            json!({}),
+            Some("T14".to_string()),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        state
+            .queue_manager
+            .claim_and_spawn("run-reassignment", session_id, &worker_id)
+            .await
+            .unwrap(),
+        ClaimOutcome::Claimed { .. }
+    ));
+
+    // Post a bare alias so the HTTP handler must resolve it to the roster/queue identity.
+    assert_eq!(
+        post_heartbeat(&app, session_id, "worker-1", "completed")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let completed_row = state
+        .queue_manager
+        .repo()
+        .get_row("run-reassignment")
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed_row.status, QueueStatus::Finalized);
+    let completed_heartbeat = completed_row.heartbeat_at.expect("completed liveness");
+
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    assert!(
+        controller
+            .read()
+            .get_stalled_agents(session_id, std::time::Duration::ZERO)
+            .is_empty(),
+        "a completed agent with no later assignment must stay silent"
+    );
+
+    // Reassignment is durable direction in the standing task file; injection only wakes the
+    // existing agent loop. Coverage must resume even if that injection were never submitted.
+    std::fs::write(
+        &task_file,
+        "# Task\n\n## Status: ACTIVE\n\n## Wave 2 Assignment — RELEASED\n",
+    )
+    .unwrap();
+    assert_eq!(
+        post_queen_injection(&app, session_id, &queen_id, &worker_id)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        controller
+            .read()
+            .get_stalled_agents(session_id, std::time::Duration::ZERO)
+            .into_iter()
+            .map(|(agent_id, _)| agent_id)
+            .collect::<Vec<_>>(),
+        vec![worker_id.clone()],
+        "the task-file reassignment must make the stale completed heartbeat eligible"
+    );
+
+    assert_eq!(
+        post_heartbeat(&app, session_id, "worker-1", "working")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let refreshed_row = state
+        .queue_manager
+        .repo()
+        .get_row("run-reassignment")
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed_row.status, QueueStatus::Finalized);
+    assert_eq!(refreshed_row.last_status.as_deref(), Some("completed"));
+    assert!(
+        refreshed_row.heartbeat_at.unwrap() > completed_heartbeat,
+        "the finalized row must expose the reassigned agent's fresh liveness"
+    );
+
+    let heartbeat_info = controller.read().get_heartbeat_info(session_id);
+    assert!(!heartbeat_info.contains_key("worker-1"));
+    assert_eq!(heartbeat_info[&worker_id].status, "working");
+    assert!(
+        controller
+            .read()
+            .get_stalled_agents(session_id, std::time::Duration::ZERO)
+            .is_empty(),
+        "the reassigned agent is fresh immediately after its working heartbeat"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    assert_eq!(
+        controller
+            .read()
+            .get_stalled_agents(session_id, std::time::Duration::ZERO)
+            .into_iter()
+            .map(|(agent_id, _)| agent_id)
+            .collect::<Vec<_>>(),
+        vec![worker_id],
+        "stall coverage must keep applying after the reassigned agent's working heartbeat"
+    );
 }
 
 #[tokio::test]

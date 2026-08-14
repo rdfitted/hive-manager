@@ -22,6 +22,17 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+
+      # Advisory: codegraph does not parse .svelte; baseline is 65 .svelte vs 69 .ts,
+      # and all 3/3 uncapped `certain` findings are false positives.
+      # Policy and promotion criteria: docs/reachability-gate.md
+      - name: Reachability (advisory)
+        run: python tools/codegraph/ci_gate.py --lang ts --root . --advisory
+
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:

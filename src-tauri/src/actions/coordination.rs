@@ -173,6 +173,7 @@ impl Action for QueenInject {
                 &request.queen_id,
                 &request.target_worker_id,
                 &request.message,
+                true,
             )
             .map_err(|e| ActionError::internal(e.to_string()))?;
         Ok(Value::Null)
@@ -249,6 +250,7 @@ impl Action for OperatorInject {
                 &request.session_id,
                 &request.target_agent_id,
                 &request.message,
+                true,
             )
             .map_err(|e| ActionError::internal(e.to_string()))?;
         Ok(Value::Null)
@@ -477,6 +479,7 @@ impl Action for AssignTask {
                 &parsed.queen_id,
                 &parsed.worker_id,
                 &parsed.task,
+                true,
             )
             .map_err(|e| ActionError::internal(e.to_string()))?;
 

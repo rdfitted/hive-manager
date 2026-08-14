@@ -54,6 +54,7 @@ impl InjectionManager {
         queen_id: &str,
         target_worker_id: &str,
         message: &str,
+        submit: bool,
     ) -> Result<(), InjectionError> {
         // Validate sender is Queen (ID should end with -queen)
         if !queen_id.ends_with("-queen") {
@@ -87,7 +88,7 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         // Only persist watcher-visible state after PTY delivery succeeds.
-        self.write_to_agent(target_worker_id, message)?;
+        self.write_to_agent(target_worker_id, message, submit)?;
 
         if target_worker_id.ends_with("-evaluator") {
             self.write_session_peer_message(session_id, |state| {
@@ -110,6 +111,7 @@ impl InjectionManager {
         evaluator_id: &str,
         target_agent_id: &str,
         message: &str,
+        submit: bool,
     ) -> Result<(), InjectionError> {
         if !evaluator_id.ends_with("-evaluator") {
             return Err(InjectionError::NotAuthorized(
@@ -148,7 +150,7 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         // Only persist watcher-visible state after PTY delivery succeeds.
-        self.write_to_agent(target_agent_id, message)?;
+        self.write_to_agent(target_agent_id, message, submit)?;
 
         if target_is_queen {
             self.write_session_peer_message(session_id, |state| {
@@ -190,7 +192,7 @@ impl InjectionManager {
 
         let mut results = Vec::new();
         for worker_id in worker_ids {
-            let result = self.write_to_agent(worker_id, &git_command);
+            let result = self.write_to_agent(worker_id, &git_command, true);
 
             let status = if result.is_ok() { "initiated" } else { "failed" };
             let log_msg = format!(
@@ -207,8 +209,13 @@ impl InjectionManager {
         Ok(results)
     }
 
-    /// Write a message to an agent's PTY and press Enter to submit
-    pub fn write_to_agent(&self, agent_id: &str, message: &str) -> Result<(), InjectionError> {
+    /// Write a message to an agent's PTY, optionally pressing Enter to submit it.
+    pub fn write_to_agent(
+        &self,
+        agent_id: &str,
+        message: &str,
+        submit: bool,
+    ) -> Result<(), InjectionError> {
         let pty_manager = self.pty_manager.read();
 
         // Strip any existing line endings first
@@ -218,16 +225,14 @@ impl InjectionManager {
         tracing::info!("Target agent: {}", agent_id);
         tracing::info!("Message: {:?}", clean_message);
         tracing::info!("Message bytes: {:?}", clean_message.as_bytes());
+        tracing::info!("Submit: {}", submit);
 
-        // Write the message content with Enter appended
-        // On Windows ConPTY, Enter is typically just \r, but some apps need \n
-        // We'll send both \r\n to maximize compatibility
-        let message_with_enter = format!("{}\r\n", clean_message);
-
-        tracing::info!("Full message with enter: {:?}", message_with_enter.as_bytes());
-
-        pty_manager
-            .write(agent_id, message_with_enter.as_bytes())
+        let write_result = if submit {
+            pty_manager.submit(agent_id, clean_message.as_bytes())
+        } else {
+            pty_manager.write(agent_id, clean_message.as_bytes())
+        };
+        write_result
             .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
 
         tracing::info!("=== INJECTION COMPLETE ===");
@@ -241,6 +246,7 @@ impl InjectionManager {
         session_id: &str,
         target_agent_id: &str,
         message: &str,
+        submit: bool,
     ) -> Result<(), InjectionError> {
         // Log to coordination.log
         let coord_message = CoordinationMessage::system(
@@ -253,7 +259,7 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         // Write to agent's PTY stdin
-        self.write_to_agent(target_agent_id, message)?;
+        self.write_to_agent(target_agent_id, message, submit)?;
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
@@ -386,7 +392,7 @@ impl InjectionManager {
         message: &str,
     ) -> Result<(), InjectionError> {
         for worker_id in worker_ids {
-            self.queen_inject(session_id, queen_id, worker_id, message)?;
+            self.queen_inject(session_id, queen_id, worker_id, message, true)?;
         }
         Ok(())
     }

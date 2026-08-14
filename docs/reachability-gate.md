@@ -1,0 +1,37 @@
+# Reachability gate
+
+Compilation and tests prove that code can run correctly; they do not prove that production code can reach it. The reachability check builds a static module graph and reports modules that are not reachable from a language entrypoint. Its CI wrapper is `tools/codegraph/ci_gate.py`, which prints every finding as `path:tier:why` and supplies the failing exit codes that the vendored analyzer does not consistently provide.
+
+## Blocking policy
+
+Rust reachability is a blocking check in `.github/workflows/rust-tests.yml`:
+
+```text
+python tools/codegraph/ci_gate.py --lang rs --root .
+```
+
+Only a `certain` finding fails the check. `certain` means the analyzer found no importer, no entrypoint, and no repository-wide textual reference (or, for Rust, a source file is never mounted into a crate). The lower-confidence `unwired`, `likely`, and `suspect` tiers remain visible for review but do not block CI because dynamic loading, framework conventions, and incomplete static evidence can make them false positives.
+
+An empty parse is a failure, not a clean result. A zero-module graph or a `NO <LANG> MODULES FOUND` sentinel usually means the wrong root or parser was selected. Treating that result as success would silently disable the gate.
+
+## Worktree exclusion is correctness
+
+The vendored analyzers skip `worktrees`, `.hive-manager`, `.claude`, and `.worktrees`, along with generated and dependency roots. Agent worktrees contain near-complete copies of the repository. If those copies enter one graph, cloned modules can appear to import each other and make genuinely unreachable production modules look reachable. Excluding them prevents false negatives; it is not merely an output-cleanliness optimization. Workflow commands must not override the analyzers' `SKIP_DIRS` sets.
+
+## TypeScript advisory
+
+The frontend workflow runs the same wrapper with `--lang ts --advisory`, so it reports findings without failing the job. The measured baseline is 72 modules and 15 unreached findings, all `suspect` because one unbounded dynamic import caps confidence. If that dynamic import is adjudicated, the analyzer reports three `certain` findings, and all three are false positives: two modules are imported by `.svelte` components and `src/routes/+layout.ts` is a SvelteKit convention entrypoint.
+
+The underlying limitation is structural: the analyzer sees 69 `.ts` files but does not parse the repository's 65 `.svelte` files, leaving roughly half of the frontend import graph invisible. TypeScript reachability becomes blocking only when the analyzer has a `.svelte`-aware parser, or when the frontend import graph is otherwise made visible to it. Until that named promotion condition is met and the baseline is remeasured, `--advisory` is deliberate policy.
+
+## Updating the analyzer
+
+The three analyzer files are vendored from `~/.claude/tools/codegraph/`, and each provenance header records its source path, copy date, and the SHA-256 of the original upstream bytes. The repository copy deliberately uses LF line endings, so its whole-file hash can differ from that upstream hash even when the analyzer body has not drifted. `tools/codegraph/vendor-manifest.json` records both identities: the original upstream-byte hash and the exact LF-vendored-file hash.
+
+Verify all three files and cross-check each header against the manifest with one command from the repository root:
+
+```text
+python tools/codegraph/verify_vendor.py
+```
+
+A clean run prints `OK` for all three files and `Verified 3 vendored files.` Do not patch vendored analyzer logic in this repository. Replace the copies from upstream as a unit, retain LF line endings, update both hashes in the manifest, and keep repository-specific exit policy in `ci_gate.py`.

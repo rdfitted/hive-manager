@@ -37,3 +37,7 @@ nul
 PLANNING DOCS/
 dist-local/
 .claude/scheduled_tasks.lock
+
+# Python bytecode (tools/codegraph is stdlib Python, run directly)
+__pycache__/
+*.pyc

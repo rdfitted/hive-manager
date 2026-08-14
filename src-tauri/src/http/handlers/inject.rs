@@ -9,10 +9,16 @@ use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use super::{validate_agent_id, validate_session_id};
 
+fn default_submit() -> bool {
+    true
+}
+
 #[derive(Deserialize)]
 pub struct OperatorInjectRequest {
     pub target_agent_id: String,
     pub message: String,
+    #[serde(default = "default_submit")]
+    pub submit: bool,
 }
 
 #[derive(Deserialize)]
@@ -20,6 +26,8 @@ pub struct QueenInjectRequest {
     pub queen_id: String,
     pub target_worker_id: String,
     pub message: String,
+    #[serde(default = "default_submit")]
+    pub submit: bool,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +35,8 @@ pub struct EvaluatorInjectRequest {
     pub evaluator_id: String,
     pub target_agent_id: String,
     pub message: String,
+    #[serde(default = "default_submit")]
+    pub submit: bool,
 }
 
 pub async fn operator_inject(
@@ -43,6 +53,7 @@ pub async fn operator_inject(
             &id,
             &payload.target_agent_id,
             &payload.message,
+            payload.submit,
         )
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
@@ -68,6 +79,7 @@ pub async fn queen_inject(
             &payload.queen_id,
             &payload.target_worker_id,
             &payload.message,
+            payload.submit,
         )
         .map_err(map_injection_error)?;
 
@@ -93,6 +105,7 @@ pub async fn evaluator_inject(
             &payload.evaluator_id,
             &payload.target_agent_id,
             &payload.message,
+            payload.submit,
         )
         .map_err(map_injection_error)?;
 
@@ -110,5 +123,164 @@ fn map_injection_error(error: crate::coordination::InjectionError) -> ApiError {
         crate::coordination::InjectionError::AgentNotFound(message)
         | crate::coordination::InjectionError::SessionNotFound(message) => ApiError::not_found(message),
         other => ApiError::internal(other.to_string()),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::coordination::{InjectionManager, QueueManager};
+    use crate::events::EventBus;
+    use crate::pty::{AgentRole, PtyManager};
+    use crate::session::SessionController;
+    use crate::storage::{ApplicationStateDb, QueueRepo, SessionStorage};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use parking_lot::RwLock;
+    use serde_json::{json, Value};
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    const AGENT_ID: &str = "inject-test-worker-1";
+
+    fn setup_test_app() -> (TempDir, Router, Arc<AppState>) {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(
+            SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap(),
+        );
+        let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+        let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+        pty_manager
+            .write()
+            .create_session(
+                AGENT_ID.to_string(),
+                AgentRole::Worker {
+                    index: 1,
+                    parent: None,
+                },
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        let session_controller = Arc::new(RwLock::new(SessionController::new(
+            pty_manager.clone(),
+        )));
+        session_controller.write().set_storage(storage.clone());
+        let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+            pty_manager.clone(),
+            SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap(),
+        )));
+        let event_bus = EventBus::new(storage.base_dir().clone());
+        let app_state_db = Arc::new(ApplicationStateDb::open_in_memory().unwrap());
+        let queue_repo = Arc::new(QueueRepo::new(app_state_db.clone()));
+        queue_repo.ensure_schema().unwrap();
+        let queue_manager = Arc::new(QueueManager::new(queue_repo, event_bus.clone()));
+        let state = Arc::new(AppState::new(
+            config,
+            pty_manager,
+            session_controller,
+            injection_manager,
+            storage,
+            event_bus,
+            app_state_db,
+            queue_manager,
+            None,
+        ));
+        let app = Router::new()
+            .route("/api/sessions/{id}/inject", post(operator_inject))
+            .with_state(state.clone());
+
+        (temp_dir, app, state)
+    }
+
+    async fn post_operator_inject(app: Router, body: Value) -> StatusCode {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/sessions/inject-test/inject")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn operator_inject_omitted_submit_defaults_to_true() {
+        let (_temp_dir, app, state) = setup_test_app();
+
+        let status = post_operator_inject(
+            app,
+            json!({ "target_agent_id": AGENT_ID, "message": "hello\r\n" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state
+                .pty_manager
+                .read()
+                .write_records_for_test(AGENT_ID)
+                .unwrap(),
+            vec![b"hello".to_vec(), b"\r".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_inject_submit_false_writes_payload_without_enter() {
+        let (_temp_dir, app, state) = setup_test_app();
+
+        let status = post_operator_inject(
+            app,
+            json!({
+                "target_agent_id": AGENT_ID,
+                "message": "draft\r\n",
+                "submit": false
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            state
+                .pty_manager
+                .read()
+                .write_records_for_test(AGENT_ID)
+                .unwrap(),
+            vec![b"draft".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_inject_multiline_preserves_newlines_and_submits_once() {
+        let (_temp_dir, app, state) = setup_test_app();
+
+        let status = post_operator_inject(
+            app,
+            json!({
+                "target_agent_id": AGENT_ID,
+                "message": "line one\nline two\r\n"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let writes = state
+            .pty_manager
+            .read()
+            .write_records_for_test(AGENT_ID)
+            .unwrap();
+        assert_eq!(writes, vec![b"line one\nline two".to_vec(), b"\r".to_vec()]);
+        assert_eq!(writes.iter().filter(|write| write.as_slice() == b"\r").count(), 1);
+        assert!(!writes[1].contains(&b'\n'));
     }
 }

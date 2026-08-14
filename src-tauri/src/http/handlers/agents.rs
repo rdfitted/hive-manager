@@ -118,7 +118,7 @@ pub async fn send_agent_input(
     state
         .injection_manager
         .read()
-        .operator_inject(&session_id, &agent_id, &req.input)
+        .operator_inject(&session_id, &agent_id, &req.input, true)
         .map_err(|error| match error {
             InjectionError::SessionNotFound(id) => {
                 ApiError::not_found(format!("Session {} not found", id))
