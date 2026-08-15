@@ -16,6 +16,7 @@ use crate::coordination::{ReleaseAfterFailure, ReleaseOutcome, StateManager, Wor
 use crate::domain::WorkspaceStrategy;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::orchestrator::org_graph::definitions::role_prompt_template;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
 use crate::session::{AddWorkerError, AddWorkerRejectionReason, SessionController};
 use crate::storage::queue::{
@@ -342,7 +343,8 @@ pub async fn add_worker(
         role_type: role_type.clone(),
         label: role_label.clone(),
         default_cli: cli.clone(),
-        prompt_template: None,
+        prompt_template: Some(role_prompt_template(&role_type)),
+        resolved_definition: None,
     };
 
     // Build config

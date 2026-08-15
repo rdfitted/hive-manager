@@ -1,7 +1,7 @@
 use crate::http::handlers::{
     actions, agents, application_state, artifacts, cells, conversations, evaluator, events, health,
-    heartbeats, inject, knowledge, learnings, planners, queue, resolver, session_files, sessions,
-    templates, workers,
+    heartbeats, inject, knowledge, learnings, planners, pty_buffer, queue, resolver, session_files,
+    sessions, templates, work_graph, workers,
 };
 use crate::http::state::AppState;
 use crate::cli::health as cli_health;
@@ -131,6 +131,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{id}/files/content",
             get(session_files::read_session_file),
         )
+        // Read-only work-graph projection (#227). The scheduler remains the sole writer.
+        .route(
+            "/api/sessions/{id}/work-graph",
+            get(work_graph::get_work_graph),
+        )
         // Durable run-queue snapshot (#126)
         .route("/api/sessions/{id}/queue", get(queue::get_queue))
         // Evaluator routes
@@ -195,6 +200,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{id}/agents/{aid}/input",
             post(agents::send_agent_input),
+        )
+        .route(
+            "/api/sessions/{id}/agents/{aid}/pty-buffer",
+            get(pty_buffer::get_pty_buffer),
         )
         .route(
             "/api/sessions/{id}/cells/{cid}/artifacts",

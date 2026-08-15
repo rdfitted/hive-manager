@@ -15,8 +15,17 @@ use crate::coordination::queue_manager::{heartbeat_cadence_label, STUCK_CUTOFF_S
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::domain::{ArtifactBundle, HiveExecutionPolicy, HiveLaunchKind, WorkspaceStrategy};
 use crate::events::{EventBus, EventEmitter};
+use crate::orchestrator::org_graph::definitions::{
+    resolve_role_definition, role_prompt_template, ResolvedRoleDefinition,
+};
+use crate::orchestrator::org_graph::composition::{
+    compose_context, render_composed_context, spawn_context_from_work_graph_task, SpawnContext,
+};
+use crate::orchestrator::org_graph::RoleDefinition;
 use crate::orchestrator::session_orchestrator::SessionOrchestrator;
-use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager, WorkerRole};
+use crate::pty::{
+    AgentConfig, AgentRole, AgentStatus, PtyManager, RoleDefinitionRef, WorkerRole,
+};
 use crate::session::cell_status::{
     agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids,
     variant_to_cell_id, PRIMARY_CELL_ID, RESOLVER_CELL_ID,
@@ -373,6 +382,10 @@ pub struct AgentInfo {
     pub status: AgentStatus,
     pub config: AgentConfig,
     pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_definition_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_definition_version: Option<u32>,
     #[serde(default)]
     pub commit_sha: Option<String>,
     #[serde(default)]
@@ -897,13 +910,13 @@ fn cell_status_changes_for_transition(
     changes
 }
 /// Generate CLI-specific polling instructions based on the CLI's behavioral profile
-fn get_polling_instructions(
+pub(crate) fn get_polling_instructions(
     cli: &str,
     task_file: &str,
-    role_type: Option<&str>,
+    role_definition: Option<&RoleDefinition>,
     _heartbeat_command: Option<&str>,
 ) -> String {
-    let read_instruction = match CliRegistry::get_behavior_for_role(cli, role_type) {
+    let read_instruction = match CliRegistry::get_behavior_for_role(cli, role_definition) {
         CliBehavior::ExplicitPolling => "Read the task file once before starting work.",
         CliBehavior::ActionProne => "Read the complete task file before taking any action.",
         CliBehavior::InstructionFollowing => "Read and follow the complete task file.",
@@ -1143,6 +1156,8 @@ impl SessionController {
                 status: AgentStatus::Running,
                 config: queen_config,
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -1199,6 +1214,8 @@ impl SessionController {
                     status: AgentStatus::Running,
                     config: worker_config,
                     parent_id: Some(format!("{}-queen", session_id)),
+                    role_definition_id: None,
+                    role_definition_version: None,
                     commit_sha: None,
                     base_commit_sha: None,
                 });
@@ -2174,6 +2191,18 @@ impl SessionController {
         session: &mut Session,
         new_state: SessionState,
     ) -> Vec<(String, String, String)> {
+        Self::set_session_state_with_snapshot(
+            self.storage.as_deref(),
+            session,
+            new_state,
+        )
+    }
+
+    fn set_session_state_with_snapshot(
+        storage: Option<&SessionStorage>,
+        session: &mut Session,
+        new_state: SessionState,
+    ) -> Vec<(String, String, String)> {
         let from_kind = session.state.kind();
         let to_kind = new_state.kind();
         let trigger = super::transitions::trigger_for(from_kind, to_kind)
@@ -2181,7 +2210,21 @@ impl SessionController {
         let _ = super::transitions::validate_and_log(from_kind, to_kind, trigger);
         let changes = cell_status_changes_for_transition(session, &new_state);
         session.state = new_state;
+        Self::emit_work_graph_snapshot_for_session_state(storage, session);
         changes
+    }
+
+    fn emit_work_graph_snapshot_for_session_state(
+        storage: Option<&SessionStorage>,
+        session: &Session,
+    ) {
+        if let Some(storage) = storage {
+            let manager = StateManager::new(storage.session_dir(&session.id));
+            let stage = format!("{:?}", session.state.kind());
+            if let Err(error) = manager.emit_work_graph_snapshot(&stage) {
+                tracing::warn!(session_id = %session.id, stage, "Failed to emit work-graph lifecycle snapshot: {error}");
+            }
+        }
     }
 
     fn persist_then_emit_session_update(
@@ -2200,6 +2243,20 @@ impl SessionController {
     pub fn insert_test_session(&self, session: Session) {
         let mut sessions = self.sessions.write();
         sessions.insert(session.id.clone(), session);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transition_test_session(
+        &self,
+        session_id: &str,
+        new_state: SessionState,
+    ) -> Result<(), String> {
+        let mut sessions = self.sessions.write();
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+        self.set_session_state_with_events(session, new_state);
+        Ok(())
     }
 
     /// Persist an in-memory test session to storage, so read paths that
@@ -2376,7 +2433,8 @@ impl SessionController {
                 if let Err(err) = self.persist_then_emit_session_update(id, changes) {
                     let mut sessions = self.sessions.write();
                     if let Some(session) = sessions.get_mut(id) {
-                        session.state = previous_session_state;
+                        let _ =
+                            self.set_session_state_with_events(session, previous_session_state);
                         session.auth_strategy = previous_auth_strategy;
                     }
                     self.finish_scratch_pty_cleanup(id);
@@ -2408,7 +2466,8 @@ impl SessionController {
             if let Err(err) = self.update_session_storage_checked(session_id) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
-                    session.state = previous_session_state;
+                    let _ = self
+                        .set_session_state_with_events(session, previous_session_state);
                     session.auth_strategy = previous_auth_strategy;
                 }
                 return Err(CompletionError::storage(err));
@@ -6286,10 +6345,21 @@ When the objective and every configured gate are complete, send this `completed`
             objective = objective,
         )
     }
+
+    pub(crate) fn polling_instructions_for_definition(
+        cli: &str,
+        task_file: &str,
+        definition: Option<&RoleDefinition>,
+    ) -> String {
+        get_polling_instructions(cli, task_file, definition, None)
+    }
+
     /// Build a worker's role prompt
-    fn build_worker_prompt(
+    pub(crate) fn build_worker_prompt(
         index: u8,
         config: &AgentConfig,
+        resolved_role: &ResolvedRoleDefinition,
+        spawn_context: &SpawnContext,
         queen_id: &str,
         session_id: &str,
         project_path: &Path,
@@ -6430,6 +6500,10 @@ When the objective and every configured gate are complete, send this `completed`
             },
             stop_conditions: &stop_conditions,
         });
+        let composed_context = render_composed_context(&compose_context(
+            resolved_role.definition.as_ref(),
+            spawn_context,
+        ));
 
         let agent_id = format!("{session_id}-worker-{index}");
         let activation_wait_heartbeat = heartbeat_snippet(
@@ -6442,10 +6516,7 @@ When the objective and every configured gate are complete, send this `completed`
         let polling_instructions = get_polling_instructions(
             &config.cli,
             &task_file,
-            config
-                .role
-                .as_ref()
-                .map(|worker_role| worker_role.role_type.as_str()),
+            resolved_role.definition.as_ref(),
             Some(&activation_wait_heartbeat),
         );
         let working_heartbeat = heartbeat_snippet(
@@ -6550,7 +6621,7 @@ Before marking the task COMPLETED, POST one durable learning record to /api/sess
 
 {assignment}
 
-{role_section}
+{composed_context}{role_section}
 
 ## Runtime
 
@@ -6601,6 +6672,7 @@ treated as stuck and requeued.
             delegation = delegation,
             workspace_contract = workspace_contract,
             assignment = assignment,
+            composed_context = composed_context,
             role_section = role_section,
             session_id = session_id,
             queen_id = queen_id,
@@ -7975,6 +8047,8 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: solo_config.clone(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             }],
@@ -8302,6 +8376,8 @@ Last updated: {timestamp}
             status: AgentStatus::Running,
             config: config.queen_config.clone(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         });
@@ -8320,10 +8396,13 @@ Last updated: {timestamp}
         for (i, worker_config) in workers_to_spawn.iter().enumerate() {
             let index = (i + 1) as u8;
             let worker_id = format!("{}-worker-{}", session_id, index);
-            let worker_role = worker_config
+            let mut worker_role = worker_config
                 .role
                 .clone()
                 .unwrap_or_else(|| WorkerRole::new("general", "Worker", &worker_config.cli));
+            let resolved_role =
+                self.resolve_worker_role_definition(&project_path, &worker_role.role_type);
+            Self::attach_resolved_definition(&mut worker_role, &resolved_role);
             let worker_config =
                 Self::apply_worker_identity(index, &worker_role, worker_config.clone());
             let (cmd, mut args) = Self::build_command(&worker_config);
@@ -8402,6 +8481,8 @@ Last updated: {timestamp}
             let worker_prompt = Self::build_worker_prompt(
                 index,
                 &worker_config,
+                &resolved_role,
+                &SpawnContext::default(),
                 &queen_id,
                 &session_id,
                 &project_path,
@@ -8471,6 +8552,14 @@ Last updated: {timestamp}
                 status: AgentStatus::Running,
                 config: worker_config.clone(),
                 parent_id: Some(queen_id.clone()),
+                role_definition_id: resolved_role
+                    .definition
+                    .as_ref()
+                    .map(|definition| definition.id.clone()),
+                role_definition_version: resolved_role
+                    .definition
+                    .as_ref()
+                    .map(|definition| definition.version),
                 commit_sha: None,
                 base_commit_sha: worker_base_commit_sha,
             });
@@ -8932,6 +9021,8 @@ phases and do EXACTLY this, then stop:
                 status: AgentStatus::Running,
                 config: variant_agent_config,
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             };
@@ -9362,6 +9453,8 @@ phases and do EXACTLY this, then stop:
                 status: AgentStatus::Running,
                 config: agent_config,
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -9401,6 +9494,91 @@ phases and do EXACTLY this, then stop:
             .and_then(|config| config.global_wiki_path)
             .filter(|path| !path.trim().is_empty())
             .map(|path| PathBuf::from(expand_tilde(&path)))
+    }
+
+    fn resolve_worker_role_definition(
+        &self,
+        project_path: &Path,
+        role_type: &str,
+    ) -> ResolvedRoleDefinition {
+        let institutional_root = self.configured_institutional_wiki_root();
+        let resolved = resolve_role_definition(
+            project_path,
+            institutional_root.as_deref(),
+            role_type,
+        );
+        for issue in &resolved.issues {
+            tracing::warn!(
+                role_id = %resolved.requested_id,
+                issue = ?issue.kind,
+                source_ref = %issue.source_ref,
+                detail = %issue.detail,
+                "Role definition resolution reported an omission"
+            );
+        }
+        resolved
+    }
+
+    fn attach_resolved_definition(
+        role: &mut WorkerRole,
+        resolved: &ResolvedRoleDefinition,
+    ) {
+        role.prompt_template = Some(
+            resolved
+                .definition
+                .as_ref()
+                .and_then(|definition| definition.prompt_template.clone())
+                .unwrap_or_else(|| role_prompt_template(&role.role_type)),
+        );
+        role.resolved_definition = resolved.definition.as_ref().map(|definition| {
+            RoleDefinitionRef {
+                id: definition.id.clone(),
+                version: definition.version,
+            }
+        });
+    }
+
+    /// Load only the task-scoped knowledge edges for an explicitly identified
+    /// plan task. Missing graph evidence is an empty scope; it is never
+    /// reconstructed from prompt text or the process working directory.
+    fn spawn_context_for_plan_task(
+        &self,
+        session_id: &str,
+        plan_task_id: Option<&str>,
+    ) -> SpawnContext {
+        let Some(plan_task_id) = plan_task_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return SpawnContext::default();
+        };
+        let Some(storage) = self.storage.as_ref() else {
+            return SpawnContext::default();
+        };
+        let state_manager = StateManager::new(storage.session_dir(session_id));
+        let composition = match state_manager.read_graph_composition_state() {
+            Ok(Some(composition)) => composition,
+            Ok(None) => return SpawnContext::default(),
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    plan_task_id,
+                    "Failed to read task-scoped work-graph context: {error}"
+                );
+                return SpawnContext::default();
+            }
+        };
+        if !composition
+            .graph
+            .nodes
+            .iter()
+            .any(|node| node.id == plan_task_id)
+        {
+            tracing::warn!(
+                session_id,
+                plan_task_id,
+                "Plan task was absent while composing worker context"
+            );
+            return SpawnContext::default();
+        }
+        spawn_context_from_work_graph_task(&composition.graph, plan_task_id)
     }
 
     fn planning_codegraph_artifact_path(project_path: &Path, session_id: &str) -> PathBuf {
@@ -9812,6 +9990,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -9927,6 +10107,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: queen_cfg.clone(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -10057,6 +10239,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: queen_cfg.clone(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -10271,6 +10455,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: queen_cfg,
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -10390,6 +10576,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: variant_agent_config,
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -10652,6 +10840,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -10758,8 +10948,16 @@ The backend composed and persisted the following authoritative skeleton before l
             return Ok(());
         }
 
-        let worker_config = &config.workers[worker_index];
         let index = (worker_index + 1) as u8;
+        let source_config = &config.workers[worker_index];
+        let mut worker_role = source_config
+            .role
+            .clone()
+            .unwrap_or_else(|| WorkerRole::new("general", "Worker", &source_config.cli));
+        let resolved_role =
+            self.resolve_worker_role_definition(&session.project_path, &worker_role.role_type);
+        Self::attach_resolved_definition(&mut worker_role, &resolved_role);
+        let worker_config = Self::apply_worker_identity(index, &worker_role, source_config.clone());
         let worker_branch = format!("hive/{}/worker-{}", session_id, index);
 
         // #125 resume guard: if this worker-spawn write-step is already journaled
@@ -10875,7 +11073,9 @@ The backend composed and persisted the following authoritative skeleton before l
         // 3. Write worker prompt to file
         let worker_prompt = Self::build_worker_prompt(
             index,
-            worker_config,
+            &worker_config,
+            &resolved_role,
+            &SpawnContext::default(),
             queen_id,
             session_id,
             &session.project_path,
@@ -10903,7 +11103,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let prompt_path = prompt_file.to_string_lossy().to_string();
 
         // 4. Build command with prompt
-        let (cmd, mut args) = Self::build_command(worker_config);
+        let (cmd, mut args) = Self::build_command(&worker_config);
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
         // 5. Spawn the worker (use worker_cwd as PTY cwd)
@@ -10947,6 +11147,14 @@ The backend composed and persisted the following authoritative skeleton before l
                     status: AgentStatus::Running,
                     config: worker_config.clone(),
                     parent_id: Some(queen_id.to_string()),
+                    role_definition_id: resolved_role
+                        .definition
+                        .as_ref()
+                        .map(|definition| definition.id.clone()),
+                    role_definition_version: resolved_role
+                        .definition
+                        .as_ref()
+                        .map(|definition| definition.version),
                     commit_sha: None,
                     base_commit_sha: Some(worker_base_commit_sha.clone()),
                 };
@@ -11232,6 +11440,10 @@ The backend composed and persisted the following authoritative skeleton before l
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
                     *session = previous_session;
+                    Self::emit_work_graph_snapshot_for_session_state(
+                        Some(storage.as_ref()),
+                        session,
+                    );
                 }
                 return Err(err);
             }
@@ -11309,6 +11521,10 @@ The backend composed and persisted the following authoritative skeleton before l
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
                     *session = previous_session;
+                    Self::emit_work_graph_snapshot_for_session_state(
+                        Some(storage.as_ref()),
+                        session,
+                    );
                 }
                 return Err(err);
             }
@@ -11400,6 +11616,10 @@ The backend composed and persisted the following authoritative skeleton before l
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
                     *session = previous_session;
+                    Self::emit_work_graph_snapshot_for_session_state(
+                        Some(storage.as_ref()),
+                        session,
+                    );
                 }
                 return Err(err);
             }
@@ -11768,16 +11988,11 @@ The backend composed and persisted the following authoritative skeleton before l
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
                         let previous_state = session.state.clone();
-                        let changes = cell_status_changes_for_transition(
+                        let changes = SessionController::set_session_state_with_snapshot(
+                            storage.as_deref(),
                             session,
-                            &SessionState::QaInconclusive,
+                            SessionState::QaInconclusive,
                         );
-                        let _ = super::transitions::validate_and_log(
-                            session.state.kind(),
-                            super::transitions::SessionStateKind::QaInconclusive,
-                            super::transitions::TransitionTrigger::QaTimedOut,
-                        );
-                        session.state = SessionState::QaInconclusive;
                         Some((previous_state, changes, session.clone()))
                     } else {
                         None
@@ -11798,7 +12013,11 @@ The backend composed and persisted the following authoritative skeleton before l
                             );
                             let mut sessions = sessions.write();
                             if let Some(session) = sessions.get_mut(&sid) {
-                                session.state = previous_state;
+                                let _ = SessionController::set_session_state_with_snapshot(
+                                    Some(storage.as_ref()),
+                                    session,
+                                    previous_state,
+                                );
                             }
                             return;
                         }
@@ -12053,6 +12272,8 @@ The backend composed and persisted the following authoritative skeleton before l
                     status: AgentStatus::Running,
                     config: judge_config,
                     parent_id: None,
+                    role_definition_id: None,
+                    role_definition_version: None,
                     commit_sha: None,
                     base_commit_sha: None,
                 };
@@ -12351,6 +12572,8 @@ The backend composed and persisted the following authoritative skeleton before l
                     status: AgentStatus::Running,
                     config: judge_config,
                     parent_id: None,
+                    role_definition_id: None,
+                    role_definition_version: None,
                     commit_sha: None,
                     base_commit_sha: None,
                 };
@@ -12801,6 +13024,8 @@ The backend composed and persisted the following authoritative skeleton before l
             status: AgentStatus::Running,
             config: config.queen_config.clone(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         });
@@ -12986,12 +13211,32 @@ The backend composed and persisted the following authoritative skeleton before l
                 state_manager
                     .write_work_graph(&graph)
                     .map_err(|error| format!("Failed to persist plan work graph: {error}"))?;
+                let ownership_state =
+                    crate::orchestrator::org_graph::ownership::OwnershipSessionState::from_plan(
+                        &graph,
+                        crate::orchestrator::org_graph::ownership::orchestrator_nodes_for_plan(
+                            &graph,
+                        ),
+                        &[],
+                    )
+                    .map_err(|error| {
+                        format!("Failed to build orchestrator ownership state: {error}")
+                    })?;
+                state_manager
+                    .write_ownership_session_state(&ownership_state)
+                    .map_err(|error| {
+                        format!("Failed to persist orchestrator ownership state: {error}")
+                    })?;
             }
             let previous_session = session.clone();
             let changes = self.set_session_state_with_events(session, SessionState::PlanReady);
             if let Some(storage) = self.storage.as_ref() {
                 if let Err(error) = Self::persist_session_snapshot(storage, session, session_id) {
                     *session = previous_session;
+                    Self::emit_work_graph_snapshot_for_session_state(
+                        Some(storage.as_ref()),
+                        session,
+                    );
                     return Err(error);
                 }
             }
@@ -13213,7 +13458,13 @@ The backend composed and persisted the following authoritative skeleton before l
                         role_type: rt.clone(),
                         label: pa.config.label.clone().unwrap_or_default(),
                         default_cli: pa.config.cli.clone(),
-                        prompt_template: pa.config.initial_prompt.clone(),
+                        prompt_template: Some(role_prompt_template(rt)),
+                        resolved_definition: pa.role_definition_id.as_ref().zip(
+                            pa.role_definition_version,
+                        ).map(|(id, version)| RoleDefinitionRef {
+                            id: id.clone(),
+                            version,
+                        }),
                     }),
                     initial_prompt: pa.config.initial_prompt.clone(),
                 };
@@ -13224,6 +13475,8 @@ The backend composed and persisted the following authoritative skeleton before l
                     status: AgentStatus::Completed,
                     config,
                     parent_id: pa.parent_id.clone(),
+                    role_definition_id: pa.role_definition_id.clone(),
+                    role_definition_version: pa.role_definition_version,
                     commit_sha: pa.commit_sha.clone(),
                     base_commit_sha: pa.base_commit_sha.clone(),
                 })
@@ -13379,6 +13632,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -13523,6 +13778,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 status: AgentStatus::Running,
                 config: config.queen_config.clone(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -13964,7 +14221,7 @@ The backend composed and persisted the following authoritative skeleton before l
         &self,
         session_id: &str,
         config: AgentConfig,
-        role: WorkerRole,
+        mut role: WorkerRole,
         parent_id: Option<String>,
         expected_index: Option<u8>,
         plan_task_id: Option<&str>,
@@ -14000,6 +14257,9 @@ The backend composed and persisted the following authoritative skeleton before l
         // Generate worker ID
         let worker_id = format!("{}-worker-{}", session_id, worker_index);
 
+        let resolved_role =
+            self.resolve_worker_role_definition(&session.project_path, &role.role_type);
+        Self::attach_resolved_definition(&mut role, &resolved_role);
         let config_with_role = Self::apply_worker_identity(worker_index, &role, config);
         let (cmd, mut args) = Self::build_command(&config_with_role);
         let uses_shared_workspace = !session.no_git
@@ -14086,9 +14346,12 @@ The backend composed and persisted the following authoritative skeleton before l
         };
 
         // Write worker prompt to file and add to args
+        let spawn_context = self.spawn_context_for_plan_task(session_id, plan_task_id);
         let worker_prompt = Self::build_worker_prompt(
             worker_index,
             &config_with_role,
+            &resolved_role,
+            &spawn_context,
             &actual_parent_id,
             session_id,
             &session.project_path,
@@ -14165,6 +14428,14 @@ The backend composed and persisted the following authoritative skeleton before l
             status: AgentStatus::Running,
             config: agent_config,
             parent_id: Some(actual_parent_id),
+            role_definition_id: resolved_role
+                .definition
+                .as_ref()
+                .map(|definition| definition.id.clone()),
+            role_definition_version: resolved_role
+                .definition
+                .as_ref()
+                .map(|definition| definition.version),
             commit_sha: None,
             base_commit_sha: worker_base_commit_sha,
         };
@@ -14337,6 +14608,8 @@ The backend composed and persisted the following authoritative skeleton before l
             status: AgentStatus::Running,
             config,
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };
@@ -14487,6 +14760,8 @@ The backend composed and persisted the following authoritative skeleton before l
             status: AgentStatus::Running,
             config,
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };
@@ -14608,6 +14883,8 @@ The backend composed and persisted the following authoritative skeleton before l
             status: AgentStatus::Running,
             config,
             parent_id: Some(evaluator_id),
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };
@@ -14751,6 +15028,8 @@ The backend composed and persisted the following authoritative skeleton before l
             status: AgentStatus::Running,
             config: agent_config,
             parent_id: Some(queen_id),
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };
@@ -14856,6 +15135,8 @@ The backend composed and persisted the following authoritative skeleton before l
                         initial_prompt: a.config.initial_prompt.clone(),
                     },
                     parent_id: a.parent_id.clone(),
+                    role_definition_id: a.role_definition_id.clone(),
+                    role_definition_version: a.role_definition_version,
                     commit_sha: a.commit_sha.clone(),
                     base_commit_sha: a.base_commit_sha.clone(),
                 }
@@ -14893,6 +15174,13 @@ The backend composed and persisted the following authoritative skeleton before l
             worktree_branch: session.worktree_branch.clone(),
             no_git: session.no_git,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persisted_snapshot_for_test(
+        session: &Session,
+    ) -> crate::storage::PersistedSession {
+        Self::session_to_persisted_snapshot(session)
     }
 
     fn init_session_storage(&self, session: &Session) {
@@ -15307,6 +15595,7 @@ mod tests {
     };
     use super::{heartbeat_cadence_label, CliBehavior, CliRegistry};
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
+    use crate::orchestrator::org_graph::composition::SpawnContext;
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
@@ -15840,12 +16129,19 @@ mod tests {
 
         let task_path = SessionController::task_file_path_for_session_worker(&restored, 2)
             .expect("Research task path");
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            &restored.project_path,
+            None,
+            "researcher",
+        );
         let prompt = SessionController::build_worker_prompt(
             2,
             &AgentConfig {
                 role: Some(WorkerRole::new("researcher", "Researcher", "claude")),
                 ..AgentConfig::default()
             },
+            &resolved,
+            &SpawnContext::default(),
             "legacy-research-queen",
             &restored.id,
             &restored.project_path,
@@ -15892,6 +16188,11 @@ mod tests {
 
     fn worker_prompt_for_cli(cli: &str) -> String {
         let temp = tempfile::tempdir().expect("temp project");
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            temp.path(),
+            None,
+            "backend",
+        );
         SessionController::build_worker_prompt(
             1,
             &AgentConfig {
@@ -15899,6 +16200,8 @@ mod tests {
                 role: Some(WorkerRole::new("backend", "Backend", cli)),
                 ..AgentConfig::default()
             },
+            &resolved,
+            &SpawnContext::default(),
             "session-141-queen",
             "session-141",
             temp.path(),
@@ -15967,7 +16270,9 @@ mod tests {
             let activation = super::get_polling_instructions(
                 cli,
                 "worker-1-task.md",
-                Some("backend"),
+                Some(&crate::orchestrator::org_graph::RoleDefinition::empty(
+                    "backend",
+                )),
                 Some("HEARTBEAT_COMMAND"),
             );
             assert!(
@@ -15999,7 +16304,9 @@ mod tests {
             let activation = super::get_polling_instructions(
                 cli,
                 "worker-1-task.md",
-                Some("backend"),
+                Some(&crate::orchestrator::org_graph::RoleDefinition::empty(
+                    "backend",
+                )),
                 Some("HEARTBEAT_COMMAND"),
             );
             assert!(
@@ -16018,7 +16325,9 @@ mod tests {
             let instructions = super::get_polling_instructions(
                 representative_cli_for(&behavior),
                 "worker-1-task.md",
-                Some("backend"),
+                Some(&crate::orchestrator::org_graph::RoleDefinition::empty(
+                    "backend",
+                )),
                 Some("HEARTBEAT_COMMAND"),
             );
             assert!(instructions.contains("Queue Activation"));
@@ -16311,9 +16620,16 @@ mod tests {
     fn live_worker_prompt_uses_actual_codex_capabilities_and_topology_git_contract() {
         let shared_policy = shared_meta_harness_policy();
         let principal = codex_principal();
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            Path::new("/repo"),
+            None,
+            "backend",
+        );
         let shared_prompt = SessionController::build_worker_prompt(
             1,
             &principal,
+            &resolved,
+            &SpawnContext::default(),
             "session-modern-queen",
             "session-modern",
             Path::new("/repo"),
@@ -16349,6 +16665,8 @@ mod tests {
         let isolated_prompt = SessionController::build_worker_prompt(
             1,
             &principal,
+            &resolved,
+            &SpawnContext::default(),
             "session-modern-queen",
             "session-modern",
             Path::new("/repo"),
@@ -16367,6 +16685,8 @@ mod tests {
         let no_workspace_prompt = SessionController::build_worker_prompt(
             1,
             &principal,
+            &resolved,
+            &SpawnContext::default(),
             "session-modern-queen",
             "session-modern",
             Path::new("/repo"),
@@ -16466,9 +16786,16 @@ mod tests {
             workspace_strategy: crate::domain::WorkspaceStrategy::None,
             ..HiveExecutionPolicy::default()
         };
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            temp.path(),
+            None,
+            "researcher",
+        );
         let prompt = SessionController::build_worker_prompt(
             1,
             &cfg,
+            &resolved,
+            &SpawnContext::default(),
             "queen",
             session_id,
             temp.path(),
@@ -16521,12 +16848,19 @@ mod tests {
             "Test task",
             "claude",
         );
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            Path::new("."),
+            None,
+            "backend",
+        );
         let worker_prompt = SessionController::build_worker_prompt(
             1,
             &AgentConfig {
                 role: Some(WorkerRole::new("backend", "Backend", "claude")),
                 ..AgentConfig::default()
             },
+            &resolved,
+            &SpawnContext::default(),
             "session-scope-equality-queen",
             session_id,
             Path::new("."),
@@ -16750,6 +17084,8 @@ mod tests {
                 status: AgentStatus::Running,
                 config: AgentConfig::default(),
                 parent_id: Some(format!("{session_id}-queen")),
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: current_head(&worker_worktree).ok(),
             }],
@@ -16784,6 +17120,8 @@ mod tests {
                 status: AgentStatus::Completed,
                 config: AgentConfig::default(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });
@@ -17012,6 +17350,8 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         }];
@@ -17022,6 +17362,8 @@ mod tests {
                 status: AgentStatus::Running,
                 config: AgentConfig::default(),
                 parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
                 commit_sha: None,
                 base_commit_sha: None,
             });

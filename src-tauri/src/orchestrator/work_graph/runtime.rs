@@ -17,6 +17,10 @@ use crate::domain::event::{Event, EventType};
 use crate::domain::run_journal::{
     Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus,
 };
+use crate::orchestrator::org_graph::adjudication::{
+    adjudicate_contradiction, AdjudicationDeclaration, AdjudicationError,
+    AdjudicationRecord, AdjudicationResolution, SourceVerdict, SourceVerdictValue,
+};
 
 use super::review::{
     instantiate_checkpoint_wave, instantiate_review_templates, route_failed_verdict,
@@ -165,6 +169,7 @@ pub enum GraphMutationType {
     ReviewRoundAdded,
     ReviewVerdictRecorded,
     RemediationDetour,
+    ContradictionAdjudicated,
     CheckpointInserted,
     Other,
 }
@@ -421,6 +426,203 @@ pub fn record_review_verdict_and_record(
         },
     )?;
     Ok(delta)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdjudicationGraphError {
+    Decision(AdjudicationError),
+    UnknownReviewVerdict(TaskId),
+    DuplicateRuntimeNode(TaskId),
+}
+
+impl fmt::Display for AdjudicationGraphError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decision(error) => write!(formatter, "review adjudication failed: {error}"),
+            Self::UnknownReviewVerdict(id) => {
+                write!(formatter, "review verdict node {id} does not exist")
+            }
+            Self::DuplicateRuntimeNode(id) => {
+                write!(formatter, "runtime adjudication node {id} already exists")
+            }
+        }
+    }
+}
+
+impl Error for AdjudicationGraphError {}
+
+impl From<AdjudicationError> for AdjudicationGraphError {
+    fn from(error: AdjudicationError) -> Self {
+        Self::Decision(error)
+    }
+}
+
+/// Record a contradictory source-verdict set and its separate adjudication.
+/// Ordinary FAIL continues through `route_failed_verdict_and_record`; this path
+/// deliberately emits a different mutation type and never creates remediation.
+pub fn route_contradictory_verdicts_and_record(
+    session_id: &str,
+    graph: &mut WorkGraph,
+    review_verdict_id: &str,
+    declaration: &AdjudicationDeclaration,
+    verdicts: &[SourceVerdict],
+) -> Result<
+    (AdjudicationRecord, Option<GraphMutationDelta>),
+    GraphMutationError<AdjudicationGraphError>,
+> {
+    let mut source_refs = verdicts
+        .iter()
+        .map(|verdict| format!("source-verdict:{}", verdict.source_id))
+        .collect::<Vec<_>>();
+    source_refs.sort();
+    mutate_and_record(
+        session_id,
+        graph,
+        GraphMutationType::ContradictionAdjudicated,
+        source_refs,
+        |graph| {
+            let record = adjudicate_contradiction(declaration, verdicts)?;
+            let review_position = graph
+                .nodes
+                .iter()
+                .position(|node| node.id == review_verdict_id)
+                .ok_or_else(|| {
+                    AdjudicationGraphError::UnknownReviewVerdict(
+                        review_verdict_id.to_string(),
+                    )
+                })?;
+            let mut known_ids = graph
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let source_nodes = record
+                .source_verdicts
+                .iter()
+                .map(|verdict| {
+                    (
+                        verdict.clone(),
+                        format!(
+                            "{review_verdict_id}::source-verdict::{}",
+                            verdict.source_id
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let adjudication_id = format!("{review_verdict_id}::adjudication");
+            for (_, id) in &source_nodes {
+                if !known_ids.insert(id.clone()) {
+                    return Err(AdjudicationGraphError::DuplicateRuntimeNode(id.clone()));
+                }
+            }
+            if !known_ids.insert(adjudication_id.clone()) {
+                return Err(AdjudicationGraphError::DuplicateRuntimeNode(
+                    adjudication_id.clone(),
+                ));
+            }
+
+            // A contradiction is not a failed aggregate verdict. It pauses at
+            // the explicit adjudication boundary instead of activating Prince
+            // remediation.
+            graph.nodes[review_position].status = NodeStatus::Blocked;
+            for (verdict, id) in &source_nodes {
+                let mut parameters = BTreeMap::new();
+                parameters.insert("source_id".to_string(), verdict.source_id.clone());
+                parameters.insert(
+                    "verdict".to_string(),
+                    serde_json::to_string(&verdict.verdict)
+                        .expect("source verdict value is serializable"),
+                );
+                parameters.insert("rationale".to_string(), verdict.rationale.clone());
+                let mut node = WorkNode::new(
+                    id,
+                    NodeKind::Review,
+                    format!("{} source verdict", verdict.source_id),
+                    NodeContract {
+                        inputs: vec![format!("{}:evidence", verdict.source_id)],
+                        outputs: vec![format!("{id}:verdict")],
+                        acceptance: vec!["retain the source verdict unchanged".to_string()],
+                    },
+                    BindingRef::Role("evaluator".to_string()),
+                    match verdict.verdict {
+                        SourceVerdictValue::Pass => NodeStatus::Completed,
+                        SourceVerdictValue::Fail => NodeStatus::Failed,
+                    },
+                );
+                node.expansion = Some(super::schema::CompositeExpansion {
+                    template: "source-review-verdict".to_string(),
+                    parameters,
+                });
+                graph.nodes.push(node);
+            }
+
+            let mut parameters = BTreeMap::new();
+            parameters.insert(
+                "policy".to_string(),
+                serde_json::to_string(&record.policy)
+                    .expect("adjudication policy is serializable"),
+            );
+            parameters.insert(
+                "adjudicator".to_string(),
+                serde_json::to_string(&record.adjudicator)
+                    .expect("declared adjudicator is serializable"),
+            );
+            parameters.insert(
+                "resolution".to_string(),
+                serde_json::to_string(&record.resolution)
+                    .expect("adjudication resolution is serializable"),
+            );
+            parameters.insert(
+                "source_verdicts".to_string(),
+                serde_json::to_string(&record.source_verdicts)
+                    .expect("source verdict records are serializable"),
+            );
+            let adjudication_status = match &record.resolution {
+                AdjudicationResolution::ConsensusPass
+                | AdjudicationResolution::Findings { .. } => NodeStatus::Completed,
+                AdjudicationResolution::ConsensusFail => NodeStatus::Failed,
+                AdjudicationResolution::ConsensusUnresolved { .. }
+                | AdjudicationResolution::Escalated { .. }
+                | AdjudicationResolution::HumanGate => NodeStatus::Blocked,
+            };
+            let mut adjudication_node = WorkNode::new(
+                &adjudication_id,
+                NodeKind::Join,
+                format!("Adjudication for {review_verdict_id}"),
+                NodeContract {
+                    inputs: source_nodes
+                        .iter()
+                        .map(|(_, id)| format!("{id}:verdict"))
+                        .collect(),
+                    outputs: vec![format!("{adjudication_id}:resolution")],
+                    acceptance: vec![
+                        "apply the declared policy without arrival-order bias".to_string(),
+                    ],
+                },
+                BindingRef::Role(record.adjudicator.role_id.clone()),
+                adjudication_status,
+            );
+            adjudication_node.expansion = Some(super::schema::CompositeExpansion {
+                template: "review-adjudication".to_string(),
+                parameters,
+            });
+            graph.nodes.push(adjudication_node);
+            for (_, source_id) in &source_nodes {
+                graph.edges.push(
+                    WorkEdge::new(
+                        source_id,
+                        &adjudication_id,
+                        EdgeKind::Informs,
+                        EdgeProvenance::Runtime,
+                    )
+                    .with_rationale(
+                        "the adjudication retains this source verdict as independent evidence",
+                    ),
+                );
+            }
+            Ok(record)
+        },
+    )
 }
 
 pub fn instantiate_checkpoint_wave_and_record(

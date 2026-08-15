@@ -2,7 +2,8 @@
 //!
 //! Built on top of #124's [`ApplicationStateDb`] (the single shared `application_state.db`).
 //! This module owns one additive table, `agent_run_queue`, created via an idempotent
-//! [`ensure_schema`] (`CREATE TABLE IF NOT EXISTS` + indexes) called once at startup.
+//! [`ensure_schema`] (`CREATE TABLE IF NOT EXISTS` + guarded additive migrations + indexes)
+//! called once at startup.
 //!
 //! # The atomic-claim invariant
 //!
@@ -85,6 +86,14 @@ pub struct QueueRow {
     pub last_status: Option<String>,
     /// Unix epoch millis of the last heartbeat, or `None` if never heartbeated.
     pub heartbeat_at: Option<i64>,
+    /// Session-local monotonic identity for the current assignment of this row.
+    ///
+    /// `0` is the honest sentinel for rows migrated from a schema that did not record
+    /// assignment order. Claims/rebinds and assignment-invalidating releases mint a positive
+    /// value; heartbeats preserve it so callers can address the same assignment after the row
+    /// reaches `finalized`.
+    #[serde(default)]
+    pub assignment_id: i64,
     /// Human-readable reason recorded when dependency failure/cancellation blocks this row.
     pub blocked_reason: Option<String>,
     pub created_at: i64,
@@ -173,8 +182,9 @@ pub enum SpawnFailureRelease {
 
 /// Create the `agent_run_queue` table (+ indexes) if absent.
 ///
-/// Additive-only and idempotent: safe to call at every startup. Uses plain
-/// `IF NOT EXISTS`, leaving #124's `schema_meta` version table untouched.
+/// Additive-only and idempotent: safe to call at every startup. The fresh DDL is followed by
+/// guarded `ALTER TABLE ... ADD COLUMN` migrations, leaving #124's `schema_meta` version table
+/// untouched.
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_run_queue (
@@ -191,11 +201,32 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             no_progress_count  INTEGER NOT NULL DEFAULT 0,
             last_status        TEXT,
             heartbeat_at       INTEGER,
+            assignment_id      INTEGER NOT NULL DEFAULT 0,
             created_at         INTEGER NOT NULL,
             updated_at         INTEGER NOT NULL
         )",
         [],
     )?;
+    let has_assignment_id = {
+        let mut stmt = conn.prepare("PRAGMA table_info(agent_run_queue)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let column_name: String = row.get(1)?;
+            if column_name == "assignment_id" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_assignment_id {
+        conn.execute(
+            "ALTER TABLE agent_run_queue
+             ADD COLUMN assignment_id INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_session_status
          ON agent_run_queue(session_id, status)",
@@ -209,6 +240,11 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_session_task_status
          ON agent_run_queue(session_id, task_id, status)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_worker_assignment
+         ON agent_run_queue(session_id, worker_id, assignment_id DESC)",
         [],
     )?;
     conn.execute(
@@ -327,8 +363,8 @@ impl QueueRepo {
                 "INSERT INTO agent_run_queue
                     (id, task_id, session_id, worker_id, role_type, cli, status, payload,
                      attempts, continuation_count, no_progress_count, last_status,
-                     heartbeat_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                     heartbeat_at, assignment_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT(id) DO NOTHING",
                 params![
                     row.id,
@@ -344,6 +380,7 @@ impl QueueRepo {
                     row.no_progress_count,
                     row.last_status,
                     row.heartbeat_at,
+                    row.assignment_id,
                     row.created_at,
                     row.updated_at,
                 ],
@@ -418,8 +455,8 @@ impl QueueRepo {
                 "INSERT INTO agent_run_queue
                     (id, task_id, session_id, worker_id, role_type, cli, status, payload,
                      attempts, continuation_count, no_progress_count, last_status,
-                     heartbeat_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                     heartbeat_at, assignment_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT(id) DO NOTHING",
                 params![
                     row.id,
@@ -435,6 +472,7 @@ impl QueueRepo {
                     row.no_progress_count,
                     row.last_status,
                     row.heartbeat_at,
+                    row.assignment_id,
                     row.created_at,
                     row.updated_at,
                 ],
@@ -596,7 +634,12 @@ impl QueueRepo {
                      attempts = attempts + 1,
                      updated_at = ?2,
                      heartbeat_at = ?2,
-                     worker_id = COALESCE(?4, worker_id)
+                     worker_id = COALESCE(?4, worker_id),
+                     assignment_id = (
+                         SELECT COALESCE(MAX(assignments.assignment_id), 0) + 1
+                         FROM agent_run_queue AS assignments
+                         WHERE assignments.session_id = agent_run_queue.session_id
+                     )
                  WHERE id = ?1
                    AND (status = 'queued'
                         OR (status = 'running'
@@ -781,14 +824,16 @@ impl QueueRepo {
         now_ms: i64,
     ) -> Result<bool, StorageError> {
         self.db.with_conn(|conn| {
+            let assignment_id = next_assignment_id_for_row(conn, id)?;
             conn.execute(
                 "UPDATE agent_run_queue
                  SET status = 'queued',
                      worker_id = CASE
                          WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
-                     updated_at = ?3
+                     updated_at = ?3,
+                     assignment_id = ?4
                  WHERE id = ?1 AND status = 'running' AND attempts = ?2",
-                params![id, expected_attempts, now_ms],
+                params![id, expected_attempts, now_ms, assignment_id],
             )?;
             Ok(conn.changes() == 1)
         })
@@ -803,11 +848,12 @@ impl QueueRepo {
     ) -> Result<bool, StorageError> {
         self.db.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
+            let assignment_id = next_assignment_id_for_row(&tx, id)?;
             let changed = tx.execute(
                 "UPDATE agent_run_queue
-                 SET status = 'failed', updated_at = ?3
+                 SET status = 'failed', updated_at = ?3, assignment_id = ?4
                  WHERE id = ?1 AND status = 'running' AND attempts = ?2",
-                params![id, expected_attempts, now_ms],
+                params![id, expected_attempts, now_ms, assignment_id],
             )?;
             if changed == 1 {
                 let root: Option<(String, Option<String>)> = tx
@@ -876,18 +922,20 @@ impl QueueRepo {
             } else {
                 ("queued", SpawnFailureRelease::Requeued { failures })
             };
+            let assignment_id = next_assignment_id_for_row(&tx, id)?;
             let changed = tx.execute(
                 "UPDATE agent_run_queue
                  SET status = ?4,
                      worker_id = CASE
                          WHEN ?4 = 'queued' AND task_id IS NOT NULL
                          THEN 'pending:' || id ELSE worker_id END,
-                     updated_at = ?5
+                     updated_at = ?5,
+                     assignment_id = ?6
                  WHERE id = ?1
                    AND status = 'running'
                    AND attempts = ?2
                    AND worker_id = ?3",
-                params![id, expected_attempts, worker_id, status, now_ms],
+                params![id, expected_attempts, worker_id, status, now_ms, assignment_id],
             )?;
             if changed != 1 {
                 tx.rollback()?;
@@ -939,14 +987,16 @@ impl QueueRepo {
     pub fn release_claim_manual(&self, id: &str, now_ms: i64) -> Result<bool, StorageError> {
         self.db.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
+            let assignment_id = next_assignment_id_for_row(&tx, id)?;
             let changed = tx.execute(
                 "UPDATE agent_run_queue
                  SET status = 'queued',
                      worker_id = CASE
                          WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
-                     updated_at = ?2
+                     updated_at = ?2,
+                     assignment_id = ?3
                  WHERE id = ?1 AND status IN ('running', 'failed')",
-                params![id, now_ms],
+                params![id, now_ms, assignment_id],
             )?;
             if changed == 1 {
                 tx.execute(
@@ -990,7 +1040,47 @@ impl QueueRepo {
         status: &str,
         now_ms: i64,
     ) -> Result<bool, StorageError> {
+        Ok(self
+            .record_heartbeat_for_assignment(session_id, worker_id, None, status, now_ms)?
+            .is_some())
+    }
+
+    /// Record a heartbeat against exactly one assignment and return its queue-row id.
+    ///
+    /// When `assignment_id` is supplied, a stale or mismatched identity updates nothing; it
+    /// never falls back to another row sharing the worker slot. Legacy prompts omit it, so the
+    /// server deterministically resolves the live row first, then the greatest durable
+    /// assignment id. The final `id` tie-break applies only to migrated sentinel-0 history,
+    /// whose real assignment order cannot be reconstructed without inventing data.
+    pub fn record_heartbeat_for_assignment(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        assignment_id: Option<i64>,
+        status: &str,
+        now_ms: i64,
+    ) -> Result<Option<String>, StorageError> {
         self.db.with_conn(|conn| {
+            let target: Option<(String, i64)> = conn
+                .query_row(
+                    "SELECT id, assignment_id
+                     FROM agent_run_queue
+                     WHERE session_id = ?1
+                       AND worker_id = ?2
+                       AND status IN ('queued', 'running', 'finalized')
+                       AND (?3 IS NULL OR assignment_id = ?3)
+                     ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,
+                              assignment_id DESC,
+                              CASE status WHEN 'queued' THEN 0 ELSE 1 END,
+                              id DESC
+                     LIMIT 1",
+                    params![session_id, worker_id, assignment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((id, resolved_assignment_id)) = target else {
+                return Ok(None);
+            };
             conn.execute(
                 "UPDATE agent_run_queue
                  SET status = CASE
@@ -1010,11 +1100,12 @@ impl QueueRepo {
                          THEN continuation_count + 1 ELSE continuation_count END,
                      last_status = CASE
                          WHEN status IN ('queued', 'running') THEN ?4 ELSE last_status END
-                 WHERE session_id = ?1 AND worker_id = ?2
-                    AND status IN ('queued', 'running', 'finalized')",
-                params![session_id, worker_id, now_ms, status],
+                 WHERE id = ?1
+                   AND assignment_id = ?2
+                   AND status IN ('queued', 'running', 'finalized')",
+                params![id, resolved_assignment_id, now_ms, status],
             )?;
-            Ok(conn.changes() >= 1)
+            Ok((conn.changes() == 1).then_some(id))
         })
     }
 
@@ -1029,8 +1120,9 @@ impl QueueRepo {
         now_ms: i64,
     ) -> Result<Vec<String>, StorageError> {
         self.db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
             let ids: Vec<String> = {
-                let mut stmt = conn.prepare(
+                let mut stmt = tx.prepare(
                     "SELECT id FROM agent_run_queue
                      WHERE status = 'running'
                        AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
@@ -1040,18 +1132,22 @@ impl QueueRepo {
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 rows
             };
-            if !ids.is_empty() {
-                conn.execute(
+            for id in &ids {
+                let assignment_id = next_assignment_id_for_row(&tx, id)?;
+                tx.execute(
                     "UPDATE agent_run_queue
                      SET status = 'queued',
                          worker_id = CASE
                              WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
-                         updated_at = ?2
-                     WHERE status = 'running'
-                       AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
-                    params![stuck_cutoff_ms, now_ms],
+                         updated_at = ?3,
+                         assignment_id = ?4
+                     WHERE id = ?1
+                       AND status = 'running'
+                       AND (heartbeat_at IS NULL OR heartbeat_at < ?2)",
+                    params![id, stuck_cutoff_ms, now_ms, assignment_id],
                 )?;
             }
+            tx.commit()?;
             Ok(ids)
         })
     }
@@ -1095,14 +1191,16 @@ impl QueueRepo {
     /// PTY no longer exists). Returns `true` if a row changed.
     pub fn requeue_running(&self, id: &str, now_ms: i64) -> Result<bool, StorageError> {
         self.db.with_conn(|conn| {
+            let assignment_id = next_assignment_id_for_row(conn, id)?;
             conn.execute(
                 "UPDATE agent_run_queue
                  SET status = 'queued',
                      worker_id = CASE
                          WHEN task_id IS NOT NULL THEN 'pending:' || id ELSE worker_id END,
-                     updated_at = ?2
+                     updated_at = ?2,
+                     assignment_id = ?3
                  WHERE id = ?1 AND status = 'running'",
-                params![id, now_ms],
+                params![id, now_ms, assignment_id],
             )?;
             Ok(conn.changes() == 1)
         })
@@ -1115,8 +1213,8 @@ impl QueueRepo {
                 "SELECT queue.id, queue.task_id, queue.session_id, queue.worker_id,
                         queue.role_type, queue.cli, queue.status, queue.payload,
                         queue.attempts, queue.continuation_count, queue.no_progress_count,
-                        queue.last_status, queue.heartbeat_at, queue.created_at, queue.updated_at,
-                        block.reason
+                        queue.last_status, queue.heartbeat_at, queue.assignment_id,
+                        queue.created_at, queue.updated_at, block.reason
                  FROM agent_run_queue AS queue
                  LEFT JOIN agent_run_queue_blocks AS block ON block.queue_id = queue.id
                  WHERE queue.session_id = ?1
@@ -1137,8 +1235,8 @@ impl QueueRepo {
                     "SELECT queue.id, queue.task_id, queue.session_id, queue.worker_id,
                             queue.role_type, queue.cli, queue.status, queue.payload,
                             queue.attempts, queue.continuation_count, queue.no_progress_count,
-                            queue.last_status, queue.heartbeat_at, queue.created_at, queue.updated_at,
-                            block.reason
+                            queue.last_status, queue.heartbeat_at, queue.assignment_id,
+                            queue.created_at, queue.updated_at, block.reason
                      FROM agent_run_queue AS queue
                      LEFT JOIN agent_run_queue_blocks AS block ON block.queue_id = queue.id
                      WHERE queue.id = ?1",
@@ -1226,6 +1324,21 @@ impl QueueRepo {
     }
 }
 
+/// Mint the next honest assignment identity within the target row's session.
+///
+/// The shared application-state connection is process-serialized, so reading the maximum and
+/// consuming it in the caller's UPDATE cannot race another queue mutation. Gaps are harmless;
+/// ordering and exact equality are the protocol properties.
+fn next_assignment_id_for_row(conn: &Connection, id: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(assignment_id), 0) + 1
+         FROM agent_run_queue
+         WHERE session_id = (SELECT session_id FROM agent_run_queue WHERE id = ?1)",
+        params![id],
+        |row| row.get(0),
+    )
+}
+
 fn row_to_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
     let status_tag: String = row.get(6)?;
     let payload_text: String = row.get(7)?;
@@ -1246,9 +1359,10 @@ fn row_to_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
         no_progress_count: row.get(10)?,
         last_status: row.get(11)?,
         heartbeat_at: row.get(12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
-        blocked_reason: row.get(15)?,
+        assignment_id: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+        blocked_reason: row.get(16)?,
     })
 }
 
@@ -1436,6 +1550,7 @@ mod tests {
             no_progress_count: 0,
             last_status: None,
             heartbeat_at: None,
+            assignment_id: 0,
             blocked_reason: None,
             created_at: 1000,
             updated_at: 1000,
@@ -1447,6 +1562,108 @@ mod tests {
         let repo = repo();
         repo.ensure_schema().unwrap();
         repo.ensure_schema().unwrap();
+    }
+
+    #[test]
+    fn ensure_schema_upgrades_legacy_queue_without_losing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy-application-state.db");
+        {
+            let legacy = Connection::open(&db_path).unwrap();
+            legacy
+                .execute(
+                    "CREATE TABLE agent_run_queue (
+                id                 TEXT PRIMARY KEY,
+                task_id            TEXT,
+                session_id         TEXT NOT NULL,
+                worker_id          TEXT NOT NULL,
+                role_type          TEXT NOT NULL,
+                cli                TEXT NOT NULL,
+                status             TEXT NOT NULL,
+                payload            TEXT NOT NULL,
+                attempts           INTEGER NOT NULL DEFAULT 0,
+                continuation_count INTEGER NOT NULL DEFAULT 0,
+                no_progress_count  INTEGER NOT NULL DEFAULT 0,
+                last_status        TEXT,
+                heartbeat_at       INTEGER,
+                created_at         INTEGER NOT NULL,
+                updated_at         INTEGER NOT NULL
+            )",
+                    [],
+                )
+                .unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO agent_run_queue
+                (id, task_id, session_id, worker_id, role_type, cli, status, payload,
+                 attempts, continuation_count, no_progress_count, last_status,
+                 heartbeat_at, created_at, updated_at)
+             VALUES ('legacy-run', 'T2', 'legacy-session', 'legacy-worker', 'backend',
+                     'codex', 'finalized', '{\"sentinel\":true}', 3, 4, 5, 'completed',
+                     1234, 1000, 2000)",
+                    [],
+                )
+                .unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO agent_run_queue
+                        SELECT 'legacy-run-2', task_id, session_id, 'legacy-worker-2',
+                               role_type, cli, status, payload, attempts, continuation_count,
+                               no_progress_count, last_status, heartbeat_at, created_at, updated_at
+                        FROM agent_run_queue WHERE id = 'legacy-run'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        ensure_schema(&conn).unwrap();
+        ensure_schema(&conn).unwrap();
+
+        let columns = {
+            let mut stmt = conn.prepare("PRAGMA table_info(agent_run_queue)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(
+            columns.iter().any(|column| column == "assignment_id"),
+            "the deployed table must gain the assignment identity column"
+        );
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_run_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(row_count, 2, "every legacy row must survive the migration");
+        let retained: (i64, String, String, i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), id, payload, attempts, heartbeat_at, assignment_id
+                 FROM agent_run_queue WHERE id = 'legacy-run'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            retained,
+            (
+                1,
+                "legacy-run".to_string(),
+                "{\"sentinel\":true}".to_string(),
+                3,
+                1234,
+                0,
+            ),
+            "migration must preserve the full legacy row and leave unknown history unstamped"
+        );
     }
 
     #[test]

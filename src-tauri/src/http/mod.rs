@@ -24,6 +24,14 @@ mod tests_wg_schema;
 mod tests_wg_state;
 #[cfg(test)]
 mod tests_wg_templates;
+#[cfg(test)]
+mod tests_wg_api;
+#[cfg(test)]
+mod tests_wg_roles;
+#[cfg(test)]
+mod tests_wg_authority;
+#[cfg(test)]
+mod tests_wg_verifier;
 
 use crate::http::routes::create_router;
 use crate::http::state::AppState;

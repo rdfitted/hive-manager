@@ -4,6 +4,7 @@
 //! specialized submodules for better maintainability and testability.
 
 pub mod fusion;
+pub mod org_graph;
 pub mod planner;
 pub mod resolver;
 pub mod session_orchestrator;

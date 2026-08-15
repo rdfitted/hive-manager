@@ -283,6 +283,8 @@ mod tests {
                     status,
                     config: AgentConfig::default(),
                     parent_id: None,
+                    role_definition_id: None,
+                    role_definition_version: None,
                     commit_sha: None,
                     base_commit_sha: None,
                 })
@@ -515,6 +517,8 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };
@@ -526,6 +530,8 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };
@@ -552,6 +558,8 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };
@@ -563,6 +571,8 @@ mod tests {
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         };

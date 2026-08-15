@@ -307,6 +307,7 @@ impl QueueManager {
             no_progress_count: 0,
             last_status: None,
             heartbeat_at: None,
+            assignment_id: 0,
             blocked_reason: None,
             created_at: now,
             updated_at: now,
@@ -356,6 +357,7 @@ impl QueueManager {
             no_progress_count: 0,
             last_status: None,
             heartbeat_at: None,
+            assignment_id: 0,
             blocked_reason: None,
             created_at: now,
             updated_at: now,
@@ -796,22 +798,36 @@ impl QueueManager {
         worker_id: &str,
         status: &str,
     ) -> Result<bool, StorageError> {
+        self.record_heartbeat_for_assignment(session_id, worker_id, None, status)
+            .await
+    }
+
+    /// Record a heartbeat for one durable assignment, falling back deterministically only
+    /// when an older caller omits `assignment_id`.
+    pub async fn record_heartbeat_for_assignment(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        assignment_id: Option<i64>,
+        status: &str,
+    ) -> Result<bool, StorageError> {
         let now = Self::now_ms();
-        let updated = self
+        let updated_row_id = self
             .repo
-            .record_heartbeat(session_id, worker_id, status, now)?;
-        if updated && status == "completed" {
-            if let Some(row) = self
-                .repo
-                .rows_for_session(session_id)?
-                .into_iter()
-                .find(|row| row.worker_id == worker_id)
-            {
-                self.emit_for_row(&row.id, EventType::WorkerFinalized, Severity::Info)
+            .record_heartbeat_for_assignment(
+                session_id,
+                worker_id,
+                assignment_id,
+                status,
+                now,
+            )?;
+        if status == "completed" {
+            if let Some(row_id) = updated_row_id.as_deref() {
+                self.emit_for_row(row_id, EventType::WorkerFinalized, Severity::Info)
                     .await;
             }
         }
-        Ok(updated)
+        Ok(updated_row_id.is_some())
     }
 
     /// Maintenance: flip stale `running` rows back to `queued`. Emits `WorkerReclaimed`

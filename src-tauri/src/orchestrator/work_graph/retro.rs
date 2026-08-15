@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -37,6 +38,7 @@ use super::schema::{
 
 pub const PROMOTION_RUN_THRESHOLD: usize = 2;
 pub const REVIEW_ESCAPE_EFFECT_KIND: &str = "review_escape";
+pub const ROLE_SCOPE_GAP_EFFECT_KIND: &str = "role_scope_gap";
 pub const UNREVIEWED_OUTCOME: &str = "unreviewed";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +59,98 @@ impl Ord for TemplateKey {
             .cmp(&other.template_id)
             .then(self.template_version.cmp(&other.template_version))
     }
+}
+
+/// Exact role-definition lineage used for historical aggregation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleDefinitionKey {
+    pub definition_id: String,
+    pub definition_version: u32,
+}
+
+impl PartialOrd for RoleDefinitionKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RoleDefinitionKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.definition_id
+            .cmp(&other.definition_id)
+            .then(self.definition_version.cmp(&other.definition_version))
+    }
+}
+
+/// Immutable attribution captured when an agent resolves its role definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRoleDefinitionAttribution {
+    pub session_id: String,
+    pub agent_id: String,
+    pub definition: RoleDefinitionKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleRefinementSignal {
+    AdditionalAttempts,
+    RemediationDetours,
+    ReviewEscapes,
+    UnusedKnowledgeScope,
+    DeclaredScopeGap,
+}
+
+impl RoleRefinementSignal {
+    pub const fn scope_impact(self) -> ScopeImpact {
+        match self {
+            Self::AdditionalAttempts | Self::RemediationDetours => ScopeImpact::NoScopeChange,
+            Self::ReviewEscapes | Self::UnusedKnowledgeScope => ScopeImpact::Narrowing,
+            Self::DeclaredScopeGap => ScopeImpact::Widening,
+        }
+    }
+
+    const fn change_key(self) -> &'static str {
+        match self {
+            Self::AdditionalAttempts => "additional_attempts",
+            Self::RemediationDetours => "remediation_detours",
+            Self::ReviewEscapes => "review_escapes",
+            Self::UnusedKnowledgeScope => "unused_knowledge_scope",
+            Self::DeclaredScopeGap => "declared_scope_gap",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeImpact {
+    Narrowing,
+    Widening,
+    NoScopeChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleDefinitionRefinementObservation {
+    pub repo_id: String,
+    pub session_id: String,
+    pub archive_id: String,
+    pub definition: RoleDefinitionKey,
+    pub signal: RoleRefinementSignal,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleDefinitionRefinementProposal {
+    pub tier: PromotionTier,
+    pub definition: RoleDefinitionKey,
+    pub change_key: String,
+    pub scope_impact: ScopeImpact,
+    pub observation_count: usize,
+    pub repo_ids: Vec<String>,
+    pub session_ids: Vec<String>,
+    pub archive_ids: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub rationale: String,
 }
 
 /// The archive stores the aggregation portion of `ArchetypeLineage` on each
@@ -122,6 +216,7 @@ pub enum RetroOmissionReason {
     UnsupportedSchemaVersion,
     PlanGraphUnavailable,
     TemplateLineageUnavailable,
+    RoleDefinitionLineageUnavailable,
     EvaluatorProvenanceUnavailable,
     EventEvidenceUnavailable,
     RunLedgerEvidenceUnavailable,
@@ -304,6 +399,22 @@ pub struct RetroArchivePath {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Deserialize)]
+struct PersistedRoleAttributionSession {
+    id: String,
+    #[serde(default)]
+    agents: Vec<PersistedRoleAttributionAgent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedRoleAttributionAgent {
+    id: String,
+    #[serde(default)]
+    role_definition_id: Option<String>,
+    #[serde(default)]
+    role_definition_version: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanActualEditDistance {
     /// Unit-cost archived structural divergences. An edge rewire is one unit.
@@ -377,6 +488,50 @@ pub struct GotchaEdgeHitRate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleDefinitionRunMetric {
+    pub definition: RoleDefinitionKey,
+    pub agent_ids: Vec<String>,
+    pub node_ids: Vec<String>,
+    pub additional_attempts: Option<usize>,
+    pub remediation_detours: Option<usize>,
+    pub caught_defects: Option<usize>,
+    pub escaped_defects: Option<usize>,
+    pub gotcha_edges_eligible: Option<usize>,
+    pub gotcha_targets_attempted: Option<usize>,
+    pub confirmed_scope_gaps: usize,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleDefinitionAggregate {
+    pub definition: RoleDefinitionKey,
+    pub run_count: usize,
+    pub repo_ids: Vec<String>,
+    pub session_ids: Vec<String>,
+    pub archive_ids: Vec<String>,
+    pub additional_attempts: Option<usize>,
+    #[serde(default)]
+    pub additional_attempts_contributing_runs: usize,
+    pub remediation_detours: Option<usize>,
+    #[serde(default)]
+    pub remediation_detours_contributing_runs: usize,
+    pub caught_defects: Option<usize>,
+    #[serde(default)]
+    pub caught_defects_contributing_runs: usize,
+    pub escaped_defects: Option<usize>,
+    #[serde(default)]
+    pub escaped_defects_contributing_runs: usize,
+    pub gotcha_edges_eligible: Option<usize>,
+    #[serde(default)]
+    pub gotcha_edges_eligible_contributing_runs: usize,
+    pub gotcha_targets_attempted: Option<usize>,
+    #[serde(default)]
+    pub gotcha_targets_attempted_contributing_runs: usize,
+    pub confirmed_scope_gaps: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerRunRetro {
     pub repo_id: String,
     pub archive_id: String,
@@ -388,6 +543,8 @@ pub struct PerRunRetro {
     pub checkpoints: EvidenceMetric<Vec<CheckpointBarrierMetric>>,
     pub reviews: EvidenceMetric<Vec<ReviewEfficacyMetric>>,
     pub gotcha_edge_hit_rate: EvidenceMetric<GotchaEdgeHitRate>,
+    #[serde(default)]
+    pub role_definitions: Vec<RoleDefinitionRunMetric>,
     #[serde(default)]
     pub omissions: Vec<RetroOmission>,
 }
@@ -433,6 +590,10 @@ pub struct RetroReport {
     pub runs: Vec<PerRunRetro>,
     pub template_aggregates: Vec<TemplateAggregate>,
     pub promotion_proposals: Vec<DeviationPromotionProposal>,
+    #[serde(default)]
+    pub role_definition_aggregates: Vec<RoleDefinitionAggregate>,
+    #[serde(default)]
+    pub role_refinement_proposals: Vec<RoleDefinitionRefinementProposal>,
     /// Request bodies exposed for the sanctioned session-learning endpoint.
     pub learning_submissions: Vec<UnreviewedLearningSubmission>,
     #[serde(default)]
@@ -449,6 +610,8 @@ impl RetroReport {
             runs: Vec::new(),
             template_aggregates: Vec::new(),
             promotion_proposals: Vec::new(),
+            role_definition_aggregates: Vec::new(),
+            role_refinement_proposals: Vec::new(),
             learning_submissions: Vec::new(),
             omissions: vec![omission],
         }
@@ -460,13 +623,20 @@ pub fn evaluate_archive_paths(
     paths: &[RetroArchivePath],
 ) -> Result<RetroReport, RetroError> {
     let mut inputs = Vec::new();
+    let mut role_attributions = Vec::new();
     let mut omissions = Vec::new();
     for input in paths {
         match read_archive(&input.path) {
-            Ok(archive) => inputs.push(RetroRunInput {
-                repo_id: input.repo_id.clone(),
-                archive,
-            }),
+            Ok(archive) => {
+                let (mut loaded_attributions, mut attribution_omissions) =
+                    load_role_attributions_for_archive(&input.path, &archive);
+                role_attributions.append(&mut loaded_attributions);
+                omissions.append(&mut attribution_omissions);
+                inputs.push(RetroRunInput {
+                    repo_id: input.repo_id.clone(),
+                    archive,
+                });
+            }
             Err(error) => {
                 let rendered = error.to_string();
                 let reason = if rendered.contains("unsupported schema version") {
@@ -483,7 +653,13 @@ pub fn evaluate_archive_paths(
             }
         }
     }
-    evaluate_inputs(evaluator, &inputs, omissions, paths.is_empty())
+    evaluate_inputs(
+        evaluator,
+        &inputs,
+        &role_attributions,
+        omissions,
+        paths.is_empty(),
+    )
 }
 
 /// Discover and evaluate immutable archives beneath a completed session.
@@ -508,6 +684,7 @@ pub fn evaluate_completed_session(
         Err(error) => evaluate_inputs(
             evaluator,
             &[],
+            &[],
             vec![RetroOmission::new(
                 RetroOmissionReason::ArchiveUnreadable,
                 "archive",
@@ -523,12 +700,30 @@ pub fn evaluate_archives(
     evaluator: &IndependentEvaluator,
     inputs: &[RetroRunInput],
 ) -> Result<RetroReport, RetroError> {
-    evaluate_inputs(evaluator, inputs, Vec::new(), inputs.is_empty())
+    evaluate_inputs(evaluator, inputs, &[], Vec::new(), inputs.is_empty())
+}
+
+/// Evaluate in-memory archives with exact historical role-definition lineage.
+/// The legacy entry point remains available and reports missing lineage rather
+/// than guessing from a role binding or the current definition on disk.
+pub fn evaluate_archives_with_role_attributions(
+    evaluator: &IndependentEvaluator,
+    inputs: &[RetroRunInput],
+    role_attributions: &[AgentRoleDefinitionAttribution],
+) -> Result<RetroReport, RetroError> {
+    evaluate_inputs(
+        evaluator,
+        inputs,
+        role_attributions,
+        Vec::new(),
+        inputs.is_empty(),
+    )
 }
 
 fn evaluate_inputs(
     evaluator: &IndependentEvaluator,
     inputs: &[RetroRunInput],
+    role_attributions: &[AgentRoleDefinitionAttribution],
     mut omissions: Vec<RetroOmission>,
     no_candidates: bool,
 ) -> Result<RetroReport, RetroError> {
@@ -591,9 +786,25 @@ fn evaluate_inputs(
 
     let mut runs: Vec<_> = valid.iter().map(evaluate_run).collect();
     apply_review_escape_revisions(&valid, &mut runs, &mut omissions);
-    let (promotion_proposals, learning_submissions) =
+    for (input, run) in valid.iter().zip(runs.iter_mut()) {
+        let role_definitions = role_definition_metrics(
+            input,
+            run,
+            role_attributions,
+            &mut omissions,
+        );
+        run.role_definitions = role_definitions;
+    }
+    let (promotion_proposals, mut learning_submissions) =
         systematic_divergence(&valid, &runs, &mut omissions);
     let template_aggregates = aggregate_templates(&runs);
+    let role_definition_aggregates = aggregate_role_definitions(&runs);
+    let role_observations = role_refinement_observations(&runs);
+    let role_refinement_proposals =
+        propose_role_definition_refinements(&role_observations);
+    learning_submissions.extend(role_refinement_learnings(
+        &role_refinement_proposals,
+    ));
     for run in &runs {
         omissions.extend(run.omissions.iter().cloned());
     }
@@ -602,6 +813,8 @@ fn evaluate_inputs(
         runs,
         template_aggregates,
         promotion_proposals,
+        role_definition_aggregates,
+        role_refinement_proposals,
         learning_submissions,
         omissions,
     })
@@ -640,8 +853,319 @@ fn evaluate_run(input: &RetroRunInput) -> PerRunRetro {
         checkpoints: checkpoint_metrics(archive),
         reviews: review_metrics(archive),
         gotcha_edge_hit_rate: gotcha_hit_rate(archive),
+        role_definitions: Vec::new(),
         omissions: run_omissions,
     }
+}
+
+fn load_role_attributions_for_archive(
+    archive_path: &Path,
+    archive: &WorkGraphArchive,
+) -> (
+    Vec<AgentRoleDefinitionAttribution>,
+    Vec<RetroOmission>,
+) {
+    let Some(session_dir) = archive_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    else {
+        return (
+            Vec::new(),
+            vec![RetroOmission::new(
+                RetroOmissionReason::RoleDefinitionLineageUnavailable,
+                "role_definition_attribution",
+                "the archive path does not identify its session directory",
+                vec![archive_path.display().to_string()],
+            )
+            .for_archive(&archive.archive_id)],
+        );
+    };
+    let session_path = session_dir.join("session.json");
+    let persisted = match fs::read_to_string(&session_path)
+        .map_err(|error| error.to_string())
+        .and_then(|source| {
+            serde_json::from_str::<PersistedRoleAttributionSession>(&source)
+                .map_err(|error| error.to_string())
+        }) {
+        Ok(persisted) => persisted,
+        Err(detail) => {
+            return (
+                Vec::new(),
+                vec![RetroOmission::new(
+                    RetroOmissionReason::RoleDefinitionLineageUnavailable,
+                    "role_definition_attribution",
+                    format!("persisted agent role-definition lineage is unavailable: {detail}"),
+                    vec![session_path.display().to_string()],
+                )
+                .for_archive(&archive.archive_id)],
+            );
+        }
+    };
+    if persisted.id != archive.session_id {
+        return (
+            Vec::new(),
+            vec![RetroOmission::new(
+                RetroOmissionReason::RoleDefinitionLineageUnavailable,
+                "role_definition_attribution",
+                "the persisted session identity does not match the archive",
+                vec![persisted.id, archive.session_id.clone()],
+            )
+            .for_archive(&archive.archive_id)],
+        );
+    }
+
+    let mut attributions = Vec::new();
+    let mut incomplete = Vec::new();
+    let relevant_agent_ids: BTreeSet<_> = archive
+        .outcomes
+        .iter()
+        .flat_map(|outcome| outcome.agent_ids.iter().cloned())
+        .collect();
+    for agent in persisted.agents {
+        if !relevant_agent_ids.contains(&agent.id) {
+            continue;
+        }
+        match (agent.role_definition_id, agent.role_definition_version) {
+            (Some(definition_id), Some(definition_version))
+                if !definition_id.trim().is_empty() && definition_version > 0 =>
+            {
+                attributions.push(AgentRoleDefinitionAttribution {
+                    session_id: archive.session_id.clone(),
+                    agent_id: agent.id,
+                    definition: RoleDefinitionKey {
+                        definition_id,
+                        definition_version,
+                    },
+                });
+            }
+            _ => incomplete.push(agent.id),
+        }
+    }
+    let omissions = if incomplete.is_empty() {
+        Vec::new()
+    } else {
+        vec![RetroOmission::new(
+            RetroOmissionReason::RoleDefinitionLineageUnavailable,
+            "role_definition_attribution",
+            "persisted agents without both a definition id and version were excluded",
+            incomplete,
+        )
+        .for_archive(&archive.archive_id)]
+    };
+    (attributions, omissions)
+}
+
+#[derive(Default)]
+struct RoleMetricAccumulator {
+    agent_ids: BTreeSet<String>,
+    node_ids: BTreeSet<String>,
+    additional_attempts: usize,
+    remediation_detours: usize,
+    caught_defects: usize,
+    escaped_defects: usize,
+    gotcha_edges_eligible: usize,
+    gotcha_targets_attempted: usize,
+    confirmed_scope_gaps: usize,
+    evidence_refs: BTreeSet<String>,
+}
+
+fn role_definition_metrics(
+    input: &RetroRunInput,
+    run: &PerRunRetro,
+    role_attributions: &[AgentRoleDefinitionAttribution],
+    omissions: &mut Vec<RetroOmission>,
+) -> Vec<RoleDefinitionRunMetric> {
+    let archive = &input.archive;
+    let mut by_agent = BTreeMap::new();
+    let mut conflicts = BTreeSet::new();
+    for attribution in role_attributions
+        .iter()
+        .filter(|item| item.session_id == archive.session_id)
+    {
+        if attribution.agent_id.trim().is_empty()
+            || attribution.definition.definition_id.trim().is_empty()
+            || attribution.definition.definition_version == 0
+        {
+            conflicts.insert(attribution.agent_id.clone());
+            continue;
+        }
+        match by_agent.get(&attribution.agent_id) {
+            Some(existing) if existing != &attribution.definition => {
+                conflicts.insert(attribution.agent_id.clone());
+            }
+            _ => {
+                by_agent.insert(attribution.agent_id.clone(), attribution.definition.clone());
+            }
+        }
+    }
+    for agent_id in &conflicts {
+        by_agent.remove(agent_id);
+    }
+
+    let mut by_node: BTreeMap<String, BTreeSet<RoleDefinitionKey>> = BTreeMap::new();
+    let mut accumulators: BTreeMap<RoleDefinitionKey, RoleMetricAccumulator> = BTreeMap::new();
+    let mut missing_agents = BTreeSet::new();
+    for outcome in &archive.outcomes {
+        let mut outcome_definitions = BTreeSet::new();
+        let confirmed_scope_gaps = outcome
+            .effects
+            .iter()
+            .filter(|effect| effect.confirmed && effect.kind == ROLE_SCOPE_GAP_EFFECT_KIND)
+            .count();
+        for agent_id in &outcome.agent_ids {
+            let Some(definition) = by_agent.get(agent_id) else {
+                missing_agents.insert(agent_id.clone());
+                continue;
+            };
+            let newly_inserted_definition = outcome_definitions.insert(definition.clone());
+            let accumulator = accumulators.entry(definition.clone()).or_default();
+            accumulator.agent_ids.insert(agent_id.clone());
+            accumulator
+                .evidence_refs
+                .extend(outcome.source_refs.iter().cloned());
+            if newly_inserted_definition {
+                accumulator.confirmed_scope_gaps += confirmed_scope_gaps;
+            }
+            accumulator.evidence_refs.extend(
+                outcome
+                    .effects
+                    .iter()
+                    .filter(|effect| effect.confirmed)
+                    .map(|effect| effect.source_ref.clone()),
+            );
+        }
+        let mut node_ids = BTreeSet::from([outcome.subject_id.clone()]);
+        if let Some(task_id) = &outcome.task_id {
+            node_ids.insert(task_id.clone());
+        }
+        for node_id in node_ids {
+            by_node
+                .entry(node_id.clone())
+                .or_default()
+                .extend(outcome_definitions.iter().cloned());
+            for definition in &outcome_definitions {
+                accumulators
+                    .entry(definition.clone())
+                    .or_default()
+                    .node_ids
+                    .insert(node_id.clone());
+            }
+        }
+    }
+
+    let mut lineage_examples = conflicts;
+    lineage_examples.extend(missing_agents);
+    let lineage_already_reported = omissions.iter().any(|omission| {
+        omission.reason == RetroOmissionReason::RoleDefinitionLineageUnavailable
+            && omission.archive_id.as_deref() == Some(archive.archive_id.as_str())
+    });
+    if (!lineage_examples.is_empty() || (by_agent.is_empty() && !archive.outcomes.is_empty()))
+        && !lineage_already_reported
+    {
+        omissions.push(
+            RetroOmission::new(
+                RetroOmissionReason::RoleDefinitionLineageUnavailable,
+                "role_definition_attribution",
+                "runtime agent ids without one exact persisted role-definition version were excluded",
+                lineage_examples.into_iter().collect(),
+            )
+            .for_archive(&archive.archive_id),
+        );
+    }
+
+    if let Some(nodes) = run.nodes.value() {
+        for node in nodes {
+            let Some(definitions) = by_node.get(&node.node_id) else {
+                continue;
+            };
+            for definition in definitions {
+                let accumulator = accumulators.entry(definition.clone()).or_default();
+                accumulator.additional_attempts += node.additional_attempts.unwrap_or(0);
+                accumulator.remediation_detours += node.remediation_detours.unwrap_or(0);
+            }
+        }
+    }
+
+    if let Some(reviews) = run.reviews.value() {
+        for review in reviews {
+            let Some(definitions) = by_node.get(&review.verdict_id) else {
+                continue;
+            };
+            for definition in definitions {
+                let accumulator = accumulators.entry(definition.clone()).or_default();
+                accumulator.caught_defects += review.caught_defects;
+                accumulator.escaped_defects += review.escaped_defects;
+                accumulator
+                    .evidence_refs
+                    .extend(review.evidence_refs.iter().cloned());
+                accumulator.evidence_refs.extend(
+                    review
+                        .revisions
+                        .iter()
+                        .map(|revision| revision.source_ref.clone()),
+                );
+            }
+        }
+    }
+
+    let knowledge_available = !archive.runtime_graph.omissions.iter().any(|omission| {
+        omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+    });
+    let event_available = source_available(archive, ArchiveSourceKind::EventLog);
+    if knowledge_available && event_available {
+        for edge in archive.runtime_graph.edges.iter().filter(|edge| {
+            edge.kind == EdgeKind::Informs
+                && edge.provenance == EdgeProvenance::Knowledge
+        }) {
+            let Some(definitions) = by_node.get(&edge.target) else {
+                continue;
+            };
+            let attempted = archive.outcomes.iter().any(|outcome| {
+                outcome_matches_node(outcome, &edge.target)
+                    && outcome.attempt_count > 0
+                    && event_backed(outcome)
+            });
+            for definition in definitions {
+                let accumulator = accumulators.entry(definition.clone()).or_default();
+                accumulator.gotcha_edges_eligible += 1;
+                accumulator.gotcha_targets_attempted += usize::from(attempted);
+                accumulator.evidence_refs.insert(format!(
+                    "knowledge-edge:{}->{}",
+                    edge.source, edge.target
+                ));
+            }
+        }
+    }
+
+    let node_evidence_available = run.nodes.value().is_some();
+    let review_evidence_available = run.reviews.value().is_some();
+    let gotcha_evidence_available = knowledge_available && event_available;
+    accumulators
+        .into_iter()
+        .map(|(definition, mut value)| {
+            value
+                .evidence_refs
+                .insert(format!("archive:{}", archive.archive_id));
+            RoleDefinitionRunMetric {
+                definition,
+                agent_ids: value.agent_ids.into_iter().collect(),
+                node_ids: value.node_ids.into_iter().collect(),
+                additional_attempts: node_evidence_available
+                    .then_some(value.additional_attempts),
+                remediation_detours: node_evidence_available
+                    .then_some(value.remediation_detours),
+                caught_defects: review_evidence_available.then_some(value.caught_defects),
+                escaped_defects: review_evidence_available.then_some(value.escaped_defects),
+                gotcha_edges_eligible: gotcha_evidence_available
+                    .then_some(value.gotcha_edges_eligible),
+                gotcha_targets_attempted: gotcha_evidence_available
+                    .then_some(value.gotcha_targets_attempted),
+                confirmed_scope_gaps: value.confirmed_scope_gaps,
+                evidence_refs: value.evidence_refs.into_iter().collect(),
+            }
+        })
+        .collect()
 }
 
 fn edit_distance(
@@ -1415,6 +1939,254 @@ fn unique_edge_kind(graph: &TaskGraph, source: &str, target: &str) -> Option<Str
         .filter_map(|edge| serde_json::to_string(&edge.kind).ok())
         .collect();
     (kinds.len() == 1).then(|| kinds.into_iter().next()).flatten()
+}
+
+fn role_refinement_observations(
+    runs: &[PerRunRetro],
+) -> Vec<RoleDefinitionRefinementObservation> {
+    let mut observations = Vec::new();
+    for run in runs {
+        for metric in &run.role_definitions {
+            let signals = [
+                (
+                    RoleRefinementSignal::AdditionalAttempts,
+                    metric.additional_attempts.unwrap_or(0) > 0,
+                ),
+                (
+                    RoleRefinementSignal::RemediationDetours,
+                    metric.remediation_detours.unwrap_or(0) > 0,
+                ),
+                (
+                    RoleRefinementSignal::ReviewEscapes,
+                    metric.escaped_defects.unwrap_or(0) > 0,
+                ),
+                (
+                    RoleRefinementSignal::UnusedKnowledgeScope,
+                    metric.gotcha_edges_eligible.unwrap_or(0) > 0
+                        && metric.gotcha_targets_attempted == Some(0),
+                ),
+                (
+                    RoleRefinementSignal::DeclaredScopeGap,
+                    metric.confirmed_scope_gaps > 0,
+                ),
+            ];
+            for (signal, observed) in signals {
+                if !observed {
+                    continue;
+                }
+                observations.push(RoleDefinitionRefinementObservation {
+                    repo_id: run.repo_id.clone(),
+                    session_id: run.session_id.clone(),
+                    archive_id: run.archive_id.clone(),
+                    definition: metric.definition.clone(),
+                    signal,
+                    evidence_refs: metric.evidence_refs.clone(),
+                });
+            }
+        }
+    }
+    observations
+}
+
+/// Return review-gated proposals only. The function has no definition path or
+/// git handle and therefore cannot apply or commit the proposed refinement.
+pub fn propose_role_definition_refinements(
+    observations: &[RoleDefinitionRefinementObservation],
+) -> Vec<RoleDefinitionRefinementProposal> {
+    let mut groups: BTreeMap<
+        (RoleDefinitionKey, RoleRefinementSignal),
+        BTreeMap<(String, String), &RoleDefinitionRefinementObservation>,
+    > = BTreeMap::new();
+    for observation in observations {
+        groups
+            .entry((observation.definition.clone(), observation.signal))
+            .or_default()
+            .entry((
+                observation.repo_id.clone(),
+                observation.session_id.clone(),
+            ))
+            .or_insert(observation);
+    }
+
+    let mut proposals = Vec::new();
+    for ((definition, signal), instances) in groups {
+        let repo_ids: BTreeSet<_> =
+            instances.values().map(|item| item.repo_id.clone()).collect();
+        if repo_ids.len() < 2 && instances.len() < PROMOTION_RUN_THRESHOLD {
+            continue;
+        }
+        let tier = if repo_ids.len() >= 2 {
+            PromotionTier::InstitutionalRevision
+        } else {
+            PromotionTier::ProjectOverride
+        };
+        let session_ids: BTreeSet<_> = instances
+            .values()
+            .map(|item| item.session_id.clone())
+            .collect();
+        let archive_ids: BTreeSet<_> = instances
+            .values()
+            .map(|item| item.archive_id.clone())
+            .collect();
+        let evidence_refs: BTreeSet<_> = instances
+            .values()
+            .flat_map(|item| item.evidence_refs.iter().cloned())
+            .collect();
+        let scope_impact = signal.scope_impact();
+        proposals.push(RoleDefinitionRefinementProposal {
+            tier,
+            definition,
+            change_key: signal.change_key().to_string(),
+            scope_impact,
+            observation_count: instances.len(),
+            repo_ids: repo_ids.into_iter().collect(),
+            session_ids: session_ids.into_iter().collect(),
+            archive_ids: archive_ids.into_iter().collect(),
+            evidence_refs: evidence_refs.into_iter().collect(),
+            rationale: match (tier, scope_impact) {
+                (PromotionTier::ProjectOverride, ScopeImpact::Widening) => {
+                    "repeated evidence in one repository suggests a wider role scope; widening is suspect by default and requires human review as a Tier 1 override".to_string()
+                }
+                (PromotionTier::InstitutionalRevision, ScopeImpact::Widening) => {
+                    "independent evidence across repositories suggests a wider role scope; widening is suspect by default and requires a PR-gated Tier 2 review".to_string()
+                }
+                (PromotionTier::ProjectOverride, _) => {
+                    "repeated evidence in one repository suggests a narrower or behavior-only role refinement for human review as a Tier 1 override".to_string()
+                }
+                (PromotionTier::InstitutionalRevision, _) => {
+                    "independent evidence across repositories suggests a role refinement for PR-gated Tier 2 review".to_string()
+                }
+            },
+        });
+    }
+    proposals
+}
+
+fn role_refinement_learnings(
+    proposals: &[RoleDefinitionRefinementProposal],
+) -> Vec<UnreviewedLearningSubmission> {
+    proposals
+        .iter()
+        .filter_map(|proposal| {
+            let session = proposal.session_ids.last()?.clone();
+            let definition = format!(
+                "{}@{}",
+                proposal.definition.definition_id,
+                proposal.definition.definition_version
+            );
+            Some(UnreviewedLearningSubmission {
+                session,
+                task: "post-run role-definition refinement proposal".to_string(),
+                outcome: UNREVIEWED_OUTCOME.to_string(),
+                keywords: vec![
+                    "role-definition".to_string(),
+                    definition.clone(),
+                    proposal.change_key.clone(),
+                    match proposal.scope_impact {
+                        ScopeImpact::Narrowing => "narrowing",
+                        ScopeImpact::Widening => "widening",
+                        ScopeImpact::NoScopeChange => "no-scope-change",
+                    }
+                    .to_string(),
+                ],
+                insight: format!(
+                    "Archived evidence proposes an unreviewed {} refinement for {definition} from {} independent session instance(s). The definition was not modified; evidence: {}.",
+                    proposal.change_key,
+                    proposal.observation_count,
+                    proposal.evidence_refs.join(", ")
+                ),
+                files_touched: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn add_optional(
+    total: &mut Option<usize>,
+    contributing_runs: &mut usize,
+    value: Option<usize>,
+) {
+    if let Some(value) = value {
+        *total.get_or_insert(0) += value;
+        *contributing_runs += 1;
+    }
+}
+
+fn aggregate_role_definitions(runs: &[PerRunRetro]) -> Vec<RoleDefinitionAggregate> {
+    let mut groups: BTreeMap<RoleDefinitionKey, RoleDefinitionAggregate> = BTreeMap::new();
+    for run in runs {
+        for metric in &run.role_definitions {
+            let aggregate = groups
+                .entry(metric.definition.clone())
+                .or_insert_with(|| RoleDefinitionAggregate {
+                    definition: metric.definition.clone(),
+                    run_count: 0,
+                    repo_ids: Vec::new(),
+                    session_ids: Vec::new(),
+                    archive_ids: Vec::new(),
+                    additional_attempts: None,
+                    additional_attempts_contributing_runs: 0,
+                    remediation_detours: None,
+                    remediation_detours_contributing_runs: 0,
+                    caught_defects: None,
+                    caught_defects_contributing_runs: 0,
+                    escaped_defects: None,
+                    escaped_defects_contributing_runs: 0,
+                    gotcha_edges_eligible: None,
+                    gotcha_edges_eligible_contributing_runs: 0,
+                    gotcha_targets_attempted: None,
+                    gotcha_targets_attempted_contributing_runs: 0,
+                    confirmed_scope_gaps: 0,
+                });
+            aggregate.run_count += 1;
+            aggregate.repo_ids.push(run.repo_id.clone());
+            aggregate.session_ids.push(run.session_id.clone());
+            aggregate.archive_ids.push(run.archive_id.clone());
+            add_optional(
+                &mut aggregate.additional_attempts,
+                &mut aggregate.additional_attempts_contributing_runs,
+                metric.additional_attempts,
+            );
+            add_optional(
+                &mut aggregate.remediation_detours,
+                &mut aggregate.remediation_detours_contributing_runs,
+                metric.remediation_detours,
+            );
+            add_optional(
+                &mut aggregate.caught_defects,
+                &mut aggregate.caught_defects_contributing_runs,
+                metric.caught_defects,
+            );
+            add_optional(
+                &mut aggregate.escaped_defects,
+                &mut aggregate.escaped_defects_contributing_runs,
+                metric.escaped_defects,
+            );
+            add_optional(
+                &mut aggregate.gotcha_edges_eligible,
+                &mut aggregate.gotcha_edges_eligible_contributing_runs,
+                metric.gotcha_edges_eligible,
+            );
+            add_optional(
+                &mut aggregate.gotcha_targets_attempted,
+                &mut aggregate.gotcha_targets_attempted_contributing_runs,
+                metric.gotcha_targets_attempted,
+            );
+            aggregate.confirmed_scope_gaps += metric.confirmed_scope_gaps;
+        }
+    }
+    groups
+        .into_values()
+        .map(|mut aggregate| {
+            aggregate.repo_ids.sort();
+            aggregate.repo_ids.dedup();
+            aggregate.session_ids.sort();
+            aggregate.session_ids.dedup();
+            aggregate.archive_ids.sort();
+            aggregate.archive_ids.dedup();
+            aggregate
+        })
+        .collect()
 }
 
 fn aggregate_templates(runs: &[PerRunRetro]) -> Vec<TemplateAggregate> {

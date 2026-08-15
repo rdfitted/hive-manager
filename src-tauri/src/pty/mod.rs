@@ -6,4 +6,4 @@ mod session;
 mod session;
 
 pub use manager::PtyManager;
-pub use session::{AgentConfig, AgentRole, AgentStatus, WorkerRole};
+pub use session::{AgentConfig, AgentRole, AgentStatus, RoleDefinitionRef, WorkerRole};

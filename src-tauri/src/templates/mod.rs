@@ -8,8 +8,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::cli::CliBehavior;
 use crate::coordination::queue_manager::{heartbeat_cadence_label, HEARTBEAT_MAX_INTERVAL_SECS};
 use crate::domain::{SessionMode, WorkspaceStrategy};
+use crate::orchestrator::org_graph::{AuthorityScope, KnowledgeRef};
 use crate::pty::WorkerRole;
 use crate::session::SessionType;
 
@@ -121,12 +123,20 @@ pub struct SessionTemplate {
     pub is_builtin: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CellTemplate {
     pub role: String,
     pub cli: String,
     pub model: Option<String>,
     pub prompt_template: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_scope: Vec<KnowledgeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<String>,
+    #[serde(default)]
+    pub authority: AuthorityScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<CliBehavior>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -156,18 +166,21 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                     cli: "claude".to_string(),
                     model: Some("opus".to_string()),
                     prompt_template: "queen-hive".to_string(),
+                    ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
                     model: Some("gpt-5.6-sol".to_string()),
                     prompt_template: "roles/backend".to_string(),
+                    ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
                     cli: "codex".to_string(),
                     model: Some("gpt-5.6-sol".to_string()),
                     prompt_template: "roles/frontend".to_string(),
+                    ..CellTemplate::default()
                 },
             ],
             workspace_strategy: WorkspaceStrategy::SharedCell,
@@ -195,24 +208,28 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                     cli: "claude".to_string(),
                     model: Some("opus".to_string()),
                     prompt_template: "queen-hive".to_string(),
+                    ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
                     model: Some("gpt-5.6-sol".to_string()),
                     prompt_template: "roles/backend".to_string(),
+                    ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
                     cli: "codex".to_string(),
                     model: Some("gpt-5.6-sol".to_string()),
                     prompt_template: "roles/frontend".to_string(),
+                    ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "coherence".to_string(),
                     cli: "droid".to_string(),
                     model: Some("glm-5.1".to_string()),
                     prompt_template: "roles/coherence".to_string(),
+                    ..CellTemplate::default()
                 },
             ],
             workspace_strategy: WorkspaceStrategy::SharedCell,
@@ -232,6 +249,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                     cli: "codex".to_string(),
                     model: Some("gpt-5.6-sol".to_string()),
                     prompt_template: "fusion-worker".to_string(),
+                    ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "candidate-b".to_string(),
@@ -240,12 +258,14 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                     cli: "codex".to_string(),
                     model: Some("gpt-5.6-terra".to_string()),
                     prompt_template: "fusion-worker".to_string(),
+                    ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "resolver".to_string(),
                     cli: "claude".to_string(),
                     model: Some("opus".to_string()),
                     prompt_template: "resolver".to_string(),
+                    ..CellTemplate::default()
                 },
             ],
             workspace_strategy: WorkspaceStrategy::IsolatedCell,
@@ -266,6 +286,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
                 cli: "claude".to_string(),
                 model: Some("opus".to_string()),
                 prompt_template: "queen-hive".to_string(),
+                ..CellTemplate::default()
             }],
         },
         RolePack {
@@ -276,6 +297,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
                 cli: "codex".to_string(),
                 model: Some("gpt-5.6-sol".to_string()),
                 prompt_template: "roles/backend".to_string(),
+                ..CellTemplate::default()
             }],
         },
         RolePack {
@@ -286,6 +308,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
                 cli: "droid".to_string(),
                 model: Some("glm-5.1".to_string()),
                 prompt_template: "roles/coherence".to_string(),
+                ..CellTemplate::default()
             }],
         },
         RolePack {
@@ -296,6 +319,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
                 cli: "claude".to_string(),
                 model: Some("opus".to_string()),
                 prompt_template: "resolver".to_string(),
+                ..CellTemplate::default()
             }],
         },
     ]

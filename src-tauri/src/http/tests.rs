@@ -350,6 +350,8 @@ fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str
             status: AgentStatus::Running,
             config: AgentConfig::default(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         })
@@ -389,6 +391,8 @@ fn make_test_agent(id: &str, role: AgentRole) -> AgentInfo {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        role_definition_id: None,
+        role_definition_version: None,
         commit_sha: None,
         base_commit_sha: None,
     }
@@ -421,6 +425,8 @@ fn make_test_session_for_completion(
             status: AgentStatus::Completed,
             config: AgentConfig::default(),
             parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
             commit_sha: None,
             base_commit_sha: None,
         });
@@ -4238,6 +4244,8 @@ async fn test_add_qa_worker_valid_request_reaches_controller() {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        role_definition_id: None,
+        role_definition_version: None,
         commit_sha: None,
         base_commit_sha: None,
     });
@@ -5022,6 +5030,8 @@ async fn milestone_ready_respawn_branch_arms_qa_and_preserves_iteration() {
             ..AgentConfig::default()
         },
         parent_id: None,
+        role_definition_id: None,
+        role_definition_version: None,
         commit_sha: None,
         base_commit_sha: None,
     });
@@ -5105,6 +5115,8 @@ async fn force_pass_is_allowed_before_the_milestone_handoff() {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        role_definition_id: None,
+        role_definition_version: None,
         commit_sha: None,
         base_commit_sha: None,
     });
@@ -6186,6 +6198,8 @@ async fn test_post_verdict_persists_commit_sha_and_rationale() {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        role_definition_id: None,
+        role_definition_version: None,
         commit_sha: None,
         base_commit_sha: None,
     });
@@ -6301,6 +6315,8 @@ async fn test_post_verdict_fail_persists_commit_sha_and_failure_state() {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        role_definition_id: None,
+        role_definition_version: None,
         commit_sha: None,
         base_commit_sha: None,
     });
@@ -9528,6 +9544,8 @@ async fn heartbeat_accepts_the_bare_queen_alias_and_canonicalizes_it() {
         status: AgentStatus::Running,
         config: AgentConfig::default(),
         parent_id: None,
+        role_definition_id: None,
+        role_definition_version: None,
         commit_sha: None,
         base_commit_sha: None,
     });
