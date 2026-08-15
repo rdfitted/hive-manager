@@ -55,6 +55,17 @@ function mockFetch(body: unknown, ok = true, status = 200) {
   return fetchMock;
 }
 
+/**
+ * Find a node's rect by its task id. Match on the rendered label — a node's
+ * textContent also carries its <title> tooltip, so a whole-node text match
+ * never equals the bare id.
+ */
+function boxFor(container: HTMLElement, id: string): Element | null | undefined {
+  return [...container.querySelectorAll('.wg-node')]
+    .find((node) => node.querySelector('.wg-label')?.textContent?.trim() === id)
+    ?.querySelector('.wg-box');
+}
+
 /** Let the $effect fire and its awaited fetch settle. */
 async function settle() {
   await tick();
@@ -94,31 +105,28 @@ describe('WorkGraphView', () => {
     expect(boxes).toHaveLength(3);
 
     // Wave 0 sits above wave 1 — the layout must express dependency depth.
-    // Match on the rendered label — a node's textContent also carries its
-    // <title> tooltip, so a whole-node text match never equals the bare id.
-    const y = (id: string) =>
-      Number(
-        [...container.querySelectorAll('.wg-node')]
-          .find((node) => node.querySelector('.wg-label')?.textContent?.trim() === id)
-          ?.querySelector('.wg-box')
-          ?.getAttribute('y')
-      );
+    const y = (id: string) => Number(boxFor(container, id)?.getAttribute('y'));
     expect(y('T1')).toBeLessThan(y('T2'));
     expect(y('T2')).toBe(y('T3'));
   });
 
-  it('renders blocked and not-started nodes with different classes', async () => {
+  it('maps blocked and not-started to mutually exclusive treatments', async () => {
     // The acceptance criterion: these two read identically in a task list and
-    // must never read identically here.
+    // must never read identically here. Assert the payload status → modifier
+    // mapping by task id (not by selecting on the modifier, which would be
+    // tautological), and assert exclusivity in both directions so a bug that
+    // applied both classes could not pass.
     mockFetch(payload());
     const { container } = render(WorkGraphView);
     await settle();
 
-    expect(container.querySelector('.wg-box--blocked')).not.toBeNull();
-    expect(container.querySelector('.wg-box--pending')).not.toBeNull();
-    expect(container.querySelector('.wg-box--blocked')?.className.baseVal).not.toBe(
-      container.querySelector('.wg-box--pending')?.className.baseVal
-    );
+    const blocked = boxFor(container, 'T2'); // status: blocked in the payload
+    const pending = boxFor(container, 'T3'); // status: pending in the payload
+
+    expect(blocked?.classList.contains('wg-box--blocked')).toBe(true);
+    expect(blocked?.classList.contains('wg-box--pending')).toBe(false);
+    expect(pending?.classList.contains('wg-box--pending')).toBe(true);
+    expect(pending?.classList.contains('wg-box--blocked')).toBe(false);
   });
 
   it('marks critical-path nodes distinctly', async () => {
