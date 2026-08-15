@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type RightPanelTab = 'status' | 'plan' | 'logs' | 'chat' | 'timeline' | 'files';
+export type RightPanelTab = 'status' | 'plan' | 'graph' | 'logs' | 'chat' | 'timeline' | 'files';
 
 export interface LayoutState {
   leftCollapsed: boolean;

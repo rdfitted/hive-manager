@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, ListBullets, NotePencil } from 'phosphor-svelte';
+  import { ChartBar, ChatCenteredText, ClockCounterClockwise, FileText, Graph, ListBullets, NotePencil } from 'phosphor-svelte';
   import { layout, RAIL_WIDTH, type RightPanelTab } from '$lib/stores/layout';
   import StatusPanel from './StatusPanel.svelte';
   import PlanView from './PlanView.svelte';
+  import WorkGraphView from './workgraph/WorkGraphView.svelte';
   import CoordinationPanel from './CoordinationPanel.svelte';
   import ConversationViewer from './ConversationViewer.svelte';
   import TimelineView from './timeline/TimelineView.svelte';
@@ -12,6 +13,7 @@
   const TABS: Array<{ id: RightPanelTab; label: string; icon: typeof ChartBar }> = [
     { id: 'status', label: 'Status', icon: ChartBar },
     { id: 'plan', label: 'Plan', icon: NotePencil },
+    { id: 'graph', label: 'Graph', icon: Graph },
     { id: 'files', label: 'Files', icon: FileText },
     { id: 'logs', label: 'Logs', icon: ListBullets },
     { id: 'chat', label: 'Chat', icon: ChatCenteredText },
@@ -71,6 +73,8 @@
         <StatusPanel />
       {:else if activeTab === 'plan'}
         <PlanView />
+      {:else if activeTab === 'graph'}
+        <WorkGraphView />
       {:else if activeTab === 'logs'}
         <CoordinationPanel />
       {:else if activeTab === 'timeline'}
