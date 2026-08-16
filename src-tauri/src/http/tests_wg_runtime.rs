@@ -13,7 +13,8 @@ use crate::domain::run_journal::{Confidence, LedgerEntry, StepKind, StepStatus};
 use crate::events::EventBus;
 use crate::orchestrator::work_graph::archive::{
     archive_completed_session, list_archives, read_archive,
-    schedule_completed_session_archive, ArchiveSourceKind,
+    schedule_completed_session_archive, ArchiveSourceKind, ArchiveSourceReport,
+    WorkGraphArchive,
     WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
 };
 use crate::orchestrator::work_graph::divergence::{
@@ -22,11 +23,14 @@ use crate::orchestrator::work_graph::divergence::{
 use crate::orchestrator::work_graph::review::{
     instantiate_review_templates, ReviewTemplate,
 };
+use crate::orchestrator::work_graph::retro::{
+    evaluate_archives, IndependentEvaluator, RetroRunInput,
+};
 use crate::orchestrator::work_graph::runtime::{
     derive_runtime_graph, instantiate_review_templates_and_record,
     mutate_and_record, mutation_log, reconstruct_structural_history,
     record_graph_change, record_review_verdict_and_record,
-    route_failed_verdict_and_record, GraphMutationType, ReviewVerdict,
+    route_failed_verdict_and_record, GraphMutationDelta, GraphMutationType, ReviewVerdict,
     RuntimeOutcomeStatus,
 };
 use crate::orchestrator::work_graph::{
@@ -66,6 +70,235 @@ fn event(
         payload,
         severity: Severity::Info,
     }
+}
+
+fn evaluate_runtime_retro(
+    plan: &TaskGraph,
+    runtime: crate::orchestrator::work_graph::runtime::RuntimeDerivation,
+    event_count: usize,
+) -> crate::orchestrator::work_graph::retro::RetroReport {
+    let archive = WorkGraphArchive {
+        schema_version: WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+        archive_id: "runtime-test-archive".to_string(),
+        session_id: "runtime-session".to_string(),
+        archived_at: Utc::now(),
+        plan_graph: Some(plan.clone()),
+        divergence: compute_divergence(Some(plan), &runtime.runtime_graph, &[]),
+        runtime_graph: runtime.runtime_graph,
+        deltas: Vec::new(),
+        outcomes: runtime.outcomes,
+        sources: vec![
+            ArchiveSourceReport {
+                kind: ArchiveSourceKind::EventLog,
+                location: "events.jsonl".to_string(),
+                available: true,
+                record_count: event_count,
+                omissions: Vec::new(),
+            },
+            ArchiveSourceReport {
+                kind: ArchiveSourceKind::MutationLog,
+                location: "memory/session-mutation-log".to_string(),
+                available: true,
+                record_count: 0,
+                omissions: Vec::new(),
+            },
+        ],
+    };
+    let evaluator = IndependentEvaluator::new(
+        "runtime-test-evaluator",
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    evaluate_archives(
+        &evaluator,
+        &[RetroRunInput {
+            repo_id: "runtime-test-repo".to_string(),
+            archive,
+        }],
+    )
+    .unwrap()
+}
+
+#[test]
+fn retry_records_total_attempts_and_retro_reports_one_additional_attempt() {
+    let plan = TaskGraph::new(vec![task("task-a", &["code"])], Vec::new());
+    let events = vec![
+        event(
+            "claim",
+            EventType::WorkerClaimed,
+            Some("worker-a"),
+            json!({"worker_id":"worker-a","task_id":"task-a"}),
+        ),
+        event(
+            "retry",
+            EventType::WorkerReclaimed,
+            Some("worker-a"),
+            json!({"worker_id":"worker-a","task_id":"task-a"}),
+        ),
+        event(
+            "complete",
+            EventType::AgentCompleted,
+            Some("worker-a"),
+            json!({}),
+        ),
+    ];
+
+    let derived = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
+    let outcome = derived
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.task_id.as_deref() == Some("task-a"))
+        .unwrap();
+    assert_eq!(outcome.attempt_count, 2, "attempt_count stores total attempts");
+
+    let report = evaluate_runtime_retro(&plan, derived, events.len());
+    let node_metrics = report.runs[0].nodes.value().unwrap();
+    let task_metric = node_metrics
+        .iter()
+        .find(|metric| metric.node_id == "task-a")
+        .unwrap();
+    assert_eq!(task_metric.additional_attempts, Some(1));
+}
+
+#[test]
+fn agent_completion_records_finished_at() {
+    let plan = TaskGraph::new(vec![task("task-a", &["code"])], Vec::new());
+    let completion = event(
+        "complete",
+        EventType::AgentCompleted,
+        Some("worker-a"),
+        json!({}),
+    );
+    let expected_finished_at = completion.timestamp;
+    let events = vec![
+        event(
+            "claim",
+            EventType::WorkerClaimed,
+            Some("worker-a"),
+            json!({"worker_id":"worker-a","task_id":"task-a"}),
+        ),
+        completion,
+    ];
+
+    let derived = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
+    let outcome = derived
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.task_id.as_deref() == Some("task-a"))
+        .unwrap();
+    assert_eq!(outcome.finished_at, Some(expected_finished_at));
+}
+
+#[test]
+fn lane_completion_records_event_backed_outcomes_and_reaches_retro() {
+    let plan = TaskGraph::new(
+        vec![task("queue-backed", &["root"]), task("in-lane", &["follow-up"])],
+        vec![WorkEdge::new(
+            "queue-backed",
+            "in-lane",
+            EdgeKind::Informs,
+            EdgeProvenance::Knowledge,
+        )],
+    );
+    let events = vec![
+        event(
+            "claim-root",
+            EventType::WorkerClaimed,
+            Some("worker-a"),
+            json!({"worker_id":"worker-a","task_id":"queue-backed"}),
+        ),
+        event(
+            "lane-complete",
+            EventType::AgentCompleted,
+            Some("worker-a"),
+            json!({}),
+        ),
+    ];
+
+    let derived = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
+    for task_id in ["queue-backed", "in-lane"] {
+        let outcome = derived
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id.as_deref() == Some(task_id))
+            .unwrap_or_else(|| panic!("missing terminal outcome for {task_id}"));
+        assert_eq!(outcome.subject_id, task_id);
+        assert_eq!(outcome.status, RuntimeOutcomeStatus::Completed);
+        if task_id == "in-lane" {
+            assert_eq!(
+                outcome.started_at, None,
+                "lane completion does not fabricate an unobserved start time"
+            );
+        }
+        assert!(
+            outcome.source_refs.iter().any(|source| source == "event:lane-complete"),
+            "{task_id} outcome is not event-backed by the real lane completion"
+        );
+    }
+    assert_eq!(
+        derived
+            .runtime_graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "in-lane")
+            .unwrap()
+            .status,
+        NodeStatus::Completed,
+        "a resolved completion must not remain at the queue projection's pending default"
+    );
+
+    let report = evaluate_runtime_retro(&plan, derived, events.len());
+    let in_lane_metric = report.runs[0]
+        .nodes
+        .value()
+        .unwrap()
+        .iter()
+        .find(|metric| metric.node_id == "in-lane")
+        .expect("the retro reports the non-queue-backed plan node");
+    assert_eq!(in_lane_metric.additional_attempts, Some(0));
+    let gotcha = report.runs[0].gotcha_edge_hit_rate.value().unwrap();
+    assert_eq!(gotcha.eligible_knowledge_edges, 1);
+    assert_eq!(
+        gotcha.targets_attempted, 1,
+        "retro event_backed/outcome_matches_node predicates must reach in-lane"
+    );
+}
+
+#[test]
+fn unresolved_completion_is_reported_as_typed_omission() {
+    let plan = TaskGraph::new(vec![task("unresolved-task", &["code"])], Vec::new());
+    let events = vec![event(
+        "unresolved-complete",
+        EventType::AgentCompleted,
+        Some("unmapped-agent"),
+        json!({}),
+    )];
+
+    let derived = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
+    let omission = derived
+        .runtime_graph
+        .omissions
+        .iter()
+        .find(|omission| {
+            omission.reason == WorkGraphOmissionReason::CompletionUnresolved
+        })
+        .expect("unresolvable completion must not be reported as an ordinary pending task");
+    assert_eq!(omission.count, 1);
+    assert_eq!(
+        omission.examples,
+        vec!["event:unresolved-complete:agent:unmapped-agent"]
+    );
+    assert!(!derived.outcomes.iter().any(|outcome| {
+        outcome.task_id.as_deref() == Some("unresolved-task")
+    }));
+    let agent_outcome = derived
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.subject_id == "agent:unmapped-agent")
+        .unwrap();
+    assert_eq!(agent_outcome.started_at, None);
+    assert!(agent_outcome.finished_at.is_some());
 }
 
 #[test]
@@ -292,6 +525,59 @@ fn review_and_remediation_mutations_are_append_only_and_reconstructable() {
     )
     .is_err());
     assert_eq!(mutation_log(session_id).len(), 3);
+}
+
+#[test]
+fn structural_history_rejects_shape_divergence_and_duplicates_but_accepts_status_only_changes() {
+    let structural = TaskGraph::new(
+        vec![task("task-a", &["code"]), task("task-b", &["review"])],
+        vec![WorkEdge::new(
+            "task-a",
+            "task-b",
+            EdgeKind::Informs,
+            EdgeProvenance::Knowledge,
+        )],
+    );
+    let delta = GraphMutationDelta {
+        sequence: 1,
+        observed_at: Utc::now(),
+        mutation_type: GraphMutationType::Other,
+        before: TaskGraph::default(),
+        after: structural.clone(),
+        source_refs: vec!["test:structural-contract".to_string()],
+    };
+
+    let mut divergent = structural.clone();
+    divergent.nodes[1].title = "Structurally different title".to_string();
+    assert_eq!(divergent.nodes.len(), delta.after.nodes.len());
+    assert_eq!(divergent.edges, delta.after.edges);
+    assert_eq!(
+        reconstruct_structural_history(&divergent, std::slice::from_ref(&delta)).unwrap_err(),
+        "final runtime graph does not match mutation delta 1"
+    );
+
+    let mut duplicate_ids = structural.clone();
+    duplicate_ids.nodes[1].id = duplicate_ids.nodes[0].id.clone();
+    let duplicate_delta = GraphMutationDelta {
+        after: duplicate_ids.clone(),
+        ..delta.clone()
+    };
+    assert_eq!(duplicate_ids.nodes.len(), duplicate_delta.after.nodes.len());
+    assert_eq!(
+        reconstruct_structural_history(
+            &duplicate_ids,
+            std::slice::from_ref(&duplicate_delta),
+        )
+        .unwrap_err(),
+        "final runtime graph does not match mutation delta 1"
+    );
+
+    let mut status_only = structural;
+    status_only.nodes[0].status = NodeStatus::Completed;
+    assert_eq!(
+        reconstruct_structural_history(&status_only, std::slice::from_ref(&delta)).unwrap(),
+        vec![delta.before.clone(), delta.after.clone()]
+    );
 }
 
 #[test]

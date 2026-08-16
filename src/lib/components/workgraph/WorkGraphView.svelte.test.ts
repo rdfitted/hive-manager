@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import type { BindingRef, NodeStatus, WorkGraphNode } from '$lib/workgraph/types';
 
 const storeMocks = vi.hoisted(() => ({
   setActiveSession: undefined as ((session: { id: string } | null) => void) | undefined,
@@ -18,17 +19,38 @@ vi.mock('$lib/config', () => ({
 }));
 
 import WorkGraphView from './WorkGraphView.svelte';
+import workGraphViewSource from './WorkGraphView.svelte?raw';
 
 const ROLE = (value: string) => ({ kind: 'role' as const, value });
+
+function graphNode(
+  id: string,
+  status: NodeStatus,
+  lane: BindingRef,
+  overrides: Partial<WorkGraphNode> = {}
+): WorkGraphNode {
+  return {
+    id,
+    title: `Task ${id}`,
+    kind: 'task',
+    status,
+    lane,
+    contract: { inputs: [], outputs: [], acceptance: [] },
+    contract_summary: { input_count: 0, output_count: 0, acceptance_count: 0 },
+    expansion: null,
+    progress: null,
+    ...overrides,
+  };
+}
 
 function payload(overrides: Record<string, unknown> = {}) {
   return {
     view: 'runtime',
     source: 'live',
     nodes: [
-      { id: 'T1', status: 'completed', lane: ROLE('backend'), contract_summary: { input_count: 1, output_count: 1, acceptance_count: 1 } },
-      { id: 'T2', status: 'blocked', lane: ROLE('backend'), contract_summary: { input_count: 1, output_count: 1, acceptance_count: 1 } },
-      { id: 'T3', status: 'pending', lane: ROLE('frontend'), contract_summary: { input_count: 0, output_count: 1, acceptance_count: 1 } },
+      graphNode('T1', 'completed', ROLE('backend'), { title: 'Prepare API contract' }),
+      graphNode('T2', 'blocked', ROLE('backend'), { title: 'Project runtime graph' }),
+      graphNode('T3', 'pending', ROLE('frontend'), { title: 'Render work graph' }),
     ],
     edges: [
       { source: 'T1', target: 'T2', kind: 'depends_on', provenance: 'planner' },
@@ -55,14 +77,10 @@ function mockFetch(body: unknown, ok = true, status = 200) {
   return fetchMock;
 }
 
-/**
- * Find a node's rect by its task id. Match on the rendered label — a node's
- * textContent also carries its <title> tooltip, so a whole-node text match
- * never equals the bare id.
- */
+/** Find a node's rect by the stable id carried separately from its label. */
 function boxFor(container: HTMLElement, id: string): Element | null | undefined {
   return [...container.querySelectorAll('.wg-node')]
-    .find((node) => node.querySelector('.wg-label')?.textContent?.trim() === id)
+    .find((node) => node.getAttribute('data-node-id') === id)
     ?.querySelector('.wg-box');
 }
 
@@ -108,6 +126,308 @@ describe('WorkGraphView', () => {
     const y = (id: string) => Number(boxFor(container, id)?.getAttribute('y'));
     expect(y('T1')).toBeLessThan(y('T2'));
     expect(y('T2')).toBe(y('T3'));
+  });
+
+  it('truncates and clips every label to its own node box', async () => {
+    const longId = '1234567890'.repeat(5);
+    const lane = ROLE('runtime-context');
+    mockFetch(
+      payload({
+        nodes: [
+          graphNode(longId, 'running', lane, { title: longId }),
+        ],
+        edges: [],
+        waves: [[longId]],
+        status_by_node: { [longId]: 'running' },
+        lane_assignment: { [longId]: lane },
+        critical_path: [],
+      })
+    );
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const node = [...container.querySelectorAll('.wg-node')].find(
+      (candidate) => candidate.getAttribute('data-node-id') === longId
+    );
+    const box = node?.querySelector('.wg-box');
+    const clip = node?.querySelector('.wg-label-clip');
+
+    expect(node?.querySelector('.wg-label')?.textContent?.trim()).toBe('12345678…');
+    expect(clip?.getAttribute('overflow')).toBe('hidden');
+    expect(clip?.getAttribute('x')).toBe(box?.getAttribute('x'));
+    expect(clip?.getAttribute('y')).toBe(box?.getAttribute('y'));
+    expect(clip?.getAttribute('width')).toBe(box?.getAttribute('width'));
+    expect(clip?.getAttribute('height')).toBe(box?.getAttribute('height'));
+  });
+
+  it('renders readable titles and keeps runtime context visually secondary', async () => {
+    const contextId = `context-${'x'.repeat(42)}`;
+    const task = graphNode('T16', 'running', ROLE('frontend'), { title: 'Render node titles' });
+    const context = graphNode(contextId, 'running', ROLE('runtime'), {
+      title: 'Runtime context',
+      kind: 'context',
+    });
+    mockFetch(
+      payload({
+        nodes: [task, context],
+        edges: [],
+        waves: [[task.id, context.id]],
+        status_by_node: { [task.id]: task.status, [context.id]: context.status },
+        lane_assignment: { [task.id]: task.lane, [context.id]: context.lane },
+        critical_path: [task.id],
+      })
+    );
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const taskElement = container.querySelector(`[data-node-id="${task.id}"]`);
+    const contextElement = [...container.querySelectorAll('.wg-node')].find(
+      (candidate) => candidate.getAttribute('data-node-id') === contextId
+    ) as SVGGElement | undefined;
+
+    expect(contextId).toHaveLength(50);
+    expect(taskElement?.querySelector('.wg-label')?.textContent?.trim()).toBe('Render n…');
+    expect(contextElement?.querySelector('.wg-label')?.textContent?.trim()).toBe('Runtime …');
+    expect(contextElement?.classList.contains('wg-node--context')).toBe(true);
+    expect(taskElement?.classList.contains('wg-node--context')).toBe(false);
+    expect(contextElement?.querySelector('.wg-box')?.getAttribute('rx')).toBe('13');
+    expect(taskElement?.querySelector('.wg-box')?.getAttribute('rx')).toBe('5');
+    expect(contextElement?.getAttribute('aria-label')).toContain(`Runtime context — ${contextId}`);
+
+    contextElement?.focus();
+    expect(document.activeElement).toBe(contextElement);
+  });
+
+  it('reveals identical inspector content on hover and keyboard focus', async () => {
+    const dependency = graphNode('T1', 'completed', ROLE('backend'), {
+      title: 'Prepare API contract',
+      kind: 'checkpoint',
+    });
+    const target = graphNode('T2', 'running', ROLE('frontend'), {
+      title: 'Wire node inspector',
+      contract: {
+        inputs: ['Canonical graph payload'],
+        outputs: ['Accessible inspector'],
+        acceptance: ['Hover and focus match'],
+      },
+    });
+    mockFetch(
+      payload({
+        nodes: [dependency, target],
+        edges: [{ source: dependency.id, target: target.id, kind: 'depends_on', provenance: 'planner' }],
+        waves: [[dependency.id], [target.id]],
+        status_by_node: { [dependency.id]: dependency.status, [target.id]: target.status },
+        lane_assignment: { [dependency.id]: dependency.lane, [target.id]: target.lane },
+        critical_path: [dependency.id, target.id],
+      })
+    );
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    expect(container.querySelector('.wg-svg')?.getAttribute('role')).toBe('group');
+    const node = container.querySelector(`[data-node-id="${target.id}"]`) as SVGGElement;
+    await fireEvent.mouseEnter(node);
+    await tick();
+    const hoverInspector = screen.getByLabelText('Node inspector for Wire node inspector');
+    const hoverContent = hoverInspector.textContent?.replace(/\s+/g, ' ').trim();
+    expect(hoverContent).toContain('Canonical graph payload');
+    expect(hoverContent).toContain('Prepare API contract');
+
+    await fireEvent.mouseLeave(node);
+    await tick();
+    expect(screen.queryByLabelText('Node inspector for Wire node inspector')).toBeNull();
+
+    await fireEvent.focus(node);
+    await tick();
+    const focusInspector = screen.getByLabelText('Node inspector for Wire node inspector');
+    expect(focusInspector.textContent?.replace(/\s+/g, ' ').trim()).toBe(hoverContent);
+    expect(node.querySelector('title')).toBeNull();
+  });
+
+  it('pins the inspector and unpins it with Escape and click-away', async () => {
+    mockFetch(payload());
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const node = container.querySelector('[data-node-id="T2"]') as SVGGElement;
+    await fireEvent.click(node);
+    await tick();
+    expect(container.querySelector('.wg-inspector-overlay')?.getAttribute('data-pinned')).toBe('true');
+
+    await fireEvent.mouseLeave(node);
+    await fireEvent.blur(node);
+    await tick();
+    expect(screen.getByLabelText('Node inspector for Project runtime graph')).toBeTruthy();
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await tick();
+    expect(screen.queryByLabelText('Node inspector for Project runtime graph')).toBeNull();
+
+    await fireEvent.click(node);
+    await tick();
+    expect(screen.getByLabelText('Node inspector for Project runtime graph')).toBeTruthy();
+    await fireEvent.click(document.body);
+    await tick();
+    expect(screen.queryByLabelText('Node inspector for Project runtime graph')).toBeNull();
+  });
+
+  it('flips and clamps the inspector anchor near the canvas edges', async () => {
+    mockFetch(payload());
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const rect = (left: number, top: number, width: number, height: number) =>
+      ({
+        x: left,
+        y: top,
+        left,
+        top,
+        width,
+        height,
+        right: left + width,
+        bottom: top + height,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    const canvas = container.querySelector('.wg-canvas') as HTMLDivElement;
+    const scroller = container.querySelector('.wg-scroller') as HTMLDivElement;
+    const node = container.querySelector('[data-node-id="T2"]') as SVGGElement;
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 300, 200));
+    vi.spyOn(node, 'getBoundingClientRect').mockReturnValue(rect(270, 170, 26, 26));
+
+    await fireEvent.mouseEnter(node);
+    await tick();
+    const overlay = container.querySelector('.wg-inspector-overlay') as HTMLDivElement;
+    vi.spyOn(overlay, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 200, 120));
+    await fireEvent.scroll(scroller);
+    await tick();
+
+    const left = Number.parseFloat(overlay.style.left);
+    const top = Number.parseFloat(overlay.style.top);
+    expect(overlay.getAttribute('data-anchor-horizontal')).toBe('left');
+    expect(overlay.getAttribute('data-anchor-vertical')).toBe('above');
+    expect(left).toBeGreaterThanOrEqual(8);
+    expect(left + 200).toBeLessThanOrEqual(292);
+    expect(top).toBeGreaterThanOrEqual(8);
+    expect(top + 120).toBeLessThanOrEqual(192);
+  });
+
+  it('reserves a structural toolbar so controls never occlude wave one', async () => {
+    mockFetch(payload());
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const toolbar = container.querySelector('.wg-toolbar');
+    const controls = container.querySelector('.wg-controls');
+    const canvas = container.querySelector('.wg-canvas');
+
+    expect(toolbar?.contains(controls)).toBe(true);
+    expect(canvas?.contains(controls)).toBe(false);
+    expect(toolbar?.parentElement).toBe(canvas?.parentElement);
+    expect(toolbar!.compareDocumentPosition(canvas!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(getComputedStyle(toolbar!).position).not.toBe('absolute');
+  });
+
+  it('renders progress totals and marks the active wave with text', async () => {
+    mockFetch(payload());
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    expect(screen.getByTestId('nodes-progress').textContent).toBe('1 / 3');
+    expect(screen.getByTestId('waves-progress').textContent).toBe('1 / 2');
+    expect(screen.getByTestId('critical-path-remaining').textContent).toBe('1');
+
+    const waveLabels = [...container.querySelectorAll('.wg-wave-label')];
+    expect(waveLabels.map((label) => label.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'Wave 1 of 2',
+      'Wave 2 of 2 Active',
+    ]);
+    expect(waveLabels[0].classList.contains('active')).toBe(false);
+    expect(waveLabels[1].classList.contains('active')).toBe(true);
+    expect(waveLabels[1].getAttribute('aria-label')).toBe('Wave 2 of 2, Active');
+  });
+
+  it('ticks elapsed locally and distinguishes fresh stale and absent progress', async () => {
+    vi.setSystemTime(new Date('2026-08-16T19:10:00.000Z'));
+    const fresh = graphNode('fresh', 'running', ROLE('frontend'), {
+      title: 'Healthy worker',
+      progress: {
+        started_at: '2026-08-16T19:09:50.000Z',
+        finished_at: null,
+        attempts: 1,
+        agent_id: 'worker-fresh',
+        last_heartbeat_at: '2026-08-16T19:09:30.000Z',
+      },
+    });
+    const stale = graphNode('stale', 'running', ROLE('backend'), {
+      title: 'Frozen worker',
+      progress: {
+        started_at: '2026-08-16T19:09:50.000Z',
+        finished_at: null,
+        attempts: 2,
+        agent_id: 'worker-stale',
+        last_heartbeat_at: '2026-08-16T19:05:00.000Z',
+      },
+    });
+    const absent = graphNode('absent', 'running', ROLE('runtime'), {
+      title: 'Unmeasured worker',
+      progress: null,
+    });
+    const fetchMock = mockFetch(
+      payload({
+        nodes: [fresh, stale, absent],
+        edges: [],
+        waves: [[fresh.id, stale.id, absent.id]],
+        status_by_node: { fresh: 'running', stale: 'running', absent: 'running' },
+        lane_assignment: { fresh: fresh.lane, stale: stale.lane, absent: absent.lane },
+        critical_path: [fresh.id],
+      })
+    );
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const nodeFor = (id: string) => container.querySelector(`[data-node-id="${id}"]`)!;
+    const progressFor = (id: string) =>
+      nodeFor(id).querySelector('.wg-node-progress')?.textContent?.replace(/\s+/g, ' ').trim();
+
+    expect(progressFor('fresh')).toBe('10s · Live');
+    expect(progressFor('stale')).toBe('Stale · 10s');
+    expect(progressFor('absent')).toBe('No timing');
+    expect(nodeFor('fresh').classList.contains('wg-node--fresh')).toBe(true);
+    expect(nodeFor('stale').classList.contains('wg-node--stale')).toBe(true);
+    expect(nodeFor('fresh').getAttribute('aria-label')).toContain('10s · Live');
+    expect(nodeFor('stale').getAttribute('aria-label')).toContain('Stale · 10s');
+    expect(nodeFor('absent').getAttribute('aria-label')).toContain('No timing');
+
+    vi.advanceTimersByTime(1000);
+    await tick();
+    expect(progressFor('fresh')).toBe('11s · Live');
+    expect(progressFor('stale')).toBe('Stale · 11s');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('attaches reduced-motion and forced-colors coverage to the animated node boundary', () => {
+    expect(workGraphViewSource).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.wg-node--fresh \.wg-box--running[\s\S]*?animation: none;/
+    );
+    expect(workGraphViewSource).toMatch(
+      /@media \(forced-colors: active\)[\s\S]*?\.wg-box \{[\s\S]*?forced-color-adjust: auto;/
+    );
+  });
+
+  it('separates and labels the source badge outside the view controls', async () => {
+    mockFetch(payload());
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const source = container.querySelector('.wg-source');
+    const controls = container.querySelector('.wg-controls');
+
+    expect(source?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Source live');
+    expect(source?.closest('button')).toBeNull();
+    expect(controls?.contains(source)).toBe(false);
+    expect(controls?.querySelectorAll('button')).toHaveLength(3);
+    expect(controls?.textContent).toContain('Runtime');
+    expect(controls?.textContent).not.toContain('live');
   });
 
   it('maps blocked and not-started to mutually exclusive treatments', async () => {

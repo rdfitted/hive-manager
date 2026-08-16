@@ -210,6 +210,7 @@ pub enum WorkGraphOmissionReason {
     ProjectKnowledgeUnavailable,
     SourceUnreadable,
     ResolutionIncomplete,
+    CompletionUnresolved,
 }
 
 impl WorkGraphOmissionReason {
@@ -226,6 +227,9 @@ impl WorkGraphOmissionReason {
             }
             Self::ResolutionIncomplete => {
                 "one or more graph references could not be resolved"
+            }
+            Self::CompletionUnresolved => {
+                "a recorded completion could not be resolved to a plan node"
             }
         }
     }

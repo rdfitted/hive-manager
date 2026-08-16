@@ -1,11 +1,11 @@
 //! Full-stack read-surface tests for work-graph observability (#227) and PTY evidence (#226).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -17,12 +17,10 @@ use crate::events::EventBus;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::archive::archive_completed_session;
-use crate::orchestrator::work_graph::runtime::{
-    record_graph_change, GraphMutationType,
-};
+use crate::orchestrator::work_graph::runtime::{record_graph_change, GraphMutationType};
 use crate::orchestrator::work_graph::{
-    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph,
-    WorkEdge, WorkNode,
+    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
+    TaskGraph, WorkEdge, WorkNode,
 };
 use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager};
 use crate::session::{
@@ -46,8 +44,7 @@ impl TestApp {
 async fn test_app() -> TestApp {
     let storage_dir = TempDir::new().expect("temporary storage");
     let storage = Arc::new(
-        SessionStorage::new_with_base(storage_dir.path().to_path_buf())
-            .expect("session storage"),
+        SessionStorage::new_with_base(storage_dir.path().to_path_buf()).expect("session storage"),
     );
     let config = Arc::new(tokio::sync::RwLock::new(
         storage.load_config().expect("test config"),
@@ -57,13 +54,11 @@ async fn test_app() -> TestApp {
     session_controller.write().set_storage(storage.clone());
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         pty_manager.clone(),
-        SessionStorage::new_with_base(storage_dir.path().to_path_buf())
-            .expect("injection storage"),
+        SessionStorage::new_with_base(storage_dir.path().to_path_buf()).expect("injection storage"),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
-    let app_state_db = Arc::new(
-        ApplicationStateDb::open(storage.base_dir()).expect("application state database"),
-    );
+    let app_state_db =
+        Arc::new(ApplicationStateDb::open(storage.base_dir()).expect("application state database"));
     let queue_repo = Arc::new(QueueRepo::new(app_state_db.clone()));
     queue_repo.ensure_schema().expect("queue schema");
     let queue_manager = Arc::new(QueueManager::new(queue_repo, event_bus.clone()));
@@ -118,12 +113,7 @@ fn portable_graph_payload(html: &str) -> Value {
     serde_json::from_str(&html[start..end]).expect("valid embedded graph JSON")
 }
 
-fn node(
-    id: &str,
-    lane: BindingRef,
-    status: NodeStatus,
-    contract_marker: &str,
-) -> WorkNode {
+fn node(id: &str, lane: BindingRef, status: NodeStatus, contract_marker: &str) -> WorkNode {
     WorkNode::new(
         id,
         NodeKind::Task,
@@ -207,9 +197,9 @@ fn running_session_with_agent(session_id: &str, agent_id: &str) -> Session {
 }
 
 #[tokio::test]
-async fn plan_ready_graph_is_bounded_and_preserves_all_provenance_classes() {
+async fn plan_ready_graph_preserves_node_contract_and_all_provenance_classes() {
     const SESSION_ID: &str = "wg-api-plan-ready";
-    const SECRET: &str = "SECRET-FULL-TASK-BODY-MUST-NOT-CROSS-THE-WIRE";
+    const CONTRACT_MARKER: &str = "contract-text-must-cross-the-wire";
     let app = test_app().await;
     let session_dir = app
         .storage()
@@ -221,31 +211,31 @@ async fn plan_ready_graph_is_bounded_and_preserves_all_provenance_classes() {
                 "a",
                 BindingRef::Role("backend".to_string()),
                 NodeStatus::Ready,
-                SECRET,
+                CONTRACT_MARKER,
             ),
             node(
                 "b",
                 BindingRef::Role("frontend".to_string()),
                 NodeStatus::Pending,
-                SECRET,
+                CONTRACT_MARKER,
             ),
             node(
                 "c",
                 BindingRef::Zone("integration".to_string()),
                 NodeStatus::Pending,
-                SECRET,
+                CONTRACT_MARKER,
             ),
             node(
                 "d",
                 BindingRef::Zone("docs".to_string()),
                 NodeStatus::Ready,
-                SECRET,
+                CONTRACT_MARKER,
             ),
             node(
                 "e",
                 BindingRef::Role("reviewer".to_string()),
                 NodeStatus::Pending,
-                SECRET,
+                CONTRACT_MARKER,
             ),
         ],
         vec![
@@ -288,16 +278,169 @@ async fn plan_ready_graph_is_bounded_and_preserves_all_provenance_classes() {
     );
 
     let first_node = &response["nodes"][0];
-    assert!(first_node.get("title").is_none());
-    assert!(first_node.get("contract").is_none());
+    assert_eq!(
+        first_node["title"],
+        format!("task-body-title-{CONTRACT_MARKER}")
+    );
+    assert_eq!(first_node["kind"], "task");
+    assert_eq!(
+        first_node["contract"],
+        json!({
+            "inputs": [format!("task-body-input-{CONTRACT_MARKER}")],
+            "outputs": [format!("task-body-output-{CONTRACT_MARKER}")],
+            "acceptance": [format!("task-body-acceptance-{CONTRACT_MARKER}")],
+        })
+    );
+    assert_eq!(first_node["expansion"], Value::Null);
     assert_eq!(
         first_node["contract_summary"],
         json!({"input_count": 1, "output_count": 1, "acceptance_count": 1})
     );
     assert!(
-        !body.contains(SECRET) && !body.contains("task-body-"),
-        "bounded node projection leaked a full task body: {body}"
+        body.contains(CONTRACT_MARKER),
+        "the full node contract must be observable over HTTP: {body}"
     );
+}
+
+#[tokio::test]
+async fn node_payload_shape_is_identical_across_live_views_and_archive() {
+    const SESSION_ID: &str = "wg-api-node-shape";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let mut expanded = node(
+        "expanded-task",
+        BindingRef::Role("backend".to_string()),
+        NodeStatus::Ready,
+        "expanded",
+    );
+    expanded.expansion = Some(CompositeExpansion {
+        template: "review-template".to_string(),
+        parameters: BTreeMap::from([("target".to_string(), "expanded-task".to_string())]),
+    });
+    let graph = TaskGraph::new(vec![expanded], vec![]);
+    StateManager::new(session_dir)
+        .write_work_graph(&graph)
+        .expect("persisted plan graph");
+
+    let mut live_nodes = Vec::new();
+    for view in ["plan", "runtime", "divergence"] {
+        let (status, body, response) = get(
+            &app.router,
+            &format!("/api/sessions/{SESSION_ID}/work-graph?view={view}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(response["source"], "live");
+        let payload = response["nodes"][0].clone();
+        assert_eq!(payload["title"], "task-body-title-expanded");
+        assert_eq!(payload["kind"], "task");
+        assert_eq!(
+            payload["contract"],
+            json!({
+                "inputs": ["task-body-input-expanded"],
+                "outputs": ["task-body-output-expanded"],
+                "acceptance": ["task-body-acceptance-expanded"],
+            })
+        );
+        assert_eq!(
+            payload["contract_summary"],
+            json!({"input_count": 1, "output_count": 1, "acceptance_count": 1})
+        );
+        assert_eq!(
+            payload["expansion"],
+            json!({
+                "template": "review-template",
+                "parameters": {"target": "expanded-task"},
+            })
+        );
+        live_nodes.push(payload);
+    }
+
+    assert_eq!(live_nodes[0], live_nodes[1]);
+    assert_eq!(live_nodes[1], live_nodes[2]);
+
+    archive_completed_session(app.storage().base_dir(), None, SESSION_ID)
+        .expect("completed archive");
+    let (status, body, archived) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=plan&source=archive"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(archived["source"], "archive");
+    assert_eq!(archived["nodes"][0], live_nodes[0]);
+}
+
+#[tokio::test]
+async fn source_selectors_choose_live_archive_and_auto_prefers_live() {
+    const SESSION_ID: &str = "wg-api-source-selector";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let archived_graph = TaskGraph::new(
+        vec![node(
+            "archived-node",
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+            "archived",
+        )],
+        vec![],
+    );
+    let state = StateManager::new(session_dir.clone());
+    state
+        .write_work_graph(&archived_graph)
+        .expect("persisted archive source graph");
+    archive_completed_session(app.storage().base_dir(), None, SESSION_ID)
+        .expect("completed archive");
+
+    let live_graph = TaskGraph::new(
+        vec![node(
+            "live-node",
+            BindingRef::Role("frontend".to_string()),
+            NodeStatus::Ready,
+            "live",
+        )],
+        vec![],
+    );
+    state
+        .write_work_graph(&live_graph)
+        .expect("persisted newer live graph");
+
+    for (selector, expected_source, expected_node) in [
+        ("source=live", "live", "live-node"),
+        ("source=archive", "archive", "archived-node"),
+        ("source=auto", "live", "live-node"),
+        ("", "live", "live-node"),
+    ] {
+        let separator = if selector.is_empty() { "" } else { "&" };
+        let (status, body, response) = get(
+            &app.router,
+            &format!("/api/sessions/{SESSION_ID}/work-graph?view=plan{separator}{selector}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{selector}: {body}");
+        assert_eq!(response["source"], expected_source, "{selector}: {body}");
+        assert_eq!(
+            response["nodes"][0]["id"], expected_node,
+            "{selector}: {body}"
+        );
+    }
+
+    std::fs::remove_file(session_dir.join("state").join("work-graph.json"))
+        .expect("remove only the temporary live graph fixture");
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=plan&source=auto"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(response["source"], "archive");
+    assert_eq!(response["nodes"][0]["id"], "archived-node");
 }
 
 #[tokio::test]
@@ -384,7 +527,10 @@ async fn runtime_graph_projects_a_blocked_subtree_from_the_durable_queue() {
     assert_eq!(response["status_by_node"]["root"], "running");
     assert_eq!(response["status_by_node"]["blocked-child"], "blocked");
     assert_eq!(response["status_by_node"]["blocked-leaf"], "blocked");
-    assert_eq!(response["critical_path"], json!(["root", "blocked-child", "blocked-leaf"]));
+    assert_eq!(
+        response["critical_path"],
+        json!(["root", "blocked-child", "blocked-leaf"])
+    );
     assert_eq!(
         response["nodes"]
             .as_array()
@@ -395,6 +541,182 @@ async fn runtime_graph_projects_a_blocked_subtree_from_the_durable_queue() {
         2,
         "the dependent branch must remain visibly blocked"
     );
+}
+
+#[tokio::test]
+async fn runtime_and_divergence_progress_preserve_queue_evidence_and_null_timing() {
+    const SESSION_ID: &str = "wg-api-live-progress";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let graph = TaskGraph::new(
+        vec![
+            node(
+                "frozen",
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Ready,
+                "frozen",
+            ),
+            node(
+                "healthy",
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Ready,
+                "healthy",
+            ),
+        ],
+        vec![],
+    );
+    StateManager::new(session_dir)
+        .write_work_graph(&graph)
+        .expect("persisted live graph");
+
+    let mut frozen = queue_row(
+        SESSION_ID,
+        "run-frozen",
+        "frozen",
+        QueueStatus::Running,
+        1_000,
+    );
+    frozen.worker_id = "agent-frozen".to_string();
+    frozen.attempts = 3;
+    frozen.heartbeat_at = Some(1_000);
+    let mut healthy = queue_row(
+        SESSION_ID,
+        "run-healthy",
+        "healthy",
+        QueueStatus::Running,
+        9_000,
+    );
+    healthy.worker_id = "agent-healthy".to_string();
+    healthy.attempts = 1;
+    healthy.heartbeat_at = Some(9_000);
+    let repo = app.state.queue_manager.repo();
+    repo.enqueue(&frozen).expect("frozen queue row");
+    repo.enqueue(&healthy).expect("healthy queue row");
+
+    let (status, body, plan) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=plan&source=live"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(plan["nodes"]
+        .as_array()
+        .expect("plan nodes")
+        .iter()
+        .all(|node| node.get("progress").is_none()));
+
+    for view in ["runtime", "divergence"] {
+        let (status, body, response) = get(
+            &app.router,
+            &format!("/api/sessions/{SESSION_ID}/work-graph?view={view}&source=live"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let nodes = response["nodes"].as_array().expect("runtime nodes");
+        let frozen_progress = &nodes
+            .iter()
+            .find(|node| node["id"] == "frozen")
+            .expect("frozen node")["progress"];
+        let healthy_progress = &nodes
+            .iter()
+            .find(|node| node["id"] == "healthy")
+            .expect("healthy node")["progress"];
+        assert_eq!(frozen_progress["started_at"], Value::Null);
+        assert_eq!(frozen_progress["finished_at"], Value::Null);
+        assert_eq!(frozen_progress["attempts"], 3);
+        assert_eq!(frozen_progress["agent_id"], "agent-frozen");
+        assert_eq!(
+            frozen_progress["last_heartbeat_at"],
+            json!(DateTime::<Utc>::from_timestamp_millis(1_000).expect("valid timestamp"))
+        );
+        assert_eq!(healthy_progress["attempts"], 1);
+        assert_eq!(healthy_progress["agent_id"], "agent-healthy");
+        assert_eq!(
+            healthy_progress["last_heartbeat_at"],
+            json!(DateTime::<Utc>::from_timestamp_millis(9_000).expect("valid timestamp"))
+        );
+        assert_ne!(
+            frozen_progress["last_heartbeat_at"], healthy_progress["last_heartbeat_at"],
+            "a frozen heartbeat must remain distinguishable from recent progress"
+        );
+    }
+}
+
+#[tokio::test]
+async fn archived_runtime_progress_uses_the_same_nullable_object_shape() {
+    const SESSION_ID: &str = "wg-api-archive-progress";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let plan = TaskGraph::new(
+        vec![node(
+            "archived-task",
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+            "archived-progress",
+        )],
+        vec![],
+    );
+    let mut runtime = plan.clone();
+    runtime.nodes[0].status = NodeStatus::Completed;
+    StateManager::new(session_dir)
+        .write_work_graph(&plan)
+        .expect("persisted archive plan");
+    record_graph_change(
+        SESSION_ID,
+        GraphMutationType::Other,
+        &plan,
+        &runtime,
+        vec!["archive-progress-test".to_string()],
+    )
+    .expect("recorded status mutation")
+    .expect("non-empty status mutation");
+    archive_completed_session(app.storage().base_dir(), None, SESSION_ID)
+        .expect("completed archive");
+
+    let (status, body, plan_response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=plan&source=archive"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(plan_response["nodes"][0].get("progress").is_none());
+
+    for view in ["runtime", "divergence"] {
+        let (status, body, response) = get(
+            &app.router,
+            &format!("/api/sessions/{SESSION_ID}/work-graph?view={view}&source=archive"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let progress = &response["nodes"][0]["progress"];
+        let keys = progress
+            .as_object()
+            .expect("archive progress object")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "agent_id",
+                "attempts",
+                "finished_at",
+                "last_heartbeat_at",
+                "started_at",
+            ])
+        );
+        assert_eq!(progress["started_at"], Value::Null);
+        assert!(progress["finished_at"].is_string());
+        assert_eq!(progress["attempts"], 1);
+        assert_eq!(progress["agent_id"], Value::Null);
+        assert_eq!(progress["last_heartbeat_at"], Value::Null);
+    }
 }
 
 #[tokio::test]
@@ -445,7 +767,7 @@ async fn completed_session_falls_back_to_archive_with_divergence() {
 
     let (status, body, response) = get(
         &app.router,
-        &format!("/api/sessions/{SESSION_ID}/work-graph?view=divergence"),
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=divergence&source=archive"),
     )
     .await;
 
@@ -465,6 +787,97 @@ async fn completed_session_falls_back_to_archive_with_divergence() {
         .expect("nodes")
         .iter()
         .any(|node| node["id"] == "runtime-review"));
+}
+
+#[tokio::test]
+async fn live_divergence_reports_recorded_runtime_retry_mutation() {
+    const SESSION_ID: &str = "wg-api-live-divergence-retry";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let plan = TaskGraph::new(
+        vec![node(
+            "retry-task",
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+            "retry",
+        )],
+        vec![],
+    );
+    let mut retried = plan.clone();
+    retried.nodes[0].status = NodeStatus::Running;
+    StateManager::new(session_dir)
+        .write_work_graph(&plan)
+        .expect("persisted plan graph");
+    record_graph_change(
+        SESSION_ID,
+        GraphMutationType::RemediationDetour,
+        &plan,
+        &retried,
+        vec!["retry:test".to_string()],
+    )
+    .expect("recorded retry mutation")
+    .expect("non-empty retry mutation");
+
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=divergence&source=live"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(response["source"], "live");
+    assert_eq!(
+        response["divergence"]["recorded_runtime_mutations"]["remediation_detour"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn live_divergence_reports_typed_omission_when_mutation_log_is_untracked() {
+    const SESSION_ID: &str = "wg-api-live-divergence-untracked";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let plan = TaskGraph::new(
+        vec![node(
+            "untracked-task",
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+            "untracked",
+        )],
+        vec![],
+    );
+    StateManager::new(session_dir)
+        .write_work_graph(&plan)
+        .expect("persisted plan graph");
+
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=divergence&source=live"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(response["divergence"]["recorded_runtime_mutations"]
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty));
+    assert_eq!(response["omissions"].as_array().map(Vec::len), Some(1));
+    let omission = &response["omissions"][0];
+    assert_eq!(omission["reason"], "resolution_incomplete");
+    assert_eq!(omission["count"], 1);
+    assert_eq!(
+        omission["detail"],
+        "the process did not observe a mutation boundary for this session; zero deltas cannot prove that no earlier structural mutations occurred"
+    );
+    assert_eq!(
+        omission["examples"],
+        json!(["mutation-log:not-observed-in-this-process"])
+    );
 }
 
 #[tokio::test]
@@ -534,7 +947,7 @@ async fn pty_buffer_exposes_unsubmitted_stub_content_and_rejects_traversal_ids()
 async fn every_session_lifecycle_stage_emits_a_retrievable_graph() {
     const SESSION_ID: &str = "wg-api-all-lifecycle-stages";
     const AGENT_ID: &str = "wg-api-lifecycle-queen";
-    const SECRET: &str = "LIFECYCLE-TASK-BODY-MUST-STAY-BOUNDED";
+    const CONTRACT_MARKER: &str = "LIFECYCLE-CONTRACT-MUST-CROSS-THE-API";
     let app = test_app().await;
     let session_dir = app
         .storage()
@@ -546,7 +959,7 @@ async fn every_session_lifecycle_stage_emits_a_retrievable_graph() {
                 "lifecycle-task",
                 BindingRef::Role("backend".to_string()),
                 NodeStatus::Running,
-                SECRET,
+                CONTRACT_MARKER,
             )],
             vec![],
         ))
@@ -612,8 +1025,8 @@ async fn every_session_lifecycle_stage_emits_a_retrievable_graph() {
         assert_eq!(response["source"], "live");
         assert_eq!(response["nodes"][0]["id"], "lifecycle-task");
         assert!(
-            !body.contains(SECRET),
-            "stage {expected_stage} leaked the task body"
+            body.contains(CONTRACT_MARKER),
+            "stage {expected_stage} omitted the task contract"
         );
     }
 
@@ -621,7 +1034,7 @@ async fn every_session_lifecycle_stage_emits_a_retrievable_graph() {
     let html = std::fs::read_to_string(artifact).expect("crash-stage portable artifact");
     assert!(html.contains("\"lifecycle_stage\":\"Failed\""));
     assert!(html.contains("lifecycle-task"));
-    assert!(!html.contains(SECRET));
+    assert!(!html.contains(CONTRACT_MARKER));
 }
 
 #[tokio::test]
@@ -678,8 +1091,8 @@ async fn completion_persistence_rollback_refreshes_the_graph_artifact() {
         .expect("snapshot read")
         .expect("rollback refreshed snapshot");
     assert_eq!(snapshot.lifecycle_stage, "Running");
-    let html = std::fs::read_to_string(session_dir.join("work-graph.html"))
-        .expect("rollback artifact");
+    let html =
+        std::fs::read_to_string(session_dir.join("work-graph.html")).expect("rollback artifact");
     assert_eq!(portable_graph_payload(&html)["lifecycle_stage"], "Running");
 }
 
@@ -691,8 +1104,14 @@ fn every_production_state_rollback_refreshes_lifecycle_evidence() {
         .next()
         .expect("production controller source");
     let forbidden_direct_mutations = [
-        ("completion rollback", "session.state = previous_session_state;"),
-        ("QA-timeout forward", "session.state = SessionState::QaInconclusive;"),
+        (
+            "completion rollback",
+            "session.state = previous_session_state;",
+        ),
+        (
+            "QA-timeout forward",
+            "session.state = SessionState::QaInconclusive;",
+        ),
         ("QA-timeout rollback", "session.state = previous_state;"),
     ];
     for (label, needle) in forbidden_direct_mutations {
@@ -794,8 +1213,8 @@ fn clean_archival_writes_and_backfills_the_portable_graph() {
         ))
         .expect("persisted graph");
 
-    let completion = archive_completed_session(temp.path(), None, SESSION_ID)
-        .expect("clean archival");
+    let completion =
+        archive_completed_session(temp.path(), None, SESSION_ID).expect("clean archival");
     let artifact = session_dir.join("work-graph.html");
     assert!(completion.created);
     assert!(artifact.is_file());

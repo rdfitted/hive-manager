@@ -192,6 +192,7 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             task_id            TEXT,
             session_id         TEXT NOT NULL,
             worker_id          TEXT NOT NULL,
+            spawned_worker_id  TEXT,
             role_type          TEXT NOT NULL,
             cli                TEXT NOT NULL,
             status             TEXT NOT NULL,
@@ -227,6 +228,35 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    let has_spawned_worker_id = {
+        let mut stmt = conn.prepare("PRAGMA table_info(agent_run_queue)")?;
+        let mut rows = stmt.query([])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let column_name: String = row.get(1)?;
+            if column_name == "spawned_worker_id" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_spawned_worker_id {
+        conn.execute(
+            "ALTER TABLE agent_run_queue
+             ADD COLUMN spawned_worker_id TEXT",
+            [],
+        )?;
+    }
+    // A deployed row predates the immutable spawn identity. Its current worker binding is the
+    // only honest value available; claims replace it with the actual spawned worker before any
+    // sentinel rewrite can sever the completion path.
+    conn.execute(
+        "UPDATE agent_run_queue
+         SET spawned_worker_id = worker_id
+         WHERE spawned_worker_id IS NULL",
+        [],
+    )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_session_status
          ON agent_run_queue(session_id, status)",
@@ -245,6 +275,11 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_worker_assignment
          ON agent_run_queue(session_id, worker_id, assignment_id DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_run_queue_spawned_worker_assignment
+         ON agent_run_queue(session_id, spawned_worker_id, assignment_id DESC)",
         [],
     )?;
     conn.execute(
@@ -361,10 +396,10 @@ impl QueueRepo {
             let tx = conn.unchecked_transaction()?;
             let inserted = tx.execute(
                 "INSERT INTO agent_run_queue
-                    (id, task_id, session_id, worker_id, role_type, cli, status, payload,
+                    (id, task_id, session_id, worker_id, spawned_worker_id, role_type, cli, status, payload,
                      attempts, continuation_count, no_progress_count, last_status,
                      heartbeat_at, assignment_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT(id) DO NOTHING",
                 params![
                     row.id,
@@ -453,10 +488,10 @@ impl QueueRepo {
             let tx = conn.unchecked_transaction()?;
             let inserted = tx.execute(
                 "INSERT INTO agent_run_queue
-                    (id, task_id, session_id, worker_id, role_type, cli, status, payload,
+                    (id, task_id, session_id, worker_id, spawned_worker_id, role_type, cli, status, payload,
                      attempts, continuation_count, no_progress_count, last_status,
                      heartbeat_at, assignment_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                  ON CONFLICT(id) DO NOTHING",
                 params![
                     row.id,
@@ -627,6 +662,34 @@ impl QueueRepo {
         stuck_cutoff_ms: i64,
         now_ms: i64,
     ) -> Result<Option<i64>, StorageError> {
+        self.try_claim_for_worker_with_grace(
+            id,
+            worker_id,
+            true,
+            None,
+            stuck_cutoff_ms,
+            stuck_cutoff_ms,
+            now_ms,
+        )
+    }
+
+    /// Claim with separate first-heartbeat and steady-state stale cutoffs.
+    ///
+    /// `allow_running_reclaim` and `expected_running_worker_id` carry the coordination
+    /// layer's process-liveness decision into this atomic statement. The exact worker fence
+    /// prevents a stale probe result from reclaiming a row that changed hands after it was
+    /// observed. Queued claims do not depend on either value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_claim_for_worker_with_grace(
+        &self,
+        id: &str,
+        worker_id: Option<&str>,
+        allow_running_reclaim: bool,
+        expected_running_worker_id: Option<&str>,
+        stuck_cutoff_ms: i64,
+        first_heartbeat_cutoff_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<i64>, StorageError> {
         self.db.with_conn(|conn| {
             conn.execute(
                 "UPDATE agent_run_queue
@@ -635,6 +698,7 @@ impl QueueRepo {
                      updated_at = ?2,
                      heartbeat_at = ?2,
                      worker_id = COALESCE(?4, worker_id),
+                     spawned_worker_id = COALESCE(?4, spawned_worker_id, worker_id),
                      assignment_id = (
                          SELECT COALESCE(MAX(assignments.assignment_id), 0) + 1
                          FROM agent_run_queue AS assignments
@@ -643,7 +707,12 @@ impl QueueRepo {
                  WHERE id = ?1
                    AND (status = 'queued'
                         OR (status = 'running'
-                            AND (heartbeat_at IS NULL OR heartbeat_at < ?3)))
+                            AND ?5
+                            AND (?6 IS NULL OR worker_id = ?6)
+                            AND ((last_status IS NULL
+                                  AND (heartbeat_at IS NULL OR heartbeat_at < ?7))
+                                 OR (last_status IS NOT NULL
+                                     AND (heartbeat_at IS NULL OR heartbeat_at < ?3)))))
                    AND (?4 IS NULL OR NOT EXISTS (
                        SELECT 1
                        FROM agent_run_queue AS active_worker
@@ -681,7 +750,15 @@ impl QueueRepo {
                          AND conflict.task_id = agent_run_queue.task_id
                          AND conflict.action = 'serialize'
                    )",
-                params![id, now_ms, stuck_cutoff_ms, worker_id],
+                params![
+                    id,
+                    now_ms,
+                    stuck_cutoff_ms,
+                    worker_id,
+                    allow_running_reclaim,
+                    expected_running_worker_id,
+                    first_heartbeat_cutoff_ms,
+                ],
             )?;
             if conn.changes() != 1 {
                 return Ok(None);
@@ -1047,6 +1124,10 @@ impl QueueRepo {
 
     /// Record a heartbeat against exactly one assignment and return its queue-row id.
     ///
+    /// `spawned_worker_id` is immutable for the assignment even when recovery rewrites the
+    /// mutable worker slot to a `pending:` sentinel. A later claim replaces the spawn identity,
+    /// so a superseded worker cannot resolve the row after a new worker starts.
+    ///
     /// When `assignment_id` is supplied, a stale or mismatched identity updates nothing; it
     /// never falls back to another row sharing the worker slot. Legacy prompts omit it, so the
     /// server deterministically resolves the live row first, then the greatest durable
@@ -1066,7 +1147,7 @@ impl QueueRepo {
                     "SELECT id, assignment_id
                      FROM agent_run_queue
                      WHERE session_id = ?1
-                       AND worker_id = ?2
+                       AND (worker_id = ?2 OR spawned_worker_id = ?2)
                        AND status IN ('queued', 'running', 'finalized')
                        AND (?3 IS NULL OR assignment_id = ?3)
                      ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,
@@ -1119,21 +1200,67 @@ impl QueueRepo {
         stuck_cutoff_ms: i64,
         now_ms: i64,
     ) -> Result<Vec<String>, StorageError> {
+        self.reclaim_stuck_matching(
+            stuck_cutoff_ms,
+            stuck_cutoff_ms,
+            now_ms,
+            None,
+        )
+    }
+
+    /// Reclaim only exact `(queue id, worker id)` pairs approved by the liveness layer, using
+    /// a longer cutoff until the first worker-authored heartbeat records `last_status`.
+    pub fn reclaim_stuck_with_grace(
+        &self,
+        stuck_cutoff_ms: i64,
+        first_heartbeat_cutoff_ms: i64,
+        now_ms: i64,
+        reclaimable_workers: &[(String, String)],
+    ) -> Result<Vec<String>, StorageError> {
+        self.reclaim_stuck_matching(
+            stuck_cutoff_ms,
+            first_heartbeat_cutoff_ms,
+            now_ms,
+            Some(reclaimable_workers),
+        )
+    }
+
+    fn reclaim_stuck_matching(
+        &self,
+        stuck_cutoff_ms: i64,
+        first_heartbeat_cutoff_ms: i64,
+        now_ms: i64,
+        reclaimable_workers: Option<&[(String, String)]>,
+    ) -> Result<Vec<String>, StorageError> {
         self.db.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
-            let ids: Vec<String> = {
+            let candidates: Vec<(String, String)> = {
                 let mut stmt = tx.prepare(
-                    "SELECT id FROM agent_run_queue
+                    "SELECT id, worker_id FROM agent_run_queue
                      WHERE status = 'running'
-                       AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
+                       AND ((last_status IS NULL
+                             AND (heartbeat_at IS NULL OR heartbeat_at < ?2))
+                            OR (last_status IS NOT NULL
+                                AND (heartbeat_at IS NULL OR heartbeat_at < ?1)))",
                 )?;
                 let rows = stmt
-                    .query_map(params![stuck_cutoff_ms], |r| r.get::<_, String>(0))?
+                    .query_map(
+                        params![stuck_cutoff_ms, first_heartbeat_cutoff_ms],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 rows
             };
-            for id in &ids {
-                let assignment_id = next_assignment_id_for_row(&tx, id)?;
+            let mut ids = Vec::new();
+            for (id, worker_id) in candidates {
+                if reclaimable_workers.is_some_and(|allowed| {
+                    !allowed
+                        .iter()
+                        .any(|candidate| candidate.0 == id && candidate.1 == worker_id)
+                }) {
+                    continue;
+                }
+                let assignment_id = next_assignment_id_for_row(&tx, &id)?;
                 tx.execute(
                     "UPDATE agent_run_queue
                      SET status = 'queued',
@@ -1143,9 +1270,23 @@ impl QueueRepo {
                          assignment_id = ?4
                      WHERE id = ?1
                        AND status = 'running'
-                       AND (heartbeat_at IS NULL OR heartbeat_at < ?2)",
-                    params![id, stuck_cutoff_ms, now_ms, assignment_id],
+                       AND worker_id = ?5
+                       AND ((last_status IS NULL
+                             AND (heartbeat_at IS NULL OR heartbeat_at < ?6))
+                            OR (last_status IS NOT NULL
+                                AND (heartbeat_at IS NULL OR heartbeat_at < ?2)))",
+                    params![
+                        id,
+                        stuck_cutoff_ms,
+                        now_ms,
+                        assignment_id,
+                        worker_id,
+                        first_heartbeat_cutoff_ms,
+                    ],
                 )?;
+                if tx.changes() == 1 {
+                    ids.push(id);
+                }
             }
             tx.commit()?;
             Ok(ids)
@@ -1203,6 +1344,27 @@ impl QueueRepo {
                 params![id, now_ms, assignment_id],
             )?;
             Ok(conn.changes() == 1)
+        })
+    }
+
+    /// Snapshot all running rows for coordination-layer liveness probing.
+    pub fn running_rows(&self) -> Result<Vec<QueueRow>, StorageError> {
+        self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT queue.id, queue.task_id, queue.session_id, queue.worker_id,
+                        queue.role_type, queue.cli, queue.status, queue.payload,
+                        queue.attempts, queue.continuation_count, queue.no_progress_count,
+                        queue.last_status, queue.heartbeat_at, queue.assignment_id,
+                        queue.created_at, queue.updated_at, block.reason
+                 FROM agent_run_queue AS queue
+                 LEFT JOIN agent_run_queue_blocks AS block ON block.queue_id = queue.id
+                 WHERE queue.status = 'running'
+                 ORDER BY queue.created_at, queue.id",
+            )?;
+            let rows = stmt
+                .query_map([], row_to_queue_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
         })
     }
 
@@ -1631,13 +1793,18 @@ mod tests {
             columns.iter().any(|column| column == "assignment_id"),
             "the deployed table must gain the assignment identity column"
         );
+        assert!(
+            columns.iter().any(|column| column == "spawned_worker_id"),
+            "the deployed table must gain the immutable spawn identity column"
+        );
         let row_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM agent_run_queue", [], |row| row.get(0))
             .unwrap();
         assert_eq!(row_count, 2, "every legacy row must survive the migration");
-        let retained: (i64, String, String, i64, i64, i64) = conn
+        let retained: (i64, String, String, i64, i64, i64, String) = conn
             .query_row(
-                "SELECT COUNT(*), id, payload, attempts, heartbeat_at, assignment_id
+                "SELECT COUNT(*), id, payload, attempts, heartbeat_at, assignment_id,
+                        spawned_worker_id
                  FROM agent_run_queue WHERE id = 'legacy-run'",
                 [],
                 |row| {
@@ -1648,6 +1815,7 @@ mod tests {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
@@ -1661,8 +1829,10 @@ mod tests {
                 3,
                 1234,
                 0,
+                "legacy-worker".to_string(),
             ),
-            "migration must preserve the full legacy row and leave unknown history unstamped"
+            "migration must preserve the full legacy row, leave unknown assignment history \
+             unstamped, and backfill the only honest spawn identity"
         );
     }
 

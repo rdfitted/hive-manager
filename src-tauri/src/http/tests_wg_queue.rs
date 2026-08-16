@@ -12,7 +12,10 @@ use parking_lot::RwLock;
 use serde_json::json;
 use tower::ServiceExt;
 
-use crate::coordination::queue_manager::{ClaimOutcome, QueueManager};
+use crate::coordination::queue_manager::{
+    ClaimOutcome, QueueManager, FIRST_HEARTBEAT_GRACE_MS,
+    FIRST_HEARTBEAT_LATENCY_MS_BY_CLI, STUCK_CUTOFF_MS,
+};
 use crate::coordination::{InjectionManager, StateManager};
 use crate::domain::event::{EventType, Severity};
 use crate::domain::HiveExecutionPolicy;
@@ -972,6 +975,242 @@ fn assignment_ids_advance_across_claim_rebind_and_release_paths() {
     assert!(
         repo.get_row("run-a").unwrap().unwrap().assignment_id > before_resume_requeue,
         "resume reconciliation must invalidate the orphaned assignment"
+    );
+}
+
+#[test]
+fn completed_heartbeat_from_reclaimed_original_worker_finalizes_via_spawn_identity() {
+    let repo = queue_repo();
+    repo.enqueue(&queued_row(
+        "run-reclaimed",
+        "pending:run-reclaimed",
+        Some("RECLAIMED"),
+        1,
+    ))
+    .unwrap();
+    repo.try_claim_for_worker("run-reclaimed", Some("worker-original"), -90_000, 10)
+        .unwrap()
+        .expect("original worker claims the task");
+
+    assert_eq!(repo.reclaim_stuck(11, 20).unwrap(), vec!["run-reclaimed"]);
+    let reclaimed = repo.get_row("run-reclaimed").unwrap().unwrap();
+    assert_eq!(reclaimed.status, QueueStatus::Queued);
+    assert_eq!(reclaimed.worker_id, "pending:run-reclaimed");
+
+    assert!(repo
+        .record_heartbeat(SESSION_ID, "worker-original", "completed", 30)
+        .unwrap());
+    let finalized = repo.get_row("run-reclaimed").unwrap().unwrap();
+    assert_eq!(finalized.status, QueueStatus::Finalized);
+    assert_eq!(finalized.heartbeat_at, Some(30));
+}
+
+#[test]
+fn spawned_identity_survives_every_worker_sentinel_rewrite() {
+    use crate::storage::queue::SpawnFailureRelease;
+
+    let repo = queue_repo();
+    for (index, release_path) in [
+        "requeue_claimed",
+        "release_failed_spawn",
+        "release_claim_manual",
+        "reclaim_stuck",
+        "requeue_running",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("run-rewrite-{index}");
+        let task_id = format!("REWRITE-{index}");
+        let worker_id = format!("worker-rewrite-{index}");
+        repo.enqueue(&queued_row(
+            &id,
+            &format!("pending:{id}"),
+            Some(&task_id),
+            index as i64,
+        ))
+        .unwrap();
+        let epoch = repo
+            .try_claim_for_worker(&id, Some(&worker_id), -90_000, 10)
+            .unwrap()
+            .expect("rewrite fixture claim");
+
+        match release_path {
+            "requeue_claimed" => assert!(repo.requeue_claimed(&id, epoch, 20).unwrap()),
+            "release_failed_spawn" => assert_eq!(
+                repo.release_failed_spawn(&id, epoch, &worker_id, 3, 20)
+                    .unwrap(),
+                SpawnFailureRelease::Requeued { failures: 1 }
+            ),
+            "release_claim_manual" => {
+                assert!(repo.release_claim_manual(&id, 20).unwrap())
+            }
+            "reclaim_stuck" => assert_eq!(repo.reclaim_stuck(11, 20).unwrap(), vec![id.clone()]),
+            "requeue_running" => assert!(repo.requeue_running(&id, 20).unwrap()),
+            _ => unreachable!(),
+        }
+
+        let released = repo.get_row(&id).unwrap().unwrap();
+        assert_eq!(released.status, QueueStatus::Queued, "{release_path}");
+        assert_eq!(released.worker_id, format!("pending:{id}"), "{release_path}");
+        assert!(
+            repo.record_heartbeat(SESSION_ID, &worker_id, "completed", 30)
+                .unwrap(),
+            "{release_path} severed the original spawn identity"
+        );
+        assert_eq!(
+            repo.get_row(&id).unwrap().unwrap().status,
+            QueueStatus::Finalized,
+            "{release_path} completion did not finalize"
+        );
+    }
+}
+
+#[test]
+fn superseded_assignment_id_cannot_finalize_newer_claim() {
+    let repo = queue_repo();
+    repo.enqueue(&queued_row(
+        "run-fenced",
+        "pending:run-fenced",
+        Some("FENCED"),
+        1,
+    ))
+    .unwrap();
+    let first_epoch = repo
+        .try_claim_for_worker("run-fenced", Some("worker-reused"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+    let first_assignment = repo.get_row("run-fenced").unwrap().unwrap().assignment_id;
+    assert!(repo.requeue_claimed("run-fenced", first_epoch, 20).unwrap());
+    repo.try_claim_for_worker("run-fenced", Some("worker-reused"), -90_000, 30)
+        .unwrap()
+        .expect("newer assignment reuses the worker slot");
+    let newer_claim = repo.get_row("run-fenced").unwrap().unwrap();
+    assert!(newer_claim.assignment_id > first_assignment);
+
+    assert_eq!(
+        repo.record_heartbeat_for_assignment(
+            SESSION_ID,
+            "worker-reused",
+            Some(first_assignment),
+            "completed",
+            40,
+        )
+        .unwrap(),
+        None,
+        "a superseded assignment must not finalize the newer claim"
+    );
+    assert_eq!(repo.get_row("run-fenced").unwrap().unwrap(), newer_claim);
+}
+
+#[tokio::test]
+async fn live_worker_is_never_reclaimed_regardless_of_heartbeat_age() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(queue_repo());
+    let mut live_row = queue_row(
+        "run-live",
+        "worker-live",
+        Some("LIVE"),
+        QueueStatus::Running,
+        1,
+    );
+    live_row.heartbeat_at = Some(1);
+    live_row.last_status = Some("working".to_string());
+    repo.enqueue(&live_row).unwrap();
+
+    let manager = QueueManager::new_with_liveness_probe(
+        Arc::clone(&repo),
+        EventBus::new(temp.path().to_path_buf()),
+        |worker_id| worker_id == "worker-live",
+    );
+
+    assert!(manager
+        .reclaim_stuck_at(2, FIRST_HEARTBEAT_GRACE_MS + STUCK_CUTOFF_MS + 2)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        repo.get_row("run-live").unwrap().unwrap().status,
+        QueueStatus::Running,
+        "maintenance must preserve a live worker even when every heartbeat cutoff elapsed"
+    );
+    assert_eq!(
+        manager
+            .claim_and_spawn("run-live", SESSION_ID, "worker-replacement")
+            .await
+            .unwrap(),
+        ClaimOutcome::AlreadyClaimed,
+        "an opportunistic claim must use the same liveness guard as maintenance"
+    );
+}
+
+#[tokio::test]
+async fn first_heartbeat_grace_is_separate_from_steady_state_cutoff() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(queue_repo());
+    let mut awaiting_first = queue_row(
+        "run-awaiting-first",
+        "worker-awaiting-first",
+        Some("FIRST"),
+        QueueStatus::Running,
+        1,
+    );
+    awaiting_first.heartbeat_at = Some(1);
+    let mut steady = queue_row(
+        "run-steady",
+        "worker-steady",
+        Some("STEADY"),
+        QueueStatus::Running,
+        2,
+    );
+    steady.heartbeat_at = Some(1);
+    steady.last_status = Some("working".to_string());
+    repo.enqueue(&awaiting_first).unwrap();
+    repo.enqueue(&steady).unwrap();
+
+    let manager = QueueManager::new(
+        Arc::clone(&repo),
+        EventBus::new(temp.path().to_path_buf()),
+    );
+    assert_eq!(
+        manager
+            .reclaim_stuck_at(2, STUCK_CUTOFF_MS + 2)
+            .await
+            .unwrap(),
+        vec!["run-steady"],
+        "the steady worker remains governed by the unchanged 90-second cutoff"
+    );
+    assert_eq!(
+        repo.get_row("run-awaiting-first").unwrap().unwrap().status,
+        QueueStatus::Running,
+        "a worker awaiting its first heartbeat receives the separate startup grace"
+    );
+
+    assert_eq!(
+        manager
+            .reclaim_stuck_at(
+                FIRST_HEARTBEAT_GRACE_MS + 2 - STUCK_CUTOFF_MS,
+                FIRST_HEARTBEAT_GRACE_MS + 2,
+            )
+            .await
+            .unwrap(),
+        vec!["run-awaiting-first"],
+        "the pre-first-heartbeat row becomes reclaimable only after its own grace expires"
+    );
+}
+
+#[test]
+fn first_heartbeat_latency_record_covers_every_cli_without_fabrication() {
+    let recorded_clis = FIRST_HEARTBEAT_LATENCY_MS_BY_CLI
+        .iter()
+        .map(|(cli, _)| *cli)
+        .collect::<Vec<_>>();
+    assert_eq!(recorded_clis, crate::adapters::VALID_CLIS);
+    assert!(
+        FIRST_HEARTBEAT_LATENCY_MS_BY_CLI
+            .iter()
+            .all(|(_, latency_ms)| latency_ms.is_none()),
+        "the 2026-08-16 evidence captured no durable heartbeat receipt timestamps"
     );
 }
 

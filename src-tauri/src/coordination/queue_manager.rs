@@ -29,6 +29,31 @@ use crate::storage::StorageError;
 /// genuinely-working-but-quiet worker that keeps heartbeating is never reclaimed.
 pub const STUCK_CUTOFF_MS: i64 = 90_000;
 
+/// Grace allowed between a successful spawn claim and the worker's first heartbeat.
+///
+/// This is deliberately independent of [`STUCK_CUTOFF_MS`]. Some CLIs can spend 8-12
+/// minutes indexing before they emit output, while the steady-state heartbeat contract must
+/// remain strict enough to detect an actually stalled worker. Once `last_status` is populated
+/// by the first worker-authored heartbeat, the normal 90-second cutoff applies again.
+pub const FIRST_HEARTBEAT_GRACE_MS: i64 = 15 * 60_000;
+
+/// Recorded launch-to-first-successful-heartbeat latency by supported CLI adapter.
+///
+/// `None` is an explicit unmeasured result, never a zero or an estimate. The 2026-08-16
+/// investigation had no durable heartbeat timestamp for any adapter. For Codex, the #251
+/// event log did show 238,389 ms from `agent_launched` to the first worker-authored
+/// conversation, but the heartbeat endpoint did not persist its own receipt time, so that
+/// adjacent observation is not represented here as heartbeat latency.
+#[allow(dead_code)] // Durable audit record; queue policy must not invent a value to consume it.
+pub const FIRST_HEARTBEAT_LATENCY_MS_BY_CLI: &[(&str, Option<i64>)] = &[
+    ("claude", None),
+    ("codex", None),
+    ("opencode", None),
+    ("cursor", None),
+    ("droid", None),
+    ("qwen", None),
+];
+
 /// `STUCK_CUTOFF_MS` in whole seconds, for prompt prose.
 pub const STUCK_CUTOFF_SECS: u64 = (STUCK_CUTOFF_MS as u64) / 1_000;
 
@@ -231,17 +256,36 @@ impl ClaimOutcome {
 pub struct QueueManager {
     repo: Arc<QueueRepo>,
     event_bus: Arc<EventBus>,
+    /// Process-liveness boundary injected by the composition root. Keeping this as a probe
+    /// avoids coupling coordination to the PTY implementation.
+    worker_is_alive: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     /// Serializes claim-and-register with every path that could reclaim the same claim.
     spawn_in_flight: Arc<Mutex<HashMap<String, SpawnInFlightReservation>>>,
 }
 
 impl QueueManager {
     pub fn new(repo: Arc<QueueRepo>, event_bus: Arc<EventBus>) -> Self {
+        Self::new_with_liveness_probe(repo, event_bus, |_| false)
+    }
+
+    pub fn new_with_liveness_probe<F>(
+        repo: Arc<QueueRepo>,
+        event_bus: Arc<EventBus>,
+        worker_is_alive: F,
+    ) -> Self
+    where
+        F: Fn(&str) -> bool + Send + Sync + 'static,
+    {
         Self {
             repo,
             event_bus,
+            worker_is_alive: Arc::new(worker_is_alive),
             spawn_in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn worker_is_demonstrably_alive(&self, worker_id: &str) -> bool {
+        (self.worker_is_alive)(worker_id)
     }
 
     /// Current millis-since-epoch.
@@ -421,6 +465,20 @@ impl QueueManager {
     ) -> Result<ClaimOutcome, StorageError> {
         let now = Self::now_ms();
         let cutoff = now - STUCK_CUTOFF_MS;
+        let first_heartbeat_cutoff = now - FIRST_HEARTBEAT_GRACE_MS;
+        // Liveness cannot be part of SQLite's predicate, so sample it immediately before the
+        // claim and carry the observed worker identity into the atomic UPDATE as a fence. If
+        // the row changes hands between this read and the UPDATE, the reclaim branch no longer
+        // matches. A queued row may still be claimed normally.
+        let observed_running_worker = self
+            .repo
+            .get_row(id)?
+            .filter(|row| row.status == QueueStatus::Running)
+            .map(|row| row.worker_id);
+        let running_reclaim_worker = observed_running_worker
+            .as_deref()
+            .filter(|worker_id| !self.worker_is_demonstrably_alive(worker_id));
+        let allow_running_reclaim = running_reclaim_worker.is_some();
         // This mutex is the prevention boundary around the durable atomic UPDATE. An existing
         // marker may only deny a retry; it never authorizes a claim. On a win the marker is
         // inserted before the critical section ends, so maintenance/manual recovery cannot
@@ -435,9 +493,15 @@ impl QueueManager {
             {
                 None
             } else {
-                let epoch = self
-                    .repo
-                    .try_claim_for_worker(id, Some(worker_id), cutoff, now)?;
+                let epoch = self.repo.try_claim_for_worker_with_grace(
+                    id,
+                    Some(worker_id),
+                    allow_running_reclaim,
+                    running_reclaim_worker,
+                    cutoff,
+                    first_heartbeat_cutoff,
+                    now,
+                )?;
                 if reserve_spawn {
                     if let Some(epoch) = epoch {
                         spawn_in_flight.insert(
@@ -849,6 +913,17 @@ impl QueueManager {
         cutoff: i64,
         now: i64,
     ) -> Result<Vec<String>, StorageError> {
+        let first_heartbeat_cutoff = now - FIRST_HEARTBEAT_GRACE_MS;
+        // Build an exact-id candidate set outside the spawn-reservation mutex. The storage
+        // UPDATE rechecks both id and worker identity, so a concurrent handoff or rebind fails
+        // closed instead of applying a stale liveness result to a different worker.
+        let reclaimable_workers = self
+            .repo
+            .running_rows()?
+            .into_iter()
+            .filter(|row| !self.worker_is_demonstrably_alive(&row.worker_id))
+            .map(|row| (row.id, row.worker_id))
+            .collect::<Vec<_>>();
         let ids = {
             let spawn_in_flight = self.spawn_in_flight.lock();
             for reservation in spawn_in_flight.values() {
@@ -861,7 +936,12 @@ impl QueueManager {
                     return Ok(Vec::new());
                 }
             }
-            self.repo.reclaim_stuck(cutoff, now)?
+            self.repo.reclaim_stuck_with_grace(
+                cutoff,
+                first_heartbeat_cutoff,
+                now,
+                &reclaimable_workers,
+            )?
         };
         for id in &ids {
             self.emit_for_row(id, EventType::WorkerReclaimed, Severity::Warning)
