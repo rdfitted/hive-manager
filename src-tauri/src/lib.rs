@@ -180,12 +180,14 @@ pub fn run() {
             app_state.set_registry(Arc::clone(&action_registry));
             app.manage(Arc::clone(&app_state));
 
-            // Stall detection background task - runs every 60s, emits agent-stalled/agent-recovered
+            // Desktop-only stall detection: this Tauri setup task does not run in headless HTTP
+            // deployments. It emits typed agent-stalled reasons plus agent-recovered.
             let stall_controller = session_controller.clone();
             let stall_app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let stall_threshold = Duration::from_secs(180); // 3 minutes
-                let mut known_stalled: HashSet<(String, String)> = HashSet::new();
+                let mut known_stalled: std::collections::HashMap<(String, String), String> =
+                    std::collections::HashMap::new();
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
                 loop {
                     interval.tick().await;
@@ -198,27 +200,44 @@ pub fn run() {
                         .collect();
                     drop(sessions);
 
-                    let mut currently_stalled: HashSet<(String, String)> = HashSet::new();
+                    let mut currently_stalled: std::collections::HashMap<
+                        (String, String),
+                        String,
+                    > = std::collections::HashMap::new();
                     for session_id in &running_session_ids {
-                        let stalled = controller.get_stalled_agents(session_id, stall_threshold);
-                        for (agent_id, _last_activity) in stalled {
-                            currently_stalled.insert((session_id.clone(), agent_id.clone()));
+                        let stalled =
+                            controller.get_stalled_agent_reports(session_id, stall_threshold);
+                        for (agent_id, _last_activity, status) in stalled {
+                            let reason = match status {
+                                crate::pty::AgentStatus::WaitingForInput(reason)
+                                    if reason == "awaiting_injected_turn" =>
+                                {
+                                    "awaiting_injected_turn"
+                                }
+                                crate::pty::AgentStatus::Idle => "idle",
+                                _ => "crashed",
+                            };
+                            currently_stalled.insert(
+                                (session_id.clone(), agent_id),
+                                reason.to_string(),
+                            );
                         }
                     }
                     drop(controller);
 
-                    // Emit agent-stalled for newly stalled
-                    for (sid, aid) in &currently_stalled {
-                        if !known_stalled.contains(&(sid.clone(), aid.clone())) {
+                    // Emit agent-stalled for a newly stalled agent or a changed reason.
+                    for ((sid, aid), reason) in &currently_stalled {
+                        if known_stalled.get(&(sid.clone(), aid.clone())) != Some(reason) {
                             let _ = stall_app_handle.emit("agent-stalled", serde_json::json!({
                                 "session_id": sid,
                                 "agent_id": aid,
+                                "reason": reason,
                             }));
                         }
                     }
                     // Emit agent-recovered for no longer stalled
-                    for (sid, aid) in known_stalled.iter() {
-                        if !currently_stalled.contains(&(sid.clone(), aid.clone())) {
+                    for (sid, aid) in known_stalled.keys() {
+                        if !currently_stalled.contains_key(&(sid.clone(), aid.clone())) {
                             let _ = stall_app_handle.emit("agent-recovered", serde_json::json!({
                                 "session_id": sid,
                                 "agent_id": aid,

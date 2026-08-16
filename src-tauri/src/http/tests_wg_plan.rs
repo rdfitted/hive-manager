@@ -55,6 +55,18 @@ fn controller_with_plan(
     session_id: &str,
     plan_content: Option<&str>,
 ) -> (TempDir, SessionController, Arc<SessionStorage>) {
+    controller_with_plan_and_type(
+        session_id,
+        plan_content,
+        SessionType::Hive { worker_count: 0 },
+    )
+}
+
+fn controller_with_plan_and_type(
+    session_id: &str,
+    plan_content: Option<&str>,
+    session_type: SessionType,
+) -> (TempDir, SessionController, Arc<SessionStorage>) {
     let temp = tempfile::tempdir().expect("temporary plan fixture");
     let project_path = temp.path().join("project");
     let project_session_dir = project_path.join(".hive-manager").join(session_id);
@@ -73,7 +85,9 @@ fn controller_with_plan(
 
     let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
     controller.set_storage(Arc::clone(&storage));
-    controller.insert_test_session(planning_session(session_id, &project_path));
+    let mut session = planning_session(session_id, &project_path);
+    session.session_type = session_type;
+    controller.insert_test_session(session);
     (temp, controller, storage)
 }
 
@@ -89,6 +103,116 @@ fn assert_session_state(
             .state,
         expected
     );
+}
+
+#[test]
+fn production_continue_builds_plan_graph_before_every_running_dispatch() {
+    let plan = r#"# Five-task production graph
+
+## Tasks
+- [ ] T1: Establish the root
+- [ ] T2: Build the first branch (deps: T1)
+- [ ] T3: Build the second branch (deps: T1)
+- [ ] T4: Join both branches (deps: T2, T3)
+- [ ] T5: Finish the workflow (deps: T4)
+"#;
+    let cases = [
+        (
+            "continue-hive",
+            SessionType::Hive { worker_count: 0 },
+            "Failed to read pending config",
+        ),
+        (
+            "continue-swarm",
+            SessionType::Swarm { planner_count: 1 },
+            "Failed to read pending swarm config",
+        ),
+        (
+            "continue-fusion",
+            SessionType::Fusion {
+                variants: vec!["Variant A".to_string()],
+            },
+            "Failed to read pending fusion config",
+        ),
+        (
+            "continue-debate",
+            SessionType::Debate {
+                variants: vec!["Debater A".to_string()],
+            },
+            "Failed to read pending debate config",
+        ),
+    ];
+
+    for (session_id, session_type, expected_dispatch_error) in cases {
+        let (_temp, controller, storage) =
+            controller_with_plan_and_type(session_id, Some(plan), session_type);
+
+        for attempt in 1..=2 {
+            let error = controller
+                .continue_after_planning(session_id)
+                .expect_err("missing launch config should stop inside the selected dispatch branch");
+            assert!(
+                error.contains(expected_dispatch_error),
+                "attempt {attempt} did not reach {session_id}'s dispatch branch: {error}"
+            );
+
+            let graph = StateManager::new(storage.session_dir(session_id))
+                .read_work_graph()
+                .expect("graph state is readable")
+                .expect("production continue persisted the plan graph");
+            assert_eq!(graph.nodes.len(), 5, "{session_id} node count");
+            assert_eq!(graph.edges.len(), 5, "{session_id} edge count");
+            assert!(graph.omissions.is_empty(), "{session_id} omissions");
+        }
+
+        assert_session_state(&controller, session_id, SessionState::PlanReady);
+    }
+}
+
+#[test]
+fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
+    let malformed_plan = r#"# Malformed production graph
+
+## Tasks
+- [ ] T1: Keep launching despite malformed graph metadata (deps: T0
+"#;
+    let cases = [
+        (
+            "continue-malformed",
+            Some(malformed_plan),
+            WorkGraphOmissionReason::ResolutionIncomplete,
+            "unterminated",
+        ),
+        (
+            "continue-missing",
+            None,
+            WorkGraphOmissionReason::SourceUnreadable,
+            "plan.md",
+        ),
+    ];
+
+    for (session_id, plan, expected_reason, expected_example) in cases {
+        let (_temp, controller, storage) = controller_with_plan(session_id, plan);
+
+        let error = controller
+            .continue_after_planning(session_id)
+            .expect_err("missing launch config should fail after the non-blocking graph build");
+        assert!(
+            error.contains("Failed to read pending config"),
+            "plan source failure blocked before Hive dispatch: {error}"
+        );
+        assert_session_state(&controller, session_id, SessionState::PlanReady);
+
+        let graph = StateManager::new(storage.session_dir(session_id))
+            .read_work_graph()
+            .expect("graph state is readable")
+            .expect("production continue replaced the creation-time seed");
+        assert!(graph.nodes.is_empty());
+        assert!(graph.edges.is_empty());
+        assert_eq!(graph.omissions.len(), 1);
+        assert_eq!(graph.omissions[0].reason, expected_reason);
+        assert!(graph.omissions[0].examples[0].contains(expected_example));
+    }
 }
 
 #[test]

@@ -2075,7 +2075,7 @@ async fn unresolved_running_task_keeps_conflict_coverage_partial() {
 }
 
 #[tokio::test]
-async fn complete_edgeless_graph_keeps_unknown_explicit_task_fifo() {
+async fn complete_edgeless_graph_rejects_unknown_explicit_task_without_spawning() {
     let temp = tempfile::tempdir().unwrap();
     let (app, state, controller) = dependency_http_fixture(&temp);
     let session_id = "http-dependency-session";
@@ -2092,14 +2092,48 @@ async fn complete_edgeless_graph_keeps_unknown_explicit_task_fifo() {
         ))
         .unwrap();
 
-    assert_eq!(post_task_worker(&app, "UNKNOWN").await.status(), StatusCode::CREATED);
+    let response = post_task_worker(&app, "UNKNOWN").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "resolution_incomplete");
+    assert_eq!(body["task_id"], "UNKNOWN");
+    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 0);
     let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
-    assert!(snapshot.resolution_incomplete.is_empty());
-    assert_eq!(snapshot.running, 1);
+    assert_eq!(snapshot.queued, 1);
+    assert_eq!(snapshot.running, 0);
+    assert_eq!(snapshot.resolution_incomplete.len(), 1);
 }
 
 #[tokio::test]
-async fn degraded_empty_graph_keeps_fifo_and_retains_its_omission() {
+async fn complete_edgeless_graph_admits_known_explicit_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state, controller) = dependency_http_fixture(&temp);
+    let session_id = "http-dependency-session";
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    state.storage.create_session_dir(session_id).unwrap();
+    controller
+        .read()
+        .insert_test_session(quiet_hive_session(session_id, &project));
+    StateManager::new(state.storage.session_dir(session_id))
+        .write_work_graph(&TaskGraph::new(
+            vec![queue_test_node("KNOWN", NodeStatus::Ready)],
+            Vec::new(),
+        ))
+        .unwrap();
+
+    assert_eq!(post_task_worker(&app, "KNOWN").await.status(), StatusCode::CREATED);
+    let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
+    assert!(snapshot.resolution_incomplete.is_empty());
+    assert_eq!(snapshot.running, 1);
+    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 1);
+}
+
+#[tokio::test]
+async fn degraded_empty_graph_rejects_unknown_and_retains_its_omission() {
     let temp = tempfile::tempdir().unwrap();
     let (app, state, controller) = dependency_http_fixture(&temp);
     let session_id = "http-dependency-session";
@@ -2120,10 +2154,18 @@ async fn degraded_empty_graph_keeps_fifo_and_retains_its_omission() {
     let state_manager = StateManager::new(state.storage.session_dir(session_id));
     state_manager.write_work_graph(&degraded).unwrap();
 
-    assert_eq!(post_task_worker(&app, "UNKNOWN").await.status(), StatusCode::CREATED);
+    let response = post_task_worker(&app, "UNKNOWN").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "resolution_incomplete");
+    assert_eq!(body["task_id"], "UNKNOWN");
     assert_eq!(state_manager.read_work_graph().unwrap(), Some(degraded));
     let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
-    assert!(snapshot.resolution_incomplete.is_empty());
+    assert_eq!(snapshot.resolution_incomplete.len(), 1);
+    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 0);
 }
 
 #[tokio::test]

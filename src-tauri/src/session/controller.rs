@@ -1715,25 +1715,100 @@ impl SessionController {
         Ok(())
     }
 
-    /// Get agents with no activity for longer than threshold.
+    const AWAITING_INJECTED_TURN_PREFIX: &'static str = "awaiting_injected_turn:";
+
+    fn awaiting_injected_turn_since(status: &AgentStatus) -> Option<DateTime<Utc>> {
+        let AgentStatus::WaitingForInput(reason) = status else {
+            return None;
+        };
+        let timestamp = reason.strip_prefix(Self::AWAITING_INJECTED_TURN_PREFIX)?;
+        DateTime::parse_from_rfc3339(timestamp)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&Utc))
+    }
+
+    /// Record that a submit keystroke was delivered and a managed turn is now awaited.
     ///
-    /// A `completed` heartbeat retires only the assignment that produced it. The task file is
-    /// the standing channel for later assignments, so a newer task-file modification proves that
-    /// the same worker has been reassigned even if the wake-up injection never submits. Keeping
-    /// completed agents exempt until that proof exists makes the never-reassigned case silent.
+    /// The PTY `AgentStatus` enum is the canonical runtime vocabulary. Its existing
+    /// `WaitingForInput` variant carries this condition; domain-agent and cell statuses remain
+    /// projections. A later heartbeat clears this marker during the stall sweep.
+    pub fn record_injection_submission(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        submitted_at: DateTime<Utc>,
+        submit_keystroke_issued: bool,
+    ) -> Result<(), String> {
+        if !submit_keystroke_issued {
+            return Ok(());
+        }
+        if self
+            .agent_heartbeats
+            .read()
+            .get(session_id)
+            .and_then(|agents| agents.get(agent_id))
+            .is_some_and(|heartbeat| heartbeat.last_activity > submitted_at)
+        {
+            // The agent already produced managed recovery evidence while the HTTP route observed
+            // the post-submit PTY window. Do not overwrite that newer heartbeat with Waiting.
+            return Ok(());
+        }
+
+        {
+            let mut sessions = self.sessions.write();
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| format!("Session not found: {session_id}"))?;
+            let agent = session
+                .agents
+                .iter_mut()
+                .find(|agent| agent.id == agent_id)
+                .ok_or_else(|| format!("Agent {agent_id} not found in session {session_id}"))?;
+
+            // PTY-ring activity may be input echo or unrelated output. Only a later heartbeat
+            // proves the agent took another managed turn, so every successful submit starts in
+            // the awaiting state regardless of the observation result.
+            agent.status = AgentStatus::WaitingForInput(format!(
+                "{}{}",
+                Self::AWAITING_INJECTED_TURN_PREFIX,
+                submitted_at.to_rfc3339()
+            ));
+        }
+        self.emit_session_update(session_id);
+        Ok(())
+    }
+
+    /// Compatibility view for existing callers that only need identity and activity time.
     pub fn get_stalled_agents(
         &self,
         session_id: &str,
         threshold: Duration,
     ) -> Vec<(String, DateTime<Utc>)> {
+        self.get_stalled_agent_reports(session_id, threshold)
+            .into_iter()
+            .map(|(agent_id, last_activity, _status)| (agent_id, last_activity))
+            .collect()
+    }
+
+    /// Get stale agents with a canonical PTY status carrying the operator-visible reason.
+    ///
+    /// A `completed` heartbeat retires only the assignment that produced it. The task file is
+    /// the standing channel for later assignments, so a newer task-file modification proves that
+    /// the same worker has been reassigned even if the wake-up injection never submits. Keeping
+    /// completed agents exempt until that proof exists makes the never-reassigned case silent.
+    pub fn get_stalled_agent_reports(
+        &self,
+        session_id: &str,
+        threshold: Duration,
+    ) -> Vec<(String, DateTime<Utc>, AgentStatus)> {
         let now = Utc::now();
         let threshold_secs = threshold.as_secs() as i64;
-        let task_file_updates = {
+        let (task_file_updates, agent_statuses) = {
             let sessions = self.sessions.read();
             sessions
                 .get(session_id)
                 .map(|session| {
-                    session
+                    let task_updates = session
                         .agents
                         .iter()
                         .filter_map(|agent| {
@@ -1748,31 +1823,123 @@ impl SessionController {
                             let modified = std::fs::metadata(task_file).ok()?.modified().ok()?;
                             Some((agent.id.clone(), DateTime::<Utc>::from(modified)))
                         })
-                        .collect::<HashMap<_, _>>()
+                        .collect::<HashMap<_, _>>();
+                    let statuses = session
+                        .agents
+                        .iter()
+                        .map(|agent| (agent.id.clone(), agent.status.clone()))
+                        .collect::<HashMap<_, _>>();
+                    (task_updates, statuses)
                 })
                 .unwrap_or_default()
         };
         let heartbeats = self.agent_heartbeats.read();
-        let Some(agents) = heartbeats.get(session_id) else {
-            return vec![];
-        };
-        agents
-            .iter()
-            .filter_map(|(agent_id, info)| {
-                let elapsed = (now - info.last_activity).num_seconds();
+        let agents = heartbeats.get(session_id);
+        let mut recovered_after_injection = Vec::new();
+        let mut stalled = Vec::new();
+        if let Some(agents) = agents {
+            stalled.extend(agents.iter().filter_map(|(agent_id, info)| {
+                let mut awaiting_since = agent_statuses
+                    .get(agent_id)
+                    .and_then(Self::awaiting_injected_turn_since);
+                if awaiting_since.is_some_and(|started_at| info.last_activity > started_at) {
+                    awaiting_since = None;
+                    recovered_after_injection.push((agent_id.clone(), info.status.clone()));
+                }
+
+                // An inject is sender activity, not evidence that the managed agent ran. It can
+                // select the awaiting-injected-turn reason, but must not refresh an already-stale
+                // heartbeat clock. Agents without any heartbeat use the marker below as fallback.
+                let last_relevant_activity = info.last_activity;
+                let elapsed = (now - last_relevant_activity).num_seconds();
                 let reassigned_after_completion = info.status == "completed"
                     && task_file_updates
                         .get(agent_id)
                         .is_some_and(|modified| modified > &info.last_activity);
                 if elapsed > threshold_secs
-                    && (info.status != "completed" || reassigned_after_completion)
+                    && (awaiting_since.is_some()
+                        || info.status != "completed"
+                        || reassigned_after_completion)
                 {
-                    Some((agent_id.clone(), info.last_activity))
+                    let runtime_status = agent_statuses.get(agent_id);
+                    let process_dead = matches!(runtime_status, Some(AgentStatus::Error(_)))
+                        || !self.pty_manager.read().is_alive(agent_id);
+                    let status = if process_dead {
+                        AgentStatus::Error("process_not_alive".to_string())
+                    } else if awaiting_since.is_some() {
+                        AgentStatus::WaitingForInput("awaiting_injected_turn".to_string())
+                    } else if info.status == "idle" {
+                        AgentStatus::Idle
+                    } else {
+                        // A live process with a stale heartbeat is quiet/idle, not proven crashed.
+                        AgentStatus::Idle
+                    };
+                    Some((agent_id.clone(), last_relevant_activity, status))
                 } else {
                     None
                 }
-            })
-            .collect()
+            }));
+        }
+
+        // A submit can happen before an agent's first heartbeat. The in-memory canonical status
+        // still carries enough time information to surface that condition after the threshold.
+        for (agent_id, status) in &agent_statuses {
+            if agents.is_some_and(|agents| agents.contains_key(agent_id)) {
+                continue;
+            }
+            if let Some(awaiting_since) = Self::awaiting_injected_turn_since(status) {
+                if (now - awaiting_since).num_seconds() > threshold_secs {
+                    let status = if !self.pty_manager.read().is_alive(agent_id) {
+                        AgentStatus::Error("process_not_alive".to_string())
+                    } else {
+                        AgentStatus::WaitingForInput("awaiting_injected_turn".to_string())
+                    };
+                    stalled.push((
+                        agent_id.clone(),
+                        awaiting_since,
+                        status,
+                    ));
+                }
+            }
+        }
+        drop(heartbeats);
+
+        if !recovered_after_injection.is_empty() {
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(session) = sessions.get_mut(session_id) {
+                    for (agent_id, heartbeat_status) in &recovered_after_injection {
+                        if let Some(agent) = session.agents.iter_mut().find(|a| &a.id == agent_id) {
+                            if Self::awaiting_injected_turn_since(&agent.status).is_some() {
+                                agent.status = if heartbeat_status == "idle" {
+                                    AgentStatus::Idle
+                                } else {
+                                    AgentStatus::Running
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+            self.emit_session_update(session_id);
+        }
+
+        stalled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_heartbeat_last_activity_for_test(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        last_activity: DateTime<Utc>,
+    ) {
+        self.agent_heartbeats
+            .write()
+            .get_mut(session_id)
+            .and_then(|agents| agents.get_mut(agent_id))
+            .expect("heartbeat fixture")
+            .last_activity = last_activity;
     }
 
     /// Get heartbeat info for a session (for active sessions endpoint).
@@ -5694,8 +5861,8 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
    ```bash
    {smoke_worker_start_heartbeat}
    ```
-2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
-3. Post to shared: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
+2. Post message to queen: `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/{session_id}-queen/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 reporting in. Smoke test task started."}}'`
+3. Post to shared (reserved session-wide broadcast key): `curl -s -X POST "http://localhost:18800/api/sessions/{session_id}/conversations/shared/append" -H "Content-Type: application/json" -d '{{"from":"worker-1","content":"Worker 1 completed conversation smoke test."}}'`
 4. Send completed heartbeat:
    ```bash
    {smoke_worker_completed_heartbeat}
@@ -5703,8 +5870,8 @@ Workers MUST use curl to exercise the conversation and heartbeat APIs.
 
 ### Task 2 (Worker 2, if present):
 1. Send heartbeat with working status
-2. Read queen conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/queen"`
-3. Read shared conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared"`
+2. Read queen conversation: `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/{session_id}-queen"`
+3. Read shared conversation (reserved session-wide broadcast key): `curl -s "http://localhost:18800/api/sessions/{session_id}/conversations/shared"`
 4. Post message to queen confirming what was read
 5. Send completed heartbeat
 
@@ -6275,25 +6442,17 @@ Heartbeat while coordinating:
 
 `POST /api/sessions/{session_id}/inject` writes a message into a running agent's terminal.
 
-**Known defect on builds at or below v0.43.0 (issues #221, #226): the message does NOT submit.** The payload and its newline share one PTY write, so the text lands in the agent's composer and waits for a keypress that never comes.
-
-**Workaround: send a second, empty message.** It writes only the newline, with no payload, which is a standalone Enter delivered as its own discrete write. That submits whatever is buffered:
+With the default `"submit":true`, the sender performs two discrete PTY writes: the payload, then a bare carriage-return submit keystroke after the adapter's configured gap. Use `"submit":false` only when intentionally leaving text in the composer.
 
 ```bash
-# 1. the real message - lands in the composer, does NOT submit
 curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
   -H "Content-Type: application/json" \\
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
-
-# 2. empty message == standalone Enter - THIS submits it
-curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
-  -H "Content-Type: application/json" \\
-  -d '{{"target_agent_id":"{session_id}-worker-N","message":""}}'
 ```
 
-Measured against a live codex agent, operator-confirmed with no keypress: step 1 alone did not submit after 60 seconds; step 2 submitted it. Drop step 2 once the fix ships.
+The response reports measured sender-side facts including `payload_bytes_written`, `submit_keystroke_issued`, `submit_bytes_written`, PTY-output byte counts, `pty_activity_observed`, and the bounded `observation_window_ms`.
 
-**Never verify an inject by watching whether the agent acts.** With an operator present at the terminal, that observable cannot distinguish an auto-submit from a human pressing Enter. Either have the operator confirm no keypress, or use the two-step form and treat submission as caused by step 2.
+**Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity. Never infer success from receiver behaviour alone.
 
 **Task files remain the primary channel for assignments.** Inject is for nudges and mid-flight corrections; workers re-read their task file, so durable direction belongs there.
 
@@ -6656,7 +6815,7 @@ Use only the native tools exposed by the configured harness. The Capability Card
 - Queen channel: {queen_conversation}
 - Shared channel: {shared_conversation}
 - Read the shared channel before starting a new subtask.
-- Send progress, blockers, and completion evidence to POST /api/sessions/{session_id}/conversations/queen/append.
+- Send progress, blockers, and completion evidence to POST /api/sessions/{session_id}/conversations/{session_id}-queen/append. The reserved session-wide `shared` conversation key remains unprefixed.
 - If the API is unavailable, append the same message to {queen_conversation}.
 
 Heartbeat while active ({heartbeat_cadence} — REQUIRED). Long silent stretches (indexing, builds,
@@ -7259,6 +7418,11 @@ running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
 - Research/no-worktree Hive: the task file is under `.hive-manager/{session_id}/tasks/` in the operator project
 - Workers re-read the returned task file for new direction; durable queue readiness, not markdown polling, controls activation
 - Dynamic principals are supported by Hive/Research sessions. Fusion variants use their pre-created Fusion task files instead of this endpoint
+- Heartbeat status remains the closed `working` / `idle` / `completed` vocabulary. `awaiting_injected_turn` is server-authored because an inject-blocked receiver cannot take a turn to self-report it.
+- Worker-authored timeouts cannot run while that worker is inject-blocked. The sender's inject receipt measures writes and a bounded PTY-output observation only; it never proves a turn.
+- Automatic 60s sweeps with a 180s stall threshold and `agent-stalled` / `agent-recovered` events run only in the desktop Tauri `.setup()` task. Headless HTTP keeps the measured inject receipt but has no automatic stall sweep; in-memory awaiting markers also reset on process restart.
+- For task-backed scheduling, the durable `agent_run_queue` is authoritative for assignment, readiness, and lifecycle; `Session.agents` is the in-memory roster and metadata cache, while PTY liveness determines whether its process is live.
+- `GET /workers` suppresses a dead `Running` roster entry when its exact Plan Task ID maps to a durably queued `pending:` row. Spawn and release can still make the stores disagree transiently while work is in flight; this reconciliation eliminates the durable failed-cleanup case, not every transient window.
 - Use this to spawn workers sequentially as tasks complete
 "#,
             session_id = session_id,
@@ -12845,6 +13009,24 @@ The backend composed and persisted the following authoritative skeleton before l
             ));
         }
 
+        if matches!(&session.session_type, SessionType::Solo { .. }) {
+            return Err("Solo sessions do not support planning continuation".to_string());
+        }
+
+        // The production continue action is the authoritative exit from Planning.
+        // Build and persist the plan-derived graph before any session-type branch
+        // can transition to Running. A retry from PlanReady is intentionally a
+        // no-op here because the graph was already persisted by mark_plan_ready.
+        if session.state == SessionState::Planning {
+            self.mark_plan_ready(session_id)?;
+        }
+
+        let session = {
+            let sessions = self.sessions.read();
+            sessions.get(session_id).cloned()
+        }
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
         // Dispatch based on session type
         match &session.session_type {
             SessionType::Swarm { .. } => {
@@ -12856,9 +13038,7 @@ The backend composed and persisted the following authoritative skeleton before l
             SessionType::Debate { .. } => {
                 return self.continue_debate_after_planning(session_id, &session);
             }
-            SessionType::Solo { .. } => {
-                return Err("Solo sessions do not support planning continuation".to_string());
-            }
+            SessionType::Solo { .. } => unreachable!("Solo continuation rejected above"),
             _ => {} // Continue with Hive logic below
         }
 
@@ -16589,16 +16769,17 @@ mod tests {
         assert!(prompt.contains("supported; encouraged (authorized)"));
         assert!(prompt.contains("do not drop effort or reasoning settings"));
         assert!(prompt.contains("Shared Cell Integration"));
-        // Inject workaround section (issues #221/#226): assert it renders AND that the
-        // literal JSON braces survive format! as SINGLE braces. A brace-escaping slip
-        // compiles fine but emits a broken command, so assert the rendered text.
+        // Inject contract: the sender reports measured write/observation facts without
+        // claiming that output proves a managed turn.
         assert!(prompt.contains("## Messaging a Running Agent (inject)"));
-        assert!(prompt.contains("the message does NOT submit"));
-        assert!(prompt.contains(
-            r#"-d '{"target_agent_id":"session-modern-worker-N","message":""}'"#
-        ));
+        assert!(prompt.contains("two discrete PTY writes"));
+        assert!(prompt.contains("submit_keystroke_issued"));
+        assert!(prompt.contains("pty_activity_observed"));
+        assert!(prompt.contains("do **not** prove that the agent took a turn"));
+        assert!(!prompt.contains("payload and its newline share one PTY write"));
+        assert!(!prompt.contains("send a second, empty message"));
+        assert!(!prompt.contains("Measured against a live codex agent"));
         assert!(!prompt.contains("{{"));
-        assert!(prompt.contains("Never verify an inject by watching whether the agent acts"));
         assert!(prompt.contains("Principals do not commit"));
         assert!(prompt.contains("backend-created hive/session-modern/primary branch"));
         assert!(prompt.contains("Managed principals are visible Hive agents"));

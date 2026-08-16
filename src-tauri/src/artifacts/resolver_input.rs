@@ -38,7 +38,9 @@ pub fn assemble_resolver_input(
     }
 
     Ok(ResolverInput {
-        queen_summary: storage.read_latest_conversation_message(session_id, "queen")?,
+        queen_summary: storage
+            .read_latest_conversation_message(session_id, &format!("{session_id}-queen"))?
+            .or(storage.read_latest_conversation_message(session_id, "queen")?),
         candidates,
     })
 }

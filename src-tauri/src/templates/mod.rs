@@ -1387,10 +1387,10 @@ curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/{{session_id}}-queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
-### Broadcast to all:
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/{{session_id}}-worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+### Broadcast to all (reserved session-wide key `shared`):
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat ({{heartbeat_cadence}}):
 {{queen_heartbeat_snippet}}
@@ -1528,10 +1528,10 @@ When you independently verify a researcher's findings are complete, immediately 
 
 ### Inter-Agent Communication
 #### Check your inbox:
-curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/{{session_id}}-queen?since=<last_check_ts>"
 #### Send message to worker:
-curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
-#### Broadcast to all:
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/{{session_id}}-worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+#### Broadcast to all (reserved session-wide key `shared`):
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 #### Heartbeat ({{heartbeat_cadence}}):
 {{queen_heartbeat_snippet}}
@@ -1610,10 +1610,10 @@ curl "{{api_base_url}}/api/sessions/{{session_id}}/learnings"
 
 ## Inter-Agent Communication
 ### Check your inbox:
-curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/queen?since=<last_check_ts>"
+curl -fsS "{{api_base_url}}/api/sessions/{{session_id}}/conversations/{{session_id}}-queen?since=<last_check_ts>"
 ### Send message to worker:
-curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
-### Broadcast to all:
+curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/{{session_id}}-worker-N/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Your message"}'
+### Broadcast to all (reserved session-wide key `shared`):
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/conversations/shared/append" -H "Content-Type: application/json" -d '{"from":"queen","content":"Announcement"}'
 ### Heartbeat ({{heartbeat_cadence}}):
 {{queen_heartbeat_snippet}}
@@ -2351,6 +2351,35 @@ mod tests {
             DEFAULT_API_BASE_URL
         );
         assert_eq!(normalize_api_base_url(None), DEFAULT_API_BASE_URL);
+    }
+
+    #[test]
+    fn builtin_queen_prompts_use_full_conversation_ids_and_reserved_shared_key() {
+        let context = PromptContext {
+            session_id: "session-245".to_string(),
+            project_path: ".".to_string(),
+            task: None,
+            variables: HashMap::new(),
+        };
+
+        for template_name in ["queen-hive", "queen-research", "queen-fusion"] {
+            let prompt = TemplateEngine::default()
+                .render_template(template_name, &context)
+                .expect("render Queen prompt");
+
+            assert!(prompt.contains(
+                "/api/sessions/session-245/conversations/session-245-queen?since="
+            ));
+            assert!(prompt.contains(
+                "/api/sessions/session-245/conversations/session-245-worker-N/append"
+            ));
+            assert!(prompt.contains(
+                "/api/sessions/session-245/conversations/shared/append"
+            ));
+            assert!(prompt.contains("reserved session-wide key `shared`"));
+            assert!(!prompt.contains("/conversations/queen"));
+            assert!(!prompt.contains("/conversations/worker-N"));
+        }
     }
 
     #[test]

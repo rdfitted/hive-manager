@@ -964,7 +964,7 @@ impl SessionStorage {
         Ok(message)
     }
 
-    /// Read conversation messages with optional since filter.
+    /// Read a canonical conversation plus any legacy bare-key history, with an optional since filter.
     pub async fn read_conversation(
         &self,
         session_id: &str,
@@ -972,13 +972,19 @@ impl SessionStorage {
         since: Option<DateTime<Utc>>,
     ) -> Result<Vec<ConversationMessage>, StorageError> {
         let path = self.conversation_file_path(session_id, agent_id);
+        let legacy_path = agent_id
+            .strip_prefix(&format!("{}-", session_id))
+            .map(|bare_id| self.conversation_file_path(session_id, bare_id));
 
         tokio::task::spawn_blocking(move || -> Result<Vec<ConversationMessage>, StorageError> {
-            if !path.exists() {
-                return Ok(Vec::new());
+            let mut messages = Vec::new();
+            for candidate in legacy_path.into_iter().chain(std::iter::once(path)) {
+                if candidate.exists() {
+                    let content = fs::read_to_string(candidate)?;
+                    messages.extend(parse_conversation_messages(&content));
+                }
             }
-            let content = fs::read_to_string(&path)?;
-            let mut messages = parse_conversation_messages(&content);
+            messages.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
             if let Some(since_ts) = since {
                 messages.retain(|m| m.timestamp > since_ts);
             }

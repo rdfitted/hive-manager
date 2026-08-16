@@ -11,10 +11,21 @@ use std::sync::Arc;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::storage::ConversationMessage;
-use super::{validate_agent_id, validate_session_id};
+use super::{canonical_agent_id, validate_agent_id, validate_session_id};
 
 const MAX_MESSAGE_CONTENT_LEN: usize = 1_048_576; // 1MB - allows large pastes
 const MAX_FROM_LEN: usize = 64;
+pub(crate) const SHARED_CONVERSATION_ID: &str = "shared";
+
+/// Resolve an agent conversation to the same full id used by the roster and UI.
+/// `shared` is a reserved session-wide broadcast channel, not an agent id.
+pub(crate) fn canonical_conversation_id(session_id: &str, agent_id: &str) -> String {
+    if agent_id == SHARED_CONVERSATION_ID {
+        SHARED_CONVERSATION_ID.to_string()
+    } else {
+        canonical_agent_id(session_id, agent_id)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AppendMessageRequest {
@@ -70,6 +81,7 @@ pub async fn append_conversation(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     validate_session_id(&session_id)?;
     validate_agent_id(&agent_id)?;
+    let agent_id = canonical_conversation_id(&session_id, &agent_id);
     let from = sanitize_text(&req.from, MAX_FROM_LEN, "from")?;
     validate_agent_id(&from)?;
     let content = sanitize_text(&req.content, MAX_MESSAGE_CONTENT_LEN, "content")?;
@@ -108,6 +120,7 @@ pub async fn read_conversation(
 ) -> Result<Json<ConversationResponse>, ApiError> {
     validate_session_id(&session_id)?;
     validate_agent_id(&agent_id)?;
+    let agent_id = canonical_conversation_id(&session_id, &agent_id);
     let since = parse_since(query.since)?;
 
     let messages = state

@@ -5,7 +5,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,10 +18,10 @@ use crate::domain::WorkspaceStrategy;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::orchestrator::org_graph::definitions::role_prompt_template;
-use crate::pty::{AgentConfig, AgentRole, WorkerRole};
+use crate::pty::{AgentConfig, AgentRole, AgentStatus, WorkerRole};
 use crate::session::{AddWorkerError, AddWorkerRejectionReason, SessionController};
 use crate::storage::queue::{
-    QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate,
+    QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate, QueueStatus,
 };
 
 struct QueueSchedulingFacts {
@@ -29,6 +30,16 @@ struct QueueSchedulingFacts {
     conflicts: Vec<QueueConflictRow>,
     conflict_coverage: Option<QueueConflictCoverage>,
     reconcile_conflict_task_id: Option<String>,
+}
+
+fn plan_task_id_from_task_file(path: &FsPath) -> Option<String> {
+    let task_file = std::fs::read_to_string(path).ok()?;
+    let (_, after_heading) = task_file.split_once("## Plan Task ID")?;
+    let encoded = after_heading
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    serde_json::from_str(encoded).ok()
 }
 
 fn queue_scheduling_facts(
@@ -97,10 +108,15 @@ fn queue_scheduling_facts(
                 },
             )
         } else {
-            // No graph, a complete edgeless graph, or a degraded empty graph retains legacy
-            // FIFO and any existing omission. It cannot truthfully clear an earlier resolution
-            // issue; only a later authoritative graph containing the task does that.
-            (Vec::new(), QueueResolutionUpdate::Preserve)
+            (
+                Vec::new(),
+                QueueResolutionUpdate::ResolutionIncomplete {
+                    task_id: task_id.to_string(),
+                    reason: format!(
+                        "explicit task {task_id} is absent from the authoritative work graph"
+                    ),
+                },
+            )
         }
     } else {
         (Vec::new(), QueueResolutionUpdate::Preserve)
@@ -963,34 +979,68 @@ pub async fn list_workers(
 ) -> Result<Json<Value>, ApiError> {
     validate_session_id(&session_id)?;
 
+    // The durable queue is authoritative for task-backed scheduling. A startup-death release
+    // can outlive failed roster cleanup, so project only the exact dead task-backed roster entry
+    // away once its row is durably queued under the canonical pending binding.
+    let queue = state
+        .queue_manager
+        .queue_snapshot(&session_id)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let released_pending_task_ids: HashSet<String> = queue
+        .rows
+        .iter()
+        .filter(|row| {
+            row.status == QueueStatus::Queued
+                && row.task_id.is_some()
+                && row.worker_id == format!("pending:{}", row.id)
+        })
+        .filter_map(|row| row.task_id.clone())
+        .collect();
+
     let controller = state.session_controller.read();
 
     let session = controller
         .get_session(&session_id)
         .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+    drop(controller);
 
-    let workers: Vec<Value> = session
+    let mut workers = Vec::new();
+    for agent in session
         .agents
         .iter()
-        .filter(|a| matches!(a.role, AgentRole::Worker { .. }))
-        .map(|a| -> Result<Value, ApiError> {
-            let index = a.id.rsplit('-').next().unwrap_or("0");
-            let task_file = SessionController::task_file_path_for_session_worker(
-                &session,
-                index.parse::<usize>().unwrap_or(0),
-            )
-            .map_err(ApiError::internal)?
-            .to_string_lossy()
-            .to_string();
-            Ok(json!({
-                "id": a.id,
-                "role": a.config.role.as_ref().map(|r| &r.label).unwrap_or(&"Worker".to_string()),
-                "cli": a.config.cli,
-                "status": format!("{:?}", a.status),
-                "task_file": task_file
-            }))
-        })
-        .collect::<Result<_, _>>()?;
+        .filter(|agent| matches!(agent.role, AgentRole::Worker { .. }))
+    {
+        let index = agent.id.rsplit('-').next().unwrap_or("0");
+        let task_file = SessionController::task_file_path_for_session_worker(
+            &session,
+            index.parse::<usize>().unwrap_or(0),
+        )
+        .map_err(ApiError::internal)?;
+        let released_task_id = if matches!(&agent.status, AgentStatus::Running) {
+            plan_task_id_from_task_file(&task_file)
+                .filter(|task_id| released_pending_task_ids.contains(task_id))
+        } else {
+            None
+        };
+        if let Some(task_id) = released_task_id.filter(|_| {
+            !state.pty_manager.read().is_alive(&agent.id)
+        }) {
+            tracing::warn!(
+                session_id = %session_id,
+                worker_id = %agent.id,
+                task_id = %task_id,
+                "suppressed dead roster entry after its task-backed queue row was released"
+            );
+            continue;
+        }
+        workers.push(json!({
+            "id": agent.id,
+            "role": agent.config.role.as_ref().map(|role| &role.label).unwrap_or(&"Worker".to_string()),
+            "cli": agent.config.cli,
+            "status": format!("{:?}", agent.status),
+            "task_file": task_file.to_string_lossy().to_string()
+        }));
+    }
 
     Ok(Json(json!({
         "session_id": session_id,
