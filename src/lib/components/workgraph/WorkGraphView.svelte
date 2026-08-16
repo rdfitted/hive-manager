@@ -235,12 +235,8 @@
       </div>
     {:else if isEmpty}
       <div class="wg-msg">
-        <p class="wg-msg-title">No work graph for this session</p>
-        <p class="wg-msg-body">
-          The endpoint answered, so this is not a connection problem — the session simply has no
-          graph to project. A graph is built when a plan is parsed at <code>PlanReady</code>;
-          sessions started before the work graph shipped have none.
-        </p>
+        <p class="wg-msg-title">No tasks in this work graph</p>
+        <p class="wg-msg-body">The work graph endpoint returned no task nodes for this session.</p>
       </div>
     {:else if graph}
       <svg

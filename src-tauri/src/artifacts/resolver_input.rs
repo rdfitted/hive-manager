@@ -38,7 +38,8 @@ pub fn assemble_resolver_input(
     }
 
     Ok(ResolverInput {
-        queen_summary: storage.read_latest_conversation_message(session_id, "queen")?,
+        queen_summary: storage
+            .read_latest_conversation_message(session_id, &format!("{session_id}-queen"))?,
         candidates,
     })
 }
@@ -109,5 +110,28 @@ mod tests {
         assert_eq!(input.queen_summary.as_deref(), Some("Pick the safer variant"));
         assert_eq!(input.candidates.len(), 1);
         assert_eq!(input.candidates[0].cell_id, "variant-a");
+    }
+
+    #[test]
+    fn canonical_queen_summary_does_not_read_stale_legacy_candidate() {
+        let storage_root = TempDir::new().unwrap();
+        let storage = SessionStorage::new_with_base(storage_root.path().to_path_buf()).unwrap();
+        storage.create_session_dir("session-c").unwrap();
+        let conversations = storage.session_dir("session-c").join("conversations");
+        let legacy_path = conversations.join("queen.md");
+        std::fs::remove_file(&legacy_path).unwrap();
+        std::fs::create_dir(&legacy_path).unwrap();
+        std::fs::write(
+            conversations.join("session-c-queen.md"),
+            "---\n[2026-04-08T23:30:00Z] from @queen\nUse the canonical summary\n\n",
+        )
+        .unwrap();
+
+        let input = assemble_resolver_input(&storage, "session-c", Vec::new()).unwrap();
+
+        assert_eq!(
+            input.queen_summary.as_deref(),
+            Some("Use the canonical summary")
+        );
     }
 }

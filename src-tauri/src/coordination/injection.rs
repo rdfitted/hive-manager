@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use thiserror::Error;
 
@@ -8,6 +9,29 @@ use crate::storage::SessionStorage;
 use crate::tauri_shim::{AppHandle, Emitter};
 
 use super::{CoordinationMessage, StateManager, WorkerStateInfo};
+
+/// Sender-side facts captured around a successful PTY injection.
+///
+/// The optional PTY values are raw snapshots and compatibility counters captured immediately
+/// around the write. The HTTP inject routes perform the bounded post-submit observation from the
+/// after-write snapshot; neither kind of ring change proves that the agent took a turn.
+#[derive(Debug, Clone)]
+pub struct InjectionReceipt {
+    pub write_started_at: DateTime<Utc>,
+    pub submitted_at: DateTime<Utc>,
+    pub observation_started_at: DateTime<Utc>,
+    pub payload_bytes_written: usize,
+    pub submit_keystroke_issued: bool,
+    pub submit_bytes_written: usize,
+    pub pty_output_before: Option<String>,
+    pub pty_output_after_write: Option<String>,
+    pub pty_activity_observed: Option<bool>,
+    pub pty_output_bytes_before: Option<usize>,
+    pub pty_output_bytes_after_write: Option<usize>,
+    pub pty_output_bytes_after: Option<usize>,
+    pub observation_window_ms: u64,
+    pub observation_elapsed_ms: u64,
+}
 
 #[derive(Debug, Error)]
 pub enum InjectionError {
@@ -55,7 +79,7 @@ impl InjectionManager {
         target_worker_id: &str,
         message: &str,
         submit: bool,
-    ) -> Result<(), InjectionError> {
+    ) -> Result<InjectionReceipt, InjectionError> {
         // Validate sender is Queen (ID should end with -queen)
         if !queen_id.ends_with("-queen") {
             return Err(InjectionError::NotAuthorized(
@@ -88,7 +112,7 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         // Only persist watcher-visible state after PTY delivery succeeds.
-        self.write_to_agent(target_worker_id, message, submit)?;
+        let receipt = self.write_to_agent(target_worker_id, message, submit)?;
 
         if target_worker_id.ends_with("-evaluator") {
             self.write_session_peer_message(session_id, |state| {
@@ -101,7 +125,7 @@ impl InjectionManager {
             let _ = app_handle.emit("coordination-message", &coord_message);
         }
 
-        Ok(())
+        Ok(receipt)
     }
 
     /// Evaluator injects a message to the Queen or its QA workers.
@@ -112,7 +136,7 @@ impl InjectionManager {
         target_agent_id: &str,
         message: &str,
         submit: bool,
-    ) -> Result<(), InjectionError> {
+    ) -> Result<InjectionReceipt, InjectionError> {
         if !evaluator_id.ends_with("-evaluator") {
             return Err(InjectionError::NotAuthorized(
                 "Only the Evaluator can inject peer QA messages".to_string(),
@@ -150,7 +174,7 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         // Only persist watcher-visible state after PTY delivery succeeds.
-        self.write_to_agent(target_agent_id, message, submit)?;
+        let receipt = self.write_to_agent(target_agent_id, message, submit)?;
 
         if target_is_queen {
             self.write_session_peer_message(session_id, |state| {
@@ -166,7 +190,7 @@ impl InjectionManager {
             let _ = app_handle.emit("coordination-message", &coord_message);
         }
 
-        Ok(())
+        Ok(receipt)
     }
 
     /// Queen initiates a branch switch for all workers
@@ -192,7 +216,9 @@ impl InjectionManager {
 
         let mut results = Vec::new();
         for worker_id in worker_ids {
-            let result = self.write_to_agent(worker_id, &git_command, true);
+            let result = self
+                .write_to_agent(worker_id, &git_command, true)
+                .map(|_| ());
 
             let status = if result.is_ok() { "initiated" } else { "failed" };
             let log_msg = format!(
@@ -215,8 +241,10 @@ impl InjectionManager {
         agent_id: &str,
         message: &str,
         submit: bool,
-    ) -> Result<(), InjectionError> {
+    ) -> Result<InjectionReceipt, InjectionError> {
         let pty_manager = self.pty_manager.read();
+        let write_started_at = Utc::now();
+        let pty_output_before = pty_manager.recent_output(agent_id);
 
         // Strip any existing line endings first
         let clean_message = message.trim_end_matches(&['\r', '\n'][..]);
@@ -234,10 +262,36 @@ impl InjectionManager {
         };
         write_result
             .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
+        // This timestamp is deliberately after the successful submit/write call. Adapter submit
+        // gaps can be much longer than the stall threshold; a pre-write timestamp would make a
+        // just-finished injection look stale and could treat a heartbeat during the gap as recovery.
+        let submitted_at = Utc::now();
+        let pty_output_after_write = pty_manager.recent_output(agent_id);
+        let pty_output_bytes_before = pty_output_before.as_ref().map(String::len);
+        let pty_output_bytes_after_write = pty_output_after_write.as_ref().map(String::len);
+        let pty_activity_observed = match (&pty_output_before, &pty_output_after_write) {
+            (Some(before), Some(after)) => Some(before != after),
+            _ => None,
+        };
 
         tracing::info!("=== INJECTION COMPLETE ===");
 
-        Ok(())
+        Ok(InjectionReceipt {
+            write_started_at,
+            submitted_at,
+            observation_started_at: submitted_at,
+            payload_bytes_written: clean_message.len(),
+            submit_keystroke_issued: submit,
+            submit_bytes_written: if submit { 1 } else { 0 },
+            pty_output_before,
+            pty_output_after_write,
+            pty_activity_observed,
+            pty_output_bytes_before,
+            pty_output_bytes_after_write,
+            pty_output_bytes_after: pty_output_bytes_after_write,
+            observation_window_ms: 0,
+            observation_elapsed_ms: 0,
+        })
     }
 
     /// Direct injection from operator to any agent (bypasses Queen authorization)
@@ -247,7 +301,7 @@ impl InjectionManager {
         target_agent_id: &str,
         message: &str,
         submit: bool,
-    ) -> Result<(), InjectionError> {
+    ) -> Result<InjectionReceipt, InjectionError> {
         // Log to coordination.log
         let coord_message = CoordinationMessage::system(
             &format_agent_display(target_agent_id),
@@ -259,14 +313,14 @@ impl InjectionManager {
             .map_err(|e| InjectionError::StorageError(e.to_string()))?;
 
         // Write to agent's PTY stdin
-        self.write_to_agent(target_agent_id, message, submit)?;
+        let receipt = self.write_to_agent(target_agent_id, message, submit)?;
 
         // Emit event for UI
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit("coordination-message", &coord_message);
         }
 
-        Ok(())
+        Ok(receipt)
     }
 
     /// Notify Queen of new worker availability (logs only, no PTY injection)

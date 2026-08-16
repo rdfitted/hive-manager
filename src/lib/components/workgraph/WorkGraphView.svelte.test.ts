@@ -153,7 +153,11 @@ describe('WorkGraphView', () => {
     const { container } = render(WorkGraphView);
     await settle();
 
-    expect(screen.getByText('No work graph for this session')).toBeTruthy();
+    expect(screen.getByText('No tasks in this work graph')).toBeTruthy();
+    expect(
+      screen.getByText('The work graph endpoint returned no task nodes for this session.')
+    ).toBeTruthy();
+    expect(container.textContent).not.toContain('started before the work graph shipped');
     expect(container.querySelector('.wg-svg')).toBeNull();
   });
 

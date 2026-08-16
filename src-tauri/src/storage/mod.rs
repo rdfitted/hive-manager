@@ -964,21 +964,25 @@ impl SessionStorage {
         Ok(message)
     }
 
-    /// Read conversation messages with optional since filter.
+    /// Read a canonical conversation plus any legacy bare-key history, with an optional since filter.
     pub async fn read_conversation(
         &self,
         session_id: &str,
         agent_id: &str,
         since: Option<DateTime<Utc>>,
     ) -> Result<Vec<ConversationMessage>, StorageError> {
-        let path = self.conversation_file_path(session_id, agent_id);
+        let candidate_paths = self.conversation_file_candidates(session_id, agent_id);
 
         tokio::task::spawn_blocking(move || -> Result<Vec<ConversationMessage>, StorageError> {
-            if !path.exists() {
-                return Ok(Vec::new());
+            let mut messages = Vec::new();
+            for candidate in candidate_paths {
+                match fs::read_to_string(&candidate) {
+                    Ok(content) => messages.extend(parse_conversation_messages(&content)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(StorageError::Io(error)),
+                }
             }
-            let content = fs::read_to_string(&path)?;
-            let mut messages = parse_conversation_messages(&content);
+            messages.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
             if let Some(since_ts) = since {
                 messages.retain(|m| m.timestamp > since_ts);
             }
@@ -992,6 +996,18 @@ impl SessionStorage {
         self.session_dir(session_id)
             .join("conversations")
             .join(format!("{}.md", agent_id))
+    }
+
+    fn conversation_file_candidates(&self, session_id: &str, agent_id: &str) -> Vec<PathBuf> {
+        let canonical_path = self.conversation_file_path(session_id, agent_id);
+        let legacy_path = agent_id
+            .strip_prefix(&format!("{}-", session_id))
+            .map(|bare_id| self.conversation_file_path(session_id, bare_id));
+
+        legacy_path
+            .into_iter()
+            .chain(std::iter::once(canonical_path))
+            .collect()
     }
 
     fn artifact_dir(&self, session_id: &str) -> PathBuf {
@@ -1471,16 +1487,24 @@ impl SessionStorage {
         session_id: &str,
         agent_id: &str,
     ) -> Result<Option<String>, StorageError> {
-        let path = self.conversation_file_path(session_id, agent_id);
-        if !path.exists() {
-            return Ok(None);
+        for candidate in self
+            .conversation_file_candidates(session_id, agent_id)
+            .into_iter()
+            .rev()
+        {
+            match fs::read_to_string(&candidate) {
+                Ok(content) => {
+                    if let Some(message) = parse_conversation_messages(&content).into_iter().last()
+                    {
+                        return Ok(Some(message.content));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(StorageError::Io(error)),
+            }
         }
 
-        let content = fs::read_to_string(path)?;
-        Ok(parse_conversation_messages(&content)
-            .into_iter()
-            .last()
-            .map(|message| message.content))
+        Ok(None)
     }
 
     fn atomic_write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), StorageError> {

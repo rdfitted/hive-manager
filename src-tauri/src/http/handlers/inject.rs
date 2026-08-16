@@ -5,14 +5,126 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::{validate_agent_id, validate_session_id};
-use crate::coordination::InjectionError;
+use crate::coordination::{InjectionError, InjectionReceipt};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 
 fn default_submit() -> bool {
     true
+}
+
+const INJECTION_EVIDENCE_SCOPE: &str = "These facts prove only that bytes were written and the PTY output ring was observed for a bounded window; they do not prove that the agent took a turn.";
+const INJECTION_ACTIVITY_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
+const INJECTION_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+struct InjectionObservation {
+    pty_observation_available: bool,
+    pty_output_bytes_after: Option<usize>,
+    pty_activity_observed: Option<bool>,
+    observation_window_ms: u64,
+    observation_elapsed_ms: u64,
+}
+
+async fn observe_injection(
+    state: &AppState,
+    agent_id: &str,
+    receipt: &InjectionReceipt,
+) -> InjectionObservation {
+    if !receipt.submit_keystroke_issued {
+        return InjectionObservation {
+            pty_observation_available: receipt.pty_output_after_write.is_some(),
+            pty_output_bytes_after: receipt.pty_output_after_write.as_ref().map(String::len),
+            pty_activity_observed: None,
+            observation_window_ms: 0,
+            observation_elapsed_ms: 0,
+        };
+    }
+
+    let Some(baseline) = receipt.pty_output_after_write.as_ref() else {
+        return InjectionObservation {
+            pty_observation_available: false,
+            pty_output_bytes_after: None,
+            pty_activity_observed: None,
+            observation_window_ms: 0,
+            observation_elapsed_ms: 0,
+        };
+    };
+
+    let observation_started = Instant::now();
+    let deadline = observation_started + INJECTION_ACTIVITY_OBSERVATION_WINDOW;
+    let mut output_after = Some(baseline.clone());
+    let mut activity_observed = false;
+    while !activity_observed {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(INJECTION_ACTIVITY_POLL_INTERVAL.min(remaining)).await;
+        output_after = state.pty_manager.read().recent_output(agent_id);
+        let Some(current) = output_after.as_ref() else {
+            break;
+        };
+        activity_observed = current != baseline;
+    }
+
+    let observation_available = output_after.is_some();
+    InjectionObservation {
+        pty_observation_available: observation_available,
+        pty_output_bytes_after: output_after.as_ref().map(String::len),
+        pty_activity_observed: observation_available.then_some(activity_observed),
+        observation_window_ms: INJECTION_ACTIVITY_OBSERVATION_WINDOW.as_millis() as u64,
+        observation_elapsed_ms: observation_started.elapsed().as_millis() as u64,
+    }
+}
+
+fn record_injection_submission(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+    receipt: &InjectionReceipt,
+) {
+    if let Err(error) = state
+        .session_controller
+        .read()
+        .record_injection_submission(
+            session_id,
+            agent_id,
+            receipt.submitted_at,
+            receipt.submit_keystroke_issued,
+        )
+    {
+        tracing::warn!(
+            "Injection succeeded but its awaiting-turn observation was not recorded for {session_id}/{agent_id}: {error}"
+        );
+    }
+}
+
+fn measured_response(
+    message: String,
+    receipt: &InjectionReceipt,
+    observation: &InjectionObservation,
+) -> Value {
+    json!({
+        "status": "success",
+        "message": message,
+        "write_started_at": receipt.write_started_at,
+        "submitted_at": receipt.submitted_at,
+        "payload_bytes_written": receipt.payload_bytes_written,
+        "submit_attempted": receipt.submit_keystroke_issued,
+        "submit_keystroke_issued": receipt.submit_keystroke_issued,
+        "submit_bytes_written": receipt.submit_bytes_written,
+        "pty_observation_available": observation.pty_observation_available,
+        "pty_output_bytes_before": receipt.pty_output_before.as_ref().map(String::len),
+        "pty_output_bytes_after_write": receipt.pty_output_after_write.as_ref().map(String::len),
+        "pty_output_bytes_after": observation.pty_output_bytes_after,
+        "pty_activity_observed": observation.pty_activity_observed,
+        "observation_window_ms": observation.observation_window_ms,
+        "observation_elapsed_ms": observation.observation_elapsed_ms,
+        "evidence_scope": INJECTION_EVIDENCE_SCOPE,
+    })
 }
 
 #[derive(Deserialize)]
@@ -49,24 +161,29 @@ pub async fn operator_inject(
     validate_session_id(&id)?;
     validate_agent_id(&payload.target_agent_id)?;
 
+    let target_agent_id = payload.target_agent_id.clone();
+    let injection_target_agent_id = target_agent_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
     let injection_result = tokio::task::spawn_blocking(move || {
         manager.read().operator_inject(
             &injection_session_id,
-            &payload.target_agent_id,
+            &injection_target_agent_id,
             &payload.message,
             payload.submit,
         )
     })
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
-    injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
+    let receipt = injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
+    let observation = observe_injection(&state, &target_agent_id, &receipt).await;
+    record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
-    Ok(Json(json!({
-        "status": "success",
-        "message": format!("Operator injection sent to session {}", id)
-    })))
+    Ok(Json(measured_response(
+        format!("Operator injection sent to session {}", id),
+        &receipt,
+        &observation,
+    )))
 }
 
 pub async fn queen_inject(
@@ -78,25 +195,30 @@ pub async fn queen_inject(
     validate_agent_id(&payload.queen_id)?;
     validate_agent_id(&payload.target_worker_id)?;
 
+    let target_worker_id = payload.target_worker_id.clone();
+    let injection_target_worker_id = target_worker_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
     let injection_result = tokio::task::spawn_blocking(move || {
         manager.read().queen_inject(
             &injection_session_id,
             &payload.queen_id,
-            &payload.target_worker_id,
+            &injection_target_worker_id,
             &payload.message,
             payload.submit,
         )
     })
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
-    injection_result.map_err(map_injection_error)?;
+    let receipt = injection_result.map_err(map_injection_error)?;
+    let observation = observe_injection(&state, &target_worker_id, &receipt).await;
+    record_injection_submission(&state, &id, &target_worker_id, &receipt);
 
-    Ok(Json(json!({
-        "status": "success",
-        "message": format!("Queen injection sent to session {}", id)
-    })))
+    Ok(Json(measured_response(
+        format!("Queen injection sent to session {}", id),
+        &receipt,
+        &observation,
+    )))
 }
 
 pub async fn evaluator_inject(
@@ -108,25 +230,30 @@ pub async fn evaluator_inject(
     validate_agent_id(&payload.evaluator_id)?;
     validate_agent_id(&payload.target_agent_id)?;
 
+    let target_agent_id = payload.target_agent_id.clone();
+    let injection_target_agent_id = target_agent_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
     let injection_result = tokio::task::spawn_blocking(move || {
         manager.read().evaluator_inject(
             &injection_session_id,
             &payload.evaluator_id,
-            &payload.target_agent_id,
+            &injection_target_agent_id,
             &payload.message,
             payload.submit,
         )
     })
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
-    injection_result.map_err(map_injection_error)?;
+    let receipt = injection_result.map_err(map_injection_error)?;
+    let observation = observe_injection(&state, &target_agent_id, &receipt).await;
+    record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
-    Ok(Json(json!({
-        "status": "success",
-        "message": format!("Evaluator injection sent to session {}", id)
-    })))
+    Ok(Json(measured_response(
+        format!("Evaluator injection sent to session {}", id),
+        &receipt,
+        &observation,
+    )))
 }
 
 fn map_injection_error(error: InjectionError) -> ApiError {
@@ -145,28 +272,95 @@ fn map_injection_error(error: InjectionError) -> ApiError {
 mod tests {
     use super::*;
     use crate::coordination::{InjectionManager, QueueManager};
+    use crate::domain::HiveExecutionPolicy;
     use crate::events::EventBus;
-    use crate::pty::{AgentRole, PtyManager};
-    use crate::session::SessionController;
+    use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager};
+    use crate::session::{
+        AgentInfo, AuthStrategy, Session, SessionController, SessionState, SessionType,
+    };
     use crate::storage::{ApplicationStateDb, QueueRepo, SessionStorage};
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{Request, StatusCode},
         routing::post,
         Router,
     };
+    use chrono::{Duration as ChronoDuration, Utc};
     use parking_lot::RwLock;
     use serde_json::{json, Value};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
+    const SESSION_ID: &str = "inject-test";
     const AGENT_ID: &str = "inject-test-worker-1";
+    const QUEEN_ID: &str = "inject-test-queen";
+    const QA_WORKER_ID: &str = "inject-test-qa-worker-1";
+
+    fn agent(id: &str, role: AgentRole) -> AgentInfo {
+        AgentInfo {
+            id: id.to_string(),
+            role,
+            status: AgentStatus::Running,
+            config: AgentConfig::default(),
+            parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        }
+    }
+
+    fn running_test_session(project_path: std::path::PathBuf) -> Session {
+        let now = Utc::now();
+        Session {
+            id: SESSION_ID.to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Hive { worker_count: 1 },
+            project_path,
+            state: SessionState::Running,
+            created_at: now,
+            last_activity_at: now,
+            agents: vec![
+                agent(
+                    AGENT_ID,
+                    AgentRole::Worker {
+                        index: 1,
+                        parent: None,
+                    },
+                ),
+                agent(QUEEN_ID, AgentRole::Queen),
+                agent(
+                    QA_WORKER_ID,
+                    AgentRole::QaWorker {
+                        index: 1,
+                        parent: Some("inject-test-evaluator".to_string()),
+                    },
+                ),
+            ],
+            default_cli: "claude".to_string(),
+            default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
+            no_git: true,
+            resume_report: None,
+        }
+    }
 
     fn setup_test_app() -> (TempDir, Router, Arc<AppState>) {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(
             SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap(),
         );
+        storage.create_session_dir(SESSION_ID).unwrap();
         let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
         let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
         pty_manager
@@ -184,10 +378,44 @@ mod tests {
                 24,
             )
             .unwrap();
+        pty_manager
+            .write()
+            .create_session(
+                QUEEN_ID.to_string(),
+                AgentRole::Queen,
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        pty_manager
+            .write()
+            .create_session(
+                QA_WORKER_ID.to_string(),
+                AgentRole::QaWorker {
+                    index: 1,
+                    parent: Some("inject-test-evaluator".to_string()),
+                },
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
         let session_controller = Arc::new(RwLock::new(SessionController::new(
             pty_manager.clone(),
         )));
         session_controller.write().set_storage(storage.clone());
+        session_controller
+            .read()
+            .insert_test_session(running_test_session(temp_dir.path().to_path_buf()));
+        session_controller
+            .read()
+            .update_session_metadata(SESSION_ID, None, None)
+            .unwrap();
         let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
             pty_manager.clone(),
             SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap(),
@@ -210,36 +438,62 @@ mod tests {
         ));
         let app = Router::new()
             .route("/api/sessions/{id}/inject", post(operator_inject))
+            .route("/api/sessions/{id}/inject/queen", post(queen_inject))
+            .route(
+                "/api/sessions/{id}/inject/evaluator",
+                post(evaluator_inject),
+            )
             .with_state(state.clone());
 
         (temp_dir, app, state)
     }
 
-    async fn post_operator_inject(app: Router, body: Value) -> StatusCode {
-        app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/sessions/inject-test/inject")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .status()
+    async fn post_inject(app: Router, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, json)
     }
 
     #[tokio::test]
     async fn operator_inject_omitted_submit_defaults_to_true() {
         let (_temp_dir, app, state) = setup_test_app();
 
-        let status = post_operator_inject(
+        let (status, response) = post_inject(
             app,
+            "/api/sessions/inject-test/inject",
             json!({ "target_agent_id": AGENT_ID, "message": "hello\r\n" }),
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["payload_bytes_written"], 5);
+        assert_eq!(response["submit_attempted"], true);
+        assert_eq!(response["submit_keystroke_issued"], true);
+        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["pty_observation_available"], true);
+        assert_eq!(response["pty_output_bytes_before"], 0);
+        assert_eq!(response["pty_output_bytes_after_write"], 6);
+        assert_eq!(response["pty_output_bytes_after"], 6);
+        assert_eq!(response["pty_activity_observed"], false);
+        assert_eq!(response["observation_window_ms"], 250);
+        assert!(response["write_started_at"].is_string());
+        assert!(response["submitted_at"].is_string());
+        assert!(response["evidence_scope"]
+            .as_str()
+            .unwrap()
+            .contains("do not prove that the agent took a turn"));
         assert_eq!(
             state
                 .pty_manager
@@ -254,8 +508,9 @@ mod tests {
     async fn operator_inject_submit_false_writes_payload_without_enter() {
         let (_temp_dir, app, state) = setup_test_app();
 
-        let status = post_operator_inject(
+        let (status, response) = post_inject(
             app,
+            "/api/sessions/inject-test/inject",
             json!({
                 "target_agent_id": AGENT_ID,
                 "message": "draft\r\n",
@@ -265,6 +520,13 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["payload_bytes_written"], 5);
+        assert_eq!(response["submit_attempted"], false);
+        assert_eq!(response["submit_keystroke_issued"], false);
+        assert_eq!(response["submit_bytes_written"], 0);
+        assert_eq!(response["observation_window_ms"], 0);
+        assert_eq!(response["observation_elapsed_ms"], 0);
+        assert_eq!(response["pty_activity_observed"], Value::Null);
         assert_eq!(
             state
                 .pty_manager
@@ -279,8 +541,9 @@ mod tests {
     async fn operator_inject_multiline_preserves_newlines_and_submits_once() {
         let (_temp_dir, app, state) = setup_test_app();
 
-        let status = post_operator_inject(
+        let (status, _response) = post_inject(
             app,
+            "/api/sessions/inject-test/inject",
             json!({
                 "target_agent_id": AGENT_ID,
                 "message": "line one\nline two\r\n"
@@ -303,12 +566,106 @@ mod tests {
     async fn operator_inject_blocking_path_preserves_pty_error_status() {
         let (_temp_dir, app, _state) = setup_test_app();
 
-        let status = post_operator_inject(
+        let (status, _response) = post_inject(
             app,
+            "/api/sessions/inject-test/inject",
             json!({ "target_agent_id": "missing-agent", "message": "hello" }),
         )
         .await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn all_inject_routes_return_the_measured_sender_contract() {
+        let (_temp_dir, app, _state) = setup_test_app();
+        let cases = [
+            (
+                "/api/sessions/inject-test/inject",
+                json!({ "target_agent_id": AGENT_ID, "message": "operator" }),
+            ),
+            (
+                "/api/sessions/inject-test/inject/queen",
+                json!({
+                    "queen_id": QUEEN_ID,
+                    "target_worker_id": AGENT_ID,
+                    "message": "queen"
+                }),
+            ),
+            (
+                "/api/sessions/inject-test/inject/evaluator",
+                json!({
+                    "evaluator_id": "inject-test-evaluator",
+                    "target_agent_id": QUEEN_ID,
+                    "message": "evaluator"
+                }),
+            ),
+        ];
+
+        for (path, body) in cases {
+            let (status, response) = post_inject(app.clone(), path, body).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {response}");
+            assert_eq!(response["submit_keystroke_issued"], true, "{path}");
+            assert_eq!(response["submit_bytes_written"], 1, "{path}");
+            assert_eq!(response["pty_observation_available"], true, "{path}");
+            assert!(response["pty_output_bytes_before"].is_number(), "{path}");
+            assert!(response["pty_output_bytes_after_write"].is_number(), "{path}");
+            assert_eq!(response["observation_window_ms"], 250, "{path}");
+            assert!(response["evidence_scope"]
+                .as_str()
+                .unwrap()
+                .contains("do not prove that the agent took a turn"));
+        }
+    }
+
+    #[test]
+    fn stall_report_distinguishes_awaiting_inject_from_crashed_and_idle() {
+        let (_temp_dir, _app, state) = setup_test_app();
+        let controller = state.session_controller.read();
+        controller
+            .update_heartbeat(SESSION_ID, AGENT_ID, "working", None)
+            .unwrap();
+        controller
+            .update_heartbeat(SESSION_ID, QUEEN_ID, "working", None)
+            .unwrap();
+        controller
+            .update_heartbeat(SESSION_ID, QA_WORKER_ID, "idle", None)
+            .unwrap();
+
+        let stale_at = Utc::now() - ChronoDuration::minutes(5);
+        for agent_id in [AGENT_ID, QUEEN_ID, QA_WORKER_ID] {
+            controller.set_heartbeat_last_activity_for_test(SESSION_ID, agent_id, stale_at);
+        }
+        controller
+            .record_injection_submission(
+                SESSION_ID,
+                AGENT_ID,
+                stale_at + ChronoDuration::seconds(1),
+                true,
+            )
+            .unwrap();
+        state.pty_manager.read().kill(QUEEN_ID).unwrap();
+
+        let reports = controller.get_stalled_agent_reports(
+            SESSION_ID,
+            std::time::Duration::from_secs(30),
+        );
+        let status_for = |agent_id: &str| {
+            reports
+                .iter()
+                .find(|(id, _, _)| id == agent_id)
+                .map(|(_, _, status)| status)
+                .unwrap()
+        };
+
+        assert_eq!(
+            status_for(AGENT_ID),
+            &AgentStatus::WaitingForInput("awaiting_injected_turn".to_string())
+        );
+        assert_eq!(
+            status_for(QUEEN_ID),
+            &AgentStatus::Error("process_not_alive".to_string())
+        );
+        assert_eq!(status_for(QA_WORKER_ID), &AgentStatus::Idle);
     }
 }

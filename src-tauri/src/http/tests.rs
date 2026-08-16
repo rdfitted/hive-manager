@@ -4,6 +4,9 @@ use crate::domain::WorkspaceStrategy;
 use crate::events::EventBus;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
+use crate::orchestrator::work_graph::{
+    BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
+};
 use crate::pty::PtyManager;
 use crate::pty::{AgentConfig, AgentRole, AgentStatus};
 use crate::session::{
@@ -5508,22 +5511,24 @@ async fn test_select_winner_path_traversal() {
 // --- Conversations API tests ---
 
 #[tokio::test]
-async fn test_append_conversation_and_verify_file_content() {
-    let (app, controller) = setup_test_app_with_controller().await;
-    let storage = SessionStorage::new().unwrap();
+async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_event() {
+    let storage_dir = TempDir::new().unwrap();
+    let project_dir = TempDir::new().unwrap();
+    let (app, controller, storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
     let session_id = format!("conv-append-{}", uuid::Uuid::new_v4());
-
-    let temp_dir = std::env::temp_dir().join(format!("hive-test-{}", session_id));
-    let _ = std::fs::create_dir_all(&temp_dir);
+    let full_agent_id = format!("{session_id}-worker-1");
     controller
         .read()
-        .insert_test_session(make_test_session(&session_id, temp_dir.to_str().unwrap()));
+        .insert_test_session(make_test_session(&session_id, project_dir.path().to_str().unwrap()));
+    let mut events = state.event_bus.subscribe_session(session_id.clone());
 
     let body = serde_json::json!({
         "from": "worker-1",
-        "content": "First conversation message"
+        "content": "Message sent through the short prompt-style key"
     });
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -5539,16 +5544,126 @@ async fn test_append_conversation_and_verify_file_content() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("timed out waiting for the short-key conversation event")
+        .expect("conversation event channel closed");
+    assert_eq!(event.agent_id.as_deref(), Some(full_agent_id.as_str()));
+    assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/conversations/{}",
+                    session_id, full_agent_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_json = read_json_body(response).await;
+    assert_eq!(response_json["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        response_json["messages"][0]["content"],
+        "Message sent through the short prompt-style key"
+    );
+
+    let body = serde_json::json!({
+        "from": "worker-1",
+        "content": "Message sent through the full UI composer key"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/conversations/{}/append",
+                    session_id, full_agent_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("timed out waiting for the full-key conversation event")
+        .expect("conversation event channel closed");
+    assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/conversations/worker-1",
+                    session_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_json = read_json_body(response).await;
+    assert_eq!(response_json["messages"].as_array().unwrap().len(), 2);
+
     let conversation_file = storage
         .session_dir(&session_id)
         .join("conversations")
-        .join("worker-1.md");
+        .join(format!("{full_agent_id}.md"));
     let file_content = std::fs::read_to_string(conversation_file).unwrap();
     assert!(file_content.contains("from @worker-1"));
-    assert!(file_content.contains("First conversation message"));
+    assert!(file_content.contains("Message sent through the short prompt-style key"));
+    assert!(file_content.contains("Message sent through the full UI composer key"));
+    assert!(!storage
+        .session_dir(&session_id)
+        .join("conversations")
+        .join("worker-1.md")
+        .exists());
 
-    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    let shared_body = serde_json::json!({
+        "from": "worker-1",
+        "content": "Reserved broadcast"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/conversations/shared/append",
+                    session_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&shared_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("timed out waiting for the shared conversation event")
+        .expect("conversation event channel closed");
+    assert_eq!(event.agent_id.as_deref(), Some("shared"));
+    assert_eq!(event.payload["data"]["agent_id"], "shared");
+    assert!(storage
+        .session_dir(&session_id)
+        .join("conversations")
+        .join("shared.md")
+        .exists());
+    assert!(!storage
+        .session_dir(&session_id)
+        .join("conversations")
+        .join(format!("{session_id}-shared.md"))
+        .exists());
 }
 
 #[tokio::test]
@@ -5639,6 +5754,68 @@ async fn test_read_conversation_since_filter() {
     let storage = SessionStorage::new().unwrap();
     let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_read_conversation_preserves_legacy_bare_history_after_canonical_append() {
+    let storage_dir = TempDir::new().unwrap();
+    let project_dir = TempDir::new().unwrap();
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("conv-legacy-{}", uuid::Uuid::new_v4());
+    let full_queen_id = format!("{session_id}-queen");
+    controller
+        .read()
+        .insert_test_session(make_test_session(&session_id, project_dir.path().to_str().unwrap()));
+    storage.create_conversation_dir(&session_id).unwrap();
+    std::fs::write(
+        storage
+            .session_dir(&session_id)
+            .join("conversations")
+            .join("queen.md"),
+        "---\n[2026-04-08T23:30:00Z] from @worker-1\nLegacy queen history\n\n",
+    )
+    .unwrap();
+
+    let body = serde_json::json!({
+        "from": "worker-2",
+        "content": "Canonical queen history"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/sessions/{}/conversations/{}/append",
+                    session_id, full_queen_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{}/conversations/queen",
+                    session_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_json = read_json_body(response).await;
+    let messages = response_json["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["content"], "Legacy queen history");
+    assert_eq!(messages[1]["content"], "Canonical queen history");
 }
 
 #[tokio::test]
@@ -9240,6 +9417,147 @@ async fn add_worker_that_dies_during_startup_is_failed_to_start_not_running() {
         format!("{}-worker-1", session_id),
         "recovery must respawn the original slot"
     );
+}
+
+/// #244 T4. A task-backed startup death can release the durable queue row after
+/// guarded roster cleanup fails. The queue is authoritative for durable scheduling,
+/// so GET /workers must not keep projecting that dead agent as Running.
+#[tokio::test]
+async fn task_backed_startup_death_with_failed_discard_reconciles_worker_and_queue_views() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("task-doa-{}", uuid::Uuid::new_v4());
+    let worker_id = format!("{}-worker-1", session_id);
+    let temp_dir = TempDir::new().unwrap();
+    storage.create_session_dir(&session_id).unwrap();
+    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+    session.no_git = true;
+    controller.read().insert_test_session(session);
+    StateManager::new(storage.session_dir(&session_id))
+        .write_work_graph(&TaskGraph::new(
+            vec![WorkNode::new(
+                "T4",
+                NodeKind::Task,
+                "T4",
+                NodeContract::default(),
+                BindingRef::Role("worker".to_string()),
+                NodeStatus::Ready,
+            )],
+            Vec::new(),
+        ))
+        .unwrap();
+
+    let mut cleanup_hook =
+        crate::http::handlers::workers::register_startup_death_cleanup_test_hook(&worker_id);
+
+    let pending_request = {
+        let app = app.clone();
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/workers", session_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "role_type": "researcher",
+                            "cli": "claude",
+                            "flags": ["--stub-die-on-start"],
+                            "task_id": "T4"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        })
+    };
+
+    // Stop the handler immediately before guarded roster cleanup. This makes the fixture's
+    // completion marker an ordered prerequisite of discard_worker_slot rather than a race
+    // against the handler's PTY-output drain delay.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cleanup_hook.wait_until_reached(),
+    )
+    .await
+    .expect("timed out waiting for startup-death cleanup barrier")
+    .expect("startup-death cleanup barrier closed before it was reached");
+    controller.read().sync_agent_commit_sha(
+        &session_id,
+        &worker_id,
+        Some("synthetic-completion-guard".to_string()),
+    );
+    cleanup_hook.release();
+
+    let response = pending_request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "failed_to_start");
+    assert_eq!(body["slot_freed"], false);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(&session_id)
+            .unwrap()
+            .agents
+            .len(),
+        1,
+        "the fixture must prove guarded roster cleanup actually failed"
+    );
+
+    let queue_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/sessions/{}/queue", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queue_response.status(), StatusCode::OK);
+    let queue: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(queue_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(queue["running"], 0);
+    assert_eq!(queue["queued"], 1);
+    assert_eq!(queue["rows"][0]["task_id"], "T4");
+    assert!(queue["rows"][0]["worker_id"]
+        .as_str()
+        .is_some_and(|worker_id| worker_id.starts_with("pending:task:")));
+
+    let workers_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/sessions/{}/workers", session_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(workers_response.status(), StatusCode::OK);
+    let workers: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(workers_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(workers["count"], 0);
+    assert_eq!(workers["workers"], serde_json::json!([]));
 }
 
 /// #207 fix 4. A rostered worker with no live process is a dead slot; release must
