@@ -20,12 +20,21 @@
     readonly kind: string;
   }
 
+  interface InspectorProgress {
+    readonly started_at: string | null;
+    readonly finished_at: string | null;
+    readonly attempts: number;
+    readonly agent_id: string | null;
+    readonly last_heartbeat_at: string | null;
+  }
+
   interface Props {
     node: InspectorNode;
     dependencies: readonly ImmediateDependency[];
+    progress?: InspectorProgress | null;
   }
 
-  let { node, dependencies }: Props = $props();
+  let { node, dependencies, progress = null }: Props = $props();
   let hasContract = $derived(
     node.contract.inputs.length > 0 ||
       node.contract.outputs.length > 0 ||
@@ -57,7 +66,7 @@
     </div>
   </dl>
 
-  <div class="contract" aria-label="Node contract">
+  <section class="contract" aria-label="Node contract">
     {#if hasContract}
       {#if node.contract.inputs.length > 0}
         <section>
@@ -94,7 +103,37 @@
     {:else}
       <p class="contract-empty">No contract recorded</p>
     {/if}
-  </div>
+  </section>
+
+  <section class="progress" aria-label="Node progress">
+    <h3>Progress</h3>
+    {#if progress}
+      <dl class="progress-grid">
+        <div>
+          <dt>Started</dt>
+          <dd>{progress.started_at ?? 'Not recorded'}</dd>
+        </div>
+        <div>
+          <dt>Finished</dt>
+          <dd>{progress.finished_at ?? 'Not recorded'}</dd>
+        </div>
+        <div>
+          <dt>Attempts</dt>
+          <dd>{progress.attempts}</dd>
+        </div>
+        <div>
+          <dt>Agent</dt>
+          <dd>{progress.agent_id ?? 'Not recorded'}</dd>
+        </div>
+        <div>
+          <dt>Last heartbeat</dt>
+          <dd>{progress.last_heartbeat_at ?? 'Not recorded'}</dd>
+        </div>
+      </dl>
+    {:else}
+      <p class="progress-empty">No progress recorded</p>
+    {/if}
+  </section>
 
   <section class="dependencies">
     <h3>Immediate dependencies</h3>
@@ -170,14 +209,16 @@
     overflow-wrap: anywhere;
   }
 
-  .node-meta {
+  .node-meta,
+  .progress-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2);
     margin: var(--space-3) 0 0;
   }
 
-  .node-meta div {
+  .node-meta div,
+  .progress-grid div {
     min-width: 0;
     padding: var(--space-2);
     border-radius: var(--radius-sm);
@@ -200,11 +241,12 @@
   }
 
   .contract,
+  .progress,
   .dependencies {
     margin-top: var(--space-4);
   }
 
-  section + section {
+  .contract section + section {
     margin-top: var(--space-3);
   }
 
@@ -226,6 +268,7 @@
   }
 
   .contract-empty,
+  .progress-empty,
   .dependencies-empty {
     margin: 0;
     color: var(--text-secondary);
@@ -235,6 +278,10 @@
   .dependencies {
     padding-top: var(--space-3);
     box-shadow: var(--edge-seam-top);
+  }
+
+  .progress-grid div:last-child {
+    grid-column: 1 / -1;
   }
 
   .dependencies li {

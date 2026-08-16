@@ -346,7 +346,7 @@ describe('WorkGraphView', () => {
     expect(waveLabels[1].getAttribute('aria-label')).toBe('Wave 2 of 2, Active');
   });
 
-  it('ticks elapsed locally and distinguishes fresh stale and absent progress', async () => {
+  it('keeps the focused node label byte-identical while timing advances and inspector progress stays readable', async () => {
     vi.setSystemTime(new Date('2026-08-16T19:10:00.000Z'));
     const fresh = graphNode('fresh', 'running', ROLE('frontend'), {
       title: 'Healthy worker',
@@ -394,14 +394,28 @@ describe('WorkGraphView', () => {
     expect(progressFor('absent')).toBe('No timing');
     expect(nodeFor('fresh').classList.contains('wg-node--fresh')).toBe(true);
     expect(nodeFor('stale').classList.contains('wg-node--stale')).toBe(true);
-    expect(nodeFor('fresh').getAttribute('aria-label')).toContain('10s · Live');
-    expect(nodeFor('stale').getAttribute('aria-label')).toContain('Stale · 10s');
-    expect(nodeFor('absent').getAttribute('aria-label')).toContain('No timing');
+
+    const focusedNode = nodeFor('fresh') as SVGGElement;
+    await fireEvent.focus(focusedNode);
+    await tick();
+    const labelBeforeTick = focusedNode.getAttribute('aria-label');
+    expect(labelBeforeTick).toBe('Healthy worker — fresh, task, running, role:frontend');
+
+    const inspectorProgress = screen.getByRole('region', { name: 'Node progress' });
+    const inspectorTextBeforeTick = inspectorProgress.textContent?.replace(/\s+/g, ' ').trim();
+    expect(inspectorProgress.hasAttribute('aria-live')).toBe(false);
+    expect(inspectorTextBeforeTick).toContain('2026-08-16T19:09:50.000Z');
+    expect(inspectorTextBeforeTick).toContain('2026-08-16T19:09:30.000Z');
+    expect(inspectorTextBeforeTick).toContain('worker-fresh');
 
     vi.advanceTimersByTime(1000);
     await tick();
     expect(progressFor('fresh')).toBe('11s · Live');
     expect(progressFor('stale')).toBe('Stale · 11s');
+    expect(focusedNode.getAttribute('aria-label')).toBe(labelBeforeTick);
+    expect(inspectorProgress.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      inspectorTextBeforeTick
+    );
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -412,6 +426,37 @@ describe('WorkGraphView', () => {
     expect(workGraphViewSource).toMatch(
       /@media \(forced-colors: active\)[\s\S]*?\.wg-box \{[\s\S]*?forced-color-adjust: auto;/
     );
+  });
+
+  it('preserves every node status as a distinct forced-colors pattern', () => {
+    const statuses = [
+      'ready',
+      'running',
+      'completed',
+      'blocked',
+      'pending',
+      'failed',
+      'cancelled',
+    ] as const satisfies readonly NodeStatus[];
+    const coversEveryStatus: Exclude<NodeStatus, (typeof statuses)[number]> extends never
+      ? true
+      : never = true;
+    const forcedColors = workGraphViewSource.slice(
+      workGraphViewSource.indexOf('@media (forced-colors: active)')
+    );
+    const patterns = statuses.map((status) => {
+      const rule = forcedColors.match(new RegExp(`\\.wg-box--${status}\\s*\\{([^}]*)\\}`));
+      const pattern = rule?.[1].match(/stroke-dasharray:\s*([^;]+);/)?.[1].trim();
+      expect(pattern, `${status} must retain a forced-colors pattern`).toBeTruthy();
+      expect(rule?.[1], `${status} must not reuse critical-path stroke width`).not.toMatch(
+        /stroke-width:/
+      );
+      return pattern;
+    });
+
+    expect(coversEveryStatus).toBe(true);
+    expect(new Set(patterns).size).toBe(statuses.length);
+    expect(patterns[statuses.indexOf('blocked')]).not.toBe(patterns[statuses.indexOf('pending')]);
   });
 
   it('separates and labels the source badge outside the view controls', async () => {
@@ -479,6 +524,45 @@ describe('WorkGraphView', () => {
     ).toBeTruthy();
     expect(container.textContent).not.toContain('started before the work graph shipped');
     expect(container.querySelector('.wg-svg')).toBeNull();
+  });
+
+  it('renders non-live omission evidence even when the graph has zero nodes', async () => {
+    mockFetch(
+      payload({
+        nodes: [],
+        edges: [],
+        waves: [],
+        status_by_node: {},
+        lane_assignment: {},
+        critical_path: [],
+        omissions: [
+          {
+            reason: 'completion_unresolved',
+            count: 4,
+            detail: 'Four completion events could not be resolved to work-graph tasks.',
+            examples: ['agent:worker-1', 'agent:worker-4'],
+          },
+        ],
+      })
+    );
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const notice = screen.getByRole('region', { name: 'Work graph omissions' });
+    expect(notice.classList.contains('lattice-forced-colors-boundary')).toBe(true);
+    expect(notice.hasAttribute('aria-live')).toBe(false);
+    expect(notice.getAttribute('role')).toBeNull();
+    expect(notice.textContent).toContain('4 omitted items');
+    expect(notice.textContent).toContain('Completion unresolved');
+    expect(notice.textContent).toContain('Count 4');
+    expect(notice.textContent).toContain(
+      'Four completion events could not be resolved to work-graph tasks.'
+    );
+    expect(notice.textContent).toContain('agent:worker-1');
+    expect(notice.textContent).toContain('agent:worker-4');
+    expect(container.querySelector('.wg-msg-title')?.textContent).toBe(
+      'No tasks in this work graph'
+    );
   });
 
   it('surfaces a failed request rather than an empty state', async () => {

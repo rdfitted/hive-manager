@@ -9,7 +9,9 @@ use tempfile::TempDir;
 
 use crate::coordination::StateManager;
 use crate::domain::event::{Event, EventType, Severity};
-use crate::domain::run_journal::{Confidence, LedgerEntry, StepKind, StepStatus};
+use crate::domain::run_journal::{
+    Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus,
+};
 use crate::events::EventBus;
 use crate::orchestrator::work_graph::archive::{
     archive_completed_session, list_archives, read_archive,
@@ -164,22 +166,28 @@ fn retry_records_total_attempts_and_retro_reports_one_additional_attempt() {
 #[test]
 fn agent_completion_records_finished_at() {
     let plan = TaskGraph::new(vec![task("task-a", &["code"])], Vec::new());
-    let completion = event(
+    let claim_at = chrono::DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let completion_at = chrono::DateTime::parse_from_rfc3339("2026-08-16T12:01:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut claim = event(
+        "claim",
+        EventType::WorkerClaimed,
+        Some("worker-a"),
+        json!({"worker_id":"worker-a","task_id":"task-a"}),
+    );
+    claim.timestamp = claim_at;
+    let mut completion = event(
         "complete",
         EventType::AgentCompleted,
         Some("worker-a"),
         json!({}),
     );
+    completion.timestamp = completion_at;
     let expected_finished_at = completion.timestamp;
-    let events = vec![
-        event(
-            "claim",
-            EventType::WorkerClaimed,
-            Some("worker-a"),
-            json!({"worker_id":"worker-a","task_id":"task-a"}),
-        ),
-        completion,
-    ];
+    let events = vec![claim, completion];
 
     let derived = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
     let outcome = derived
@@ -188,6 +196,68 @@ fn agent_completion_records_finished_at() {
         .find(|outcome| outcome.task_id.as_deref() == Some("task-a"))
         .unwrap();
     assert_eq!(outcome.finished_at, Some(expected_finished_at));
+    assert_eq!(outcome.started_at, Some(claim_at));
+    assert!(outcome.started_at < outcome.finished_at);
+}
+
+fn journal_entry(step_id: &str, status: StepStatus) -> RunJournalEntry {
+    let started_at = chrono::DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    RunJournalEntry {
+        run_id: "runtime-session".to_string(),
+        step_id: step_id.to_string(),
+        kind: StepKind::Other,
+        status,
+        started_at,
+        finished_at: (status == StepStatus::Skipped)
+            .then_some(started_at + chrono::Duration::minutes(1)),
+        detail: None,
+    }
+}
+
+#[test]
+fn journal_observation_skipped_status_remains_completed() {
+    let entry = journal_entry("skipped-step", StepStatus::Skipped);
+    let node_id = format!("runtime:journal:{}", entry.step_id);
+    let plan = TaskGraph::default();
+    let derived = derive_runtime_graph(Some(&plan), &[], &[entry], &[], &[]);
+
+    let node = derived
+        .runtime_graph
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .unwrap();
+    assert_eq!(node.status, NodeStatus::Completed);
+    let outcome = derived
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.subject_id == node_id)
+        .unwrap();
+    assert_eq!(outcome.status, RuntimeOutcomeStatus::Skipped);
+}
+
+#[test]
+fn journal_observation_interrupted_status_remains_blocked() {
+    let entry = journal_entry("interrupted-step", StepStatus::Interrupted);
+    let node_id = format!("runtime:journal:{}", entry.step_id);
+    let plan = TaskGraph::default();
+    let derived = derive_runtime_graph(Some(&plan), &[], &[entry], &[], &[]);
+
+    let node = derived
+        .runtime_graph
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .unwrap();
+    assert_eq!(node.status, NodeStatus::Blocked);
+    let outcome = derived
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.subject_id == node_id)
+        .unwrap();
+    assert_eq!(outcome.status, RuntimeOutcomeStatus::Interrupted);
 }
 
 #[test]

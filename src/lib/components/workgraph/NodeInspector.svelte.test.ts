@@ -1,10 +1,31 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen, within } from '@testing-library/svelte';
 import NodeInspector from './NodeInspector.svelte';
+import nodeInspectorSource from './NodeInspector.svelte?raw';
 
 afterEach(cleanup);
 
 describe('NodeInspector', () => {
+  it('exposes the contract as a named region without widening section spacing', () => {
+    render(NodeInspector, {
+      props: {
+        node: {
+          id: 'T13',
+          title: 'Build the node inspector',
+          kind: 'task',
+          lane: 'wg-cards',
+          status: 'running',
+          contract: { inputs: [], outputs: [], acceptance: [] },
+        },
+        dependencies: [],
+      },
+    });
+
+    expect(screen.getByRole('region', { name: 'Node contract' })).toBeTruthy();
+    expect(nodeInspectorSource).toContain('.contract section + section {');
+    expect(nodeInspectorSource).not.toMatch(/^\s*section \+ section \{/m);
+  });
+
   it('renders the full node contract and immediate dependencies', () => {
     render(NodeInspector, {
       props: {
@@ -55,6 +76,37 @@ describe('NodeInspector', () => {
     expect(within(card).queryByText('No contract recorded')).toBeNull();
   });
 
+  it('renders progress timing in a static accessible region', () => {
+    render(NodeInspector, {
+      props: {
+        node: {
+          id: 'T8',
+          title: 'Expose runtime progress',
+          kind: 'task',
+          lane: 'api',
+          status: 'running',
+          contract: { inputs: [], outputs: [], acceptance: [] },
+        },
+        dependencies: [],
+        progress: {
+          started_at: '2026-08-16T19:09:50.000Z',
+          finished_at: null,
+          attempts: 2,
+          agent_id: 'worker-api',
+          last_heartbeat_at: '2026-08-16T19:09:30.000Z',
+        },
+      },
+    });
+
+    const progressRegion = screen.getByRole('region', { name: 'Node progress' });
+    expect(progressRegion.hasAttribute('aria-live')).toBe(false);
+    expect(within(progressRegion).getByText('2026-08-16T19:09:50.000Z')).toBeTruthy();
+    expect(within(progressRegion).getByText('2026-08-16T19:09:30.000Z')).toBeTruthy();
+    expect(within(progressRegion).getByText('2')).toBeTruthy();
+    expect(within(progressRegion).getByText('worker-api')).toBeTruthy();
+    expect(within(progressRegion).getByText('Not recorded')).toBeTruthy();
+  });
+
   it('renders exactly one fallback line for an empty contract without empty headings', () => {
     render(NodeInspector, {
       props: {
@@ -77,6 +129,7 @@ describe('NodeInspector', () => {
     expect(within(card).queryByRole('heading', { name: 'Inputs' })).toBeNull();
     expect(within(card).queryByRole('heading', { name: 'Outputs' })).toBeNull();
     expect(within(card).queryByRole('heading', { name: 'Acceptance' })).toBeNull();
+    expect(within(card).getByText('No progress recorded')).toBeTruthy();
     expect(within(card).getByText('No immediate dependencies')).toBeTruthy();
   });
 });

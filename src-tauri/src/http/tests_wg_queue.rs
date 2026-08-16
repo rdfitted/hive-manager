@@ -1200,6 +1200,142 @@ async fn first_heartbeat_grace_is_separate_from_steady_state_cutoff() {
 }
 
 #[test]
+fn new_assignment_resets_first_heartbeat_grace_across_every_retry_route() {
+    use crate::storage::queue::SpawnFailureRelease;
+
+    const FIRST_CLAIM_AT: i64 = 1_000;
+    const FIRST_HEARTBEAT_AT: i64 = 1_100;
+    const RELEASE_AT: i64 = 1_200;
+    const RETRY_CLAIM_AT: i64 = 2_000;
+
+    for retry_route in [
+        "requeue_claimed",
+        "release_failed_spawn",
+        "release_claim_manual",
+        "reclaim_stuck",
+        "requeue_running",
+        "direct_running_reclaim",
+    ] {
+        let repo = queue_repo();
+        let id = format!("run-assignment-grace-{retry_route}");
+        let task_id = format!("ASSIGNMENT-GRACE-{retry_route}");
+        let first_worker = format!("worker-a-{retry_route}");
+        let retry_worker = format!("worker-b-{retry_route}");
+        repo.enqueue(&queued_row(
+            &id,
+            &format!("pending:{id}"),
+            Some(&task_id),
+            1,
+        ))
+        .unwrap();
+        let first_epoch = repo
+            .try_claim_for_worker(&id, Some(&first_worker), -90_000, FIRST_CLAIM_AT)
+            .unwrap()
+            .expect("first worker claims the row");
+        assert!(repo
+            .record_heartbeat(
+                SESSION_ID,
+                &first_worker,
+                "working",
+                FIRST_HEARTBEAT_AT,
+            )
+            .unwrap());
+        assert_eq!(
+            repo.get_row(&id).unwrap().unwrap().last_status.as_deref(),
+            Some("working"),
+            "{retry_route}: fixture must establish the prior assignment heartbeat"
+        );
+
+        if retry_route == "direct_running_reclaim" {
+            repo.try_claim_for_worker_with_grace(
+                &id,
+                Some(&retry_worker),
+                true,
+                Some(&first_worker),
+                FIRST_HEARTBEAT_AT + 1,
+                -1,
+                RETRY_CLAIM_AT,
+            )
+            .unwrap()
+            .expect("stale running assignment is reclaimed directly");
+        } else {
+            match retry_route {
+                "requeue_claimed" => {
+                    assert!(repo.requeue_claimed(&id, first_epoch, RELEASE_AT).unwrap())
+                }
+                "release_failed_spawn" => assert_eq!(
+                    repo.release_failed_spawn(
+                        &id,
+                        first_epoch,
+                        &first_worker,
+                        3,
+                        RELEASE_AT,
+                    )
+                    .unwrap(),
+                    SpawnFailureRelease::Requeued { failures: 1 }
+                ),
+                "release_claim_manual" => {
+                    assert!(repo.release_claim_manual(&id, RELEASE_AT).unwrap())
+                }
+                "reclaim_stuck" => assert_eq!(
+                    repo.reclaim_stuck(FIRST_HEARTBEAT_AT + 1, RELEASE_AT)
+                        .unwrap(),
+                    vec![id.clone()]
+                ),
+                "requeue_running" => {
+                    assert!(repo.requeue_running(&id, RELEASE_AT).unwrap())
+                }
+                _ => unreachable!(),
+            }
+            repo.try_claim_for_worker(&id, Some(&retry_worker), -90_000, RETRY_CLAIM_AT)
+                .unwrap()
+                .expect("retry worker claims the released row");
+        }
+
+        let retry = repo.get_row(&id).unwrap().unwrap();
+        assert_eq!(retry.worker_id, retry_worker, "{retry_route}");
+        assert_eq!(retry.status, QueueStatus::Running, "{retry_route}");
+        assert_eq!(retry.heartbeat_at, Some(RETRY_CLAIM_AT), "{retry_route}");
+        assert_eq!(
+            retry.last_status, None,
+            "{retry_route}: a new assignment must await its own first heartbeat"
+        );
+
+        let just_past_steady_cutoff = RETRY_CLAIM_AT + STUCK_CUTOFF_MS + 1;
+        let reclaimable_worker = vec![(id.clone(), retry.worker_id.clone())];
+        assert!(repo
+            .reclaim_stuck_with_grace(
+                just_past_steady_cutoff - STUCK_CUTOFF_MS,
+                just_past_steady_cutoff - FIRST_HEARTBEAT_GRACE_MS,
+                just_past_steady_cutoff,
+                &reclaimable_worker,
+            )
+            .unwrap()
+            .is_empty(),
+            "{retry_route}: retry was reclaimed under the prior assignment's steady cutoff"
+        );
+        assert_eq!(
+            repo.get_row(&id).unwrap().unwrap().status,
+            QueueStatus::Running,
+            "{retry_route}: retry must survive until its first-heartbeat grace expires"
+        );
+
+        let just_past_first_heartbeat_grace = RETRY_CLAIM_AT + FIRST_HEARTBEAT_GRACE_MS + 1;
+        assert_eq!(
+            repo.reclaim_stuck_with_grace(
+                just_past_first_heartbeat_grace - STUCK_CUTOFF_MS,
+                just_past_first_heartbeat_grace - FIRST_HEARTBEAT_GRACE_MS,
+                just_past_first_heartbeat_grace,
+                &reclaimable_worker,
+            )
+            .unwrap(),
+            vec![id],
+            "{retry_route}: no retry heartbeat eventually expires the assignment grace"
+        );
+    }
+}
+
+#[test]
 fn first_heartbeat_latency_record_covers_every_cli_without_fabrication() {
     let recorded_clis = FIRST_HEARTBEAT_LATENCY_MS_BY_CLI
         .iter()

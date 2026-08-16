@@ -16,11 +16,16 @@ use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
-use crate::orchestrator::work_graph::archive::archive_completed_session;
-use crate::orchestrator::work_graph::runtime::{record_graph_change, GraphMutationType};
+use crate::orchestrator::work_graph::archive::{
+    archive_completed_session, WorkGraphArchive, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+};
+use crate::orchestrator::work_graph::divergence::DivergenceSummary;
+use crate::orchestrator::work_graph::runtime::{
+    record_graph_change, GraphMutationType, RuntimeOutcome, RuntimeOutcomeStatus,
+};
 use crate::orchestrator::work_graph::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
-    TaskGraph, WorkEdge, WorkNode,
+    TaskGraph, WorkEdge, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
 };
 use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager};
 use crate::session::{
@@ -720,6 +725,135 @@ async fn archived_runtime_progress_uses_the_same_nullable_object_shape() {
 }
 
 #[tokio::test]
+async fn archived_progress_keeps_target_and_expansion_outcomes_distinct_in_any_order() {
+    let app = test_app().await;
+    let mut review_node = node(
+        "review-a",
+        BindingRef::Role("reviewer".to_string()),
+        NodeStatus::Completed,
+        "review-outcome",
+    );
+    review_node.kind = NodeKind::Review;
+    review_node.expansion = Some(CompositeExpansion {
+        template: "review".to_string(),
+        parameters: BTreeMap::from([("target".to_string(), "task-a".to_string())]),
+    });
+    let runtime_graph = TaskGraph::new(
+        vec![
+            node(
+                "task-a",
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Completed,
+                "task-outcome",
+            ),
+            review_node,
+        ],
+        vec![],
+    );
+    let review_started = DateTime::<Utc>::from_timestamp(10, 0).expect("review start");
+    let review_finished = DateTime::<Utc>::from_timestamp(20, 0).expect("review finish");
+    let task_started = DateTime::<Utc>::from_timestamp(30, 0).expect("task start");
+    let task_finished = DateTime::<Utc>::from_timestamp(40, 0).expect("task finish");
+    let review_outcome = RuntimeOutcome {
+        subject_id: "review-a".to_string(),
+        task_id: Some("task-a".to_string()),
+        agent_ids: vec!["agent-review".to_string()],
+        status: RuntimeOutcomeStatus::Completed,
+        started_at: Some(review_started),
+        finished_at: Some(review_finished),
+        attempt_count: 1,
+        effects: Vec::new(),
+        source_refs: vec!["event:review-a".to_string()],
+    };
+    let task_outcome = RuntimeOutcome {
+        subject_id: "task-a".to_string(),
+        task_id: Some("task-a".to_string()),
+        agent_ids: vec!["agent-task".to_string()],
+        status: RuntimeOutcomeStatus::Completed,
+        started_at: Some(task_started),
+        finished_at: Some(task_finished),
+        attempt_count: 3,
+        effects: Vec::new(),
+        source_refs: vec!["event:task-a".to_string()],
+    };
+    let fixture_orders = [
+        (
+            "wg-api-progress-review-first",
+            vec![review_outcome.clone(), task_outcome.clone()],
+        ),
+        (
+            "wg-api-progress-task-first",
+            vec![task_outcome, review_outcome],
+        ),
+    ];
+    let mut projected_nodes = Vec::new();
+
+    for (session_id, outcomes) in fixture_orders {
+        let session_dir = app
+            .storage()
+            .create_session_dir(session_id)
+            .expect("session directory");
+        let archive = WorkGraphArchive {
+            schema_version: WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+            archive_id: format!("archive-{session_id}"),
+            session_id: session_id.to_string(),
+            archived_at: Utc::now(),
+            plan_graph: Some(runtime_graph.clone()),
+            runtime_graph: runtime_graph.clone(),
+            deltas: Vec::new(),
+            outcomes,
+            divergence: DivergenceSummary::default(),
+            sources: Vec::new(),
+        };
+        let archive_dir = session_dir.join("archive").join("work-graphs");
+        std::fs::create_dir_all(&archive_dir).expect("archive directory");
+        std::fs::write(
+            archive_dir.join(format!("{}.json", archive.archive_id)),
+            serde_json::to_vec_pretty(&archive).expect("archive JSON"),
+        )
+        .expect("archive fixture");
+
+        let (status, body, response) = get(
+            &app.router,
+            &format!("/api/sessions/{session_id}/work-graph?view=runtime&source=archive"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let nodes = response["nodes"].as_array().expect("archive nodes");
+        let task_progress = &nodes
+            .iter()
+            .find(|node| node["id"] == "task-a")
+            .expect("task node")["progress"];
+        let review_progress = &nodes
+            .iter()
+            .find(|node| node["id"] == "review-a")
+            .expect("review node")["progress"];
+        assert_eq!(task_progress["attempts"], 3, "{body}");
+        assert_eq!(task_progress["agent_id"], "agent-task", "{body}");
+        assert_eq!(task_progress["started_at"], json!(task_started), "{body}");
+        assert_eq!(task_progress["finished_at"], json!(task_finished), "{body}");
+        assert_eq!(review_progress["attempts"], 1, "{body}");
+        assert_eq!(review_progress["agent_id"], "agent-review", "{body}");
+        assert_eq!(
+            review_progress["started_at"],
+            json!(review_started),
+            "{body}"
+        );
+        assert_eq!(
+            review_progress["finished_at"],
+            json!(review_finished),
+            "{body}"
+        );
+        projected_nodes.push(response["nodes"].clone());
+    }
+
+    assert_eq!(
+        projected_nodes[0], projected_nodes[1],
+        "archive progress must not depend on outcome ordering"
+    );
+}
+
+#[tokio::test]
 async fn completed_session_falls_back_to_archive_with_divergence() {
     const SESSION_ID: &str = "wg-api-archived";
     let app = test_app().await;
@@ -878,6 +1012,99 @@ async fn live_divergence_reports_typed_omission_when_mutation_log_is_untracked()
         omission["examples"],
         json!(["mutation-log:not-observed-in-this-process"])
     );
+}
+
+#[tokio::test]
+async fn live_divergence_combines_completion_and_projection_omissions() {
+    const SESSION_ID: &str = "wg-api-live-completion-omission";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let mut graph = TaskGraph::new(
+        vec![node(
+            "unresolved-task",
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+            "completion-omission",
+        )],
+        vec![],
+    );
+    graph.omissions.push(WorkGraphOmission::new(
+        WorkGraphOmissionReason::CompletionUnresolved,
+        1,
+        vec!["event:unmapped-completion:agent:worker-7".to_string()],
+    ));
+    StateManager::new(session_dir)
+        .write_work_graph(&graph)
+        .expect("persisted graph with completion omission");
+
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=divergence&source=live"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let omissions = response["omissions"]
+        .as_array()
+        .expect("combined omission evidence");
+    assert_eq!(omissions.len(), 2, "{body}");
+    assert!(omissions.iter().any(|omission| {
+        omission["reason"] == "completion_unresolved"
+            && omission["count"] == 1
+            && omission["examples"] == json!(["event:unmapped-completion:agent:worker-7"])
+    }));
+    assert!(omissions
+        .iter()
+        .any(|omission| omission["reason"] == "resolution_incomplete"));
+}
+
+#[tokio::test]
+async fn archived_runtime_serializes_completion_unresolved_graph_omission() {
+    const SESSION_ID: &str = "wg-api-archive-completion-omission";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let mut graph = TaskGraph::new(
+        vec![node(
+            "archived-unresolved-task",
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+            "archived-completion-omission",
+        )],
+        vec![],
+    );
+    graph.omissions.push(WorkGraphOmission::new(
+        WorkGraphOmissionReason::CompletionUnresolved,
+        1,
+        vec!["event:archived-unmapped-completion:agent:worker-8".to_string()],
+    ));
+    StateManager::new(session_dir)
+        .write_work_graph(&graph)
+        .expect("persisted graph with completion omission");
+    archive_completed_session(app.storage().base_dir(), None, SESSION_ID)
+        .expect("completed archive");
+
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=runtime&source=archive"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(response["omissions"]
+        .as_array()
+        .expect("archive graph omissions")
+        .iter()
+        .any(|omission| {
+            omission["reason"] == "completion_unresolved"
+                && omission["examples"]
+                    == json!(["event:archived-unmapped-completion:agent:worker-8"])
+        }));
 }
 
 #[tokio::test]

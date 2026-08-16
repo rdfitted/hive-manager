@@ -697,6 +697,7 @@ impl QueueRepo {
                      attempts = attempts + 1,
                      updated_at = ?2,
                      heartbeat_at = ?2,
+                     last_status = NULL,
                      worker_id = COALESCE(?4, worker_id),
                      spawned_worker_id = COALESCE(?4, spawned_worker_id, worker_id),
                      assignment_id = (

@@ -1074,7 +1074,7 @@ pub fn derive_runtime_graph(
         );
     }
 
-    project_outcome_statuses(&mut graph, &outcomes);
+    project_outcome_statuses(&mut graph, &outcomes, &structural_ids);
 
     RuntimeDerivation {
         runtime_graph: graph,
@@ -1465,8 +1465,12 @@ fn completion_role_binding(
 fn project_outcome_statuses(
     graph: &mut WorkGraph,
     outcomes: &BTreeMap<String, RuntimeOutcome>,
+    structural_ids: &std::collections::BTreeSet<TaskId>,
 ) {
     for node in &mut graph.nodes {
+        if !structural_ids.contains(&node.id) {
+            continue;
+        }
         let Some(outcome) = outcomes.get(&node.id) else {
             continue;
         };

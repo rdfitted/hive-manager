@@ -15,6 +15,7 @@
     BindingRef,
     NodeStatus,
     WorkGraphNode,
+    WorkGraphOmissionReason,
     WorkGraphResponse
   } from '$lib/workgraph/types';
   import SkelBar from '../SkelBar.svelte';
@@ -39,6 +40,14 @@
     'var(--status-success)',
     'var(--text-secondary)'
   ];
+
+  const OMISSION_LABELS: Record<WorkGraphOmissionReason, string> = {
+    codegraph_unavailable: 'Code graph unavailable',
+    project_knowledge_unavailable: 'Project knowledge unavailable',
+    source_unreadable: 'Source unreadable',
+    resolution_incomplete: 'Resolution incomplete',
+    completion_unresolved: 'Completion unresolved'
+  };
 
   const POLL_MS = 3000;
   const CLOCK_TICK_MS = 1000;
@@ -181,6 +190,10 @@
     calculateCriticalPathRemaining(graph?.critical_path ?? [], completedNodeIds)
   );
   let activeWave = $derived(selectActiveWave(graph?.waves ?? [], completedNodeIds));
+  let graphOmissions = $derived(graph?.omissions ?? []);
+  let omittedItemCount = $derived(
+    graphOmissions.reduce((total, omission) => total + omission.count, 0)
+  );
 
   let inspectedNode = $derived(
     visibleNodeId ? graphNodeById.get(visibleNodeId) ?? null : null
@@ -457,6 +470,44 @@
     </div>
   </div>
 
+  {#if graphOmissions.length > 0}
+    <section
+      class="wg-omissions lattice-forced-colors-boundary"
+      aria-label="Work graph omissions"
+    >
+      <header class="wg-omissions-header">
+        <h2>Not everything is shown</h2>
+        <span class="wg-omissions-total">
+          {omittedItemCount} omitted {omittedItemCount === 1 ? 'item' : 'items'}
+        </span>
+      </header>
+      <p class="wg-omissions-intro">
+        Some work-graph evidence could not be represented in this projection.
+      </p>
+      <ul class="wg-omission-list">
+        {#each graphOmissions as omission, index (`${omission.reason}:${index}`)}
+          <li class="wg-omission">
+            <div class="wg-omission-header">
+              <strong>{OMISSION_LABELS[omission.reason]}</strong>
+              <span>Count {omission.count}</span>
+            </div>
+            <p>{omission.detail}</p>
+            {#if omission.examples.length > 0}
+              <div class="wg-omission-examples">
+                <span>Examples</span>
+                <ul>
+                  {#each omission.examples as example}
+                    <li><code>{example}</code></li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
   {#if graph && graph.nodes.length > 0}
     <div class="wg-progress">
       <ProgressHeader
@@ -540,7 +591,7 @@
               use:registerNode={node.id}
               role="button"
               tabindex="0"
-              aria-label={`${node.title} — ${node.id}, ${node.kind}, ${node.status}, ${node.laneK}${node.progressText ? `, ${node.progressText}` : ''}`}
+              aria-label={`${node.title} — ${node.id}, ${node.kind}, ${node.status}, ${node.laneK}`}
               aria-expanded={visibleNodeId === node.id}
               aria-controls={visibleNodeId === node.id ? 'wg-node-inspector' : undefined}
               onmouseenter={() => handleNodeEnter(node.id)}
@@ -614,7 +665,11 @@
         data-pinned={pinnedNodeId === inspectorNode.id}
         style={`left: ${inspectorLeft}px; top: ${inspectorTop}px`}
       >
-        <NodeInspector node={inspectorNode} dependencies={inspectorDependencies} />
+        <NodeInspector
+          node={inspectorNode}
+          dependencies={inspectorDependencies}
+          progress={inspectedNode?.progress ?? null}
+        />
       </div>
     {/if}
   </div>
@@ -671,6 +726,79 @@
 
   .wg-source-label {
     color: var(--text-secondary);
+  }
+
+  .wg-omissions {
+    flex: 0 0 auto;
+    max-height: 180px;
+    margin: var(--space-2);
+    padding: var(--space-3);
+    overflow: auto;
+    border: 1px solid var(--status-warning);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--status-warning) 8%, var(--bg-panel));
+    box-shadow: var(--edge-seam);
+    color: var(--text-primary);
+  }
+
+  .wg-omissions-header,
+  .wg-omission-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .wg-omissions h2 {
+    margin: 0;
+    font: var(--text-small) var(--font-display);
+  }
+
+  .wg-omissions-total,
+  .wg-omission-header span,
+  .wg-omission-examples > span {
+    color: var(--text-secondary);
+    font: var(--text-micro) var(--font-mono);
+  }
+
+  .wg-omissions-intro,
+  .wg-omission p {
+    margin: var(--space-1) 0 0;
+    color: var(--text-secondary);
+    font: var(--text-small) var(--font-body);
+  }
+
+  .wg-omission-list,
+  .wg-omission-examples ul {
+    display: grid;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .wg-omission {
+    padding-top: var(--space-2);
+    box-shadow: var(--edge-seam-top);
+  }
+
+  .wg-omission-header strong {
+    font: var(--text-small) var(--font-mono);
+  }
+
+  .wg-omission-examples {
+    margin-top: var(--space-2);
+  }
+
+  .wg-omission-examples ul {
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+  }
+
+  .wg-omission-examples code {
+    overflow-wrap: anywhere;
+    color: var(--text-primary);
+    font: var(--text-micro) var(--font-mono);
   }
 
   .wg-progress {
@@ -939,6 +1067,38 @@
       forced-color-adjust: auto;
       fill: Canvas;
       stroke: CanvasText;
+    }
+
+    /* Forced colours intentionally flatten fills, so preserve the complete
+       status vocabulary with pairwise-distinct, non-colour stroke patterns.
+       Stroke width remains reserved for critical-path and focus/pin emphasis. */
+    .wg-box--ready {
+      stroke-dasharray: none;
+    }
+
+    .wg-box--running {
+      stroke-dasharray: 12 2;
+    }
+
+    .wg-box--completed {
+      stroke-dasharray: 1 3;
+      stroke-linecap: round;
+    }
+
+    .wg-box--blocked {
+      stroke-dasharray: 8 2 2 2;
+    }
+
+    .wg-box--pending {
+      stroke-dasharray: 4 4;
+    }
+
+    .wg-box--failed {
+      stroke-dasharray: 2 2;
+    }
+
+    .wg-box--cancelled {
+      stroke-dasharray: 2 3 2 8;
     }
 
     .wg-node:focus-visible .wg-box,

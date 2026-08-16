@@ -12,7 +12,7 @@ use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::archive::{list_archives, read_archive, WorkGraphArchive};
 use crate::orchestrator::work_graph::divergence::{compute_divergence, DivergenceSummary};
-use crate::orchestrator::work_graph::runtime::mutation_log_snapshot;
+use crate::orchestrator::work_graph::runtime::{mutation_log_snapshot, RuntimeOutcome};
 use crate::orchestrator::work_graph::{
     topological_sort, BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract,
     NodeKind, NodeStatus, TaskGraph, TaskId, WorkGraphOmission, WorkGraphOmissionReason,
@@ -242,23 +242,52 @@ fn graph_from_archive(
 }
 
 fn archive_progress_by_node(archive: &WorkGraphArchive) -> BTreeMap<TaskId, WorkGraphNodeProgress> {
+    let structural_node_ids: BTreeSet<&str> = archive
+        .runtime_graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect();
     let mut progress = BTreeMap::new();
-    for outcome in &archive.outcomes {
-        let node_id = outcome
+
+    for outcome in archive
+        .outcomes
+        .iter()
+        .filter(|outcome| structural_node_ids.contains(outcome.subject_id.as_str()))
+    {
+        progress.insert(
+            outcome.subject_id.clone(),
+            node_progress_from_outcome(outcome),
+        );
+    }
+
+    for outcome in archive
+        .outcomes
+        .iter()
+        .filter(|outcome| !structural_node_ids.contains(outcome.subject_id.as_str()))
+    {
+        let Some(task_id) = outcome
             .task_id
-            .clone()
-            .unwrap_or_else(|| outcome.subject_id.clone());
+            .as_ref()
+            .filter(|task_id| structural_node_ids.contains(task_id.as_str()))
+        else {
+            continue;
+        };
         progress
-            .entry(node_id)
-            .or_insert_with(|| WorkGraphNodeProgress {
-                started_at: outcome.started_at,
-                finished_at: outcome.finished_at,
-                attempts: outcome.attempt_count,
-                agent_id: outcome.agent_ids.last().cloned(),
-                last_heartbeat_at: None,
-            });
+            .entry(task_id.clone())
+            .or_insert_with(|| node_progress_from_outcome(outcome));
     }
     progress
+}
+
+fn node_progress_from_outcome(outcome: &RuntimeOutcome) -> WorkGraphNodeProgress {
+    WorkGraphNodeProgress {
+        started_at: outcome.started_at,
+        finished_at: outcome.finished_at,
+        attempts: outcome.attempt_count,
+        agent_id: outcome.agent_ids.last().cloned(),
+        last_heartbeat_at: None,
+    }
 }
 
 fn graph_from_live_state(
@@ -397,13 +426,15 @@ fn project_graph(
     graph: TaskGraph,
     divergence: Option<DivergenceSummary>,
     progress_by_node: &BTreeMap<TaskId, WorkGraphNodeProgress>,
-    omissions: Vec<WorkGraphOmission>,
+    supplemental_omissions: Vec<WorkGraphOmission>,
 ) -> Result<WorkGraphResponse, ApiError> {
     let order = topological_sort(&graph).map_err(|error| {
         ApiError::internal(format!("Persisted work graph is not schedulable: {error}"))
     })?;
     let waves = topological_waves(&graph, &order);
     let critical_path = critical_path(&graph, &order);
+    let mut omissions = graph.omissions.clone();
+    omissions.extend(supplemental_omissions);
 
     let nodes = graph
         .nodes

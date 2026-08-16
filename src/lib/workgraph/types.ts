@@ -114,6 +114,20 @@ export interface DivergenceSummary {
   records: DivergenceRecord[];
 }
 
+export type WorkGraphOmissionReason =
+  | 'codegraph_unavailable'
+  | 'project_knowledge_unavailable'
+  | 'source_unreadable'
+  | 'resolution_incomplete'
+  | 'completion_unresolved';
+
+export interface WorkGraphOmission {
+  reason: WorkGraphOmissionReason;
+  count: number;
+  detail: string;
+  examples: string[];
+}
+
 export interface WorkGraphResponse {
   view: WorkGraphView;
   source: WorkGraphSource;
@@ -125,4 +139,6 @@ export interface WorkGraphResponse {
   critical_path: string[];
   provenance_by_edge: EdgeProvenanceResponse[];
   divergence: DivergenceSummary | null;
+  /** Omitted by serde when no graph or projection omissions were recorded. */
+  omissions?: WorkGraphOmission[];
 }
