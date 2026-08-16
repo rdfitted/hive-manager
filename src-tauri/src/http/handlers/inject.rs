@@ -37,7 +37,7 @@ async fn observe_injection(
         return InjectionObservation {
             pty_observation_available: receipt.pty_output_after_write.is_some(),
             pty_output_bytes_after: receipt.pty_output_after_write.as_ref().map(String::len),
-            pty_activity_observed: Some(false),
+            pty_activity_observed: None,
             observation_window_ms: 0,
             observation_elapsed_ms: 0,
         };
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(response["submit_bytes_written"], 0);
         assert_eq!(response["observation_window_ms"], 0);
         assert_eq!(response["observation_elapsed_ms"], 0);
-        assert_eq!(response["pty_activity_observed"], false);
+        assert_eq!(response["pty_activity_observed"], Value::Null);
         assert_eq!(
             state
                 .pty_manager

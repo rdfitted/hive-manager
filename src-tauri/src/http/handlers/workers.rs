@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path as FsPath;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::{validate_cli, validate_session_id};
@@ -23,6 +25,91 @@ use crate::session::{AddWorkerError, AddWorkerRejectionReason, SessionController
 use crate::storage::queue::{
     QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate, QueueStatus,
 };
+
+#[cfg(test)]
+struct StartupDeathCleanupHook {
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static STARTUP_DEATH_CLEANUP_HOOKS: OnceLock<
+    parking_lot::Mutex<HashMap<String, StartupDeathCleanupHook>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+fn startup_death_cleanup_hooks(
+) -> &'static parking_lot::Mutex<HashMap<String, StartupDeathCleanupHook>> {
+    STARTUP_DEATH_CLEANUP_HOOKS.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct StartupDeathCleanupTestControl {
+    worker_id: String,
+    reached: tokio::sync::oneshot::Receiver<()>,
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl StartupDeathCleanupTestControl {
+    pub(crate) async fn wait_until_reached(
+        &mut self,
+    ) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        (&mut self.reached).await
+    }
+
+    pub(crate) fn release(mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for StartupDeathCleanupTestControl {
+    fn drop(&mut self) {
+        startup_death_cleanup_hooks().lock().remove(&self.worker_id);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_startup_death_cleanup_test_hook(
+    worker_id: &str,
+) -> StartupDeathCleanupTestControl {
+    use std::collections::hash_map::Entry;
+
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    match startup_death_cleanup_hooks()
+        .lock()
+        .entry(worker_id.to_string())
+    {
+        Entry::Vacant(entry) => {
+            entry.insert(StartupDeathCleanupHook {
+                reached: reached_tx,
+                release: release_rx,
+            });
+        }
+        Entry::Occupied(_) => {
+            panic!("startup-death cleanup hook already registered for {worker_id}")
+        }
+    }
+
+    StartupDeathCleanupTestControl {
+        worker_id: worker_id.to_string(),
+        reached: reached_rx,
+        release: Some(release_tx),
+    }
+}
+
+#[cfg(test)]
+async fn wait_for_startup_death_cleanup_test_hook(worker_id: &str) {
+    let hook = startup_death_cleanup_hooks().lock().remove(worker_id);
+    if let Some(hook) = hook {
+        let _ = hook.reached.send(());
+        let _ = hook.release.await;
+    }
+}
 
 struct QueueSchedulingFacts {
     prerequisite_task_ids: Vec<String>,
@@ -658,6 +745,9 @@ pub async fn add_worker(
         {
             let _ = state.pty_manager.read().kill(&agent_info.id);
         }
+
+        #[cfg(test)]
+        wait_for_startup_death_cleanup_test_hook(&agent_info.id).await;
 
         // Free the slot so a retry respawns worker-N in place instead of advancing the
         // index and orphaning the original branch/task-file paths.

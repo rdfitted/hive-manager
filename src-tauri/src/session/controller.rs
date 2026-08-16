@@ -1834,6 +1834,7 @@ impl SessionController {
                 .unwrap_or_default()
         };
         let heartbeats = self.agent_heartbeats.read();
+        let pty_manager = self.pty_manager.read();
         let agents = heartbeats.get(session_id);
         let mut recovered_after_injection = Vec::new();
         let mut stalled = Vec::new();
@@ -1863,7 +1864,7 @@ impl SessionController {
                 {
                     let runtime_status = agent_statuses.get(agent_id);
                     let process_dead = matches!(runtime_status, Some(AgentStatus::Error(_)))
-                        || !self.pty_manager.read().is_alive(agent_id);
+                        || !pty_manager.is_alive(agent_id);
                     let status = if process_dead {
                         AgentStatus::Error("process_not_alive".to_string())
                     } else if awaiting_since.is_some() {
@@ -1889,7 +1890,7 @@ impl SessionController {
             }
             if let Some(awaiting_since) = Self::awaiting_injected_turn_since(status) {
                 if (now - awaiting_since).num_seconds() > threshold_secs {
-                    let status = if !self.pty_manager.read().is_alive(agent_id) {
+                    let status = if !pty_manager.is_alive(agent_id) {
                         AgentStatus::Error("process_not_alive".to_string())
                     } else {
                         AgentStatus::WaitingForInput("awaiting_injected_turn".to_string())
@@ -1902,6 +1903,7 @@ impl SessionController {
                 }
             }
         }
+        drop(pty_manager);
         drop(heartbeats);
 
         if !recovered_after_injection.is_empty() {
@@ -13038,7 +13040,9 @@ The backend composed and persisted the following authoritative skeleton before l
             SessionType::Debate { .. } => {
                 return self.continue_debate_after_planning(session_id, &session);
             }
-            SessionType::Solo { .. } => unreachable!("Solo continuation rejected above"),
+            SessionType::Solo { .. } => {
+                return Err("Solo sessions do not support planning continuation".to_string());
+            }
             _ => {} // Continue with Hive logic below
         }
 

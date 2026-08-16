@@ -5544,7 +5544,10 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    let event = events.recv().await.unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("timed out waiting for the short-key conversation event")
+        .expect("conversation event channel closed");
     assert_eq!(event.agent_id.as_deref(), Some(full_agent_id.as_str()));
     assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
 
@@ -5589,7 +5592,10 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
-    let event = events.recv().await.unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("timed out waiting for the full-key conversation event")
+        .expect("conversation event channel closed");
     assert_eq!(event.payload["data"]["agent_id"], full_agent_id);
 
     let response = app
@@ -5642,7 +5648,10 @@ async fn test_short_and_full_conversation_keys_share_canonical_history_and_live_
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
-    let event = events.recv().await.unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+        .await
+        .expect("timed out waiting for the shared conversation event")
+        .expect("conversation event channel closed");
     assert_eq!(event.agent_id.as_deref(), Some("shared"));
     assert_eq!(event.payload["data"]["agent_id"], "shared");
     assert!(storage
@@ -9439,6 +9448,9 @@ async fn task_backed_startup_death_with_failed_discard_reconciles_worker_and_que
         ))
         .unwrap();
 
+    let mut cleanup_hook =
+        crate::http::handlers::workers::register_startup_death_cleanup_test_hook(&worker_id);
+
     let pending_request = {
         let app = app.clone();
         let session_id = session_id.clone();
@@ -9464,27 +9476,22 @@ async fn task_backed_startup_death_with_failed_discard_reconciles_worker_and_que
         })
     };
 
-    // The handler deliberately waits 150ms to drain final PTY output after observing death.
-    // Marking the now-rostered agent as having produced work makes discard_worker_slot refuse
-    // destructive cleanup, deterministically exercising slot_freed=false inside that window.
-    let mut forced_discard_failure = false;
-    for _ in 0..100 {
-        let rostered = controller
-            .read()
-            .get_session(&session_id)
-            .is_some_and(|session| session.agents.iter().any(|agent| agent.id == worker_id));
-        if rostered {
-            controller.read().sync_agent_commit_sha(
-                &session_id,
-                &worker_id,
-                Some("synthetic-completion-guard".to_string()),
-            );
-            forced_discard_failure = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert!(forced_discard_failure, "worker never reached the roster");
+    // Stop the handler immediately before guarded roster cleanup. This makes the fixture's
+    // completion marker an ordered prerequisite of discard_worker_slot rather than a race
+    // against the handler's PTY-output drain delay.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cleanup_hook.wait_until_reached(),
+    )
+    .await
+    .expect("timed out waiting for startup-death cleanup barrier")
+    .expect("startup-death cleanup barrier closed before it was reached");
+    controller.read().sync_agent_commit_sha(
+        &session_id,
+        &worker_id,
+        Some("synthetic-completion-guard".to_string()),
+    );
+    cleanup_hook.release();
 
     let response = pending_request.await.unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
