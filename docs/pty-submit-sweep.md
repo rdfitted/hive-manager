@@ -29,20 +29,63 @@ keep `byte_count` directly comparable to the fixture byte length.
 
 ## Shipped behavior under test
 
-- The payload and Enter are two discrete PTY writes.
-- Enter is a bare `\r`; no `\n` is appended and Enter is outside any bracketed-paste envelope.
+- Since #256, a submitted payload is delivered inside one bracketed-paste envelope
+  (`ESC[200~` payload `ESC[201~`), and the envelope is closed before Enter is sent. The
+  envelope is what stops TUI paste-coalescing (observed in codex, which suppresses Enter
+  for a window after a fast raw byte burst) from swallowing the follow-up `\r` as a
+  literal newline inside the paste.
+- Enter is still a bare `\r` written as its own discrete PTY write; no `\n` is appended
+  and Enter is outside the bracketed-paste envelope.
+- An empty payload with `"submit": true` writes only the bare `\r` — this is the
+  supported flush for content already staged in a composer.
 - A multi-line payload retains its internal newlines and receives one Enter after the whole
   payload, not one Enter per line.
+- Trailing `\r`/`\n` on an injected message are always stripped before writing
+  (`clean_message`), so a payload cannot self-submit by embedding its own newline; the
+  discrete Enter write is the only submit mechanism.
 - `pty.paste` remains bracketed input with no automatic submit.
-- The compiled fallback is 50 ms for every adapter until measurements justify a change.
+- The compiled fallback gap is 50 ms for every adapter until measurements justify a change.
 - `HIVE_PTY_SUBMIT_GAP_MS` values from 0 through 300,000 ms override the adapter policy for the
   sweep. Invalid, overflowed, and larger values are rejected with one warning and fall back to the
   adapter default; they are never silently clamped. The 300,000 ms safety ceiling is not a default.
+  The parsed override is cached in a `OnceLock` on first use, so it is restart-scoped: changing
+  the variable requires restarting the backend, not just re-running a request.
 
 The 50 ms value is intentionally unchanged. Existing uncontrolled observations report two
 failures around 1.2-2.7 seconds, two successes around 4-5 seconds, and one success around
 65 seconds. Agent busy state was uncontrolled, so those observations suggest 50 ms is likely
-too short but do not support replacing it with another guessed constant.
+too short but do not support replacing it with another guessed constant. Note that those
+observations predate the #256 bracketed envelope, which removes the dependency on the gap
+for paste-coalescing composers rather than tuning it.
+
+## Sender receipt and delivery signal (#256)
+
+The inject response reports measured facts, not request echoes:
+
+- `payload_bytes_written` counts the sanitized payload bytes actually written inside the
+  envelope (embedded `ESC[201~` sequences are stripped before framing).
+- `submit_bytes_written` counts the discrete Enter write itself; `submit_keystroke_issued`
+  is derived from it.
+- `submit_confirmed` is a tri-state delivery heuristic observed from the PTY output ring
+  after the Enter write, over a bounded 1,500 ms window: `true` means sustained ring
+  activity consistent with the composer accepting Enter and starting a turn, `false` means
+  the Enter produced no observable ring reaction at all, and `null` means unknown,
+  unobservable, or `"submit": false`. An agent that was already streaming output can
+  produce a false positive; the field never upgrades an ambiguous buffer observation to a
+  sweep PASS.
+
+## Two-call workaround
+
+Before #256, a single-call submit could leave the payload staged in a codex composer with
+the Enter swallowed. The two-call pattern remains supported and is the recovery path for
+any content found staged in a composer:
+
+```bash
+# 1) deliver the payload, leave it in the composer
+curl -X POST .../inject -d '{"target_agent_id":"...","message":"...","submit":false}'
+# 2) separate call: bare Enter flushes it
+curl -X POST .../inject -d '{"target_agent_id":"...","message":"","submit":true}'
+```
 
 ## Evidence status before this sweep
 

@@ -309,7 +309,7 @@ fn inject_to_pty(
     send_enter: bool,
 ) -> Result<(), ActionError> {
     let result = if send_enter {
-        pty_manager.submit(id, message)
+        pty_manager.submit(id, message).map(|_| ())
     } else {
         pty_manager.write_bracketed(id, message)
     };
@@ -501,20 +501,26 @@ mod tests {
         manager
     }
 
+    /// #256: submit delivers the payload bracketed so composer paste-coalescing cannot
+    /// swallow the Enter, and the Enter stays a discrete bare write outside the envelope.
     #[test]
-    fn pty_inject_send_enter_writes_payload_then_bare_enter() {
+    fn pty_inject_send_enter_brackets_payload_then_writes_bare_enter() {
         let manager = test_manager();
 
         inject_to_pty(&manager, AGENT_ID, b"hello", true).unwrap();
 
         let writes = manager.write_records_for_test(AGENT_ID).unwrap();
-        assert_eq!(writes, vec![b"hello".to_vec(), b"\r".to_vec()]);
-        assert!(!writes.iter().any(|write| {
-            write.as_slice() == BRACKETED_PASTE_START
-                || write.as_slice() == BRACKETED_PASTE_END
-        }));
-        assert!(!writes[0].contains(&b'\r'));
-        assert_eq!(writes[1], b"\r");
+        assert_eq!(
+            writes,
+            vec![
+                BRACKETED_PASTE_START.to_vec(),
+                b"hello".to_vec(),
+                BRACKETED_PASTE_END.to_vec(),
+                b"\r".to_vec()
+            ]
+        );
+        assert!(!writes[1].contains(&b'\r'));
+        assert_eq!(writes.last().unwrap().as_slice(), b"\r");
     }
 
     #[test]

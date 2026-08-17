@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
-use crate::adapters::PtySubmitPolicy;
+use crate::adapters::{PtySubmitPolicy, PtySubmitResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
@@ -454,20 +454,30 @@ impl PtySession {
         Self::write_locked(&mut writer, data)
     }
 
-    pub fn submit(&self, data: &[u8]) -> Result<(), PtyError> {
+    pub fn submit(&self, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
         let mut writer = self.writer.lock();
-        Self::write_locked(&mut writer, data)?;
+        let payload_bytes_written = if data.is_empty() {
+            0
+        } else {
+            Self::write_bracketed_locked(&mut writer, data)?
+        };
         self.pause_submit_after_payload_if_requested();
         std::thread::sleep(submit_gap(self.submit_policy));
-        Self::write_locked(&mut writer, b"\r")
+        Self::write_locked(&mut writer, b"\r")?;
+        Ok(PtySubmitResult {
+            payload_bytes_written,
+            submit_bytes_written: 1,
+        })
     }
 
     pub fn write_records(&self) -> Vec<Vec<u8>> {
         self.write_records.lock().clone()
     }
 
-    pub fn write_bracketed(&self, data: &[u8]) -> Result<(), PtyError> {
-        let mut writer = self.writer.lock();
+    fn write_bracketed_locked(
+        writer: &mut SendWriter,
+        data: &[u8],
+    ) -> Result<usize, PtyError> {
         let sanitized = sanitize_bracketed_paste(data);
 
         writer.0.write_all(BRACKETED_PASTE_START)?;
@@ -481,6 +491,12 @@ impl PtySession {
         writer.0.write_all(BRACKETED_PASTE_END)?;
         writer.0.flush()?;
 
+        Ok(sanitized.as_ref().len())
+    }
+
+    pub fn write_bracketed(&self, data: &[u8]) -> Result<(), PtyError> {
+        let mut writer = self.writer.lock();
+        Self::write_bracketed_locked(&mut writer, data)?;
         Ok(())
     }
 
