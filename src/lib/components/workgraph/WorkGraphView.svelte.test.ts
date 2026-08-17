@@ -563,6 +563,14 @@ describe('WorkGraphView', () => {
     expect(container.querySelector('.wg-msg-title')?.textContent).toBe(
       'No tasks in this work graph'
     );
+
+    // The panel clips its list at max-height and has no focusable descendants,
+    // so it must be focusable itself or a keyboard-only user cannot scroll to
+    // the omissions below the fold.
+    expect(notice.getAttribute('tabindex')).toBe('0');
+    expect(notice.querySelector('a, button, input, select, textarea, [tabindex]')).toBeNull();
+    notice.focus();
+    expect(document.activeElement).toBe(notice);
   });
 
   it('surfaces a failed request rather than an empty state', async () => {

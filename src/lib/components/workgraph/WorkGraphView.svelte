@@ -471,9 +471,16 @@
   </div>
 
   {#if graphOmissions.length > 0}
+    <!-- tabindex makes this scroll container reachable: it has no focusable
+         descendants, so without it a keyboard-only user cannot scroll to the
+         omissions clipped by max-height. The lint rule does not model scroll
+         containers, where WCAG 2.1.1 requires exactly this tab stop, so the
+         suppression is scoped to this element only. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <section
       class="wg-omissions lattice-forced-colors-boundary"
       aria-label="Work graph omissions"
+      tabindex="0"
     >
       <header class="wg-omissions-header">
         <h2>Not everything is shown</h2>
@@ -739,6 +746,11 @@
     background: color-mix(in srgb, var(--status-warning) 8%, var(--bg-panel));
     box-shadow: var(--edge-seam);
     color: var(--text-primary);
+  }
+
+  .wg-omissions:focus-visible {
+    outline: 2px solid var(--accent-cyan);
+    outline-offset: 2px;
   }
 
   .wg-omissions-header,
