@@ -705,7 +705,30 @@ pub fn reconstruct_structural_history(
 }
 
 fn same_structural_state(left: &WorkGraph, right: &WorkGraph) -> bool {
-    left.nodes == right.nodes && left.edges == right.edges
+    if left.nodes.len() != right.nodes.len() || left.edges != right.edges {
+        return false;
+    }
+    let left_nodes: BTreeMap<_, _> = left
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let right_nodes: BTreeMap<_, _> = right
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    left_nodes.len() == left.nodes.len()
+        && right_nodes.len() == right.nodes.len()
+        && left_nodes.iter().all(|(node_id, left_node)| {
+            right_nodes.get(node_id).is_some_and(|right_node| {
+                left_node.kind == right_node.kind
+                    && left_node.title == right_node.title
+                    && left_node.contract == right_node.contract
+                    && left_node.binding == right_node.binding
+                    && left_node.expansion == right_node.expansion
+            })
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,11 +819,13 @@ pub fn derive_runtime_graph(
         graph = delta.after.clone();
     }
 
-    let structural_ids: std::collections::BTreeSet<_> = graph
+    let structural_nodes: BTreeMap<_, _> = graph
         .nodes
         .iter()
-        .map(|node| node.id.clone())
+        .map(|node| (node.id.clone(), node.clone()))
         .collect();
+    let structural_ids: std::collections::BTreeSet<_> =
+        structural_nodes.keys().cloned().collect();
     let mut last_agent_observation = BTreeMap::<String, String>::new();
     let mut current_task = BTreeMap::<String, TaskId>::new();
     let mut outcomes = BTreeMap::<String, RuntimeOutcome>::new();
@@ -945,10 +970,26 @@ pub fn derive_runtime_graph(
             update_event_outcome(
                 &mut outcomes,
                 &agent_id,
-                resolved_event_task,
+                resolved_event_task.clone(),
                 kind,
                 event,
             );
+            if kind == RuntimeObservationKind::Completion {
+                let resolved = update_lane_completion_outcomes(
+                    &mut outcomes,
+                    &structural_nodes,
+                    &agent_id,
+                    resolved_event_task.as_deref(),
+                    event,
+                );
+                if !resolved {
+                    record_omission(
+                        &mut graph,
+                        WorkGraphOmissionReason::CompletionUnresolved,
+                        &format!("event:{}:agent:{agent_id}", event.id),
+                    );
+                }
+            }
         }
     }
 
@@ -1032,6 +1073,8 @@ pub fn derive_runtime_graph(
             },
         );
     }
+
+    project_outcome_statuses(&mut graph, &outcomes, &structural_ids);
 
     RuntimeDerivation {
         runtime_graph: graph,
@@ -1285,7 +1328,14 @@ fn update_event_outcome(
             task_id: task_id.clone(),
             agent_ids: vec![agent_id.to_string()],
             status: RuntimeOutcomeStatus::Running,
-            started_at: Some(event.timestamp),
+            started_at: matches!(
+                kind,
+                RuntimeObservationKind::Claim
+                    | RuntimeObservationKind::ClaimFailed
+                    | RuntimeObservationKind::Spawn
+                    | RuntimeObservationKind::Retry
+            )
+            .then_some(event.timestamp),
             finished_at: None,
             attempt_count: 0,
             effects: Vec::new(),
@@ -1312,6 +1362,7 @@ fn update_event_outcome(
             outcome.started_at.get_or_insert(event.timestamp);
         }
         RuntimeObservationKind::Retry => {
+            outcome.attempt_count = outcome.attempt_count.saturating_add(1);
             outcome.status = RuntimeOutcomeStatus::Running;
         }
         RuntimeObservationKind::Completion => {
@@ -1341,5 +1392,98 @@ fn update_event_outcome(
         }
         RuntimeObservationKind::JournalStep
         | RuntimeObservationKind::LedgerEffect => {}
+    }
+}
+
+fn update_lane_completion_outcomes(
+    outcomes: &mut BTreeMap<String, RuntimeOutcome>,
+    structural_nodes: &BTreeMap<TaskId, WorkNode>,
+    agent_id: &str,
+    anchor_task_id: Option<&str>,
+    event: &Event,
+) -> bool {
+    let binding = anchor_task_id
+        .and_then(|task_id| structural_nodes.get(task_id))
+        .map(|node| node.binding.clone())
+        .or_else(|| completion_role_binding(agent_id, structural_nodes));
+    let Some(binding) = binding else {
+        return false;
+    };
+
+    let source_ref = format!("event:{}", event.id);
+    let mut matched = false;
+    for node in structural_nodes.values().filter(|node| {
+        node.binding == binding && matches!(node.kind, NodeKind::Task | NodeKind::Review)
+    }) {
+        matched = true;
+        let outcome = outcomes
+            .entry(node.id.clone())
+            .or_insert_with(|| RuntimeOutcome {
+                subject_id: node.id.clone(),
+                task_id: Some(node.id.clone()),
+                agent_ids: Vec::new(),
+                status: RuntimeOutcomeStatus::Completed,
+                started_at: None,
+                finished_at: Some(event.timestamp),
+                attempt_count: 1,
+                effects: Vec::new(),
+                source_refs: Vec::new(),
+            });
+        if !outcome.agent_ids.iter().any(|known| known == agent_id) {
+            outcome.agent_ids.push(agent_id.to_string());
+        }
+        outcome.task_id.get_or_insert_with(|| node.id.clone());
+        if outcome.status != RuntimeOutcomeStatus::Finalized {
+            outcome.status = RuntimeOutcomeStatus::Completed;
+        }
+        outcome.finished_at = Some(event.timestamp);
+        if outcome.attempt_count == 0 {
+            outcome.attempt_count = 1;
+        }
+        if !outcome.source_refs.iter().any(|known| known == &source_ref) {
+            outcome.source_refs.push(source_ref.clone());
+        }
+    }
+    matched
+}
+
+fn completion_role_binding(
+    agent_id: &str,
+    structural_nodes: &BTreeMap<TaskId, WorkNode>,
+) -> Option<BindingRef> {
+    let mut matches = structural_nodes.values().filter_map(|node| {
+        let BindingRef::Role(role) = &node.binding else {
+            return None;
+        };
+        (agent_id == role || agent_id.ends_with(&format!("-{role}")))
+            .then(|| node.binding.clone())
+    });
+    let binding = matches.next()?;
+    matches.all(|candidate| candidate == binding).then_some(binding)
+}
+
+fn project_outcome_statuses(
+    graph: &mut WorkGraph,
+    outcomes: &BTreeMap<String, RuntimeOutcome>,
+    structural_ids: &std::collections::BTreeSet<TaskId>,
+) {
+    for node in &mut graph.nodes {
+        if !structural_ids.contains(&node.id) {
+            continue;
+        }
+        let Some(outcome) = outcomes.get(&node.id) else {
+            continue;
+        };
+        node.status = match outcome.status {
+            RuntimeOutcomeStatus::Running => NodeStatus::Running,
+            RuntimeOutcomeStatus::Completed | RuntimeOutcomeStatus::Finalized => {
+                NodeStatus::Completed
+            }
+            RuntimeOutcomeStatus::Failed => NodeStatus::Failed,
+            RuntimeOutcomeStatus::Interrupted | RuntimeOutcomeStatus::Skipped => {
+                NodeStatus::Cancelled
+            }
+            RuntimeOutcomeStatus::Unknown => continue,
+        };
     }
 }

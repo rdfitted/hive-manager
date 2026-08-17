@@ -121,10 +121,14 @@ pub fn run() {
     queue_repo
         .ensure_schema()
         .expect("Failed to initialize agent_run_queue schema");
-    let queue_manager = Arc::new(crate::coordination::QueueManager::new(
-        Arc::clone(&queue_repo),
-        Arc::clone(&event_bus),
-    ));
+    let queue_pty_manager = Arc::clone(&pty_manager);
+    let queue_manager = Arc::new(
+        crate::coordination::QueueManager::new_with_liveness_probe(
+            Arc::clone(&queue_repo),
+            Arc::clone(&event_bus),
+            move |worker_id| queue_pty_manager.read().is_alive(worker_id),
+        ),
+    );
 
     // Set storage on session controller
     {
