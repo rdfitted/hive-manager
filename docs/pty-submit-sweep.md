@@ -158,7 +158,11 @@ gap:
 
 4. Without touching the target terminal, repeat the PTY-buffer `GET` at 250 ms, 1 second,
    5 seconds, and 10 seconds after the configured gap. Save every raw status and response;
-   do not rely on a transient UI repaint.
+   do not rely on a transient UI repaint. Note that since #256 the inject POST itself can
+   stay pending up to ~1,500 ms after the Enter write while the `submit_confirmed`
+   observation runs, so issue the POST from a separate shell (or background it) rather
+   than waiting for its response — otherwise the 250 ms and 1 second samples are missed
+   before the POST returns.
 5. Score the current terminal state reconstructed from the PTY output:
 
    - **PASS**: the unique payload is no longer sitting in the composer and the buffer shows

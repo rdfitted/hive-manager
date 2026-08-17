@@ -6452,7 +6452,7 @@ curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
 ```
 
-The response reports measured sender-side facts: `payload_bytes_written` and `submit_bytes_written` count the bytes actually written (the sanitized payload and the discrete Enter write), `submit_keystroke_issued` reflects the real Enter write, plus PTY-output byte counts, `pty_activity_observed`, the bounded `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = the Enter produced no observable reaction, `null` = unknown or not requested).
+The response reports measured sender-side facts: `payload_bytes_written` and `submit_bytes_written` count the bytes actually written (the sanitized payload and the discrete Enter write), `submit_keystroke_issued` reflects the real Enter write, plus PTY-output byte counts, `pty_activity_observed`, the bounded `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = the Enter produced no observable reaction, `null` = unknown or not requested). A `"submit":true` response may stay pending up to ~1500 ms while that confirmation window runs (it returns earlier once activity is confirmed); `submit_confirmation_elapsed_ms` reports the actual wait. Do not treat the held response as a stalled agent.
 
 **Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity, and `submit_confirmed` is heuristic. Never infer success from receiver behaviour alone.
 
@@ -16781,6 +16781,7 @@ mod tests {
         assert!(prompt.contains(r#"{"message":"","submit":true}"#));
         assert!(prompt.contains("submit_keystroke_issued"));
         assert!(prompt.contains("submit_confirmed"));
+        assert!(prompt.contains("may stay pending up to ~1500 ms"));
         assert!(prompt.contains("pty_activity_observed"));
         assert!(prompt.contains("do **not** prove that the agent took a turn"));
         assert!(!prompt.contains("payload and its newline share one PTY write"));
