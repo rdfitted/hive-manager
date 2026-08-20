@@ -7,7 +7,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use thiserror::Error;
 
-use crate::adapters::PtySubmitPolicy;
+use crate::adapters::{PtySubmitPolicy, PtySubmitResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
@@ -457,20 +457,38 @@ impl PtySession {
         Ok(())
     }
 
-    /// Write a payload, then deliver Enter as a discrete bare carriage return.
-    pub fn submit(&self, data: &[u8]) -> Result<(), PtyError> {
+    /// Deliver a payload inside a bracketed-paste envelope, then Enter as a discrete
+    /// bare carriage return outside the envelope.
+    ///
+    /// The envelope is what makes the Enter register: a raw fast byte burst trips TUI
+    /// paste-coalescing (codex suppresses Enter for ~120 ms after a burst), which used to
+    /// swallow the follow-up `\r` as a literal newline inside the paste (#256). The end
+    /// marker tells the composer the paste is over, so the Enter is interpreted as a
+    /// keystroke rather than payload. An empty payload writes only the Enter, preserving
+    /// the documented bare-Enter flush for content already staged in a composer.
+    pub fn submit(&self, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
         let mut writer = self.writer.lock();
-        Self::write_locked(&mut writer, data)?;
+        let payload_bytes_written = if data.is_empty() {
+            0
+        } else {
+            Self::write_bracketed_locked(&mut writer, data)?
+        };
         // Keep the per-session writer locked so no concurrent write can be
         // interleaved and accidentally submitted by this Enter.
         std::thread::sleep(submit_gap(self.submit_policy));
-        Self::write_locked(&mut writer, b"\r")
+        Self::write_locked(&mut writer, b"\r")?;
+        Ok(PtySubmitResult {
+            payload_bytes_written,
+            submit_bytes_written: 1,
+        })
     }
 
-    /// Write with bracketed paste mode wrapping - used for paste operations
-    pub fn write_bracketed(&self, data: &[u8]) -> Result<(), PtyError> {
-        tracing::debug!("PTY write_bracketed: {} bytes", data.len());
-        let mut writer = self.writer.lock();
+    /// Write `data` as one bracketed-paste envelope while the caller already holds the
+    /// writer lock. Returns the sanitized payload byte count (framing markers excluded).
+    fn write_bracketed_locked(
+        writer: &mut SendWriter,
+        data: &[u8],
+    ) -> Result<usize, PtyError> {
         let sanitized = sanitize_bracketed_paste(data);
 
         // Send bracketed paste start sequence
@@ -493,6 +511,14 @@ impl PtySession {
         writer.0.flush()
             .map_err(into_io_error)?;
 
+        Ok(sanitized.as_ref().len())
+    }
+
+    /// Write with bracketed paste mode wrapping - used for paste operations
+    pub fn write_bracketed(&self, data: &[u8]) -> Result<(), PtyError> {
+        tracing::debug!("PTY write_bracketed: {} bytes", data.len());
+        let mut writer = self.writer.lock();
+        Self::write_bracketed_locked(&mut writer, data)?;
         tracing::debug!("PTY write_bracketed complete");
         Ok(())
     }

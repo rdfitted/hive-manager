@@ -51,6 +51,18 @@ pub struct PtySubmitPolicy {
     pub default_gap: Duration,
 }
 
+/// Measured outcome of one PTY submit: what was actually written, not what was requested.
+///
+/// `payload_bytes_written` counts the sanitized payload bytes delivered inside the
+/// bracketed-paste envelope (framing markers excluded); it is zero for a bare-Enter
+/// submit. `submit_bytes_written` counts the discrete Enter write itself (#256 replaced
+/// the constant-by-construction receipt values with these).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtySubmitResult {
+    pub payload_bytes_written: usize,
+    pub submit_bytes_written: usize,
+}
+
 /// Resolve the policy from the executable that is actually handed to the PTY.
 /// Cursor launches through `wsl`, so that executable is normalized back to the
 /// Cursor adapter instead of silently using the unknown-command fallback.

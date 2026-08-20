@@ -6444,7 +6444,7 @@ Heartbeat while coordinating:
 
 `POST /api/sessions/{session_id}/inject` writes a message into a running agent's terminal.
 
-With the default `"submit":true`, the sender performs two discrete PTY writes: the payload, then a bare carriage-return submit keystroke after the adapter's configured gap. Use `"submit":false` only when intentionally leaving text in the composer.
+With the default `"submit":true`, the sender delivers the payload inside one bracketed-paste envelope, then presses Enter as a discrete bare carriage-return write outside the envelope after the adapter's configured gap. The closed envelope is what lets composers with paste-coalescing (codex) register the Enter as a keystroke instead of swallowing it into the paste. Trailing `\r`/`\n` on the message are always stripped before writing, so a payload can never self-submit. Use `"submit":false` only when intentionally leaving text in the composer; text already staged in a composer can be flushed with `{{"message":"","submit":true}}`, which writes only the bare Enter.
 
 ```bash
 curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
@@ -6452,11 +6452,11 @@ curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
 ```
 
-The response reports measured sender-side facts including `payload_bytes_written`, `submit_keystroke_issued`, `submit_bytes_written`, PTY-output byte counts, `pty_activity_observed`, and the bounded `observation_window_ms`.
+The response reports measured sender-side facts: `payload_bytes_written` and `submit_bytes_written` count the bytes actually written (the sanitized payload and the discrete Enter write), `submit_keystroke_issued` reflects the real Enter write, plus PTY-output byte counts, `pty_activity_observed`, the bounded `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = the Enter produced no observable reaction, `null` = unknown or not requested). A `"submit":true` response may stay pending up to ~1500 ms while that confirmation window runs (it returns earlier once activity is confirmed); `submit_confirmation_elapsed_ms` reports the actual wait. Do not treat the held response as a stalled agent.
 
-**Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity. Never infer success from receiver behaviour alone.
+**Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity, and `submit_confirmed` is heuristic. Never infer success from receiver behaviour alone.
 
-**Task files remain the primary channel for assignments.** Inject is for nudges and mid-flight corrections; workers re-read their task file, so durable direction belongs there.
+**Task files remain the primary channel for assignments.** Inject is a nudge; task files are the contract. Workers re-read their task file, so durable direction belongs there. `HIVE_PTY_SUBMIT_GAP_MS` (ceiling 300000 ms) overrides the submit gap, but the value is cached on first use and requires an app restart to change.
 
 {topology_instructions}
 
@@ -16776,8 +16776,12 @@ mod tests {
         // Inject contract: the sender reports measured write/observation facts without
         // claiming that output proves a managed turn.
         assert!(prompt.contains("## Messaging a Running Agent (inject)"));
-        assert!(prompt.contains("two discrete PTY writes"));
+        assert!(prompt.contains("bracketed-paste envelope"));
+        assert!(prompt.contains("discrete bare carriage-return write outside the envelope"));
+        assert!(prompt.contains(r#"{"message":"","submit":true}"#));
         assert!(prompt.contains("submit_keystroke_issued"));
+        assert!(prompt.contains("submit_confirmed"));
+        assert!(prompt.contains("may stay pending up to ~1500 ms"));
         assert!(prompt.contains("pty_activity_observed"));
         assert!(prompt.contains("do **not** prove that the agent took a turn"));
         assert!(!prompt.contains("payload and its newline share one PTY write"));

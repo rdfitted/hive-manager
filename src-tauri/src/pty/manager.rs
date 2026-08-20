@@ -6,7 +6,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 
 use super::session::{AgentRole, AgentStatus, PtyError, PtySession, read_from_reader};
-use crate::adapters::pty_submit_policy;
+use crate::adapters::{pty_submit_policy, PtySubmitResult};
 use crate::cli::agent_store;
 use crate::tauri_shim::{AppHandle, Emitter};
 
@@ -248,8 +248,8 @@ impl PtyManager {
         session.write(data)
     }
 
-    /// Write a payload and then a discrete bare Enter to submit it.
-    pub fn submit(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
+    /// Deliver a payload as a bracketed paste and then a discrete bare Enter to submit it.
+    pub fn submit(&self, id: &str, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
         tracing::debug!("PtyManager::submit called for session: {}", id);
         let sessions = self.sessions.read();
         let session = sessions
@@ -334,6 +334,17 @@ impl PtyManager {
     pub fn write_records_for_test(&self, id: &str) -> Option<Vec<Vec<u8>>> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|session| session.write_records())
+    }
+
+    /// Test hook: append synthetic child output to a session's diagnostic ring, so the
+    /// post-submit confirmation observer (#256) can be exercised against a stub PTY that
+    /// has no real child to produce output.
+    #[cfg(all(test, windows))]
+    pub fn record_output_for_test(&self, id: &str, bytes: &[u8]) {
+        let sessions = self.sessions.read();
+        if let Some(session) = sessions.get(id) {
+            session.record_output(bytes);
+        }
     }
 
     #[cfg(all(test, windows))]
@@ -513,8 +524,10 @@ mod tests {
         assert_eq!(args, vec!["-p".to_string(), "hello".to_string()]);
     }
 
+    /// #256: the payload travels inside one bracketed-paste envelope, the envelope is
+    /// terminated before Enter, and Enter is its own discrete write outside the envelope.
     #[test]
-    fn submit_writes_one_multiline_payload_then_one_bare_enter() {
+    fn submit_brackets_one_multiline_payload_then_one_discrete_bare_enter() {
         let manager = PtyManager::new();
         manager
             .create_session(
@@ -528,19 +541,133 @@ mod tests {
             )
             .unwrap();
 
-        manager
+        let result = manager
             .submit("submit-agent", b"line one\nline two\nline three")
             .unwrap();
 
         let writes = manager.write_records_for_test("submit-agent").unwrap();
         assert_eq!(
             writes,
-            vec![b"line one\nline two\nline three".to_vec(), b"\r".to_vec()]
+            vec![
+                b"\x1b[200~".to_vec(),
+                b"line one\nline two\nline three".to_vec(),
+                b"\x1b[201~".to_vec(),
+                b"\r".to_vec(),
+            ]
         );
-        assert!(!writes[0].ends_with(b"\r"));
-        assert!(!writes[0].ends_with(b"\n"));
-        assert_eq!(writes[1], b"\r");
-        assert!(!writes[1].contains(&b'\n'));
+        let end_marker_index = writes
+            .iter()
+            .position(|write| write.as_slice() == b"\x1b[201~")
+            .expect("bracketed payload must be terminated");
+        let enter_index = writes
+            .iter()
+            .position(|write| write.as_slice() == b"\r")
+            .expect("Enter must be written");
+        assert!(
+            end_marker_index < enter_index,
+            "the paste envelope must close before Enter is sent"
+        );
+        assert!(!writes[1].ends_with(b"\r"));
+        assert!(!writes[1].ends_with(b"\n"));
+        assert!(!writes[enter_index].contains(&b'\n'));
+        assert_eq!(result.payload_bytes_written, b"line one\nline two\nline three".len());
+        assert_eq!(result.submit_bytes_written, 1);
+    }
+
+    /// #256: an empty payload stays the documented bare-Enter flush — no paste envelope,
+    /// only the discrete Enter that submits whatever is already staged in the composer.
+    #[test]
+    fn submit_with_empty_payload_writes_only_the_bare_enter() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "bare-enter-agent".to_string(),
+                worker_role(),
+                "codex",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        let result = manager.submit("bare-enter-agent", b"").unwrap();
+
+        assert_eq!(
+            manager.write_records_for_test("bare-enter-agent").unwrap(),
+            vec![b"\r".to_vec()]
+        );
+        assert_eq!(result.payload_bytes_written, 0);
+        assert_eq!(result.submit_bytes_written, 1);
+    }
+
+    /// #256: an embedded end marker cannot terminate the envelope early and the reported
+    /// payload count is the sanitized byte count actually written.
+    #[test]
+    fn submit_sanitizes_embedded_end_markers_and_reports_sanitized_bytes() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "sanitize-agent".to_string(),
+                worker_role(),
+                "codex",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        let result = manager
+            .submit("sanitize-agent", b"safe\x1b[201~payload")
+            .unwrap();
+
+        assert_eq!(
+            manager.write_records_for_test("sanitize-agent").unwrap(),
+            vec![
+                b"\x1b[200~".to_vec(),
+                b"safepayload".to_vec(),
+                b"\x1b[201~".to_vec(),
+                b"\r".to_vec(),
+            ]
+        );
+        assert_eq!(result.payload_bytes_written, b"safepayload".len());
+    }
+
+    /// #256 acceptance: payloads larger than 1 KB (here, larger than one 16 KB write
+    /// chunk) still travel in a single envelope and receive exactly one Enter.
+    #[test]
+    fn submit_chunks_an_oversized_payload_inside_a_single_envelope() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "chunked-agent".to_string(),
+                worker_role(),
+                "codex",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        let payload = vec![b'x'; 16 * 1024 + 17];
+        let result = manager.submit("chunked-agent", &payload).unwrap();
+
+        let writes = manager.write_records_for_test("chunked-agent").unwrap();
+        assert_eq!(writes.first().unwrap().as_slice(), b"\x1b[200~");
+        assert_eq!(writes[1].len(), 16 * 1024);
+        assert_eq!(writes[2].len(), 17);
+        assert_eq!(writes[3].as_slice(), b"\x1b[201~");
+        assert_eq!(writes.last().unwrap().as_slice(), b"\r");
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| write.as_slice() == b"\r")
+                .count(),
+            1
+        );
+        assert_eq!(result.payload_bytes_written, payload.len());
     }
 
     #[test]
@@ -629,7 +756,9 @@ mod tests {
                 .write_records_for_test("atomic-submit-agent")
                 .unwrap(),
             vec![
+                b"\x1b[200~".to_vec(),
                 b"payload".to_vec(),
+                b"\x1b[201~".to_vec(),
                 b"\r".to_vec(),
                 b"interloper".to_vec()
             ]
@@ -682,7 +811,12 @@ mod tests {
             manager
                 .write_records_for_test("abandoned-submit-pause-agent")
                 .unwrap(),
-            vec![b"payload".to_vec(), b"\r".to_vec()]
+            vec![
+                b"\x1b[200~".to_vec(),
+                b"payload".to_vec(),
+                b"\x1b[201~".to_vec(),
+                b"\r".to_vec()
+            ]
         );
     }
 

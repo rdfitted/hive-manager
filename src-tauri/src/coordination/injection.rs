@@ -12,7 +12,10 @@ use super::{CoordinationMessage, StateManager, WorkerStateInfo};
 
 /// Sender-side facts captured around a successful PTY injection.
 ///
-/// The optional PTY values are raw snapshots and compatibility counters captured immediately
+/// `payload_bytes_written` and `submit_bytes_written` are measured from the actual PTY
+/// writes (#256): the sanitized payload delivered inside the bracketed-paste envelope and
+/// the discrete Enter write, respectively — they are not echoes of the request flags. The
+/// optional PTY values are raw snapshots and compatibility counters captured immediately
 /// around the write. The HTTP inject routes perform the bounded post-submit observation from the
 /// after-write snapshot; neither kind of ring change proves that the agent took a turn.
 #[derive(Debug, Clone)]
@@ -255,13 +258,24 @@ impl InjectionManager {
         tracing::info!("Message bytes: {:?}", clean_message.as_bytes());
         tracing::info!("Submit: {}", submit);
 
-        let write_result = if submit {
-            pty_manager.submit(agent_id, clean_message.as_bytes())
+        // Byte counts are measured from the actual PTY writes (#256): the payload count
+        // is what survived bracketed-paste sanitization, and the submit count is the
+        // discrete Enter write itself — not echoes of the request flags.
+        let (payload_bytes_written, submit_bytes_written) = if submit {
+            let submit_result = pty_manager
+                .submit(agent_id, clean_message.as_bytes())
+                .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
+            (
+                submit_result.payload_bytes_written,
+                submit_result.submit_bytes_written,
+            )
         } else {
-            pty_manager.write(agent_id, clean_message.as_bytes())
+            pty_manager
+                .write(agent_id, clean_message.as_bytes())
+                .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
+            (clean_message.len(), 0)
         };
-        write_result
-            .map_err(|e| InjectionError::PtyError(format!("Failed to write: {}", e)))?;
+        let submit_keystroke_issued = submit_bytes_written > 0;
         // This timestamp is deliberately after the successful submit/write call. Adapter submit
         // gaps can be much longer than the stall threshold; a pre-write timestamp would make a
         // just-finished injection look stale and could treat a heartbeat during the gap as recovery.
@@ -280,9 +294,9 @@ impl InjectionManager {
             write_started_at,
             submitted_at,
             observation_started_at: submitted_at,
-            payload_bytes_written: clean_message.len(),
-            submit_keystroke_issued: submit,
-            submit_bytes_written: if submit { 1 } else { 0 },
+            payload_bytes_written,
+            submit_keystroke_issued,
+            submit_bytes_written,
             pty_output_before,
             pty_output_after_write,
             pty_activity_observed,
