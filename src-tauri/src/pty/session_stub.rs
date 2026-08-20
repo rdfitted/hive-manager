@@ -451,8 +451,22 @@ impl PtySession {
 
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
         let mut writer = self.writer.lock();
-        Self::write_locked(&mut writer, data)
+        if data == Self::SUBMIT_KEYSTROKE {
+            Self::write_submit_keystroke_locked(&mut writer)?;
+            Ok(())
+        } else {
+            Self::write_locked(&mut writer, data)
+        }
     }
+
+    // BEGIN SHARED SUBMIT KEYSTROKE PRIMITIVE
+    const SUBMIT_KEYSTROKE: &'static [u8] = b"\r";
+
+    fn write_submit_keystroke_locked(writer: &mut SendWriter) -> Result<usize, PtyError> {
+        Self::write_locked(writer, Self::SUBMIT_KEYSTROKE)?;
+        Ok(Self::SUBMIT_KEYSTROKE.len())
+    }
+    // END SHARED SUBMIT KEYSTROKE PRIMITIVE
 
     pub fn submit(&self, data: &[u8]) -> Result<PtySubmitResult, PtyError> {
         let mut writer = self.writer.lock();
@@ -463,10 +477,10 @@ impl PtySession {
         };
         self.pause_submit_after_payload_if_requested();
         std::thread::sleep(submit_gap(self.submit_policy));
-        Self::write_locked(&mut writer, b"\r")?;
+        let submit_bytes_written = Self::write_submit_keystroke_locked(&mut writer)?;
         Ok(PtySubmitResult {
             payload_bytes_written,
-            submit_bytes_written: 1,
+            submit_bytes_written,
         })
     }
 
@@ -692,6 +706,27 @@ mod tests {
         let production = policy_block(include_str!("session.rs"));
         let test_stub = policy_block(include_str!("session_stub.rs"));
         assert_eq!(production, test_stub, "the Windows shim must not drift");
+    }
+
+    #[test]
+    fn submit_keystroke_primitive_matches_the_production_session() {
+        fn primitive_block(source: &str) -> String {
+            source
+                .split_once("// BEGIN SHARED SUBMIT KEYSTROKE PRIMITIVE")
+                .expect("submit keystroke primitive start marker")
+                .1
+                .split_once("// END SHARED SUBMIT KEYSTROKE PRIMITIVE")
+                .expect("submit keystroke primitive end marker")
+                .0
+                .replace("\r\n", "\n")
+        }
+
+        let production = primitive_block(include_str!("session.rs"));
+        let test_stub = primitive_block(include_str!("session_stub.rs"));
+        assert_eq!(
+            production, test_stub,
+            "the production and Windows-shim submit retry primitives must not drift"
+        );
     }
 
     #[test]

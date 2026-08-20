@@ -4927,6 +4927,8 @@ Task syntax is load-bearing: use a unique stable `T<number>:` prefix, put comma-
 prerequisites in `(deps: T1, T2)`, and keep `(inputs: ...)`, `(outputs: ...)`, and
 `(acceptance: ...)` on the same checkbox line. Omit `deps:` for roots. Dependency metadata,
 not prose phases, is the executable ordering source.
+Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`,
+`[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 
 ## IMPORTANT
 - Write the plan to `.hive-manager/{session_id}/plan.md` and then STOP
@@ -5018,6 +5020,8 @@ Write a concise debate plan to `.hive-manager/{session_id}/plan.md`:
 Task syntax is load-bearing: every task has a unique stable `T<number>:` prefix; prerequisites
 use `(deps: T1, T2)`; contracts use `(inputs: ...)`, `(outputs: ...)`, and
 `(acceptance: ...)` on that same checkbox line. Omit `deps:` for roots.
+Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`,
+`[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 
 Do not run the debate. Stop after writing the plan.
 "#,
@@ -5394,9 +5398,10 @@ This roster is available implementation capacity, not a required task count. Des
 - Evidence and repository findings
 - Coherent workstreams with owned paths and authoritative inputs
 - A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
-  `- [ ] [P1] T1: Stable root task (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
-  `- [ ] [P2] T2: Stable dependent task (deps: T1) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  `- [ ] T1: Stable root task (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
+  `- [ ] T2: Stable dependent task (deps: T1) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
   Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
+  Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 - Ownership matrix and serialized hotspots
 - Integration order and wave narrative consistent with the task graph
 - Validation gates with commands/evidence
@@ -5623,12 +5628,12 @@ Write to `.hive-manager/{session_id}/plan.md`:
 ## Domain Tasks (for Planners)
 
 ### Domain 1: [Domain Name]
-- [ ] [P1] T1: Task description (inputs: required context) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 1
+- [ ] T1: Task description (inputs: required context) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 1
 Files: [list of files in this domain]
 Workers: {workers_per} available
 
 ### Domain 2: [Domain Name]
-- [ ] [P2] T2: Task description (deps: T1) (inputs: T1 output) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 2
+- [ ] T2: Task description (deps: T1) (inputs: T1 output) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 2
 Files: [list of files in this domain]
 Workers: {workers_per} available
 
@@ -5648,6 +5653,8 @@ Workers: {workers_per} available
 Task syntax is load-bearing: use unique stable `T<number>:` ids, comma-separated prerequisite
 ids in `(deps: ...)`, and same-line `(inputs: ...)`, `(outputs: ...)`, and `(acceptance: ...)`.
 Omit `deps:` for roots. The graph metadata, not PHASE prose, controls execution order.
+Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`,
+`[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 
 ---
 
@@ -5666,6 +5673,36 @@ Omit `deps:` for roots. The graph metadata, not PHASE prose, controls execution 
             planner_table = planner_table.trim_end(),
             worker_info = worker_info.trim_end()
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn planner_task_line_prompts_for_test() -> [String; 6] {
+        let planner = AgentConfig::default();
+        let policy = HiveExecutionPolicy::default();
+        let smoke_workers = vec![AgentConfig::default(); 4];
+
+        [
+            Self::build_fusion_master_planner_prompt("test-fusion", "test objective", &[]),
+            Self::build_debate_master_planner_prompt("test-debate", "test topic", &[], 2),
+            Self::build_master_planner_prompt(
+                "test-hive",
+                "test objective",
+                &planner,
+                &[],
+                &policy,
+                Path::new("/repo"),
+                Path::new("/repo/.hive-manager/worktrees/test-hive/primary"),
+            ),
+            Self::build_swarm_master_planner_prompt("test-swarm", "test objective", 2, &[]),
+            Self::build_smoke_test_prompt("test-hive-smoke", &smoke_workers, false, None),
+            Self::build_swarm_smoke_test_prompt(
+                "test-swarm-smoke",
+                4,
+                &[],
+                false,
+                None,
+            ),
+        ]
     }
 
     /// Build a minimal smoke test prompt that creates a simple plan without real investigation
@@ -5852,6 +5889,8 @@ Testing {worker_count} workers as configured by the user.
 The `T<number>:` ids and `(deps: ...)` declarations above are the executable work graph.
 Keep every task's `(inputs: ...)`, `(outputs: ...)`, and `(acceptance: ...)` metadata on its
 checkbox line; prose in the Dependencies section is explanatory only.
+Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`,
+`[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 
 ## Task Details
 
@@ -6107,6 +6146,8 @@ Testing {planner_count} planners, each with {workers_per} workers ({total_worker
 The stable `T<number>:` ids and task-line `(deps: ...)` declarations are the executable graph.
 Inputs, outputs, and acceptance stay on the same checkbox line; the prose dependency section is
 only a readable explanation of those edges.
+Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`,
+`[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 
 ## Planner → Worker Breakdown
 
@@ -6452,9 +6493,9 @@ curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
 ```
 
-The response reports measured sender-side facts: `payload_bytes_written` and `submit_bytes_written` count the bytes actually written (the sanitized payload and the discrete Enter write), `submit_keystroke_issued` reflects the real Enter write, plus PTY-output byte counts, `pty_activity_observed`, the bounded `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = the Enter produced no observable reaction, `null` = unknown or not requested). A `"submit":true` response may stay pending up to ~1500 ms while that confirmation window runs (it returns earlier once activity is confirmed); `submit_confirmation_elapsed_ms` reports the actual wait. Do not treat the held response as a stalled agent.
+The response reports measured sender-side facts: `payload_bytes_written` counts the sanitized payload bytes, `submit_bytes_written` is the aggregate number of Enter bytes written across all attempts, and `submit_attempts` reports `0` when no Enter was requested, `1` when one Enter was written, or `2` when the bounded automatic retry fired. `submit_keystroke_issued` reflects whether any Enter was written. The receipt also includes PTY-output byte counts, `pty_activity_observed`, the bounded `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = the initial Enter and its one automatic retry both produced no observable reaction, `null` = unknown or not requested). When `submit_confirmed` is `false`, the sender has already retried once automatically; flush the target with `{{"message":"","submit":true}}`, then re-check its state. Remediate one target at a time. A `"submit":true` response may stay pending up to ~1500 ms while that confirmation window runs (it returns earlier once activity is confirmed); `submit_confirmation_elapsed_ms` reports the actual wait. Do not treat the held response as a stalled agent.
 
-**Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity, and `submit_confirmed` is heuristic. Never infer success from receiver behaviour alone.
+**Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity, and `submit_confirmed` is heuristic. `submit_confirmed: true` is not proof that a busy receiver accepted Enter: unrelated output from a target that was already streaming can create a false positive and bypass the false-only retry. When the target was busy, inspect its actual state rather than treating `true` as confirmation. Never infer success from receiver behaviour alone.
 
 **Task files remain the primary channel for assignments.** Inject is a nudge; task files are the contract. Workers re-read their task file, so durable direction belongs there. `HIVE_PTY_SUBMIT_GAP_MS` (ceiling 300000 ms) overrides the submit gap, but the value is cached on first use and requires an app restart to change.
 
@@ -9943,6 +9984,7 @@ The backend composed and persisted the following authoritative skeleton before l
 - The listed node contracts and dependency edges already exist and will be reconciled with your plan rather than replaced by it.
 - Add only genuinely plan-specific `T<number>` tasks. Their `(deps: ...)` values may reference the exact skeleton IDs below.
 - Do not emit a checkbox line that attempts to redefine a non-`T<number>` skeleton node. Describe any rationale in prose and preserve the stable ID in dependency metadata.
+- Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
 
 ```json
 {payload}
@@ -13304,26 +13346,24 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let mut graph = match std::fs::read_to_string(&plan_path) {
             Ok(content) => {
-                match crate::actions::coordination::parse_plan_markdown_checked(&content) {
-                    Ok(plan) => {
-                        crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan)
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id,
-                            plan_path = %plan_path.display(),
-                            error = %error,
-                            "Plan graph metadata could not be parsed; degrading to an edgeless graph"
-                        );
-                        let mut graph = TaskGraph::default();
-                        graph.omissions.push(WorkGraphOmission::new(
-                            WorkGraphOmissionReason::ResolutionIncomplete,
-                            error.messages.len(),
-                            error.messages,
-                        ));
-                        graph
-                    }
+                let (plan, messages) =
+                    crate::actions::coordination::parse_plan_markdown_with_diagnostics(&content);
+                let mut graph =
+                    crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan);
+                if !messages.is_empty() {
+                    tracing::warn!(
+                        session_id,
+                        plan_path = %plan_path.display(),
+                        diagnostics = messages.len(),
+                        "Plan graph metadata was only partially parsed; preserving resolved nodes"
+                    );
+                    graph.omissions.push(WorkGraphOmission::new(
+                        WorkGraphOmissionReason::ResolutionIncomplete,
+                        messages.len(),
+                        messages,
+                    ));
                 }
+                graph
             }
             Err(error) => {
                 tracing::warn!(
@@ -13342,10 +13382,33 @@ The backend composed and persisted the following authoritative skeleton before l
             }
         };
 
+        let duplicate_nodes =
+            crate::orchestrator::work_graph::validate::quarantine_duplicate_nodes(&mut graph);
+        if !duplicate_nodes.is_empty() {
+            let examples = duplicate_nodes
+                .iter()
+                .map(|task_id| {
+                    format!(
+                        "duplicate task {task_id} was omitted after its first declaration"
+                    )
+                })
+                .collect::<Vec<_>>();
+            tracing::warn!(
+                session_id,
+                duplicates = duplicate_nodes.len(),
+                "Duplicate plan task declarations were quarantined"
+            );
+            graph.omissions.push(WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                duplicate_nodes.len(),
+                examples,
+            ));
+        }
+
         // Phase B is opt-in by persisted state rather than by a live launch
         // config. That makes a crash/retry deterministic and lets resumed
         // planning sessions finish without reconstructing departed agents.
-        let reconciled_composition = if let Some(storage) = self.storage.as_ref() {
+        let mut reconciled_composition = if let Some(storage) = self.storage.as_ref() {
             let state_manager = StateManager::new(storage.session_dir(session_id));
             Self::reconcile_planner_graph_with_persisted_skeleton(&state_manager, &graph)?
         } else {
@@ -13355,10 +13418,62 @@ The backend composed and persisted the following authoritative skeleton before l
             graph = composition.graph.clone();
         }
 
-        let validation = crate::orchestrator::work_graph::validate::validate_plan_ready(&graph)
-            .map_err(|error| error.to_string())?;
-        for warning in validation.warnings {
-            tracing::warn!(session_id, warning = %warning, "PlanReady validation warning");
+        let quarantined =
+            crate::orchestrator::work_graph::validate::quarantine_dangling_dependencies(
+                &mut graph,
+            );
+        if !quarantined.is_empty() {
+            let examples = quarantined
+                .iter()
+                .map(|reference| {
+                    format!(
+                        "{} depends on unknown {}",
+                        reference.dependent, reference.dependency
+                    )
+                })
+                .collect::<Vec<_>>();
+            tracing::warn!(
+                session_id,
+                dependencies = quarantined.len(),
+                "Dangling plan dependencies were quarantined"
+            );
+            graph.omissions.push(WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                quarantined.len(),
+                examples,
+            ));
+        }
+
+        use crate::orchestrator::work_graph::validate::PlanReadyError;
+        match crate::orchestrator::work_graph::validate::validate_plan_ready(&graph) {
+            Ok(validation) => {
+                for warning in validation.warnings {
+                    tracing::warn!(session_id, warning = %warning, "PlanReady validation warning");
+                }
+            }
+            Err(error @ (PlanReadyError::DuplicateTaskIds { .. }
+            | PlanReadyError::DanglingDependencies { .. })) => {
+                let message = error.to_string();
+                tracing::warn!(
+                    session_id,
+                    error = %message,
+                    "Plan topology validation was incomplete; allowing the readable plan to proceed"
+                );
+                graph.omissions.push(WorkGraphOmission::new(
+                    WorkGraphOmissionReason::ResolutionIncomplete,
+                    1,
+                    vec![message],
+                ));
+            }
+            Err(error @ (PlanReadyError::Cycle { .. }
+            | PlanReadyError::MissingVerificationSignal { .. }
+            | PlanReadyError::MissingVerificationSignalClass { .. }
+            | PlanReadyError::InsufficientVerificationIsolation { .. }
+            | PlanReadyError::InvalidReviewAuthorityMetadata { .. }
+            | PlanReadyError::MissingAdjudicator { .. }
+            | PlanReadyError::AdjudicatorLacksAuthority { .. })) => {
+                return Err(error.to_string());
+            }
         }
 
         if self.storage.is_none() {
@@ -13370,6 +13485,10 @@ The backend composed and persisted the following authoritative skeleton before l
                 vec![message.to_string()],
             ));
             tracing::warn!(session_id, omission = message);
+        }
+
+        if let Some(composition) = reconciled_composition.as_mut() {
+            composition.graph = graph.clone();
         }
 
         let changes = {
@@ -16781,9 +16900,24 @@ mod tests {
         assert!(prompt.contains(r#"{"message":"","submit":true}"#));
         assert!(prompt.contains("submit_keystroke_issued"));
         assert!(prompt.contains("submit_confirmed"));
+        assert!(prompt.contains("`submit_bytes_written` is the aggregate number"));
+        assert!(prompt.contains("`submit_attempts` reports `0` when no Enter was requested"));
+        let remediation_passage = prompt
+            .split("\n\n")
+            .find(|passage| passage.contains("the tri-state `submit_confirmed`"))
+            .expect("inject receipt and remediation passage");
+        assert!(
+            remediation_passage.contains(
+                "`false` = the initial Enter and its one automatic retry both produced no observable reaction"
+            ) && remediation_passage.contains(
+                r#"When `submit_confirmed` is `false`, the sender has already retried once automatically; flush the target with `{"message":"","submit":true}`, then re-check its state. Remediate one target at a time."#
+            ),
+            "the false verdict and its measured remediation must stay in one emitted passage"
+        );
         assert!(prompt.contains("may stay pending up to ~1500 ms"));
         assert!(prompt.contains("pty_activity_observed"));
         assert!(prompt.contains("do **not** prove that the agent took a turn"));
+        assert!(prompt.contains("`submit_confirmed: true` is not proof that a busy receiver accepted Enter"));
         assert!(!prompt.contains("payload and its newline share one PTY write"));
         assert!(!prompt.contains("send a second, empty message"));
         assert!(!prompt.contains("Measured against a live codex agent"));

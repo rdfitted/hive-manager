@@ -19,6 +19,7 @@ fn default_submit() -> bool {
 const INJECTION_EVIDENCE_SCOPE: &str = "These facts prove only that bytes were written and the PTY output ring was observed for a bounded window; they do not prove that the agent took a turn. submit_confirmed is heuristic: true means sustained post-submit ring activity consistent with the composer accepting Enter, false means Enter produced no observable reaction within the confirmation window, null means unknown or not applicable. An agent that was already streaming output can produce a false positive.";
 const INJECTION_ACTIVITY_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SUBMIT_KEYSTROKE: &[u8] = b"\r";
 /// How long the sender watches the ring for delivery evidence after the Enter write (#256).
 const SUBMIT_CONFIRMATION_WINDOW: Duration = Duration::from_millis(1500);
 /// Minimum spread between the first and last observed ring change for the activity to
@@ -35,6 +36,12 @@ struct InjectionObservation {
     submit_confirmation_basis: &'static str,
     submit_confirmation_window_ms: u64,
     submit_confirmation_elapsed_ms: u64,
+}
+
+struct InjectionMeasurement {
+    observation: InjectionObservation,
+    submit_attempts: usize,
+    submit_bytes_written: usize,
 }
 
 impl InjectionObservation {
@@ -77,27 +84,28 @@ fn classify_submit_confirmation(change_offsets: &[Duration]) -> (Option<bool>, &
     }
 }
 
-async fn observe_injection(
+async fn observe_submit(
     state: &AppState,
     agent_id: &str,
-    receipt: &InjectionReceipt,
+    submit_keystroke_issued: bool,
+    pty_output_after_write: Option<&str>,
 ) -> InjectionObservation {
-    if !receipt.submit_keystroke_issued {
+    if !submit_keystroke_issued {
         return InjectionObservation::unobserved(
-            receipt.pty_output_after_write.is_some(),
-            receipt.pty_output_after_write.as_ref().map(String::len),
+            pty_output_after_write.is_some(),
+            pty_output_after_write.map(str::len),
             "not-submitted",
         );
     }
 
-    let Some(baseline) = receipt.pty_output_after_write.as_ref() else {
+    let Some(baseline) = pty_output_after_write else {
         return InjectionObservation::unobserved(false, None, "pty-unobservable");
     };
 
     let observation_started = Instant::now();
     let confirmation_deadline = observation_started + SUBMIT_CONFIRMATION_WINDOW;
-    let mut previous = baseline.clone();
-    let mut output_after = Some(baseline.clone());
+    let mut previous = baseline.to_owned();
+    let mut output_after = Some(baseline.to_owned());
     let mut first_activity_elapsed: Option<Duration> = None;
     let mut change_offsets: Vec<Duration> = Vec::new();
     let mut ring_lost = false;
@@ -157,6 +165,48 @@ async fn observe_injection(
     }
 }
 
+async fn observe_injection_with_retry(
+    state: &AppState,
+    agent_id: &str,
+    receipt: &InjectionReceipt,
+) -> Result<InjectionMeasurement, ApiError> {
+    let mut observation = observe_submit(
+        state,
+        agent_id,
+        receipt.submit_keystroke_issued,
+        receipt.pty_output_after_write.as_deref(),
+    )
+    .await;
+    let mut submit_attempts = usize::from(receipt.submit_keystroke_issued);
+    let mut submit_bytes_written = receipt.submit_bytes_written;
+
+    if observation.submit_confirmed == Some(false) {
+        let pty_manager = Arc::clone(&state.pty_manager);
+        let retry_agent_id = agent_id.to_string();
+        let retry_result = tokio::task::spawn_blocking(move || {
+            pty_manager.read().write(&retry_agent_id, SUBMIT_KEYSTROKE)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("Submit retry task failed: {error}")))?;
+        retry_result
+            .map_err(|error| ApiError::internal(format!("Submit retry failed: {error}")))?;
+        submit_attempts += 1;
+        submit_bytes_written += SUBMIT_KEYSTROKE.len();
+
+        // Capture the new baseline after the retry write. PTYs with local echo (including
+        // the Windows test stub) mirror the CR into the ring; observing from the old
+        // baseline would misclassify that self-echo as receiver activity.
+        let retry_baseline = state.pty_manager.read().recent_output(agent_id);
+        observation = observe_submit(state, agent_id, true, retry_baseline.as_deref()).await;
+    }
+
+    Ok(InjectionMeasurement {
+        observation,
+        submit_attempts,
+        submit_bytes_written,
+    })
+}
+
 fn record_injection_submission(
     state: &AppState,
     session_id: &str,
@@ -182,8 +232,9 @@ fn record_injection_submission(
 fn measured_response(
     message: String,
     receipt: &InjectionReceipt,
-    observation: &InjectionObservation,
+    measurement: &InjectionMeasurement,
 ) -> Value {
+    let observation = &measurement.observation;
     json!({
         "status": "success",
         "message": message,
@@ -192,7 +243,8 @@ fn measured_response(
         "payload_bytes_written": receipt.payload_bytes_written,
         "submit_attempted": receipt.submit_keystroke_issued,
         "submit_keystroke_issued": receipt.submit_keystroke_issued,
-        "submit_bytes_written": receipt.submit_bytes_written,
+        "submit_bytes_written": measurement.submit_bytes_written,
+        "submit_attempts": measurement.submit_attempts,
         "pty_observation_available": observation.pty_observation_available,
         "pty_output_bytes_before": receipt.pty_output_before.as_ref().map(String::len),
         "pty_output_bytes_after_write": receipt.pty_output_after_write.as_ref().map(String::len),
@@ -257,13 +309,13 @@ pub async fn operator_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
-    let observation = observe_injection(&state, &target_agent_id, &receipt).await;
+    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await?;
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
     Ok(Json(measured_response(
         format!("Operator injection sent to session {}", id),
         &receipt,
-        &observation,
+        &measurement,
     )))
 }
 
@@ -292,13 +344,13 @@ pub async fn queen_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(map_injection_error)?;
-    let observation = observe_injection(&state, &target_worker_id, &receipt).await;
+    let measurement = observe_injection_with_retry(&state, &target_worker_id, &receipt).await?;
     record_injection_submission(&state, &id, &target_worker_id, &receipt);
 
     Ok(Json(measured_response(
         format!("Queen injection sent to session {}", id),
         &receipt,
-        &observation,
+        &measurement,
     )))
 }
 
@@ -327,13 +379,13 @@ pub async fn evaluator_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(map_injection_error)?;
-    let observation = observe_injection(&state, &target_agent_id, &receipt).await;
+    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await?;
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
     Ok(Json(measured_response(
         format!("Evaluator injection sent to session {}", id),
         &receipt,
-        &observation,
+        &measurement,
     )))
 }
 
@@ -562,15 +614,18 @@ mod tests {
         assert_eq!(response["payload_bytes_written"], 5);
         assert_eq!(response["submit_attempted"], true);
         assert_eq!(response["submit_keystroke_issued"], true);
-        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["submit_bytes_written"], 2);
+        assert_eq!(response["submit_attempts"], 2);
         assert_eq!(response["pty_observation_available"], true);
         assert_eq!(response["pty_output_bytes_before"], 0);
         // The stub mirrors stdin into the ring: 6-byte start marker + 5-byte payload
-        // + 6-byte end marker + 1-byte Enter.
+        // + 6-byte end marker + the initial Enter. The retry adds one more byte.
         assert_eq!(response["pty_output_bytes_after_write"], 18);
-        assert_eq!(response["pty_output_bytes_after"], 18);
+        assert_eq!(response["pty_output_bytes_after"], 19);
         assert_eq!(response["pty_activity_observed"], false);
         assert_eq!(response["observation_window_ms"], 250);
+        // Neither bounded observation saw receiver activity. Capturing the retry baseline
+        // after its self-echo preserves the second confident negative as false.
         assert_eq!(response["submit_confirmed"], false);
         assert_eq!(
             response["submit_confirmation_basis"],
@@ -593,6 +648,7 @@ mod tests {
                 b"\x1b[200~".to_vec(),
                 b"hello".to_vec(),
                 b"\x1b[201~".to_vec(),
+                b"\r".to_vec(),
                 b"\r".to_vec()
             ]
         );
@@ -618,6 +674,7 @@ mod tests {
         assert_eq!(response["submit_attempted"], false);
         assert_eq!(response["submit_keystroke_issued"], false);
         assert_eq!(response["submit_bytes_written"], 0);
+        assert_eq!(response["submit_attempts"], 0);
         assert_eq!(response["observation_window_ms"], 0);
         assert_eq!(response["observation_elapsed_ms"], 0);
         assert_eq!(response["pty_activity_observed"], Value::Null);
@@ -635,10 +692,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_inject_multiline_preserves_newlines_and_submits_once() {
+    async fn operator_inject_multiline_preserves_newlines_and_retries_one_confident_negative() {
         let (_temp_dir, app, state) = setup_test_app();
 
-        let (status, _response) = post_inject(
+        let (status, response) = post_inject(
             app,
             "/api/sessions/inject-test/inject",
             json!({
@@ -649,6 +706,8 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_attempts"], 2);
+        assert_eq!(response["submit_bytes_written"], 2);
         let writes = state
             .pty_manager
             .read()
@@ -660,10 +719,11 @@ mod tests {
                 b"\x1b[200~".to_vec(),
                 b"line one\nline two".to_vec(),
                 b"\x1b[201~".to_vec(),
+                b"\r".to_vec(),
                 b"\r".to_vec()
             ]
         );
-        assert_eq!(writes.iter().filter(|write| write.as_slice() == b"\r").count(), 1);
+        assert_eq!(writes.iter().filter(|write| write.as_slice() == b"\r").count(), 2);
         assert!(!writes.last().unwrap().contains(&b'\n'));
     }
 
@@ -711,7 +771,8 @@ mod tests {
             let (status, response) = post_inject(app.clone(), path, body).await;
             assert_eq!(status, StatusCode::OK, "{path}: {response}");
             assert_eq!(response["submit_keystroke_issued"], true, "{path}");
-            assert_eq!(response["submit_bytes_written"], 1, "{path}");
+            assert_eq!(response["submit_bytes_written"], 2, "{path}");
+            assert_eq!(response["submit_attempts"], 2, "{path}");
             assert_eq!(response["pty_observation_available"], true, "{path}");
             assert!(response["pty_output_bytes_before"].is_number(), "{path}");
             assert!(response["pty_output_bytes_after_write"].is_number(), "{path}");
@@ -730,10 +791,9 @@ mod tests {
     }
 
     /// #256 acceptance: a payload well over 1 KB travels through the full HTTP stack in
-    /// one bracketed envelope with exactly one Enter, and the receipt reports the real
-    /// payload byte count.
+    /// one bracketed envelope, and a confident negative adds only one bare-Enter retry.
     #[tokio::test]
-    async fn operator_inject_large_payload_brackets_once_and_submits_once() {
+    async fn operator_inject_large_payload_brackets_once_and_retries_once() {
         let (_temp_dir, app, state) = setup_test_app();
         let payload = "p".repeat(1287);
 
@@ -746,7 +806,8 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["payload_bytes_written"], 1287);
-        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["submit_bytes_written"], 2);
+        assert_eq!(response["submit_attempts"], 2);
         let writes = state
             .pty_manager
             .read()
@@ -758,6 +819,7 @@ mod tests {
                 b"\x1b[200~".to_vec(),
                 payload.as_bytes().to_vec(),
                 b"\x1b[201~".to_vec(),
+                b"\r".to_vec(),
                 b"\r".to_vec()
             ]
         );
@@ -787,7 +849,8 @@ mod tests {
     }
 
     /// #256: the documented two-call workaround — an empty message with submit:true —
-    /// stays a bare-Enter flush with no paste envelope.
+    /// stays a bare-Enter flush with no paste envelope; the stub's confident negative
+    /// produces the one bounded bare-Enter retry.
     #[tokio::test]
     async fn operator_inject_empty_message_flushes_with_a_bare_enter() {
         let (_temp_dir, app, state) = setup_test_app();
@@ -802,14 +865,61 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["payload_bytes_written"], 0);
         assert_eq!(response["submit_keystroke_issued"], true);
-        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["submit_bytes_written"], 2);
+        assert_eq!(response["submit_attempts"], 2);
         assert_eq!(
             state
                 .pty_manager
                 .read()
                 .write_records_for_test(AGENT_ID)
                 .unwrap(),
-            vec![b"\r".to_vec()]
+            vec![b"\r".to_vec(), b"\r".to_vec()]
+        );
+    }
+
+    /// #259: one isolated repaint is ambiguous, so the tri-state contract must suppress
+    /// the retry and leave exactly one Enter in the stub writer.
+    #[tokio::test]
+    async fn operator_inject_does_not_retry_ambiguous_submit_observation() {
+        let (_temp_dir, app, state) = setup_test_app();
+
+        let pty_manager = Arc::clone(&state.pty_manager);
+        let repainter = tokio::spawn(async move {
+            // The initial submit holds a 50 ms adapter gap before capturing its receipt
+            // baseline. Wait well past that gap so this is post-submit receiver activity.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            pty_manager
+                .read()
+                .record_output_for_test(AGENT_ID, b"one-frame;");
+        });
+
+        let (status, response) = post_inject(
+            app,
+            "/api/sessions/inject-test/inject",
+            json!({ "target_agent_id": AGENT_ID, "message": "go" }),
+        )
+        .await;
+        repainter.await.unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["submit_confirmed"], Value::Null);
+        assert_eq!(
+            response["submit_confirmation_basis"],
+            "ambiguous-post-submit-activity"
+        );
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["submit_bytes_written"], 1);
+        let writes = state
+            .pty_manager
+            .read()
+            .write_records_for_test(AGENT_ID)
+            .unwrap();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| write.as_slice() == b"\r")
+                .count(),
+            1
         );
     }
 
@@ -844,7 +954,21 @@ mod tests {
             response["submit_confirmation_basis"],
             "sustained-post-submit-activity"
         );
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["submit_bytes_written"], 1);
         assert!(response["submit_confirmation_elapsed_ms"].as_u64().unwrap() <= 1500);
+        let writes = state
+            .pty_manager
+            .read()
+            .write_records_for_test(AGENT_ID)
+            .unwrap();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| write.as_slice() == b"\r")
+                .count(),
+            1
+        );
     }
 
     #[test]

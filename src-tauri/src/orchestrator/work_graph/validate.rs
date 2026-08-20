@@ -140,6 +140,54 @@ impl fmt::Display for PlanReadyError {
 
 impl Error for PlanReadyError {}
 
+/// Retain the first declaration of each task id and quarantine later ones.
+pub fn quarantine_duplicate_nodes(graph: &mut TaskGraph) -> Vec<TaskId> {
+    let mut seen = BTreeSet::new();
+    let mut quarantined = Vec::new();
+
+    graph.nodes.retain(|node| {
+        if seen.insert(node.id.clone()) {
+            true
+        } else {
+            quarantined.push(node.id.clone());
+            false
+        }
+    });
+
+    quarantined.sort();
+    quarantined
+}
+
+/// Remove dependency edges whose source or target is absent from the graph.
+/// The returned references preserve the operator-facing detail that would
+/// otherwise be lost when the invalid edges are quarantined.
+pub fn quarantine_dangling_dependencies(graph: &mut TaskGraph) -> Vec<DanglingDependency> {
+    let node_ids = graph
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut quarantined = Vec::new();
+
+    graph.edges.retain(|edge| {
+        let dangling = edge.kind == EdgeKind::DependsOn
+            && (!node_ids.contains(&edge.source) || !node_ids.contains(&edge.target));
+        if dangling {
+            quarantined.push(DanglingDependency {
+                dependent: edge.target.clone(),
+                dependency: edge.source.clone(),
+            });
+        }
+        !dangling
+    });
+
+    quarantined.sort_by(|left, right| {
+        (&left.dependent, &left.dependency).cmp(&(&right.dependent, &right.dependency))
+    });
+    quarantined.dedup();
+    quarantined
+}
+
 pub fn validate_plan_ready(graph: &TaskGraph) -> Result<PlanReadyValidation, PlanReadyError> {
     let mut counts = BTreeMap::<&str, usize>::new();
     for node in &graph.nodes {
