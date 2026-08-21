@@ -70,9 +70,15 @@ The inject response reports measured facts, not request echoes:
 - `payload_bytes_written` counts the sanitized payload bytes actually written inside the
   envelope (embedded `ESC[201~` sequences are stripped before framing).
 - `submit_bytes_written` counts all discrete Enter bytes actually written;
-  `submit_keystroke_issued` is derived from the initial write. `submit_attempts` is `0` when
-  submit was not requested, `1` when the initial Enter was not confidently rejected, and `2`
-  when the one bounded retry ran.
+  `submit_keystroke_issued` is derived from the initial write. `submit_attempts` counts the Enter
+  writes that actually landed: `0` when submit was not requested, `1` when exactly one Enter was
+  written, and `2` when the one bounded retry also wrote. Note that `1` therefore covers two
+  distinct cases — the initial Enter was not confidently rejected so no retry was needed, **and**
+  the retry was attempted but its write failed. Read `submit_retry_failed` to tell them apart.
+- `submit_confirmation_window_ms` is **per attempt** (1,500 ms) while
+  `submit_confirmation_elapsed_ms` is **cumulative across attempts**. After a retry the elapsed
+  value can therefore approach 3,000 ms and legitimately exceed the reported window — do not
+  compute `elapsed / window` or assert `elapsed <= window`.
 - `submit_confirmed` is a tri-state delivery heuristic observed from the PTY output ring
   after an Enter write, over a bounded 1,500 ms window per attempt: `true` means sustained ring
   activity consistent with the composer accepting Enter and starting a turn, `false` means
