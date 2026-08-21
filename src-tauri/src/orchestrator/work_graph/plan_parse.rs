@@ -4,7 +4,7 @@ use crate::actions::coordination::SessionPlan;
 
 use super::schema::{
     BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, TaskId,
-    WorkEdge, WorkNode,
+    WorkEdge, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
 };
 use super::review::JUDGE_PRINCE_REMEDIATION_TEMPLATE;
 
@@ -18,15 +18,23 @@ pub fn task_graph_from_plan(plan: &SessionPlan) -> TaskGraph {
     // parser are descriptive rather than schedulable. Plans with no explicit IDs
     // retain positional `task-N` nodes for backward compatibility.
     let has_explicit_graph = plan.tasks.iter().any(|task| task.explicit_id);
+    let mut seen_task_ids = std::collections::BTreeSet::new();
+    let mut duplicate_task_ids = Vec::new();
     let graph_tasks = plan
         .tasks
         .iter()
         .filter(|task| !has_explicit_graph || task.explicit_id)
+        .filter(|task| {
+            if seen_task_ids.insert(task.id.clone()) {
+                true
+            } else {
+                duplicate_task_ids.push(task.id.clone());
+                false
+            }
+        })
         .collect::<Vec<_>>();
-    let nodes = plan
-        .tasks
+    let nodes = graph_tasks
         .iter()
-        .filter(|task| !has_explicit_graph || task.explicit_id)
         .map(|task| {
             let status = if task.status == "completed" {
                 NodeStatus::Completed
@@ -53,7 +61,7 @@ pub fn task_graph_from_plan(plan: &SessionPlan) -> TaskGraph {
         .collect();
 
     let edges = graph_tasks
-        .into_iter()
+        .iter()
         .flat_map(|task| {
             task.depends_on.iter().map(move |dependency| {
                 WorkEdge::new(
@@ -66,7 +74,22 @@ pub fn task_graph_from_plan(plan: &SessionPlan) -> TaskGraph {
         })
         .collect();
 
-    TaskGraph::new(nodes, edges)
+    let mut graph = TaskGraph::new(nodes, edges);
+    if !duplicate_task_ids.is_empty() {
+        duplicate_task_ids.sort();
+        let examples = duplicate_task_ids
+            .iter()
+            .map(|task_id| {
+                format!("duplicate task {task_id} was omitted after its first declaration")
+            })
+            .collect();
+        graph.omissions.push(WorkGraphOmission::new(
+            WorkGraphOmissionReason::ResolutionIncomplete,
+            duplicate_task_ids.len(),
+            examples,
+        ));
+    }
+    graph
 }
 
 /// Promote only the initial plan-time frontier after every structural stage

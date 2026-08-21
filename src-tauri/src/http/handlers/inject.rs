@@ -4,7 +4,8 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use super::{validate_agent_id, validate_session_id};
@@ -42,6 +43,64 @@ struct InjectionMeasurement {
     observation: InjectionObservation,
     submit_attempts: usize,
     submit_bytes_written: usize,
+    submit_retry_failure: Option<String>,
+}
+
+type InjectionTransactionMutex = tokio::sync::Mutex<()>;
+type InjectionTransactionLockMap = HashMap<(usize, String), Weak<InjectionTransactionMutex>>;
+
+/// Serialize the complete write -> observe -> optional retry transaction per runtime/agent.
+///
+/// The map holds only weak references, so completed transactions do not retain one mutex per
+/// historical agent. Including the AppState identity keeps independent runtimes (and tests) from
+/// blocking each other when they happen to use the same agent id.
+fn injection_transaction_lock(state: &AppState, agent_id: &str) -> Arc<InjectionTransactionMutex> {
+    static LOCKS: OnceLock<parking_lot::Mutex<InjectionTransactionLockMap>> = OnceLock::new();
+
+    let key = (state as *const AppState as usize, agent_id.to_string());
+    let mut locks = LOCKS
+        .get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+        .lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(InjectionTransactionMutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+#[cfg(all(test, windows))]
+type BeforeSubmitRetryHook =
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
+
+#[cfg(all(test, windows))]
+fn before_submit_retry_hooks() -> &'static parking_lot::Mutex<HashMap<usize, BeforeSubmitRetryHook>>
+{
+    static HOOKS: OnceLock<parking_lot::Mutex<HashMap<usize, BeforeSubmitRetryHook>>> =
+        OnceLock::new();
+    HOOKS.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+#[cfg(all(test, windows))]
+fn install_before_submit_retry_hook<F>(state: &AppState, hook: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    before_submit_retry_hooks()
+        .lock()
+        .insert(state as *const AppState as usize, Box::pin(hook));
+}
+
+#[cfg(all(test, windows))]
+async fn run_before_submit_retry_hook(state: &AppState) {
+    let hook = before_submit_retry_hooks()
+        .lock()
+        .remove(&(state as *const AppState as usize));
+    if let Some(hook) = hook {
+        hook.await;
+    }
 }
 
 impl InjectionObservation {
@@ -75,9 +134,7 @@ impl InjectionObservation {
 fn classify_submit_confirmation(change_offsets: &[Duration]) -> (Option<bool>, &'static str) {
     match change_offsets {
         [] => (Some(false), "no-post-submit-activity"),
-        [first, .., last]
-            if last.saturating_sub(*first) >= SUBMIT_CONFIRMATION_MIN_SPAN =>
-        {
+        [first, .., last] if last.saturating_sub(*first) >= SUBMIT_CONFIRMATION_MIN_SPAN => {
             (Some(true), "sustained-post-submit-activity")
         }
         _ => (None, "ambiguous-post-submit-activity"),
@@ -169,7 +226,7 @@ async fn observe_injection_with_retry(
     state: &AppState,
     agent_id: &str,
     receipt: &InjectionReceipt,
-) -> Result<InjectionMeasurement, ApiError> {
+) -> InjectionMeasurement {
     let mut observation = observe_submit(
         state,
         agent_id,
@@ -179,32 +236,53 @@ async fn observe_injection_with_retry(
     .await;
     let mut submit_attempts = usize::from(receipt.submit_keystroke_issued);
     let mut submit_bytes_written = receipt.submit_bytes_written;
+    let mut submit_retry_failure = None;
 
     if observation.submit_confirmed == Some(false) {
+        let first_confirmation_elapsed_ms = observation.submit_confirmation_elapsed_ms;
+        #[cfg(all(test, windows))]
+        run_before_submit_retry_hook(state).await;
+
         let pty_manager = Arc::clone(&state.pty_manager);
         let retry_agent_id = agent_id.to_string();
         let retry_result = tokio::task::spawn_blocking(move || {
             pty_manager.read().write(&retry_agent_id, SUBMIT_KEYSTROKE)
         })
-        .await
-        .map_err(|error| ApiError::internal(format!("Submit retry task failed: {error}")))?;
-        retry_result
-            .map_err(|error| ApiError::internal(format!("Submit retry failed: {error}")))?;
-        submit_attempts += 1;
-        submit_bytes_written += SUBMIT_KEYSTROKE.len();
+        .await;
+        let retry_result = retry_result
+            .map_err(|error| format!("Submit retry task failed: {error}"))
+            .and_then(|result| result.map_err(|error| format!("Submit retry failed: {error}")));
 
-        // Capture the new baseline after the retry write. PTYs with local echo (including
-        // the Windows test stub) mirror the CR into the ring; observing from the old
-        // baseline would misclassify that self-echo as receiver activity.
-        let retry_baseline = state.pty_manager.read().recent_output(agent_id);
-        observation = observe_submit(state, agent_id, true, retry_baseline.as_deref()).await;
+        match retry_result {
+            Ok(()) => {
+                submit_attempts += 1;
+                submit_bytes_written += SUBMIT_KEYSTROKE.len();
+
+                // Capture the new baseline after the retry write. PTYs with local echo
+                // (including the Windows test stub) mirror the CR into the ring; observing
+                // from the old baseline would misclassify that self-echo as receiver activity.
+                let retry_baseline = state.pty_manager.read().recent_output(agent_id);
+                let mut retry_observation =
+                    observe_submit(state, agent_id, true, retry_baseline.as_deref()).await;
+                retry_observation.submit_confirmation_elapsed_ms = first_confirmation_elapsed_ms
+                    .saturating_add(retry_observation.submit_confirmation_elapsed_ms);
+                observation = retry_observation;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Initial injection succeeded but its bounded submit retry failed for {agent_id}: {error}"
+                );
+                submit_retry_failure = Some(error);
+            }
+        }
     }
 
-    Ok(InjectionMeasurement {
+    InjectionMeasurement {
         observation,
         submit_attempts,
         submit_bytes_written,
-    })
+        submit_retry_failure,
+    }
 }
 
 fn record_injection_submission(
@@ -213,16 +291,12 @@ fn record_injection_submission(
     agent_id: &str,
     receipt: &InjectionReceipt,
 ) {
-    if let Err(error) = state
-        .session_controller
-        .read()
-        .record_injection_submission(
-            session_id,
-            agent_id,
-            receipt.submitted_at,
-            receipt.submit_keystroke_issued,
-        )
-    {
+    if let Err(error) = state.session_controller.read().record_injection_submission(
+        session_id,
+        agent_id,
+        receipt.submitted_at,
+        receipt.submit_keystroke_issued,
+    ) {
         tracing::warn!(
             "Injection succeeded but its awaiting-turn observation was not recorded for {session_id}/{agent_id}: {error}"
         );
@@ -245,6 +319,8 @@ fn measured_response(
         "submit_keystroke_issued": receipt.submit_keystroke_issued,
         "submit_bytes_written": measurement.submit_bytes_written,
         "submit_attempts": measurement.submit_attempts,
+        "submit_retry_failed": measurement.submit_retry_failure.is_some(),
+        "submit_retry_failure": measurement.submit_retry_failure,
         "pty_observation_available": observation.pty_observation_available,
         "pty_output_bytes_before": receipt.pty_output_before.as_ref().map(String::len),
         "pty_output_bytes_after_write": receipt.pty_output_after_write.as_ref().map(String::len),
@@ -295,6 +371,8 @@ pub async fn operator_inject(
     validate_agent_id(&payload.target_agent_id)?;
 
     let target_agent_id = payload.target_agent_id.clone();
+    let transaction_lock = injection_transaction_lock(&state, &target_agent_id);
+    let _transaction_guard = transaction_lock.lock().await;
     let injection_target_agent_id = target_agent_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
@@ -309,7 +387,7 @@ pub async fn operator_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
-    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await?;
+    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await;
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
     Ok(Json(measured_response(
@@ -329,6 +407,8 @@ pub async fn queen_inject(
     validate_agent_id(&payload.target_worker_id)?;
 
     let target_worker_id = payload.target_worker_id.clone();
+    let transaction_lock = injection_transaction_lock(&state, &target_worker_id);
+    let _transaction_guard = transaction_lock.lock().await;
     let injection_target_worker_id = target_worker_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
@@ -344,7 +424,7 @@ pub async fn queen_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(map_injection_error)?;
-    let measurement = observe_injection_with_retry(&state, &target_worker_id, &receipt).await?;
+    let measurement = observe_injection_with_retry(&state, &target_worker_id, &receipt).await;
     record_injection_submission(&state, &id, &target_worker_id, &receipt);
 
     Ok(Json(measured_response(
@@ -364,6 +444,8 @@ pub async fn evaluator_inject(
     validate_agent_id(&payload.target_agent_id)?;
 
     let target_agent_id = payload.target_agent_id.clone();
+    let transaction_lock = injection_transaction_lock(&state, &target_agent_id);
+    let _transaction_guard = transaction_lock.lock().await;
     let injection_target_agent_id = target_agent_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
@@ -379,7 +461,7 @@ pub async fn evaluator_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(map_injection_error)?;
-    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await?;
+    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await;
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
     Ok(Json(measured_response(
@@ -490,9 +572,8 @@ mod tests {
 
     fn setup_test_app() -> (TempDir, Router, Arc<AppState>) {
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(
-            SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap(),
-        );
+        let storage =
+            Arc::new(SessionStorage::new_with_base(temp_dir.path().to_path_buf()).unwrap());
         storage.create_session_dir(SESSION_ID).unwrap();
         let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
         let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
@@ -538,9 +619,7 @@ mod tests {
                 24,
             )
             .unwrap();
-        let session_controller = Arc::new(RwLock::new(SessionController::new(
-            pty_manager.clone(),
-        )));
+        let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
         session_controller.write().set_storage(storage.clone());
         session_controller
             .read()
@@ -616,6 +695,8 @@ mod tests {
         assert_eq!(response["submit_keystroke_issued"], true);
         assert_eq!(response["submit_bytes_written"], 2);
         assert_eq!(response["submit_attempts"], 2);
+        assert_eq!(response["submit_retry_failed"], false);
+        assert_eq!(response["submit_retry_failure"], Value::Null);
         assert_eq!(response["pty_observation_available"], true);
         assert_eq!(response["pty_output_bytes_before"], 0);
         // The stub mirrors stdin into the ring: 6-byte start marker + 5-byte payload
@@ -632,6 +713,10 @@ mod tests {
             "no-post-submit-activity"
         );
         assert_eq!(response["submit_confirmation_window_ms"], 1500);
+        assert!(
+            response["submit_confirmation_elapsed_ms"].as_u64().unwrap() >= 2800,
+            "two quiet confirmation windows must report cumulative elapsed time: {response}"
+        );
         assert!(response["write_started_at"].is_string());
         assert!(response["submitted_at"].is_string());
         assert!(response["evidence_scope"]
@@ -675,6 +760,8 @@ mod tests {
         assert_eq!(response["submit_keystroke_issued"], false);
         assert_eq!(response["submit_bytes_written"], 0);
         assert_eq!(response["submit_attempts"], 0);
+        assert_eq!(response["submit_retry_failed"], false);
+        assert_eq!(response["submit_retry_failure"], Value::Null);
         assert_eq!(response["observation_window_ms"], 0);
         assert_eq!(response["observation_elapsed_ms"], 0);
         assert_eq!(response["pty_activity_observed"], Value::Null);
@@ -723,7 +810,13 @@ mod tests {
                 b"\r".to_vec()
             ]
         );
-        assert_eq!(writes.iter().filter(|write| write.as_slice() == b"\r").count(), 2);
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| write.as_slice() == b"\r")
+                .count(),
+            2
+        );
         assert!(!writes.last().unwrap().contains(&b'\n'));
     }
 
@@ -773,16 +866,18 @@ mod tests {
             assert_eq!(response["submit_keystroke_issued"], true, "{path}");
             assert_eq!(response["submit_bytes_written"], 2, "{path}");
             assert_eq!(response["submit_attempts"], 2, "{path}");
+            assert_eq!(response["submit_retry_failed"], false, "{path}");
+            assert_eq!(response["submit_retry_failure"], Value::Null, "{path}");
             assert_eq!(response["pty_observation_available"], true, "{path}");
             assert!(response["pty_output_bytes_before"].is_number(), "{path}");
-            assert!(response["pty_output_bytes_after_write"].is_number(), "{path}");
+            assert!(
+                response["pty_output_bytes_after_write"].is_number(),
+                "{path}"
+            );
             assert_eq!(response["observation_window_ms"], 250, "{path}");
             assert_eq!(response["submit_confirmed"], false, "{path}");
             assert_eq!(response["submit_confirmation_window_ms"], 1500, "{path}");
-            assert!(
-                response["submit_confirmation_basis"].is_string(),
-                "{path}"
-            );
+            assert!(response["submit_confirmation_basis"].is_string(), "{path}");
             assert!(response["evidence_scope"]
                 .as_str()
                 .unwrap()
@@ -923,6 +1018,113 @@ mod tests {
         );
     }
 
+    /// Review finding 3: the staging request begins only after the submitting request has
+    /// completed its first quiet observation. Without the per-agent transaction lock, the
+    /// test hook gives the staged payload time to land before the delayed bare-Enter retry.
+    #[tokio::test]
+    async fn concurrent_injects_to_same_agent_do_not_cross_submit_staged_text() {
+        let (_temp_dir, app, state) = setup_test_app();
+        let (retry_ready_tx, retry_ready_rx) = tokio::sync::oneshot::channel();
+        install_before_submit_retry_hook(&state, async move {
+            let _ = retry_ready_tx.send(());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let submitting_app = app.clone();
+        let submitting = tokio::spawn(async move {
+            post_inject(
+                submitting_app,
+                "/api/sessions/inject-test/inject",
+                json!({ "target_agent_id": AGENT_ID, "message": "first" }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), retry_ready_rx)
+            .await
+            .expect("initial quiet confirmation window")
+            .expect("retry hook signal");
+
+        let staged = tokio::spawn(async move {
+            post_inject(
+                app,
+                "/api/sessions/inject-test/inject",
+                json!({
+                    "target_agent_id": AGENT_ID,
+                    "message": "draft",
+                    "submit": false
+                }),
+            )
+            .await
+        });
+        let (submitting, staged) = tokio::join!(submitting, staged);
+        let (submit_status, submit_response) = submitting.unwrap();
+        let (stage_status, stage_response) = staged.unwrap();
+
+        assert_eq!(submit_status, StatusCode::OK, "{submit_response}");
+        assert_eq!(stage_status, StatusCode::OK, "{stage_response}");
+        assert_eq!(submit_response["submit_attempts"], 2);
+        assert_eq!(stage_response["submit_attempts"], 0);
+        assert_eq!(
+            state
+                .pty_manager
+                .read()
+                .write_records_for_test(AGENT_ID)
+                .unwrap(),
+            vec![
+                b"\x1b[200~".to_vec(),
+                b"first".to_vec(),
+                b"\x1b[201~".to_vec(),
+                b"\r".to_vec(),
+                b"\r".to_vec(),
+                b"draft".to_vec(),
+            ],
+            "staged text must be written only after the submitting transaction finishes"
+        );
+    }
+
+    /// Review finding 4: once the initial payload and Enter succeeded, losing the PTY before
+    /// the bounded retry is a receipt caveat, not an HTTP failure or reason to skip recording.
+    #[tokio::test]
+    async fn failed_submit_retry_returns_success_and_records_initial_submission() {
+        let (_temp_dir, app, state) = setup_test_app();
+        let pty_manager = Arc::clone(&state.pty_manager);
+        install_before_submit_retry_hook(&state, async move {
+            pty_manager.read().kill(AGENT_ID).unwrap();
+        });
+
+        let (status, response) = post_inject(
+            app,
+            "/api/sessions/inject-test/inject",
+            json!({ "target_agent_id": AGENT_ID, "message": "go" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["submit_attempts"], 1);
+        assert_eq!(response["submit_bytes_written"], 1);
+        assert_eq!(response["submit_retry_failed"], true);
+        assert!(response["submit_retry_failure"]
+            .as_str()
+            .unwrap()
+            .contains("Submit retry failed"));
+        assert_eq!(response["submit_confirmed"], false);
+        assert!(matches!(
+            state
+                .session_controller
+                .read()
+                .get_session(SESSION_ID)
+                .unwrap()
+                .agents
+                .into_iter()
+                .find(|agent| agent.id == AGENT_ID)
+                .unwrap()
+                .status,
+            AgentStatus::WaitingForInput(reason)
+                if reason.starts_with("awaiting_injected_turn:")
+        ));
+    }
+
     /// #256: sustained post-submit ring activity flips submit_confirmed to true. A
     /// background task plays the role of the child TUI repainting after it accepted
     /// the Enter.
@@ -985,10 +1187,7 @@ mod tests {
             "a single repaint also matches a swallowed Enter"
         );
         assert_eq!(
-            classify_submit_confirmation(&[
-                Duration::from_millis(40),
-                Duration::from_millis(120)
-            ]),
+            classify_submit_confirmation(&[Duration::from_millis(40), Duration::from_millis(120)]),
             (None, "ambiguous-post-submit-activity"),
             "a short burst is not sustained activity"
         );
@@ -1030,10 +1229,8 @@ mod tests {
             .unwrap();
         state.pty_manager.read().kill(QUEEN_ID).unwrap();
 
-        let reports = controller.get_stalled_agent_reports(
-            SESSION_ID,
-            std::time::Duration::from_secs(30),
-        );
+        let reports =
+            controller.get_stalled_agent_reports(SESSION_ID, std::time::Duration::from_secs(30));
         let status_for = |agent_id: &str| {
             reports
                 .iter()

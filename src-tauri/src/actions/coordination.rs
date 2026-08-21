@@ -782,14 +782,16 @@ pub(crate) fn parse_plan_markdown_with_diagnostics(
     if title.is_empty() {
         title = "Plan in Progress...".to_string();
     }
-    for task in tasks
-        .iter()
-        .filter(|task| task.checkbox_source && !task.explicit_id)
-    {
-        diagnostics.push(format!(
-            "schedulable checkbox task is missing a stable T<number>: id: {}",
-            task.title
-        ));
+    if tasks.iter().any(|task| task.explicit_id) {
+        for task in tasks
+            .iter()
+            .filter(|task| task.checkbox_source && !task.explicit_id)
+        {
+            diagnostics.push(format!(
+                "schedulable checkbox task is missing a stable T<number>: id: {}",
+                task.title
+            ));
+        }
     }
 
     (
@@ -997,7 +999,8 @@ fn extract_assignee(text: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_assignee, extract_priority, parse_task_line, run_blocking_injection,
+        extract_assignee, extract_priority, parse_plan_markdown_with_diagnostics, parse_task_line,
+        run_blocking_injection,
     };
     use crate::coordination::InjectionError;
 
@@ -1108,6 +1111,17 @@ mod tests {
             extract_assignee("Title -> worker-1 -> trailing"),
             ("Title ".to_string(), Some("worker-1 -> trailing".to_string()))
         );
+    }
+
+    #[test]
+    fn legacy_checkbox_plan_has_no_missing_stable_id_diagnostics() {
+        let (plan, diagnostics) = parse_plan_markdown_with_diagnostics(
+            "# Legacy\n\n## Tasks\n- [ ] First positional task\n- [ ] Second positional task\n",
+        );
+
+        assert_eq!(plan.tasks.len(), 2);
+        assert!(plan.tasks.iter().all(|task| !task.explicit_id));
+        assert!(diagnostics.is_empty());
     }
 }
 

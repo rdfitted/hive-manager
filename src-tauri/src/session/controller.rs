@@ -6493,7 +6493,7 @@ curl -sS -X POST "http://localhost:18800/api/sessions/{session_id}/inject" \\
   -d '{{"target_agent_id":"{session_id}-worker-N","message":"your message here"}}'
 ```
 
-The response reports measured sender-side facts: `payload_bytes_written` counts the sanitized payload bytes, `submit_bytes_written` is the aggregate number of Enter bytes written across all attempts, and `submit_attempts` reports `0` when no Enter was requested, `1` when one Enter was written, or `2` when the bounded automatic retry fired. `submit_keystroke_issued` reflects whether any Enter was written. The receipt also includes PTY-output byte counts, `pty_activity_observed`, the bounded `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = the initial Enter and its one automatic retry both produced no observable reaction, `null` = unknown or not requested). When `submit_confirmed` is `false`, the sender has already retried once automatically; flush the target with `{{"message":"","submit":true}}`, then re-check its state. Remediate one target at a time. A `"submit":true` response may stay pending up to ~1500 ms while that confirmation window runs (it returns earlier once activity is confirmed); `submit_confirmation_elapsed_ms` reports the actual wait. Do not treat the held response as a stalled agent.
+The response reports measured sender-side facts: `payload_bytes_written` counts the sanitized payload bytes, `submit_bytes_written` is the aggregate number of Enter bytes written across all attempts, and `submit_attempts` reports `0` when no Enter was requested, `1` when one Enter was written, or `2` when the bounded automatic retry was written. `submit_keystroke_issued` reflects whether the initial Enter was written. The receipt also includes PTY-output byte counts, `pty_activity_observed`, the bounded per-attempt `observation_window_ms`, and the tri-state `submit_confirmed` (`true` = sustained post-submit PTY activity consistent with the composer accepting Enter, `false` = no observable reaction in the last completed confirmation window, `null` = unknown or not requested). Normally, `false` means the initial Enter and its one automatic retry both produced no observable reaction. If the retry write itself fails, the response remains successful because the initial injection already happened: `submit_retry_failed` is `true`, `submit_retry_failure` gives the caveat, `submit_attempts`/`submit_bytes_written` count only successful Enter writes, and `submit_confirmed` retains the honest pre-retry verdict. When `submit_confirmed` is `false` and `submit_retry_failed` is `false`, the sender has already retried once automatically; flush the target with `{{"message":"","submit":true}}`, then re-check its state. Remediate one target at a time. A `"submit":true` response may stay pending up to ~3000 ms across two confirmation windows (it returns earlier once activity is confirmed); `submit_confirmation_elapsed_ms` reports cumulative time spent in every completed confirmation window. Do not treat the held response as a stalled agent.
 
 **Evidence limit:** these facts prove only that bytes were written and the existing PTY-output ring was observed for a bounded window. They do **not** prove that the agent took a turn; output may be terminal echo or unrelated activity, and `submit_confirmed` is heuristic. `submit_confirmed: true` is not proof that a busy receiver accepted Enter: unrelated output from a target that was already streaming can create a false positive and bypass the false-only retry. When the target was busy, inspect its actual state rather than treating `true` as confirmation. Never infer success from receiver behaviour alone.
 
@@ -16908,13 +16908,15 @@ mod tests {
             .expect("inject receipt and remediation passage");
         assert!(
             remediation_passage.contains(
-                "`false` = the initial Enter and its one automatic retry both produced no observable reaction"
+                "Normally, `false` means the initial Enter and its one automatic retry both produced no observable reaction"
             ) && remediation_passage.contains(
-                r#"When `submit_confirmed` is `false`, the sender has already retried once automatically; flush the target with `{"message":"","submit":true}`, then re-check its state. Remediate one target at a time."#
+                r#"When `submit_confirmed` is `false` and `submit_retry_failed` is `false`, the sender has already retried once automatically; flush the target with `{"message":"","submit":true}`, then re-check its state. Remediate one target at a time."#
             ),
             "the false verdict and its measured remediation must stay in one emitted passage"
         );
-        assert!(prompt.contains("may stay pending up to ~1500 ms"));
+        assert!(prompt.contains("`submit_retry_failed` is `true`"));
+        assert!(prompt.contains("`submit_confirmation_elapsed_ms` reports cumulative time"));
+        assert!(prompt.contains("may stay pending up to ~3000 ms across two confirmation windows"));
         assert!(prompt.contains("pty_activity_observed"));
         assert!(prompt.contains("do **not** prove that the agent took a turn"));
         assert!(prompt.contains("`submit_confirmed: true` is not proof that a busy receiver accepted Enter"));

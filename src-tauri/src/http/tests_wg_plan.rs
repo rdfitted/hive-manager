@@ -705,13 +705,7 @@ Keep the existing parser behavior.
         .unwrap();
     assert_eq!(graph.nodes.len(), 2);
     assert!(graph.edges.is_empty());
-    assert_eq!(graph.omissions.len(), 1);
-    assert_eq!(
-        graph.omissions[0].reason,
-        WorkGraphOmissionReason::ResolutionIncomplete
-    );
-    assert_eq!(graph.omissions[0].count, 1);
-    assert!(graph.omissions[0].examples[0].contains("Fix launch regression"));
+    assert!(graph.omissions.is_empty());
     assert!(
         StateManager::new(storage.session_dir("legacy-plan"))
             .read_graph_composition_state()
@@ -851,7 +845,7 @@ fn partially_parsed_twenty_two_line_plan_preserves_eighteen_nodes_and_four_omiss
 }
 
 #[test]
-fn all_legacy_checkbox_tasks_are_preserved_but_reported_without_stable_ids() {
+fn all_legacy_checkbox_tasks_are_preserved_without_omissions() {
     let plan = r#"# Positional-only plan
 
 ## Tasks
@@ -875,16 +869,7 @@ fn all_legacy_checkbox_tasks_are_preserved_but_reported_without_stable_ids() {
             .collect::<Vec<_>>(),
         vec!["task-1", "task-2"]
     );
-    assert_eq!(graph.omissions.len(), 1);
-    assert_eq!(graph.omissions[0].count, 2);
-    assert!(graph.omissions[0]
-        .examples
-        .iter()
-        .any(|example| example.contains("First positional")));
-    assert!(graph.omissions[0]
-        .examples
-        .iter()
-        .any(|example| example.contains("Second positional")));
+    assert!(graph.omissions.is_empty());
 }
 
 #[test]
@@ -952,6 +937,61 @@ fn duplicate_explicit_ids_are_reported_without_blocking_readable_plan() {
         .iter()
         .flat_map(|omission| omission.examples.iter())
         .any(|example| example.contains("duplicate") && example.contains("T1")));
+}
+
+#[test]
+fn duplicate_dependency_metadata_is_omitted_without_manufacturing_a_cycle() {
+    let plan = r#"# Duplicate dependency metadata
+
+## Tasks
+- [ ] T1: Root
+- [ ] T2: Second (deps: T1)
+- [ ] T1: Duplicate declaration (deps: T2)
+"#;
+    let (_temp, controller, storage) =
+        controller_with_plan("duplicate-dependency-plan", Some(plan));
+
+    let result = controller.mark_plan_ready("duplicate-dependency-plan");
+    assert!(
+        result.is_ok(),
+        "a duplicate declaration must not manufacture a cycle: {result:?}"
+    );
+    assert_session_state(
+        &controller,
+        "duplicate-dependency-plan",
+        SessionState::PlanReady,
+    );
+
+    let graph = StateManager::new(storage.session_dir("duplicate-dependency-plan"))
+        .read_work_graph()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.title.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("T1", "Root"), ("T2", "Second")]
+    );
+    assert_eq!(graph.edges.len(), 1);
+    assert_eq!(graph.edges[0].source, "T1");
+    assert_eq!(graph.edges[0].target, "T2");
+    assert!(
+        graph
+            .edges
+            .iter()
+            .all(|edge| !(edge.source == "T2" && edge.target == "T1")),
+        "T1 must not inherit the duplicate declaration's dependency"
+    );
+    validate_plan_ready(&graph).expect("the persisted graph must not contain a cycle");
+    assert!(graph.omissions.iter().any(|omission| {
+        omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+            && omission
+                .examples
+                .iter()
+                .any(|example| example.contains("duplicate") && example.contains("T1"))
+    }));
 }
 
 #[test]
