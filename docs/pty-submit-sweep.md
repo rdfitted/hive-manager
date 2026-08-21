@@ -3,7 +3,10 @@
 This procedure measures whether a discrete bare carriage return submits input to each
 supported agent composer after a configurable delay. It deliberately does not infer success
 from a marker file, an agent reply, or any other downstream action: those signals are
-confounded when an operator is present and can press Enter.
+confounded when an operator is present and can press Enter. That constraint is asymmetric:
+operator interference invalidates a positive "submitted" observation, but text visibly
+remaining in the composer is admissible negative evidence because a keypress cannot
+manufacture the staged payload.
 
 The read-only instrument is:
 
@@ -35,7 +38,9 @@ keep `byte_count` directly comparable to the fixture byte length.
   for a window after a fast raw byte burst) from swallowing the follow-up `\r` as a
   literal newline inside the paste.
 - Enter is still a bare `\r` written as its own discrete PTY write; no `\n` is appended
-  and Enter is outside the bracketed-paste envelope.
+  and Enter is outside the bracketed-paste envelope. If the first observation returns the
+  confident negative `submit_confirmed: false`, the HTTP inject path writes exactly one more
+  bare `\r` and observes once more. Confirmed and ambiguous first observations do not retry.
 - An empty payload with `"submit": true` writes only the bare `\r` — this is the
   supported flush for content already staged in a composer.
 - A multi-line payload retains its internal newlines and receives one Enter after the whole
@@ -58,21 +63,41 @@ too short but do not support replacing it with another guessed constant. Note th
 observations predate the #256 bracketed envelope, which removes the dependency on the gap
 for paste-coalescing composers rather than tuning it.
 
-## Sender receipt and delivery signal (#256)
+## Sender receipt and delivery signal (#256, #259)
 
 The inject response reports measured facts, not request echoes:
 
 - `payload_bytes_written` counts the sanitized payload bytes actually written inside the
   envelope (embedded `ESC[201~` sequences are stripped before framing).
-- `submit_bytes_written` counts the discrete Enter write itself; `submit_keystroke_issued`
-  is derived from it.
+- `submit_bytes_written` counts all discrete Enter bytes actually written;
+  `submit_keystroke_issued` is derived from the initial write. `submit_attempts` counts the Enter
+  writes that actually landed: `0` when submit was not requested, `1` when exactly one Enter was
+  written, and `2` when the one bounded retry also wrote. Note that `1` therefore covers two
+  distinct cases — the initial Enter was not confidently rejected so no retry was needed, **and**
+  the retry was attempted but its write failed. Read `submit_retry_failed` to tell them apart.
+- `submit_confirmation_window_ms` is **per attempt** (1,500 ms) while
+  `submit_confirmation_elapsed_ms` is **cumulative across attempts**. After a retry the elapsed
+  value can therefore approach 3,000 ms and legitimately exceed the reported window — do not
+  compute `elapsed / window` or assert `elapsed <= window`.
 - `submit_confirmed` is a tri-state delivery heuristic observed from the PTY output ring
-  after the Enter write, over a bounded 1,500 ms window: `true` means sustained ring
+  after an Enter write, over a bounded 1,500 ms window per attempt: `true` means sustained ring
   activity consistent with the composer accepting Enter and starting a turn, `false` means
   the Enter produced no observable ring reaction at all, and `null` means unknown,
   unobservable, or `"submit": false`. An agent that was already streaming output can
   produce a false positive; the field never upgrades an ambiguous buffer observation to a
   sweep PASS.
+- The retry is keyed strictly on the first `false` verdict and is capped at one extra CR.
+  Its observation baseline is captured after that CR so local echo cannot become false
+  receiver evidence. The response reports the retry observation as the final verdict; two
+  quiet windows therefore remain `false`. A false negative can double-execute a turn on a
+  non-idempotent composer, so the matrix measurement must settle that risk before any widening.
+- Issue #260 tracks the opposite live failure: during this session, four injects to three
+  busy codex principals returned `submit_confirmed: true` with
+  `sustained-post-submit-activity` even though each payload remained visibly staged and needed
+  a later bare-Enter flush. Busy receiver output can therefore create a false positive that
+  bypasses this strictly `Some(false)`-keyed retry. The classifier and retry key remain
+  unchanged for #259; the sweep must treat `true` as sender-side evidence, never as a PASS
+  without controlled receiver-buffer confirmation.
 
 ## Two-call workaround
 
@@ -88,6 +113,8 @@ curl -X POST .../inject -d '{"target_agent_id":"...","message":"","submit":true}
 ```
 
 ## Evidence status before this sweep
+
+Issue #241 owns this sweep matrix and the single-call receiver-side assertion.
 
 No cell has been measured against the current per-adapter policy and T6 instrument. Each cell
 below must be measured in two controlled states: **idle at the prompt** and **mid-generation**.
@@ -108,8 +135,10 @@ matrix cells because their adapter, payload class, and busy state were not all c
 2. Start a fresh backend for each gap candidate with
    `HIVE_PTY_SUBMIT_GAP_MS=<milliseconds>` set before launch.
 3. Start a fresh real session for the selected adapter and record its session and agent IDs.
-4. The operator must not focus the target terminal or touch the keyboard from immediately
-   before injection until after the buffer observation is recorded.
+4. For a positive PASS, the operator must not focus the target terminal or touch the keyboard
+   from immediately before injection until after the buffer observation is recorded. A
+   visibly staged payload remains admissible FAIL evidence even if the operator was present,
+   because operator input can confound submission but cannot manufacture that negative state.
 5. Record the build SHA, OS/ConPTY version, adapter CLI version, model, session/agent IDs,
    candidate gap, payload class, attempt number, and whether the agent was visibly busy.
 
@@ -158,22 +187,25 @@ gap:
 
 4. Without touching the target terminal, repeat the PTY-buffer `GET` at 250 ms, 1 second,
    5 seconds, and 10 seconds after the configured gap. Save every raw status and response;
-   do not rely on a transient UI repaint. Note that since #256 the inject POST itself can
-   stay pending up to ~1,500 ms after the Enter write while the `submit_confirmed`
-   observation runs, so issue the POST from a separate shell (or background it) rather
-   than waiting for its response — otherwise the 250 ms and 1 second samples are missed
-   before the POST returns.
+   do not rely on a transient UI repaint. Note that the inject POST itself can stay pending
+   up to ~1,500 ms after one Enter write, or ~3,000 ms when a confident negative triggers
+   the single retry and second observation. Issue the POST from a separate shell (or
+   background it) rather than waiting for its response — otherwise the 250 ms and 1 second
+   samples are missed before the POST returns.
 5. Score the current terminal state reconstructed from the PTY output:
 
    - **PASS**: the unique payload is no longer sitting in the composer and the buffer shows
      the composer accepted the discrete Enter.
    - **FAIL**: the unique payload remains in the composer, including the literal-newline or
      shift-Enter shape documented by issue #226.
-   - **INVALID**: the operator touched the keyboard, the 8 KB tail evicted the observation,
-     the process exited, or output is insufficient to distinguish submitted from staged.
+   - **INVALID**: for a claimed PASS, the operator touched the keyboard; or, for either result,
+     the 8 KB tail evicted the observation, the process exited, or output is insufficient to
+     distinguish submitted from staged.
 
    A marker file, response text, or other downstream agent action is supporting context only;
-   it never upgrades an ambiguous buffer observation to PASS.
+   it never upgrades an ambiguous buffer observation to PASS. Operator interference likewise
+   cannot establish a PASS, but a payload visibly resident in the composer is always admissible
+   FAIL evidence.
 6. Repeat until there are three valid attempts for that adapter/payload/state/gap cell. Record
    every invalid attempt
    and its cause, but exclude it from the pass denominator.

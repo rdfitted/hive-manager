@@ -451,11 +451,24 @@ impl PtySession {
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
         tracing::debug!("PTY write: {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
         let mut writer = self.writer.lock();
-        Self::write_locked(&mut writer, data)?;
+        if data == Self::SUBMIT_KEYSTROKE {
+            Self::write_submit_keystroke_locked(&mut writer)?;
+        } else {
+            Self::write_locked(&mut writer, data)?;
+        }
 
         tracing::debug!("PTY write complete");
         Ok(())
     }
+
+    // BEGIN SHARED SUBMIT KEYSTROKE PRIMITIVE
+    const SUBMIT_KEYSTROKE: &'static [u8] = b"\r";
+
+    fn write_submit_keystroke_locked(writer: &mut SendWriter) -> Result<usize, PtyError> {
+        Self::write_locked(writer, Self::SUBMIT_KEYSTROKE)?;
+        Ok(Self::SUBMIT_KEYSTROKE.len())
+    }
+    // END SHARED SUBMIT KEYSTROKE PRIMITIVE
 
     /// Deliver a payload inside a bracketed-paste envelope, then Enter as a discrete
     /// bare carriage return outside the envelope.
@@ -476,10 +489,10 @@ impl PtySession {
         // Keep the per-session writer locked so no concurrent write can be
         // interleaved and accidentally submitted by this Enter.
         std::thread::sleep(submit_gap(self.submit_policy));
-        Self::write_locked(&mut writer, b"\r")?;
+        let submit_bytes_written = Self::write_submit_keystroke_locked(&mut writer)?;
         Ok(PtySubmitResult {
             payload_bytes_written,
-            submit_bytes_written: 1,
+            submit_bytes_written,
         })
     }
 
