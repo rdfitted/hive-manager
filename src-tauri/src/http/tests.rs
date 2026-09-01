@@ -4349,6 +4349,61 @@ fn test_persisted_session_legacy_json_defaults_to_claude() {
 
 // --- Fusion mode smoke tests ---
 
+#[test]
+fn planner_task_line_prompts_emit_safe_examples_and_priority_tokens() {
+    let [fusion, debate, hive, swarm, hive_smoke, swarm_smoke] =
+        SessionController::planner_task_line_prompts_for_test();
+    let allowed_brackets =
+        "Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.";
+    let correlated_t1 = format!("- [ ] [P{}] T{}:", 1, 1);
+    let correlated_t2 = format!("- [ ] [P{}] T{}:", 2, 2);
+
+    for (name, prompt) in [
+        ("fusion", &fusion),
+        ("debate", &debate),
+        ("hive", &hive),
+        ("swarm", &swarm),
+    ] {
+        let normalized_prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            prompt.contains("- [ ] T1:"),
+            "{name} prompt must emit a bracket-free T1 exemplar"
+        );
+        assert!(
+            prompt.contains("- [ ] T2:"),
+            "{name} prompt must emit a bracket-free T2 exemplar"
+        );
+        assert!(
+            normalized_prompt.contains(allowed_brackets),
+            "{name} prompt must state the leading-bracket allowlist"
+        );
+        assert!(
+            !prompt.contains(&correlated_t1) && !prompt.contains(&correlated_t2),
+            "{name} prompt must not correlate bracket and task indices"
+        );
+    }
+
+    fn emitted_priorities(prompt: &str) -> Vec<&str> {
+        prompt
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("- [ ] [")
+                    .and_then(|rest| rest.split_once("] T"))
+                    .map(|(priority, _)| priority)
+            })
+            .collect()
+    }
+
+    assert_eq!(
+        emitted_priorities(&hive_smoke),
+        ["HIGH", "MEDIUM", "LOW", "LOW"]
+    );
+    assert_eq!(
+        emitted_priorities(&swarm_smoke),
+        ["HIGH", "MEDIUM", "LOW", "LOW"]
+    );
+}
+
 #[tokio::test]
 async fn test_launch_fusion_success() {
     let app = setup_test_app().await;

@@ -11,11 +11,14 @@ use tempfile::TempDir;
 use crate::actions::coordination::{parse_plan_markdown, parse_plan_markdown_checked};
 use crate::coordination::StateManager;
 use crate::domain::HiveExecutionPolicy;
+use crate::orchestrator::work_graph::review::{
+    MULTI_LENS_REVIEW_TEMPLATE, VERIFICATION_DUTY_PARAMETER,
+};
 use crate::orchestrator::work_graph::validate::{
     validate_plan_ready, PlanReadyWarning,
 };
 use crate::orchestrator::work_graph::{
-    EdgeKind, EdgeProvenance, NodeStatus, WorkGraphOmissionReason,
+    EdgeKind, EdgeProvenance, NodeKind, NodeStatus, WorkGraphOmissionReason,
 };
 use crate::pty::PtyManager;
 use crate::session::{
@@ -180,18 +183,20 @@ fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
         (
             "continue-malformed",
             Some(malformed_plan),
+            1,
             WorkGraphOmissionReason::ResolutionIncomplete,
             "unterminated",
         ),
         (
             "continue-missing",
             None,
+            0,
             WorkGraphOmissionReason::SourceUnreadable,
             "plan.md",
         ),
     ];
 
-    for (session_id, plan, expected_reason, expected_example) in cases {
+    for (session_id, plan, expected_nodes, expected_reason, expected_example) in cases {
         let (_temp, controller, storage) = controller_with_plan(session_id, plan);
 
         let error = controller
@@ -207,7 +212,7 @@ fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
             .read_work_graph()
             .expect("graph state is readable")
             .expect("production continue replaced the creation-time seed");
-        assert!(graph.nodes.is_empty());
+        assert_eq!(graph.nodes.len(), expected_nodes);
         assert!(graph.edges.is_empty());
         assert_eq!(graph.omissions.len(), 1);
         assert_eq!(graph.omissions[0].reason, expected_reason);
@@ -227,28 +232,104 @@ fn mark_plan_ready_rejects_cycle_and_leaves_session_planning() {
 
     let error = controller
         .mark_plan_ready("cycle-plan")
-        .expect_err("cycle must fail the real PlanReady transition");
+        .expect_err("a dependency cycle must block the PlanReady transition");
     assert!(error.contains("T1"), "cycle error omitted T1: {error}");
     assert!(error.contains("T2"), "cycle error omitted T2: {error}");
     assert_session_state(&controller, "cycle-plan", SessionState::Planning);
 }
 
 #[test]
-fn mark_plan_ready_rejects_dangling_dependency_and_names_both_ids() {
+fn mark_plan_ready_rejects_missing_review_signal_and_leaves_session_planning() {
+    let plan = "# Review authority plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design)\n";
+    let (_temp, controller, storage) = controller_with_plan("review-authority", Some(plan));
+    let project_path = controller
+        .get_session("review-authority")
+        .unwrap()
+        .project_path;
+    controller
+        .prepare_initial_work_graph(
+            &project_path,
+            "review-authority",
+            Some("feature-build"),
+            &BTreeMap::from([("component".to_string(), "billing".to_string())]),
+        )
+        .expect("review skeleton composes")
+        .expect("feature-build provides a review skeleton");
+
+    let state_manager = StateManager::new(storage.session_dir("review-authority"));
+    let mut composition = state_manager
+        .read_graph_composition_state()
+        .unwrap()
+        .unwrap();
+    let review = composition
+        .graph
+        .nodes
+        .iter_mut()
+        .find(|node| {
+            node.kind == NodeKind::Join
+                && node
+                    .expansion
+                    .as_ref()
+                    .is_some_and(|expansion| expansion.template == MULTI_LENS_REVIEW_TEMPLATE)
+        })
+        .expect("feature-build includes a multi-lens review gate");
+    let review_id = review.id.clone();
+    review
+        .expansion
+        .as_mut()
+        .expect("review expansion exists")
+        .parameters
+        .remove(VERIFICATION_DUTY_PARAMETER);
+    state_manager
+        .write_graph_composition_state(&composition)
+        .unwrap();
+
+    let error = controller
+        .mark_plan_ready("review-authority")
+        .expect_err("a review gate without a verification signal must block PlanReady");
+    assert!(
+        error.contains(&review_id),
+        "review-authority error omitted the review id: {error}"
+    );
+    assert!(
+        error.contains("no named verification signal"),
+        "unexpected review-authority error: {error}"
+    );
+    assert_session_state(&controller, "review-authority", SessionState::Planning);
+}
+
+#[test]
+fn mark_plan_ready_is_always_ok_and_quarantines_dangling_dependency() {
     let plan = r#"# Dangling plan
 
 ## Tasks
 - [ ] T1: Root task
 - [ ] T2: Dependent task (deps: MISSING)
 "#;
-    let (_temp, controller, _storage) = controller_with_plan("dangling-plan", Some(plan));
+    let (_temp, controller, storage) = controller_with_plan("dangling-plan", Some(plan));
 
-    let error = controller
+    controller
         .mark_plan_ready("dangling-plan")
-        .expect_err("dangling dependency must fail PlanReady");
-    assert!(error.contains("T2"), "error omitted dependent id: {error}");
-    assert!(error.contains("MISSING"), "error omitted unknown id: {error}");
-    assert_session_state(&controller, "dangling-plan", SessionState::Planning);
+        .expect("a readable dangling plan must not block PlanReady");
+    assert_session_state(&controller, "dangling-plan", SessionState::PlanReady);
+
+    let graph = StateManager::new(storage.session_dir("dangling-plan"))
+        .read_work_graph()
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.nodes.len(), 2);
+    validate_plan_ready(&graph).expect("the persisted graph must be valid after edge quarantine");
+    assert!(
+        graph.edges.is_empty(),
+        "unresolved dependencies must not survive quarantine"
+    );
+    let diagnostic = graph
+        .omissions
+        .iter()
+        .flat_map(|omission| omission.examples.iter())
+        .find(|example| example.contains("MISSING"))
+        .expect("the quarantined dependency must remain operator-visible");
+    assert!(diagnostic.contains("T2"));
 }
 
 #[test]
@@ -459,7 +540,7 @@ fn phase_b_reconciliation_is_idempotent_after_a_persisted_retry() {
 
 #[test]
 fn mark_plan_ready_persists_one_authoritative_reconciled_graph() {
-    let plan = "# Reconciled plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design) (acceptance: reconciled)\n";
+    let plan = "# Reconciled plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design, MISSING) (acceptance: reconciled)\n";
     let (_temp, controller, storage) =
         controller_with_plan("composed-plan-ready", Some(plan));
     let project_path = controller
@@ -488,6 +569,21 @@ fn mark_plan_ready_persists_one_authoritative_reconciled_graph() {
     assert_eq!(authoritative, composition.graph);
     assert!(authoritative.nodes.iter().any(|node| node.id == "design"));
     assert!(authoritative.nodes.iter().any(|node| node.id == "T1"));
+    assert!(authoritative.edges.iter().any(|edge| {
+        edge.source == "design" && edge.target == "T1" && edge.kind == EdgeKind::DependsOn
+    }));
+    assert!(
+        authoritative
+            .edges
+            .iter()
+            .all(|edge| edge.source != "MISSING" && edge.target != "MISSING"),
+        "quarantine runs after reconciliation so skeleton references survive and unknown ones do not"
+    );
+    assert!(authoritative
+        .omissions
+        .iter()
+        .flat_map(|omission| omission.examples.iter())
+        .any(|example| example.contains("T1") && example.contains("MISSING")));
     assert!(composition.lineage.is_some());
     assert!(
         !composition.graph.omissions.is_empty(),
@@ -620,7 +716,7 @@ Keep the existing parser behavior.
 }
 
 #[test]
-fn malformed_graph_metadata_degrades_to_edgeless_graph_with_omission() {
+fn malformed_graph_metadata_preserves_task_and_degrades_to_edgeless_graph() {
     let plan = r#"# Legacy-compatible malformed graph metadata
 
 ## Tasks
@@ -637,7 +733,8 @@ fn malformed_graph_metadata_degrades_to_edgeless_graph_with_omission() {
         .read_work_graph()
         .unwrap()
         .unwrap();
-    assert!(graph.nodes.is_empty());
+    assert_eq!(graph.nodes.len(), 1);
+    assert_eq!(graph.nodes[0].id, "T1");
     assert!(graph.edges.is_empty());
     assert_eq!(graph.omissions.len(), 1);
     assert_eq!(
@@ -648,12 +745,13 @@ fn malformed_graph_metadata_degrades_to_edgeless_graph_with_omission() {
 }
 
 #[test]
-fn explicit_graph_with_unidentified_checkbox_degrades_and_reports_it() {
+fn explicit_graph_preserves_resolved_tasks_and_reports_every_lost_reference() {
     let plan = r#"# Mixed malformed graph
 
 ## Tasks
 - [ ] T1: Stable root task
 - [ ] Crucial workstream missing its stable id
+- [ ] T2: Stable dependent task (deps: T3)
 "#;
     let error = parse_plan_markdown_checked(plan)
         .expect_err("an explicit graph cannot silently discard a schedulable checkbox");
@@ -665,18 +763,113 @@ fn explicit_graph_with_unidentified_checkbox_degrades_and_reports_it() {
     let (_temp, controller, storage) = controller_with_plan("mixed-malformed", Some(plan));
     controller
         .mark_plan_ready("mixed-malformed")
-        .expect("malformed graph syntax follows the degrade-and-report guardrail");
+        .expect("partial graph syntax must preserve usable work without blocking PlanReady");
+    assert_session_state(&controller, "mixed-malformed", SessionState::PlanReady);
     let graph = StateManager::new(storage.session_dir("mixed-malformed"))
         .read_work_graph()
         .unwrap()
         .unwrap();
-    assert!(graph.nodes.is_empty());
-    assert!(graph.edges.is_empty());
     assert_eq!(
-        graph.omissions[0].reason,
+        graph
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["T1", "T2"],
+        "every successfully identified task must be preserved"
+    );
+    assert!(
+        graph.edges.is_empty(),
+        "the dependency on the unresolved T3 endpoint must be quarantined"
+    );
+    assert!(graph
+        .omissions
+        .iter()
+        .all(|omission| omission.reason == WorkGraphOmissionReason::ResolutionIncomplete));
+    let examples = graph
+        .omissions
+        .iter()
+        .flat_map(|omission| omission.examples.iter())
+        .collect::<Vec<_>>();
+    assert!(
+        examples
+            .iter()
+            .any(|example| example.contains("Crucial workstream")),
+        "the unidentified schedulable line must not disappear silently"
+    );
+    assert!(
+        examples
+            .iter()
+            .any(|example| example.contains("T2") && example.contains("T3")),
+        "the quarantined dependency must name both endpoints"
+    );
+}
+
+#[test]
+fn partially_parsed_twenty_two_line_plan_preserves_eighteen_nodes_and_four_omissions() {
+    let mut plan = String::from("# Partially parsed plan\n\n## Tasks\n");
+    for id in 1..=18 {
+        plan.push_str(&format!("- [ ] T{id}: Stable task {id}\n"));
+    }
+    for id in 19..=22 {
+        plan.push_str(&format!("- [ ] Unidentified task {id}\n"));
+    }
+
+    let (_temp, controller, storage) = controller_with_plan("partial-18-of-22", Some(&plan));
+    controller
+        .mark_plan_ready("partial-18-of-22")
+        .expect("a readable partially parsed plan must not block PlanReady");
+    assert_session_state(&controller, "partial-18-of-22", SessionState::PlanReady);
+
+    let graph = StateManager::new(storage.session_dir("partial-18-of-22"))
+        .read_work_graph()
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.nodes.len(), 18);
+    let parser_omission = graph
+        .omissions
+        .iter()
+        .find(|omission| omission.count == 4)
+        .expect("the four unresolved lines must be counted as omissions");
+    assert_eq!(
+        parser_omission.reason,
         WorkGraphOmissionReason::ResolutionIncomplete
     );
-    assert!(graph.omissions[0].examples[0].contains("Crucial workstream"));
+    assert_eq!(parser_omission.examples.len(), 4);
+    for id in 19..=22 {
+        assert!(parser_omission
+            .examples
+            .iter()
+            .any(|example| example.contains(&format!("Unidentified task {id}"))));
+    }
+}
+
+#[test]
+fn all_legacy_checkbox_tasks_are_preserved_without_omissions() {
+    let plan = r#"# Positional-only plan
+
+## Tasks
+- [ ] First positional task
+- [ ] Second positional task
+"#;
+    let (_temp, controller, storage) = controller_with_plan("all-positional", Some(plan));
+
+    controller
+        .mark_plan_ready("all-positional")
+        .expect("positional compatibility must not block PlanReady");
+    let graph = StateManager::new(storage.session_dir("all-positional"))
+        .read_work_graph()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["task-1", "task-2"]
+    );
+    assert!(graph.omissions.is_empty());
 }
 
 #[test]
@@ -720,19 +913,85 @@ fn unreadable_plan_degrades_and_persists_source_omission() {
 }
 
 #[test]
-fn duplicate_explicit_ids_fail_the_real_gate_without_state_change() {
+fn duplicate_explicit_ids_are_reported_without_blocking_readable_plan() {
     let plan = r#"# Duplicate ids
 
 ## Tasks
 - [ ] T1: First declaration
 - [ ] T1: Second declaration
 "#;
-    let (_temp, controller, _storage) = controller_with_plan("duplicate-plan", Some(plan));
-    let error = controller
+    let (_temp, controller, storage) = controller_with_plan("duplicate-plan", Some(plan));
+    controller
         .mark_plan_ready("duplicate-plan")
-        .expect_err("duplicate task ids must fail PlanReady");
-    assert!(error.contains("T1"), "duplicate error omitted task id: {error}");
-    assert_session_state(&controller, "duplicate-plan", SessionState::Planning);
+        .expect("duplicate ids in a readable plan must not block PlanReady");
+    assert_session_state(&controller, "duplicate-plan", SessionState::PlanReady);
+
+    let graph = StateManager::new(storage.session_dir("duplicate-plan"))
+        .read_work_graph()
+        .unwrap()
+        .unwrap();
+    assert_eq!(graph.nodes.len(), 1);
+    validate_plan_ready(&graph).expect("the persisted graph must retain one unambiguous T1 node");
+    assert!(graph
+        .omissions
+        .iter()
+        .flat_map(|omission| omission.examples.iter())
+        .any(|example| example.contains("duplicate") && example.contains("T1")));
+}
+
+#[test]
+fn duplicate_dependency_metadata_is_omitted_without_manufacturing_a_cycle() {
+    let plan = r#"# Duplicate dependency metadata
+
+## Tasks
+- [ ] T1: Root
+- [ ] T2: Second (deps: T1)
+- [ ] T1: Duplicate declaration (deps: T2)
+"#;
+    let (_temp, controller, storage) =
+        controller_with_plan("duplicate-dependency-plan", Some(plan));
+
+    let result = controller.mark_plan_ready("duplicate-dependency-plan");
+    assert!(
+        result.is_ok(),
+        "a duplicate declaration must not manufacture a cycle: {result:?}"
+    );
+    assert_session_state(
+        &controller,
+        "duplicate-dependency-plan",
+        SessionState::PlanReady,
+    );
+
+    let graph = StateManager::new(storage.session_dir("duplicate-dependency-plan"))
+        .read_work_graph()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        graph
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node.title.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("T1", "Root"), ("T2", "Second")]
+    );
+    assert_eq!(graph.edges.len(), 1);
+    assert_eq!(graph.edges[0].source, "T1");
+    assert_eq!(graph.edges[0].target, "T2");
+    assert!(
+        graph
+            .edges
+            .iter()
+            .all(|edge| !(edge.source == "T2" && edge.target == "T1")),
+        "T1 must not inherit the duplicate declaration's dependency"
+    );
+    validate_plan_ready(&graph).expect("the persisted graph must not contain a cycle");
+    assert!(graph.omissions.iter().any(|omission| {
+        omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+            && omission
+                .examples
+                .iter()
+                .any(|example| example.contains("duplicate") && example.contains("T1"))
+    }));
 }
 
 #[test]

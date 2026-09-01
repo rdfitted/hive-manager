@@ -730,7 +730,9 @@ pub(crate) fn parse_plan_markdown_checked(
     }
 }
 
-fn parse_plan_markdown_with_diagnostics(content: &str) -> (SessionPlan, Vec<String>) {
+pub(crate) fn parse_plan_markdown_with_diagnostics(
+    content: &str,
+) -> (SessionPlan, Vec<String>) {
     let mut title = String::new();
     let mut summary = String::new();
     let mut tasks: Vec<PlanTask> = Vec::new();
@@ -893,6 +895,11 @@ fn extract_explicit_task_id(text: &str) -> (String, Option<TaskId>) {
     let Some((candidate, remainder)) = text.split_once(':') else {
         return (text.to_string(), None);
     };
+    let candidate = candidate.trim();
+    let candidate = candidate
+        .strip_prefix('[')
+        .and_then(|candidate| candidate.split_once(']'))
+        .map_or(candidate, |(_, candidate)| candidate.trim_start());
     let mut chars = candidate.chars();
     let is_explicit_id = matches!(chars.next(), Some('T' | 't'))
         && chars.clone().next().is_some()
@@ -992,7 +999,8 @@ fn extract_assignee(text: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_assignee, extract_priority, parse_task_line, run_blocking_injection,
+        extract_assignee, extract_priority, parse_plan_markdown_with_diagnostics, parse_task_line,
+        run_blocking_injection,
     };
     use crate::coordination::InjectionError;
 
@@ -1014,6 +1022,55 @@ mod tests {
 
         assert_eq!(title, "Fix launch regression");
         assert_eq!(priority.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn task_line_resolves_explicit_id_with_optional_bracket_label_and_spacing() {
+        let cases = [
+            ("P4", "- [ ] [P4] T4: title", "T4"),
+            ("P18", "- [ ] [P18] T18: title", "T18"),
+            ("Queen", "- [ ] [Queen] T5: title", "T5"),
+            ("Operator", "- [ ] [Operator] T6: title", "T6"),
+            ("bare-T", "- [ ] T7: title", "T7"),
+            ("spaced-colon", "- [ ] T8 : title", "T8"),
+        ];
+
+        for (case, line, expected_id) in cases {
+            let mut counter = 0;
+            let task = parse_task_line(line, &mut counter)
+                .unwrap_or_else(|| panic!("{case}: expected a parsed task"));
+
+            assert_eq!(task.id, expected_id, "{case}");
+            assert!(task.explicit_id, "{case}");
+            assert_eq!(task.title, "title", "{case}");
+        }
+    }
+
+    #[test]
+    fn task_line_keeps_recognized_priority_tokens() {
+        let cases = [
+            ("HIGH", "high"),
+            ("MEDIUM", "medium"),
+            ("LOW", "low"),
+            ("P1", "high"),
+            ("P2", "medium"),
+            ("P3", "low"),
+        ];
+
+        for (marker, expected_priority) in cases {
+            let mut counter = 0;
+            let line = format!("- [ ] [{marker}] T1: title");
+            let task = parse_task_line(&line, &mut counter)
+                .unwrap_or_else(|| panic!("{marker}: expected a parsed task"));
+
+            assert_eq!(task.id, "T1", "{marker}");
+            assert_eq!(task.title, "title", "{marker}");
+            assert_eq!(
+                task.priority.as_deref(),
+                Some(expected_priority),
+                "{marker}"
+            );
+        }
     }
 
     #[test]
@@ -1054,6 +1111,17 @@ mod tests {
             extract_assignee("Title -> worker-1 -> trailing"),
             ("Title ".to_string(), Some("worker-1 -> trailing".to_string()))
         );
+    }
+
+    #[test]
+    fn legacy_checkbox_plan_has_no_missing_stable_id_diagnostics() {
+        let (plan, diagnostics) = parse_plan_markdown_with_diagnostics(
+            "# Legacy\n\n## Tasks\n- [ ] First positional task\n- [ ] Second positional task\n",
+        );
+
+        assert_eq!(plan.tasks.len(), 2);
+        assert!(plan.tasks.iter().all(|task| !task.explicit_id));
+        assert!(diagnostics.is_empty());
     }
 }
 
