@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -42,6 +43,10 @@ impl EventBus {
         self.sender.subscribe()
     }
 
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// Subscribe and filter events by session_id.
     pub fn subscribe_session(&self, session_id: String) -> FilteredReceiver {
         FilteredReceiver {
@@ -72,7 +77,10 @@ impl EventBus {
         line.push('\n');
 
         let mut writers = self.writers.lock().await;
-        if !writers.iter().any(|(session_id, _)| session_id == &event.session_id) {
+        if !writers
+            .iter()
+            .any(|(session_id, _)| session_id == &event.session_id)
+        {
             let session_dir = self.data_dir.join(&event.session_id);
             tokio::fs::create_dir_all(&session_dir)
                 .await
@@ -198,10 +206,9 @@ mod tests {
         let event = make_event("sess-persist", EventType::SessionCreated);
         bus.publish(event.clone()).await.unwrap();
 
-        let contents =
-            tokio::fs::read_to_string(tmp.path().join("sess-persist/events.jsonl"))
-                .await
-                .unwrap();
+        let contents = tokio::fs::read_to_string(tmp.path().join("sess-persist/events.jsonl"))
+            .await
+            .unwrap();
         let deserialized: Event = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(deserialized.id, event.id);
         assert_eq!(deserialized.event_type, EventType::SessionCreated);
@@ -219,10 +226,9 @@ mod tests {
             .await
             .unwrap();
 
-        let contents =
-            tokio::fs::read_to_string(tmp.path().join("sess-append/events.jsonl"))
-                .await
-                .unwrap();
+        let contents = tokio::fs::read_to_string(tmp.path().join("sess-append/events.jsonl"))
+            .await
+            .unwrap();
         let lines: Vec<&str> = contents.trim().lines().collect();
         assert_eq!(lines.len(), 2);
 

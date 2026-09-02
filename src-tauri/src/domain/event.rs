@@ -34,6 +34,7 @@ pub enum EventType {
     WorkerClaimFailed,
     WorkerReclaimed,
     WorkerFinalized,
+    WorkNodeCompleted,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

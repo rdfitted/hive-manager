@@ -2,11 +2,11 @@
 
 use crate::actions::coordination::SessionPlan;
 
+use super::review::JUDGE_PRINCE_REMEDIATION_TEMPLATE;
 use super::schema::{
     BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, TaskId,
     WorkEdge, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
 };
-use super::review::JUDGE_PRINCE_REMEDIATION_TEMPLATE;
 
 /// Convert parsed plan tasks into schedulable nodes and planner-provenance edges.
 ///
@@ -89,6 +89,26 @@ pub fn task_graph_from_plan(plan: &SessionPlan) -> TaskGraph {
             examples,
         ));
     }
+    let unrecognized_bindings = graph_tasks
+        .iter()
+        .filter(|task| task.assignee.is_some() && !task.assignee_recognized)
+        .collect::<Vec<_>>();
+    if !unrecognized_bindings.is_empty() {
+        graph.omissions.push(WorkGraphOmission::new(
+            WorkGraphOmissionReason::ResolutionIncomplete,
+            unrecognized_bindings.len(),
+            unrecognized_bindings
+                .iter()
+                .map(|task| {
+                    format!(
+                        "task {} preserved unrecognized principal binding {}",
+                        task.id,
+                        task.assignee.as_deref().unwrap_or("unassigned")
+                    )
+                })
+                .collect(),
+        ));
+    }
     graph
 }
 
@@ -107,9 +127,10 @@ pub fn promote_initial_ready_nodes(graph: &mut TaskGraph) -> Vec<TaskId> {
         .iter()
         .filter(|node| node.status == NodeStatus::Pending)
         .filter(|node| {
-            !node.expansion.as_ref().is_some_and(|expansion| {
-                expansion.template == JUDGE_PRINCE_REMEDIATION_TEMPLATE
-            })
+            !node
+                .expansion
+                .as_ref()
+                .is_some_and(|expansion| expansion.template == JUDGE_PRINCE_REMEDIATION_TEMPLATE)
         })
         .filter(|node| {
             graph

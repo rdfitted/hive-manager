@@ -4,12 +4,18 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::validate_agent_id;
 use super::validate_session_id;
+use crate::coordination::StateManager;
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::orchestrator::work_graph::completion_ledger::{
+    NodeCompletionFact, NodeCompletionProvenance,
+};
+use crate::orchestrator::work_graph::BindingRef;
 
 /// POST /api/sessions/{id}/heartbeat - Body
 #[derive(Debug, Deserialize)]
@@ -22,6 +28,9 @@ pub struct PostHeartbeatRequest {
     /// deterministic fallback; a supplied identity is always treated as an exact fence.
     #[serde(default)]
     pub assignment_id: Option<i64>,
+    /// Exact work-graph node ids completed by this heartbeat's resolved agent.
+    #[serde(default)]
+    pub completed_nodes: Vec<String>,
 }
 
 /// Response for POST heartbeat
@@ -71,7 +80,10 @@ pub async fn post_heartbeat(
             "Status must be one of: working, idle, completed",
         ));
     }
-    if req.assignment_id.is_some_and(|assignment_id| assignment_id <= 0) {
+    if req
+        .assignment_id
+        .is_some_and(|assignment_id| assignment_id <= 0)
+    {
         return Err(ApiError::bad_request(
             "assignment_id must be a positive server-issued identity",
         ));
@@ -100,13 +112,12 @@ pub async fn post_heartbeat(
 
     let (raw_known, qualified_known) = {
         let controller = state.session_controller.read();
-        let session = controller.get_session(&session_id).ok_or_else(|| {
-            ApiError::not_found(format!("Session {} not found", session_id))
-        })?;
+        let session = controller
+            .get_session(&session_id)
+            .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
         let pty_manager = state.pty_manager.read();
-        let known = |id: &str| {
-            session.agents.iter().any(|a| a.id == id) || pty_manager.is_alive(id)
-        };
+        let known =
+            |id: &str| session.agents.iter().any(|a| a.id == id) || pty_manager.is_alive(id);
         (known(&req.agent_id), known(&qualified))
     };
 
@@ -137,6 +148,96 @@ pub async fn post_heartbeat(
                 req.agent_id, session_id
             )));
         }
+    };
+
+    // Validate the whole declared set before the queue or controller is mutated. Exact ids are
+    // deliberate: aliases and labels are not node identity, and a mixed valid/invalid request
+    // must apply none of its declarations.
+    let completed_nodes = if req.completed_nodes.is_empty() {
+        Vec::new()
+    } else {
+        if req.status != "completed" {
+            return Err(ApiError::bad_request(
+                "completed_nodes may only be supplied with status completed",
+            ));
+        }
+        let state_manager = StateManager::new(state.storage.session_dir(&session_id));
+        let composition = state_manager
+            .read_graph_composition_state()
+            .map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to read graph composition for completed_nodes validation: {error}"
+                ))
+            })?;
+        let graph = if let Some(composition) = composition {
+            Some(composition.graph)
+        } else {
+            state_manager.read_work_graph().map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to read work graph for completed_nodes validation: {error}"
+                ))
+            })?
+        };
+        let known_ids: BTreeSet<&str> = graph
+            .as_ref()
+            .into_iter()
+            .flat_map(|graph| graph.nodes.iter().map(|node| node.id.as_str()))
+            .collect();
+        let unknown: BTreeSet<&str> = req
+            .completed_nodes
+            .iter()
+            .map(String::as_str)
+            .filter(|task_id| !known_ids.contains(task_id))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "Unknown completed_nodes: {}",
+                unknown.into_iter().collect::<Vec<_>>().join(", ")
+            )));
+        }
+
+        let hierarchy = state_manager.read_hierarchy().map_err(|error| {
+            ApiError::internal(format!(
+                "Failed to read hierarchy for completed_nodes validation: {error}"
+            ))
+        })?;
+        if let Some(agent_principal) = hierarchy
+            .iter()
+            .find(|node| node.id == agent_id)
+            .and_then(|node| node.principal.as_deref())
+            .map(str::trim)
+            .filter(|principal| !principal.is_empty())
+        {
+            let ownership_conflicts = graph
+                .as_ref()
+                .into_iter()
+                .flat_map(|graph| graph.nodes.iter())
+                .filter(|node| req.completed_nodes.iter().any(|task_id| task_id == &node.id))
+                .filter_map(|node| {
+                    let node_principal = match &node.binding {
+                        BindingRef::Role(principal) | BindingRef::Zone(principal) => principal.trim(),
+                    };
+                    (!node_principal.is_empty() && node_principal != agent_principal).then(|| {
+                        format!(
+                            "node {} is bound to principal {}, but agent {} resolves to principal {}",
+                            node.id, node_principal, agent_id, agent_principal
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !ownership_conflicts.is_empty() {
+                return Err(ApiError::bad_request(format!(
+                    "completed_nodes ownership mismatch: {}",
+                    ownership_conflicts.join("; ")
+                )));
+            }
+        }
+        req.completed_nodes
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
     };
 
     // A supplied assignment identity is an exact durable fence. Check it before
@@ -181,6 +282,33 @@ pub async fn post_heartbeat(
             .record_heartbeat_for_assignment(&session_id, &agent_id, None, &req.status)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
+    }
+
+    if !completed_nodes.is_empty() {
+        let facts = completed_nodes
+            .into_iter()
+            .map(|task_id| {
+                NodeCompletionFact::new(
+                    task_id,
+                    agent_id.clone(),
+                    NodeCompletionProvenance::Heartbeat,
+                )
+            })
+            .collect::<Vec<_>>();
+        StateManager::new(state.storage.session_dir(&session_id))
+            .append_node_completion_facts(&facts)
+            .map_err(|error| {
+                ApiError::internal(format!("Failed to persist completed_nodes: {error}"))
+            })?;
+        for fact in facts {
+            if let Err(error) = state.event_bus.publish(fact.event(&session_id)).await {
+                tracing::warn!(
+                    session_id = %session_id,
+                    task_id = %fact.task_id,
+                    "Failed to publish durable heartbeat completion event: {error}"
+                );
+            }
+        }
     }
 
     Ok((
@@ -247,9 +375,12 @@ mod tests {
     use parking_lot::RwLock;
     use tempfile::TempDir;
 
-    use crate::coordination::{InjectionManager, QueueManager};
+    use crate::coordination::{HierarchyNode, InjectionManager, QueueManager};
     use crate::domain::HiveExecutionPolicy;
     use crate::events::EventBus;
+    use crate::orchestrator::work_graph::{
+        NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
+    };
     use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager};
     use crate::session::{
         AgentInfo, AuthStrategy, Session, SessionController, SessionState, SessionType,
@@ -285,8 +416,7 @@ mod tests {
     fn fixture() -> HeartbeatFixture {
         let temp = TempDir::new().expect("heartbeat fixture directory");
         let storage = Arc::new(
-            SessionStorage::new_with_base(temp.path().to_path_buf())
-                .expect("session storage"),
+            SessionStorage::new_with_base(temp.path().to_path_buf()).expect("session storage"),
         );
         storage
             .create_session_dir(SESSION_ID)
@@ -295,19 +425,17 @@ mod tests {
             storage.load_config().expect("test config"),
         ));
         let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
-        let session_controller = Arc::new(RwLock::new(SessionController::new(
-            Arc::clone(&pty_manager),
-        )));
+        let session_controller = Arc::new(RwLock::new(SessionController::new(Arc::clone(
+            &pty_manager,
+        ))));
         session_controller.write().set_storage(Arc::clone(&storage));
         let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
             Arc::clone(&pty_manager),
-            SessionStorage::new_with_base(temp.path().to_path_buf())
-                .expect("injection storage"),
+            SessionStorage::new_with_base(temp.path().to_path_buf()).expect("injection storage"),
         )));
         let event_bus = EventBus::new(storage.base_dir().clone());
-        let app_state_db = Arc::new(
-            ApplicationStateDb::open_in_memory().expect("application state database"),
-        );
+        let app_state_db =
+            Arc::new(ApplicationStateDb::open_in_memory().expect("application state database"));
         let queue_repo = Arc::new(QueueRepo::new(Arc::clone(&app_state_db)));
         queue_repo.ensure_schema().expect("queue schema");
         let queue_manager = Arc::new(QueueManager::new(queue_repo, Arc::clone(&event_bus)));
@@ -391,6 +519,16 @@ mod tests {
         status: &str,
         assignment_id: Option<i64>,
     ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
+        heartbeat_with_completed_nodes(state, agent_id, status, assignment_id, &[]).await
+    }
+
+    async fn heartbeat_with_completed_nodes(
+        state: Arc<AppState>,
+        agent_id: &str,
+        status: &str,
+        assignment_id: Option<i64>,
+        completed_nodes: &[&str],
+    ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
         post_heartbeat(
             State(state),
             Path(SESSION_ID.to_string()),
@@ -399,9 +537,45 @@ mod tests {
                 status: status.to_string(),
                 summary: Some(format!("{status} from handler test")),
                 assignment_id,
+                completed_nodes: completed_nodes
+                    .iter()
+                    .map(|task_id| (*task_id).to_string())
+                    .collect(),
             }),
         )
         .await
+    }
+
+    fn work_node(id: &str, principal: &str) -> WorkNode {
+        WorkNode::new(
+            id,
+            NodeKind::Task,
+            format!("Task {id}"),
+            NodeContract::default(),
+            BindingRef::Role(principal.to_string()),
+            NodeStatus::Pending,
+        )
+    }
+
+    fn write_graph_and_worker_principal(
+        fixture: &HeartbeatFixture,
+        graph: TaskGraph,
+        principal: Option<&str>,
+    ) -> StateManager {
+        let state_manager = StateManager::new(fixture.state.storage.session_dir(SESSION_ID));
+        state_manager
+            .write_work_graph(&graph)
+            .expect("heartbeat test work graph");
+        state_manager
+            .update_hierarchy(&[HierarchyNode {
+                id: WORKER_ID.to_string(),
+                role: "Worker-1".to_string(),
+                principal: principal.map(str::to_string),
+                parent_id: Some(QUEEN_ID.to_string()),
+                children: Vec::new(),
+            }])
+            .expect("heartbeat test hierarchy");
+        state_manager
     }
 
     fn expect_success(
@@ -528,5 +702,119 @@ mod tests {
             .get_heartbeat_info(SESSION_ID);
         assert!(!heartbeats.contains_key("queen"));
         assert_eq!(heartbeats[QUEEN_ID].status, "working");
+    }
+
+    #[tokio::test]
+    async fn contradictory_node_principal_rejects_the_entire_completion_set() {
+        let fixture = fixture();
+        let state_manager = write_graph_and_worker_principal(
+            &fixture,
+            TaskGraph::new(
+                vec![work_node("T-owned", "P1"), work_node("T-other", "P2")],
+                Vec::new(),
+            ),
+            Some("P1"),
+        );
+
+        let response = heartbeat_with_completed_nodes(
+            Arc::clone(&fixture.state),
+            "worker-1",
+            "completed",
+            None,
+            &["T-owned", "T-other"],
+        )
+        .await;
+        let error = match response {
+            Ok((status, _)) => panic!(
+                "a resolved principal must not complete another principal's node: got {status}"
+            ),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("node T-other"));
+        assert!(error.message.contains("principal P2"));
+        assert!(error.message.contains("principal P1"));
+        assert!(
+            state_manager
+                .read_node_completion_facts()
+                .expect("completion ledger")
+                .is_empty(),
+            "one ownership conflict must prevent every fact in the request"
+        );
+        assert!(
+            fixture
+                .state
+                .session_controller
+                .read()
+                .get_heartbeat_info(SESSION_ID)
+                .is_empty(),
+            "ownership validation must run before controller liveness is mutated"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_agent_principal_allows_a_bound_node_completion() {
+        let fixture = fixture();
+        let state_manager = write_graph_and_worker_principal(
+            &fixture,
+            TaskGraph::new(vec![work_node("T-bound", "P2")], Vec::new()),
+            None,
+        );
+
+        // Most spawn paths intentionally persist no principal. This is the normal fail-open case,
+        // not evidence that the agent contradicts the node's recorded binding.
+        let response = expect_success(
+            heartbeat_with_completed_nodes(
+                Arc::clone(&fixture.state),
+                "worker-1",
+                "completed",
+                None,
+                &["T-bound"],
+            )
+            .await,
+            "completion from an agent with no recorded principal",
+        );
+
+        assert_eq!(response.0, StatusCode::OK);
+        let facts = state_manager
+            .read_node_completion_facts()
+            .expect("completion ledger");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].task_id, "T-bound");
+        assert_eq!(
+            facts[0].agent_id, WORKER_ID,
+            "the fact must retain the resolved full agent id"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_node_binding_allows_a_resolved_principal_completion() {
+        let fixture = fixture();
+        let state_manager = write_graph_and_worker_principal(
+            &fixture,
+            TaskGraph::new(vec![work_node("T-unbound", "  ")], Vec::new()),
+            Some("P1"),
+        );
+
+        let response = expect_success(
+            heartbeat_with_completed_nodes(
+                Arc::clone(&fixture.state),
+                "worker-1",
+                "completed",
+                None,
+                &["T-unbound"],
+            )
+            .await,
+            "completion for a node with no recorded binding",
+        );
+
+        assert_eq!(response.0, StatusCode::OK);
+        let facts = state_manager
+            .read_node_completion_facts()
+            .expect("completion ledger");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].task_id, "T-unbound");
+        assert_eq!(facts[0].agent_id, WORKER_ID);
     }
 }

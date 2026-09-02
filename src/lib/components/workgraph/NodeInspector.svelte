@@ -1,4 +1,17 @@
 <script lang="ts">
+  import type { CompletionProvenance } from '$lib/workgraph/types';
+
+  const PROVENANCE_PRESENTATION: Record<
+    CompletionProvenance,
+    { readonly label: string; readonly detail: string }
+  > = {
+    declared: { label: 'Declared', detail: 'Explicit completion fact' },
+    queue: { label: 'Queue', detail: 'Finalized queue record' },
+    observed: { label: 'Observed', detail: 'Directly witnessed completion' },
+    inferred: { label: 'Inferred', detail: 'Completed through lane fan-out' },
+    plan: { label: 'Plan', detail: 'Persisted status without a backing queue row' }
+  };
+
   interface NodeContract {
     readonly inputs: readonly string[];
     readonly outputs: readonly string[];
@@ -32,13 +45,24 @@
     node: InspectorNode;
     dependencies: readonly ImmediateDependency[];
     progress?: InspectorProgress | null;
+    completionProvenance?: CompletionProvenance | null;
+    completionSourceRefs?: readonly string[];
   }
 
-  let { node, dependencies, progress = null }: Props = $props();
+  let {
+    node,
+    dependencies,
+    progress = null,
+    completionProvenance = null,
+    completionSourceRefs = []
+  }: Props = $props();
   let hasContract = $derived(
     node.contract.inputs.length > 0 ||
       node.contract.outputs.length > 0 ||
       node.contract.acceptance.length > 0
+  );
+  let provenancePresentation = $derived(
+    completionProvenance ? PROVENANCE_PRESENTATION[completionProvenance] : null
   );
 </script>
 
@@ -65,6 +89,34 @@
       <dd>{node.status}</dd>
     </div>
   </dl>
+
+  <section class="completion-evidence" aria-label="Completion evidence">
+    <h3>Completion evidence</h3>
+    {#if provenancePresentation}
+      <dl class="completion-evidence-grid">
+        <div>
+          <dt>Provenance</dt>
+          <dd
+            class:provenance-inferred={completionProvenance === 'inferred'}
+            data-testid="completion-provenance"
+          >{provenancePresentation.label}</dd>
+        </div>
+      </dl>
+      <p class="provenance-detail">{provenancePresentation.detail}</p>
+      <h4>Source references</h4>
+      {#if completionSourceRefs.length > 0}
+        <ul class="source-reference-list" aria-label="Completion source references">
+          {#each completionSourceRefs as sourceRef}
+            <li><code>{sourceRef}</code></li>
+          {/each}
+        </ul>
+      {:else}
+        <p class="source-reference-empty">No source references recorded</p>
+      {/if}
+    {:else}
+      <p class="completion-evidence-empty">No completion provenance recorded</p>
+    {/if}
+  </section>
 
   <section class="contract" aria-label="Node contract">
     {#if hasContract}
@@ -210,7 +262,8 @@
   }
 
   .node-meta,
-  .progress-grid {
+  .progress-grid,
+  .completion-evidence-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2);
@@ -218,7 +271,8 @@
   }
 
   .node-meta div,
-  .progress-grid div {
+  .progress-grid div,
+  .completion-evidence-grid div {
     min-width: 0;
     padding: var(--space-2);
     border-radius: var(--radius-sm);
@@ -226,7 +280,8 @@
   }
 
   dt,
-  h3 {
+  h3,
+  h4 {
     color: var(--text-secondary);
     font: var(--text-micro) var(--font-mono);
     letter-spacing: 0.06em;
@@ -241,6 +296,7 @@
   }
 
   .contract,
+  .completion-evidence,
   .progress,
   .dependencies {
     margin-top: var(--space-4);
@@ -252,6 +308,45 @@
 
   h3 {
     margin: 0 0 var(--space-2);
+  }
+
+  h4 {
+    margin: var(--space-3) 0 var(--space-2);
+  }
+
+  .completion-evidence-grid {
+    margin-top: 0;
+  }
+
+  .provenance-inferred {
+    color: var(--status-success);
+  }
+
+  .provenance-detail,
+  .completion-evidence-empty,
+  .source-reference-empty {
+    margin: var(--space-2) 0 0;
+    color: var(--text-secondary);
+    font: var(--text-small) var(--font-body);
+  }
+
+  .source-reference-list {
+    gap: var(--space-1);
+    padding-left: 0;
+    list-style: none;
+  }
+
+  .source-reference-list li {
+    min-width: 0;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background-color: var(--bg-raised);
+  }
+
+  .source-reference-list code {
+    overflow-wrap: anywhere;
+    color: var(--text-primary);
+    font: var(--text-micro) var(--font-mono);
   }
 
   ul {

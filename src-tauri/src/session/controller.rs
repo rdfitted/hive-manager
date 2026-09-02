@@ -15,17 +15,15 @@ use crate::coordination::queue_manager::{heartbeat_cadence_label, STUCK_CUTOFF_S
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::domain::{ArtifactBundle, HiveExecutionPolicy, HiveLaunchKind, WorkspaceStrategy};
 use crate::events::{EventBus, EventEmitter};
-use crate::orchestrator::org_graph::definitions::{
-    resolve_role_definition, role_prompt_template, ResolvedRoleDefinition,
-};
 use crate::orchestrator::org_graph::composition::{
     compose_context, render_composed_context, spawn_context_from_work_graph_task, SpawnContext,
 };
+use crate::orchestrator::org_graph::definitions::{
+    resolve_role_definition, role_prompt_template, ResolvedRoleDefinition,
+};
 use crate::orchestrator::org_graph::RoleDefinition;
 use crate::orchestrator::session_orchestrator::SessionOrchestrator;
-use crate::pty::{
-    AgentConfig, AgentRole, AgentStatus, PtyManager, RoleDefinitionRef, WorkerRole,
-};
+use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager, RoleDefinitionRef, WorkerRole};
 use crate::session::cell_status::{
     agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids,
     variant_to_cell_id, PRIMARY_CELL_ID, RESOLVER_CELL_ID,
@@ -329,19 +327,13 @@ impl SessionState {
             SessionState::WaitingForWorker(_) => SessionStateKind::WaitingForWorker,
             SessionState::SpawningPlanner(_) => SessionStateKind::SpawningPlanner,
             SessionState::WaitingForPlanner(_) => SessionStateKind::WaitingForPlanner,
-            SessionState::SpawningFusionVariant(_) => {
-                SessionStateKind::SpawningFusionVariant
-            }
-            SessionState::WaitingForFusionVariants => {
-                SessionStateKind::WaitingForFusionVariants
-            }
+            SessionState::SpawningFusionVariant(_) => SessionStateKind::SpawningFusionVariant,
+            SessionState::WaitingForFusionVariants => SessionStateKind::WaitingForFusionVariants,
             SessionState::SpawningDebateRound(_) => SessionStateKind::SpawningDebateRound,
             SessionState::WaitingForDebateRound(_) => SessionStateKind::WaitingForDebateRound,
             SessionState::SpawningJudge => SessionStateKind::SpawningJudge,
             SessionState::Judging => SessionStateKind::Judging,
-            SessionState::AwaitingVerdictSelection => {
-                SessionStateKind::AwaitingVerdictSelection
-            }
+            SessionState::AwaitingVerdictSelection => SessionStateKind::AwaitingVerdictSelection,
             SessionState::MergingWinner => SessionStateKind::MergingWinner,
             SessionState::SpawningEvaluator => SessionStateKind::SpawningEvaluator,
             SessionState::QaInProgress { .. } => SessionStateKind::QaInProgress,
@@ -371,6 +363,13 @@ impl SessionState {
                 | SessionState::QaFailed { .. }
                 | SessionState::PrinceRemediation
                 | SessionState::QaInconclusive
+        )
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            SessionState::Completed | SessionState::Closed | SessionState::Failed(_)
         )
     }
 }
@@ -737,6 +736,9 @@ pub struct SessionController {
     task_watchers: Mutex<HashMap<String, TaskFileWatcher>>,
     /// session_id -> agent_id -> heartbeat info
     agent_heartbeats: Arc<RwLock<HashMap<String, HashMap<String, AgentHeartbeatInfo>>>>,
+    /// Process-local carrier for the plan principal known only at the
+    /// plan-task-aware spawn site. Both hierarchy persistence sinks consume it.
+    principal_bindings: Arc<RwLock<HashMap<String, String>>>,
     /// Session-owned operator shells. These PTYs are deliberately separate from
     /// `Session::agents` so they never enter worker queues, artifacts, or agent trees.
     scratch_ptys: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -889,8 +891,7 @@ fn cell_status_changes_for_transition(
     // Keep cell projection behavior identical even when a transition is not yet
     // represented. The live mutator logs absent rows, while this lookup makes
     // the transition table the shared query seam for the status-change path.
-    let _transition =
-        super::transitions::transition_for(session.state.kind(), new_state.kind());
+    let _transition = super::transitions::transition_for(session.state.kind(), new_state.kind());
     let cell_ids = session_cell_ids(session);
     let before = cell_ids
         .iter()
@@ -985,6 +986,7 @@ impl SessionController {
             storage: None,
             task_watchers: Mutex::new(HashMap::new()),
             agent_heartbeats: Arc::new(RwLock::new(HashMap::new())),
+            principal_bindings: Arc::new(RwLock::new(HashMap::new())),
             scratch_ptys: Arc::new(RwLock::new(HashMap::new())),
             scratch_pty_cleanup_sessions: Arc::new(RwLock::new(HashSet::new())),
             session_lifecycle_locks: Mutex::new(HashMap::new()),
@@ -1686,8 +1688,7 @@ impl SessionController {
         let session_snapshot = {
             let mut sessions = self.sessions.write();
             sessions.get_mut(session_id).map(|session| {
-                if Self::status_counts_as_session_activity(status)
-                    && now > session.last_activity_at
+                if Self::status_counts_as_session_activity(status) && now > session.last_activity_at
                 {
                     session.last_activity_at = now;
                 }
@@ -1696,7 +1697,7 @@ impl SessionController {
         };
 
         if let (Some(storage), Some(session)) = (self.storage.as_ref(), session_snapshot.as_ref()) {
-            Self::persist_session_snapshot(storage, session, session_id)?;
+            Self::persist_session_snapshot(storage, session, session_id, &self.principal_bindings)?;
         }
         let status_changed = prev_status.as_ref().map(|s| s != status).unwrap_or(true);
         if status_changed {
@@ -1815,11 +1816,9 @@ impl SessionController {
                             let AgentRole::Worker { index, .. } = &agent.role else {
                                 return None;
                             };
-                            let task_file = Self::task_file_path_for_session_worker(
-                                session,
-                                *index as usize,
-                            )
-                            .ok()?;
+                            let task_file =
+                                Self::task_file_path_for_session_worker(session, *index as usize)
+                                    .ok()?;
                             let modified = std::fs::metadata(task_file).ok()?.modified().ok()?;
                             Some((agent.id.clone(), DateTime::<Utc>::from(modified)))
                         })
@@ -1895,11 +1894,7 @@ impl SessionController {
                     } else {
                         AgentStatus::WaitingForInput("awaiting_injected_turn".to_string())
                     };
-                    stalled.push((
-                        agent_id.clone(),
-                        awaiting_since,
-                        status,
-                    ));
+                    stalled.push((agent_id.clone(), awaiting_since, status));
                 }
             }
         }
@@ -2360,11 +2355,7 @@ impl SessionController {
         session: &mut Session,
         new_state: SessionState,
     ) -> Vec<(String, String, String)> {
-        Self::set_session_state_with_snapshot(
-            self.storage.as_deref(),
-            session,
-            new_state,
-        )
+        Self::set_session_state_with_snapshot(self.storage.as_deref(), session, new_state)
     }
 
     fn set_session_state_with_snapshot(
@@ -2509,11 +2500,7 @@ impl SessionController {
     }
 
     #[cfg(test)]
-    pub(crate) fn insert_scratch_pty_ownership_for_test(
-        &self,
-        session_id: &str,
-        pty_id: &str,
-    ) {
+    pub(crate) fn insert_scratch_pty_ownership_for_test(&self, session_id: &str, pty_id: &str) {
         self.scratch_ptys
             .write()
             .entry(session_id.to_string())
@@ -2541,15 +2528,10 @@ impl SessionController {
     }
 
     fn finish_scratch_pty_cleanup(&self, session_id: &str) {
-        self.scratch_pty_cleanup_sessions
-            .write()
-            .remove(session_id);
+        self.scratch_pty_cleanup_sessions.write().remove(session_id);
     }
 
-    pub(crate) fn scratch_pty_lifecycle_lock(
-        &self,
-        pty_id: &str,
-    ) -> Option<Arc<Mutex<()>>> {
+    pub(crate) fn scratch_pty_lifecycle_lock(&self, pty_id: &str) -> Option<Arc<Mutex<()>>> {
         let remainder = pty_id.strip_prefix("scratch:")?;
         let (session_id, unique_id) = remainder.rsplit_once(':')?;
         if session_id.is_empty() || unique_id.is_empty() {
@@ -2602,8 +2584,7 @@ impl SessionController {
                 if let Err(err) = self.persist_then_emit_session_update(id, changes) {
                     let mut sessions = self.sessions.write();
                     if let Some(session) = sessions.get_mut(id) {
-                        let _ =
-                            self.set_session_state_with_events(session, previous_session_state);
+                        let _ = self.set_session_state_with_events(session, previous_session_state);
                         session.auth_strategy = previous_auth_strategy;
                     }
                     self.finish_scratch_pty_cleanup(id);
@@ -2635,8 +2616,7 @@ impl SessionController {
             if let Err(err) = self.update_session_storage_checked(session_id) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
-                    let _ = self
-                        .set_session_state_with_events(session, previous_session_state);
+                    let _ = self.set_session_state_with_events(session, previous_session_state);
                     session.auth_strategy = previous_auth_strategy;
                 }
                 return Err(CompletionError::storage(err));
@@ -3734,6 +3714,7 @@ Last updated: {timestamp}
             &agent_id,
             "working",
             "Starting fusion variant",
+            &[],
         );
         let heartbeat_command = heartbeat_snippet(
             "http://localhost:18800",
@@ -3741,6 +3722,7 @@ Last updated: {timestamp}
             &agent_id,
             "idle",
             "Waiting for task activation",
+            &[],
         );
         let completed_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
@@ -3748,6 +3730,7 @@ Last updated: {timestamp}
             &agent_id,
             "completed",
             "Completed fusion variant",
+            &[],
         );
         let polling_instructions =
             get_polling_instructions(cli, &task_file, None, Some(&heartbeat_command));
@@ -4711,10 +4694,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         let mut variables = HashMap::new();
         variables.insert("qa_worker_index".to_string(), index.to_string());
         let qa_worker_agent_id = format!("{}-qa-worker-{}", session_id, index);
-        variables.insert(
-            "qa_worker_agent_id".to_string(),
-            qa_worker_agent_id.clone(),
-        );
+        variables.insert("qa_worker_agent_id".to_string(), qa_worker_agent_id.clone());
         variables.insert(
             "qa_worker_completed_heartbeat".to_string(),
             heartbeat_snippet(
@@ -4723,6 +4703,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
                 &qa_worker_agent_id,
                 "completed",
                 "Completed QA assignment",
+                &[],
             ),
         );
         variables.insert(
@@ -5695,13 +5676,7 @@ Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[
             ),
             Self::build_swarm_master_planner_prompt("test-swarm", "test objective", 2, &[]),
             Self::build_smoke_test_prompt("test-hive-smoke", &smoke_workers, false, None),
-            Self::build_swarm_smoke_test_prompt(
-                "test-swarm-smoke",
-                4,
-                &[],
-                false,
-                None,
-            ),
+            Self::build_swarm_smoke_test_prompt("test-swarm-smoke", 4, &[], false, None),
         ]
     }
 
@@ -5953,6 +5928,7 @@ This tests that:
                 &format!("{session_id}-worker-1"),
                 "working",
                 "Starting smoke test",
+                &[],
             ),
             smoke_worker_completed_heartbeat = heartbeat_snippet(
                 "http://localhost:18800",
@@ -5960,6 +5936,7 @@ This tests that:
                 &format!("{session_id}-worker-1"),
                 "completed",
                 "Smoke test done",
+                &[],
             ),
         )
     }
@@ -6243,6 +6220,7 @@ This tests that:
                 "queen",
                 "working",
                 "Coordinating researchers",
+                &[],
             ),
         );
         variables.insert(
@@ -6424,6 +6402,7 @@ This tests that:
             "queen",
             "working",
             "Coordinating managed principals",
+            &[],
         );
         let queen_completed_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
@@ -6431,6 +6410,7 @@ This tests that:
             "queen",
             "completed",
             "Objective and every configured gate complete",
+            &[],
         );
 
         format!(
@@ -6714,6 +6694,7 @@ When the objective and every configured gate are complete, send this `completed`
             &agent_id,
             "idle",
             "Waiting for task activation",
+            &[],
         );
         let polling_instructions = get_polling_instructions(
             &config.cli,
@@ -6727,6 +6708,7 @@ When the objective and every configured gate are complete, send this `completed`
             &agent_id,
             "working",
             "Executing assigned workstream",
+            &[],
         );
         let completed_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
@@ -6734,6 +6716,7 @@ When the objective and every configured gate are complete, send this `completed`
             &agent_id,
             "completed",
             "Completed assigned workstream",
+            &["<exact-work-graph-node-id>"],
         );
 
         let role_section = if is_research {
@@ -6764,7 +6747,7 @@ When the objective and every configured gate are complete, send this `completed`
 
 1. {validation_and_handoff_rule}
 2. Update the authoritative task file at {task_file} to `Status: COMPLETED` and add the evidence summary.
-3. Send this completed heartbeat exactly as shown:
+3. In the completed heartbeat below, replace `<exact-work-graph-node-id>` with every exact node ID completed by this assignment (never a title, label, or agent ID); if no work-graph node was assigned, remove the optional `completed_nodes` field. Then send it:
    ```bash
    {completed_heartbeat}
    ```
@@ -6781,7 +6764,7 @@ When the objective and every configured gate are complete, send this `completed`
 1. {validation_and_handoff_rule}
 2. Complete the Learnings Protocol below before changing the task status.
 3. Update the authoritative task file at {task_file} to `Status: COMPLETED` and add the result summary.
-4. Send this completed heartbeat exactly as shown:
+4. In the completed heartbeat below, replace `<exact-work-graph-node-id>` with every exact node ID completed by this assignment (never a title, label, or agent ID); if no work-graph node was assigned, remove the optional `completed_nodes` field. Then send it:
    ```bash
    {completed_heartbeat}
    ```
@@ -7352,8 +7335,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         let worker_task_file_example = "<absolute task path returned by the backend>".to_string();
         let qa_task_file_example =
             format!(".hive-manager/{}/tasks/qa-worker-N-task.md", session_id);
-        let worker_one_task_file_example =
-            "<absolute task path returned for worker 1>".to_string();
+        let worker_one_task_file_example = "<absolute task path returned for worker 1>".to_string();
 
         // Spawn Worker tool
         let spawn_worker_tool = format!(
@@ -7602,6 +7584,7 @@ curl "http://localhost:18800/api/sessions/{session_id}/workers"
             "<exact-agent-id>",
             "completed",
             "Queen verified completion: replace with concise gate evidence",
+            &[],
         );
         let mark_worker_status_tool = format!(
             r#"# Mark Worker Status Tool
@@ -7624,6 +7607,7 @@ Content-Type: application/json
 | agent_id | string | Yes | Exact full agent ID from the roster or worker API, such as `{session_id}-worker-2` or `{session_id}-fusion-1` |
 | status | string | Yes | `working` = doing work or holding the session open; `idle` = alive and blocked on another actor; `completed` = this actor is finished |
 | summary | string | No | Concise evidence-backed status summary |
+| completed_nodes | string[] | No | Exact work-graph node IDs completed by this agent; valid only with `status: completed`. Omit when no node binding is known. |
 
 ## Mark a Verified Completion
 
@@ -8417,9 +8401,7 @@ Last updated: {timestamp}
         )
         .map_err(|error| error.to_string())?;
 
-        if config.work_graph_archetype.is_some()
-            && topology.launch_kind == HiveLaunchKind::Solo
-        {
+        if config.work_graph_archetype.is_some() && topology.launch_kind == HiveLaunchKind::Solo {
             return Err(
                 "A work-graph archetype requires a Hive planning topology and cannot be coerced to Solo"
                     .to_string(),
@@ -8842,27 +8824,27 @@ Last updated: {timestamp}
                     config.smoke_test,
                 )
             })
-        .map_err(|err| {
-            {
-                let mut watchers = self.task_watchers.lock();
-                let _ = watchers.remove(&session.id);
-            }
-            {
-                let mut heartbeats = self.agent_heartbeats.write();
-                heartbeats.remove(&session.id);
-            }
-            {
-                let mut sessions = self.sessions.write();
-                sessions.remove(&session.id);
-            }
-            self.rollback_launch_allocations(
-                &project_path,
-                &session_id,
-                &created_cells,
-                &spawned_agent_ids,
-            );
-            err
-        })?;
+            .map_err(|err| {
+                {
+                    let mut watchers = self.task_watchers.lock();
+                    let _ = watchers.remove(&session.id);
+                }
+                {
+                    let mut heartbeats = self.agent_heartbeats.write();
+                    heartbeats.remove(&session.id);
+                }
+                {
+                    let mut sessions = self.sessions.write();
+                    sessions.remove(&session.id);
+                }
+                self.rollback_launch_allocations(
+                    &project_path,
+                    &session_id,
+                    &created_cells,
+                    &spawned_agent_ids,
+                );
+                err
+            })?;
 
         Ok(session)
     }
@@ -9709,11 +9691,8 @@ phases and do EXACTLY this, then stop:
         role_type: &str,
     ) -> ResolvedRoleDefinition {
         let institutional_root = self.configured_institutional_wiki_root();
-        let resolved = resolve_role_definition(
-            project_path,
-            institutional_root.as_deref(),
-            role_type,
-        );
+        let resolved =
+            resolve_role_definition(project_path, institutional_root.as_deref(), role_type);
         for issue in &resolved.issues {
             tracing::warn!(
                 role_id = %resolved.requested_id,
@@ -9726,10 +9705,7 @@ phases and do EXACTLY this, then stop:
         resolved
     }
 
-    fn attach_resolved_definition(
-        role: &mut WorkerRole,
-        resolved: &ResolvedRoleDefinition,
-    ) {
+    fn attach_resolved_definition(role: &mut WorkerRole, resolved: &ResolvedRoleDefinition) {
         role.prompt_template = Some(
             resolved
                 .definition
@@ -9737,12 +9713,14 @@ phases and do EXACTLY this, then stop:
                 .and_then(|definition| definition.prompt_template.clone())
                 .unwrap_or_else(|| role_prompt_template(&role.role_type)),
         );
-        role.resolved_definition = resolved.definition.as_ref().map(|definition| {
-            RoleDefinitionRef {
-                id: definition.id.clone(),
-                version: definition.version,
-            }
-        });
+        role.resolved_definition =
+            resolved
+                .definition
+                .as_ref()
+                .map(|definition| RoleDefinitionRef {
+                    id: definition.id.clone(),
+                    version: definition.version,
+                });
     }
 
     /// Load only the task-scoped knowledge edges for an explicitly identified
@@ -9786,6 +9764,40 @@ phases and do EXACTLY this, then stop:
             return SpawnContext::default();
         }
         spawn_context_from_work_graph_task(&composition.graph, plan_task_id)
+    }
+
+    fn principal_binding_for_plan_task(
+        &self,
+        session_id: &str,
+        plan_task_id: Option<&str>,
+    ) -> Option<String> {
+        let plan_task_id = plan_task_id.map(str::trim).filter(|id| !id.is_empty())?;
+        let storage = self.storage.as_ref()?;
+        let state_manager = StateManager::new(storage.session_dir(session_id));
+        let graph = match state_manager.read_work_graph() {
+            Ok(Some(graph)) => graph,
+            Ok(None) => {
+                state_manager
+                    .read_graph_composition_state()
+                    .ok()
+                    .flatten()?
+                    .graph
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    plan_task_id,
+                    "Failed to read work graph for principal binding: {error}"
+                );
+                return None;
+            }
+        };
+        let node = graph.nodes.iter().find(|node| node.id == plan_task_id)?;
+        let principal = match &node.binding {
+            crate::orchestrator::work_graph::BindingRef::Role(principal)
+            | crate::orchestrator::work_graph::BindingRef::Zone(principal) => principal.trim(),
+        };
+        (!principal.is_empty()).then(|| principal.to_string())
     }
 
     fn planning_codegraph_artifact_path(project_path: &Path, session_id: &str) -> PathBuf {
@@ -9880,7 +9892,10 @@ phases and do EXACTLY this, then stop:
             .agents
             .iter()
             .filter(|agent| {
-                matches!(agent.role, AgentRole::MasterPlanner | AgentRole::Planner { .. })
+                matches!(
+                    agent.role,
+                    AgentRole::MasterPlanner | AgentRole::Planner { .. }
+                )
             })
             .map(|agent| agent.id.clone())
             .collect();
@@ -9892,11 +9907,9 @@ phases and do EXACTLY this, then stop:
             .collect();
         if path.exists() {
             let existing: crate::orchestrator::work_graph::archive::RetroEvaluatorProvenance =
-                serde_json::from_str(
-                    &std::fs::read_to_string(&path).map_err(|error| {
-                        format!("Failed to read existing retro evaluator provenance: {error}")
-                    })?,
-                )
+                serde_json::from_str(&std::fs::read_to_string(&path).map_err(|error| {
+                    format!("Failed to read existing retro evaluator provenance: {error}")
+                })?)
                 .map_err(|error| {
                     format!("Failed to parse existing retro evaluator provenance: {error}")
                 })?;
@@ -9930,7 +9943,8 @@ phases and do EXACTLY this, then stop:
         session_id: &str,
         archetype_id: Option<&str>,
         session_parameters: &BTreeMap<String, String>,
-    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String> {
+    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String>
+    {
         let Some(archetype_id) = archetype_id else {
             return Ok(None);
         };
@@ -9947,16 +9961,15 @@ phases and do EXACTLY this, then stop:
         )
         .map_err(|error| format!("Failed to load the planning codegraph artifact: {error}"))?;
         let institutional_wiki_root = self.configured_institutional_wiki_root();
-        let composition =
-            crate::orchestrator::work_graph::runtime::compose_initial_work_graph(
-                crate::orchestrator::work_graph::TaskGraph::default(),
-                project_path,
-                institutional_wiki_root.as_deref(),
-                Some(archetype_id),
-                session_parameters,
-                &resolver,
-            )
-            .map_err(|error| format!("Failed to compose initial work graph: {error}"))?;
+        let composition = crate::orchestrator::work_graph::runtime::compose_initial_work_graph(
+            crate::orchestrator::work_graph::TaskGraph::default(),
+            project_path,
+            institutional_wiki_root.as_deref(),
+            Some(archetype_id),
+            session_parameters,
+            &resolver,
+        )
+        .map_err(|error| format!("Failed to compose initial work graph: {error}"))?;
         StateManager::new(storage.session_dir(session_id))
             .write_graph_composition_state(&composition)
             .map_err(|error| format!("Failed to persist initial work-graph skeleton: {error}"))?;
@@ -9999,7 +10012,8 @@ The backend composed and persisted the following authoritative skeleton before l
     pub(crate) fn reconcile_planner_graph_with_persisted_skeleton(
         state_manager: &StateManager,
         planner_graph: &crate::orchestrator::work_graph::TaskGraph,
-    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String> {
+    ) -> Result<Option<crate::orchestrator::work_graph::runtime::GraphCompositionState>, String>
+    {
         let Some(persisted) = state_manager
             .read_graph_composition_state()
             .map_err(|error| format!("Failed to read initial work-graph skeleton: {error}"))?
@@ -11643,8 +11657,12 @@ The backend composed and persisted the following authoritative skeleton before l
         };
 
         if let Some(storage) = self.storage.as_ref() {
-            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id)
-            {
+            if let Err(err) = Self::persist_session_snapshot(
+                storage,
+                &updated_session,
+                session_id,
+                &self.principal_bindings,
+            ) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
                     *session = previous_session;
@@ -11724,8 +11742,12 @@ The backend composed and persisted the following authoritative skeleton before l
         };
 
         if let Some(storage) = self.storage.as_ref() {
-            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id)
-            {
+            if let Err(err) = Self::persist_session_snapshot(
+                storage,
+                &updated_session,
+                session_id,
+                &self.principal_bindings,
+            ) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
                     *session = previous_session;
@@ -11819,8 +11841,12 @@ The backend composed and persisted the following authoritative skeleton before l
         };
 
         if let Some(storage) = self.storage.as_ref() {
-            if let Err(err) = Self::persist_session_snapshot(storage, &updated_session, session_id)
-            {
+            if let Err(err) = Self::persist_session_snapshot(
+                storage,
+                &updated_session,
+                session_id,
+                &self.principal_bindings,
+            ) {
                 let mut sessions = self.sessions.write();
                 if let Some(session) = sessions.get_mut(session_id) {
                     *session = previous_session;
@@ -12169,6 +12195,7 @@ The backend composed and persisted the following authoritative skeleton before l
         let app_handle = self.app_handle.clone();
         let event_emitter = self.event_emitter.clone();
         let storage = self.storage.clone();
+        let principal_bindings = Arc::clone(&self.principal_bindings);
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
@@ -12213,6 +12240,7 @@ The backend composed and persisted the following authoritative skeleton before l
                             storage,
                             &updated_session,
                             &sid,
+                            &principal_bindings,
                         ) {
                             tracing::warn!(
                                 "Failed to persist QA timeout state for {}: {}",
@@ -13388,9 +13416,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let examples = duplicate_nodes
                 .iter()
                 .map(|task_id| {
-                    format!(
-                        "duplicate task {task_id} was omitted after its first declaration"
-                    )
+                    format!("duplicate task {task_id} was omitted after its first declaration")
                 })
                 .collect::<Vec<_>>();
             tracing::warn!(
@@ -13419,9 +13445,7 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let quarantined =
-            crate::orchestrator::work_graph::validate::quarantine_dangling_dependencies(
-                &mut graph,
-            );
+            crate::orchestrator::work_graph::validate::quarantine_dangling_dependencies(&mut graph);
         if !quarantined.is_empty() {
             let examples = quarantined
                 .iter()
@@ -13451,8 +13475,10 @@ The backend composed and persisted the following authoritative skeleton before l
                     tracing::warn!(session_id, warning = %warning, "PlanReady validation warning");
                 }
             }
-            Err(error @ (PlanReadyError::DuplicateTaskIds { .. }
-            | PlanReadyError::DanglingDependencies { .. })) => {
+            Err(
+                error @ (PlanReadyError::DuplicateTaskIds { .. }
+                | PlanReadyError::DanglingDependencies { .. }),
+            ) => {
                 let message = error.to_string();
                 tracing::warn!(
                     session_id,
@@ -13465,13 +13491,15 @@ The backend composed and persisted the following authoritative skeleton before l
                     vec![message],
                 ));
             }
-            Err(error @ (PlanReadyError::Cycle { .. }
-            | PlanReadyError::MissingVerificationSignal { .. }
-            | PlanReadyError::MissingVerificationSignalClass { .. }
-            | PlanReadyError::InsufficientVerificationIsolation { .. }
-            | PlanReadyError::InvalidReviewAuthorityMetadata { .. }
-            | PlanReadyError::MissingAdjudicator { .. }
-            | PlanReadyError::AdjudicatorLacksAuthority { .. })) => {
+            Err(
+                error @ (PlanReadyError::Cycle { .. }
+                | PlanReadyError::MissingVerificationSignal { .. }
+                | PlanReadyError::MissingVerificationSignalClass { .. }
+                | PlanReadyError::InsufficientVerificationIsolation { .. }
+                | PlanReadyError::InvalidReviewAuthorityMetadata { .. }
+                | PlanReadyError::MissingAdjudicator { .. }
+                | PlanReadyError::AdjudicatorLacksAuthority { .. }),
+            ) => {
                 return Err(error.to_string());
             }
         }
@@ -13486,6 +13514,8 @@ The backend composed and persisted the following authoritative skeleton before l
             ));
             tracing::warn!(session_id, omission = message);
         }
+
+        crate::orchestrator::work_graph::runtime::dedupe_graph_omissions(&mut graph);
 
         if let Some(composition) = reconciled_composition.as_mut() {
             composition.graph = graph.clone();
@@ -13534,7 +13564,12 @@ The backend composed and persisted the following authoritative skeleton before l
             let previous_session = session.clone();
             let changes = self.set_session_state_with_events(session, SessionState::PlanReady);
             if let Some(storage) = self.storage.as_ref() {
-                if let Err(error) = Self::persist_session_snapshot(storage, session, session_id) {
+                if let Err(error) = Self::persist_session_snapshot(
+                    storage,
+                    session,
+                    session_id,
+                    &self.principal_bindings,
+                ) {
                     *session = previous_session;
                     Self::emit_work_graph_snapshot_for_session_state(
                         Some(storage.as_ref()),
@@ -13762,12 +13797,14 @@ The backend composed and persisted the following authoritative skeleton before l
                         label: pa.config.label.clone().unwrap_or_default(),
                         default_cli: pa.config.cli.clone(),
                         prompt_template: Some(role_prompt_template(rt)),
-                        resolved_definition: pa.role_definition_id.as_ref().zip(
-                            pa.role_definition_version,
-                        ).map(|(id, version)| RoleDefinitionRef {
-                            id: id.clone(),
-                            version,
-                        }),
+                        resolved_definition: pa
+                            .role_definition_id
+                            .as_ref()
+                            .zip(pa.role_definition_version)
+                            .map(|(id, version)| RoleDefinitionRef {
+                                id: id.clone(),
+                                version,
+                            }),
                     }),
                     initial_prompt: pa.config.initial_prompt.clone(),
                 };
@@ -14264,7 +14301,10 @@ The backend composed and persisted the following authoritative skeleton before l
                 AgentRole::Queen | AgentRole::Planner { .. } | AgentRole::Prince
             ) {
                 return Err(AddWorkerRejection {
-                    error: format!("Agent {} cannot parent a managed principal", explicit_parent),
+                    error: format!(
+                        "Agent {} cannot parent a managed principal",
+                        explicit_parent
+                    ),
                     reason: AddWorkerRejectionReason::ParentCannotParent,
                     current_state: format!("{:?}", session.state),
                 });
@@ -14350,9 +14390,7 @@ The backend composed and persisted the following authoritative skeleton before l
             let agent = session
                 .agents
                 .iter()
-                .find(|a| {
-                    a.id == worker_id && matches!(a.role, AgentRole::Worker { .. })
-                })
+                .find(|a| a.id == worker_id && matches!(a.role, AgentRole::Worker { .. }))
                 .ok_or_else(|| {
                     format!(
                         "Worker {} is not a rostered worker of session {}",
@@ -14508,14 +14546,7 @@ The backend composed and persisted the following authoritative skeleton before l
         parent_id: Option<String>,
         expected_index: Option<u8>,
     ) -> Result<AgentInfo, String> {
-        self.add_worker_for_plan_task(
-            session_id,
-            config,
-            role,
-            parent_id,
-            expected_index,
-            None,
-        )
+        self.add_worker_for_plan_task(session_id, config, role, parent_id, expected_index, None)
     }
 
     /// Add a worker with an explicit work-graph binding. The ID is transported verbatim;
@@ -14535,6 +14566,8 @@ The backend composed and persisted the following authoritative skeleton before l
             sessions.get(session_id).cloned()
         }
         .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+        let principal_binding = self.principal_binding_for_plan_task(session_id, plan_task_id);
 
         Self::check_add_worker_preconditions(&session, &role, parent_id.as_deref())
             .map_err(|rejection| rejection.error)?;
@@ -14743,6 +14776,12 @@ The backend composed and persisted the following authoritative skeleton before l
             base_commit_sha: worker_base_commit_sha,
         };
 
+        if let Some(principal) = principal_binding {
+            self.principal_bindings
+                .write()
+                .insert(worker_id.clone(), principal);
+        }
+
         // Update session
         {
             let mut sessions = self.sessions.write();
@@ -14821,22 +14860,23 @@ The backend composed and persisted the following authoritative skeleton before l
         // written `SpawningEvaluator`, so a respawn from `QaFailed { iteration: 2 }`
         // fell to the catch-all arm and reset the counter to `None`, defeating the
         // max-retries ceiling.
-        let (previous_state, spawning_changes) = {
-            let mut sessions = self.sessions.write();
-            if let Some(current) = sessions.get_mut(session_id) {
-                let previous_state = current.state.clone();
-                current.agents.retain(|agent| agent.id != evaluator_id);
-                (
-                    Some(previous_state),
-                    Some(self.set_session_state_with_events(
-                        current,
-                        SessionState::SpawningEvaluator,
-                    )),
-                )
-            } else {
-                (None, None)
-            }
-        };
+        let (previous_state, spawning_changes) =
+            {
+                let mut sessions = self.sessions.write();
+                if let Some(current) = sessions.get_mut(session_id) {
+                    let previous_state = current.state.clone();
+                    current.agents.retain(|agent| agent.id != evaluator_id);
+                    (
+                        Some(previous_state),
+                        Some(self.set_session_state_with_events(
+                            current,
+                            SessionState::SpawningEvaluator,
+                        )),
+                    )
+                } else {
+                    (None, None)
+                }
+            };
         self.emit_session_update(session_id);
         self.update_session_storage(session_id);
         if let Some(changes) = spawning_changes {
@@ -15501,6 +15541,7 @@ The backend composed and persisted the following authoritative skeleton before l
             }
 
             // Build hierarchy nodes
+            let principal_bindings = self.principal_bindings.read();
             let hierarchy: Vec<HierarchyNode> = session
                 .agents
                 .iter()
@@ -15517,6 +15558,7 @@ The backend composed and persisted the following authoritative skeleton before l
                     HierarchyNode {
                         id: agent.id.clone(),
                         role: role_str,
+                        principal: principal_bindings.get(&agent.id).cloned(),
                         parent_id: agent.parent_id.clone(),
                         children,
                     }
@@ -15614,7 +15656,12 @@ The backend composed and persisted the following authoritative skeleton before l
                 session.clone()
             };
 
-            Self::persist_session_snapshot(storage, &session, session_id)?;
+            Self::persist_session_snapshot(
+                storage,
+                &session,
+                session_id,
+                &self.principal_bindings,
+            )?;
         }
 
         Ok(())
@@ -15624,12 +15671,28 @@ The backend composed and persisted the following authoritative skeleton before l
         storage: &SessionStorage,
         session: &Session,
         session_id: &str,
+        principal_bindings: &RwLock<HashMap<String, String>>,
     ) -> Result<(), String> {
         let persisted = Self::session_to_persisted_snapshot(session);
         storage
             .save_session(&persisted)
             .map_err(|e| format!("Failed to update session metadata: {}", e))?;
 
+        let state_manager = StateManager::new(storage.session_dir(session_id));
+        let persisted_principals: HashMap<String, String> = match state_manager.read_hierarchy() {
+            Ok(hierarchy) => hierarchy
+                .into_iter()
+                .filter_map(|node| node.principal.map(|principal| (node.id, principal)))
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    "Failed to preserve existing hierarchy principals: {error}"
+                );
+                HashMap::new()
+            }
+        };
+        let principal_bindings = principal_bindings.read();
         let hierarchy: Vec<HierarchyNode> = session
             .agents
             .iter()
@@ -15646,6 +15709,10 @@ The backend composed and persisted the following authoritative skeleton before l
                 HierarchyNode {
                     id: agent.id.clone(),
                     role: role_str,
+                    principal: principal_bindings
+                        .get(&agent.id)
+                        .cloned()
+                        .or_else(|| persisted_principals.get(&agent.id).cloned()),
                     parent_id: agent.parent_id.clone(),
                     children,
                 }
@@ -15667,7 +15734,6 @@ The backend composed and persisted the following authoritative skeleton before l
             })
             .collect();
 
-        let state_manager = StateManager::new(storage.session_dir(session_id));
         if let Err(e) = state_manager.update_hierarchy(&hierarchy) {
             tracing::warn!("Failed to update hierarchy: {}", e);
         }
@@ -15897,12 +15963,19 @@ mod tests {
         SessionError, SessionState, SessionType,
     };
     use super::{heartbeat_cadence_label, CliBehavior, CliRegistry};
+    use crate::coordination::StateManager;
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::orchestrator::org_graph::composition::SpawnContext;
+    use crate::orchestrator::work_graph::{
+        BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkGraphOmission,
+        WorkGraphOmissionReason, WorkNode,
+    };
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
+    use crate::storage::SessionStorage;
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
@@ -15970,6 +16043,207 @@ mod tests {
     }
 
     #[test]
+    fn terminal_session_state_excludes_the_closing_transition() {
+        assert!(SessionState::Completed.is_terminal());
+        assert!(SessionState::Closed.is_terminal());
+        assert!(SessionState::Failed("failure".to_string()).is_terminal());
+        assert!(!SessionState::Closing.is_terminal());
+        assert!(!SessionState::Running.is_terminal());
+    }
+
+    #[test]
+    fn plan_task_spawn_persists_principal_only_for_the_spawned_worker() {
+        const SESSION_ID: &str = "principal-spawn";
+        let temp = tempfile::tempdir().expect("temporary principal fixture");
+        let project_path = temp.path().join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        let storage = Arc::new(
+            SessionStorage::new_with_base(temp.path().join("storage"))
+                .expect("isolated session storage"),
+        );
+        let session_dir = storage
+            .create_session_dir(SESSION_ID)
+            .expect("session state directory");
+        StateManager::new(session_dir.clone())
+            .write_work_graph(&TaskGraph::new(
+                vec![WorkNode::new(
+                    "T1",
+                    NodeKind::Task,
+                    "Principal-owned task",
+                    NodeContract::default(),
+                    BindingRef::Role("P1".to_string()),
+                    NodeStatus::Ready,
+                )],
+                Vec::new(),
+            ))
+            .unwrap();
+
+        let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+        controller.set_storage(Arc::clone(&storage));
+        let mut session =
+            test_completion_session(SESSION_ID, SessionState::Running, Utc::now(), false);
+        session.session_type = SessionType::Hive { worker_count: 2 };
+        session.project_path = project_path.clone();
+        session.execution_policy.workspace_strategy = WorkspaceStrategy::SharedCell;
+        session.worktree_path = Some(project_path.to_string_lossy().to_string());
+        session.agents = vec![
+            AgentInfo {
+                id: format!("{SESSION_ID}-queen"),
+                role: AgentRole::Queen,
+                status: AgentStatus::Running,
+                config: AgentConfig::default(),
+                parent_id: None,
+                role_definition_id: None,
+                role_definition_version: None,
+                commit_sha: None,
+                base_commit_sha: None,
+            },
+            AgentInfo {
+                id: format!("{SESSION_ID}-worker-1"),
+                role: AgentRole::Worker {
+                    index: 1,
+                    parent: Some(format!("{SESSION_ID}-queen")),
+                },
+                status: AgentStatus::Running,
+                config: AgentConfig::default(),
+                parent_id: Some(format!("{SESSION_ID}-queen")),
+                role_definition_id: None,
+                role_definition_version: None,
+                commit_sha: None,
+                base_commit_sha: None,
+            },
+            AgentInfo {
+                id: format!("{SESSION_ID}-worker-2"),
+                role: AgentRole::Worker {
+                    index: 2,
+                    parent: Some(format!("{SESSION_ID}-queen")),
+                },
+                status: AgentStatus::Running,
+                config: AgentConfig::default(),
+                parent_id: Some(format!("{SESSION_ID}-queen")),
+                role_definition_id: None,
+                role_definition_version: None,
+                commit_sha: None,
+                base_commit_sha: None,
+            },
+        ];
+        controller.insert_test_session(session);
+
+        let test_cli = std::env::current_exe()
+            .expect("current test executable")
+            .to_string_lossy()
+            .into_owned();
+        let worker_config = AgentConfig {
+            cli: test_cli.clone(),
+            ..AgentConfig::default()
+        };
+
+        let spawned = controller
+            .add_worker_for_plan_task(
+                SESSION_ID,
+                worker_config,
+                WorkerRole::new("general", "General", &test_cli),
+                None,
+                Some(3),
+                Some("T1"),
+            )
+            .expect("plan-task-aware worker spawn");
+        assert_eq!(spawned.id, format!("{SESSION_ID}-worker-3"));
+
+        let hierarchy = StateManager::new(session_dir).read_hierarchy().unwrap();
+        assert_eq!(
+            hierarchy
+                .iter()
+                .find(|node| node.id == spawned.id)
+                .expect("spawned worker hierarchy node")
+                .principal
+                .as_deref(),
+            Some("P1")
+        );
+        assert!(hierarchy
+            .iter()
+            .filter(|node| node.id != spawned.id)
+            .all(|node| node.principal.is_none()));
+    }
+
+    #[test]
+    fn mark_plan_ready_dedupes_omissions_appended_after_reconciliation() {
+        const SESSION_ID: &str = "phase-b-omission-retry";
+        let temp = tempfile::tempdir().expect("temporary plan fixture");
+        let project_path = temp.path().join("project");
+        let project_session_dir = project_path.join(".hive-manager").join(SESSION_ID);
+        std::fs::create_dir_all(&project_session_dir).unwrap();
+        std::fs::write(
+            project_session_dir.join("plan.md"),
+            "# Reconciled plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design, MISSING)\n",
+        )
+        .unwrap();
+
+        let storage = Arc::new(
+            SessionStorage::new_with_base(temp.path().join("storage"))
+                .expect("isolated session storage"),
+        );
+        storage
+            .create_session_dir(SESSION_ID)
+            .expect("session state directory");
+        let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+        controller.set_storage(Arc::clone(&storage));
+        let mut session =
+            test_completion_session(SESSION_ID, SessionState::Planning, Utc::now(), false);
+        session.session_type = SessionType::Hive { worker_count: 0 };
+        session.project_path = project_path.clone();
+        session.no_git = true;
+        controller.insert_test_session(session);
+        controller
+            .prepare_initial_work_graph(
+                &project_path,
+                SESSION_ID,
+                Some("feature-build"),
+                &BTreeMap::from([("component".to_string(), "billing".to_string())]),
+            )
+            .unwrap();
+
+        let state_manager = StateManager::new(storage.session_dir(SESSION_ID));
+        let duplicate = WorkGraphOmission::new(
+            WorkGraphOmissionReason::ResolutionIncomplete,
+            1,
+            vec!["T1 depends on unknown MISSING".to_string()],
+        );
+        let mut persisted = state_manager
+            .read_graph_composition_state()
+            .unwrap()
+            .unwrap();
+        persisted.graph.omissions.push(duplicate.clone());
+        state_manager
+            .write_graph_composition_state(&persisted)
+            .unwrap();
+
+        controller
+            .mark_plan_ready(SESSION_ID)
+            .expect("a retry after a partial persist reaches PlanReady");
+
+        let authoritative = state_manager.read_work_graph().unwrap().unwrap();
+        assert_eq!(
+            authoritative
+                .omissions
+                .iter()
+                .filter(|omission| **omission == duplicate)
+                .count(),
+            1,
+            "the post-reconciliation quarantine must not duplicate a persisted omission"
+        );
+        assert_eq!(
+            state_manager
+                .read_graph_composition_state()
+                .unwrap()
+                .unwrap()
+                .graph,
+            authoritative,
+            "both persisted graph representations must contain the same deduped omissions"
+        );
+    }
+
+    #[test]
     fn heartbeat_activity_semantics_only_exempt_completed_status() {
         assert!(SessionController::status_counts_as_session_activity(
             "working"
@@ -16006,10 +16280,8 @@ mod tests {
         }
         drop(heartbeats);
 
-        let stalled = controller.get_stalled_agents(
-            "session-stall",
-            std::time::Duration::from_secs(30),
-        );
+        let stalled =
+            controller.get_stalled_agents("session-stall", std::time::Duration::from_secs(30));
         assert_eq!(stalled.len(), 1);
         assert_eq!(stalled[0].0, "session-stall-worker-1");
     }
@@ -16275,9 +16547,7 @@ mod tests {
         assert!(prompt.contains("/repo/execution"));
         assert!(!prompt.contains("UI Tester"));
         assert!(prompt.contains("## Completion Protocol (MANDATORY)"));
-        assert!(
-            prompt.contains(".hive-manager/session-123/tasks/qa-worker-1-task.md")
-        );
+        assert!(prompt.contains(".hive-manager/session-123/tasks/qa-worker-1-task.md"));
         assert!(prompt.contains(r#""agent_id":"session-123-qa-worker-1""#));
         assert!(prompt.contains(r#""status":"completed""#));
         assert!(!prompt.contains("{{qa_worker_completed_heartbeat}}"));
@@ -16295,10 +16565,8 @@ mod tests {
                 "/repo/execution",
             );
 
-            let completion = extract_markdown_section(
-                &prompt,
-                "## Completion Protocol (MANDATORY)",
-            );
+            let completion =
+                extract_markdown_section(&prompt, "## Completion Protocol (MANDATORY)");
             assert!(
                 completion.contains(r#""agent_id":"session-qa-qa-worker-3""#),
                 "missing exact agent ID for {specialization}"
@@ -16781,6 +17049,8 @@ mod tests {
         assert!(status_content.contains("`working` = doing work or holding the session open"));
         assert!(status_content.contains("`idle` = alive and blocked on another actor"));
         assert!(status_content.contains("`completed` = this actor is finished"));
+        assert!(status_content.contains("| completed_nodes | string[] | No |"));
+        assert!(status_content.contains("Exact work-graph node IDs"));
         assert!(status_content.contains(
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
@@ -16919,7 +17189,8 @@ mod tests {
         assert!(prompt.contains("may stay pending up to ~3000 ms across two confirmation windows"));
         assert!(prompt.contains("pty_activity_observed"));
         assert!(prompt.contains("do **not** prove that the agent took a turn"));
-        assert!(prompt.contains("`submit_confirmed: true` is not proof that a busy receiver accepted Enter"));
+        assert!(prompt
+            .contains("`submit_confirmed: true` is not proof that a busy receiver accepted Enter"));
         assert!(!prompt.contains("payload and its newline share one PTY write"));
         assert!(!prompt.contains("send a second, empty message"));
         assert!(!prompt.contains("Measured against a live codex agent"));
@@ -16975,6 +17246,12 @@ mod tests {
         assert!(shared_prompt.contains("Completion Protocol (MANDATORY)"));
         assert!(shared_prompt.contains(r#""agent_id":"session-modern-worker-1""#));
         assert!(shared_prompt.contains(r#""status":"completed""#));
+        let completion_protocol =
+            extract_markdown_section(&shared_prompt, "## Completion Protocol (MANDATORY)");
+        assert!(completion_protocol.contains(r#""completed_nodes":["<exact-work-graph-node-id>"]"#));
+        assert!(completion_protocol.contains(
+            "every exact node ID completed by this assignment (never a title, label, or agent ID)"
+        ));
         assert!(shared_prompt.contains("Begin only when Status is ACTIVE"));
         assert!(shared_prompt.contains("Queue Activation"));
         assert!(shared_prompt.contains("human-readable mirror"));
@@ -16999,8 +17276,9 @@ mod tests {
             &isolated_policy,
         );
         assert!(isolated_prompt.contains("Commit the completed assignment"));
-        assert!(isolated_prompt
-            .contains("commit SHA when applicable plus focused validation evidence"));
+        assert!(
+            isolated_prompt.contains("commit SHA when applicable plus focused validation evidence")
+        );
         assert!(isolated_prompt.contains("Do not create or switch branches"));
 
         let no_workspace_policy = HiveExecutionPolicy {
@@ -17490,12 +17768,8 @@ mod tests {
         for (session_id, close) in [("scratch-stop", false), ("scratch-close", true)] {
             let temp_dir = tempfile::tempdir().expect("temp project dir");
             let controller = test_controller();
-            let mut session = test_completion_session(
-                session_id,
-                SessionState::Running,
-                Utc::now(),
-                false,
-            );
+            let mut session =
+                test_completion_session(session_id, SessionState::Running, Utc::now(), false);
             session.project_path = temp_dir.path().to_path_buf();
             controller.insert_test_session(session);
 
@@ -17503,13 +17777,11 @@ mod tests {
             controller
                 .register_scratch_pty(session_id, pty_id.clone())
                 .expect("scratch PTY should be owned by its session");
-            assert!(
-                controller
-                    .scratch_ptys
-                    .read()
-                    .get(session_id)
-                    .is_some_and(|ids| ids.contains(&pty_id))
-            );
+            assert!(controller
+                .scratch_ptys
+                .read()
+                .get(session_id)
+                .is_some_and(|ids| ids.contains(&pty_id)));
 
             if close {
                 controller

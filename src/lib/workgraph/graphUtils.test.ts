@@ -35,21 +35,52 @@ describe('workgraph graphUtils', () => {
 
     expect(calculateWaveStatistics(waves, new Set(['T1', 'T2', 'T3']))).toEqual({
       nodesComplete: 3,
+      nodesObserved: 0,
+      nodesInferred: 0,
       nodesTotal: 4,
       wavesComplete: 2,
       wavesTotal: 3,
     });
     expect(calculateWaveStatistics(waves, new Set(['T1', 'T2', 'T3', 'T4']))).toEqual({
       nodesComplete: 4,
+      nodesObserved: 0,
+      nodesInferred: 0,
       nodesTotal: 4,
       wavesComplete: 3,
       wavesTotal: 3,
     });
     expect(calculateWaveStatistics([], new Set())).toEqual({
       nodesComplete: 0,
+      nodesObserved: 0,
+      nodesInferred: 0,
       nodesTotal: 0,
       wavesComplete: 0,
       wavesTotal: 0,
+    });
+  });
+
+  it('calculateWaveStatistics separates direct evidence from lane inference', () => {
+    const waves = [['declared', 'queue'], ['observed', 'inferred', 'plan']] as const;
+
+    expect(
+      calculateWaveStatistics(
+        waves,
+        new Set(['declared', 'queue', 'observed', 'inferred', 'plan']),
+        {
+          declared: 'declared',
+          queue: 'queue',
+          observed: 'observed',
+          inferred: 'inferred',
+          plan: 'plan',
+        },
+      ),
+    ).toEqual({
+      nodesComplete: 5,
+      nodesObserved: 3,
+      nodesInferred: 1,
+      nodesTotal: 5,
+      wavesComplete: 2,
+      wavesTotal: 2,
     });
   });
 

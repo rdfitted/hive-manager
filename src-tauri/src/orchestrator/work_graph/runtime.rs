@@ -14,32 +14,30 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::domain::event::{Event, EventType};
-use crate::domain::run_journal::{
-    Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus,
-};
+use crate::domain::run_journal::{Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus};
 use crate::orchestrator::org_graph::adjudication::{
-    adjudicate_contradiction, AdjudicationDeclaration, AdjudicationError,
-    AdjudicationRecord, AdjudicationResolution, SourceVerdict, SourceVerdictValue,
+    adjudicate_contradiction, AdjudicationDeclaration, AdjudicationError, AdjudicationRecord,
+    AdjudicationResolution, SourceVerdict, SourceVerdictValue,
 };
 
-use super::review::{
-    instantiate_checkpoint_wave, instantiate_review_templates, route_failed_verdict,
-    CheckpointWave, ReviewExpansion, ReviewGraphError, ReviewRoundExpansion,
-    ReviewExpansionSidecar, ReviewTemplate,
-};
 use super::archetypes::{
     instantiate_named_archetype_into, reconcile_planner_graph, stamp_checkpoint_waves,
     ArchetypeError, ArchetypeLineage, RepoShapeFactsProvider,
 };
 use super::codegraph::{derive_codegraph_touches, CodegraphDerivationReport};
+use super::completion_ledger::NodeCompletionFact;
 use super::context::{
     derive_project_context_from_coverage, ContextDerivationReport, TouchesResolver,
 };
 use super::plan_parse::promote_initial_ready_nodes;
+use super::review::{
+    instantiate_checkpoint_wave, instantiate_review_templates, route_failed_verdict,
+    CheckpointWave, ReviewExpansion, ReviewExpansionSidecar, ReviewGraphError,
+    ReviewRoundExpansion, ReviewTemplate,
+};
 use super::schema::{
-    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
-    TaskGraph, TaskId, WorkEdge, WorkGraph, WorkGraphOmission,
-    WorkGraphOmissionReason, WorkNode,
+    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, TaskId,
+    WorkEdge, WorkGraph, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
 };
 
 pub const RUNTIME_OBSERVATION_PREFIX: &str = "runtime:";
@@ -65,7 +63,9 @@ pub enum GraphCompositionError {
 impl fmt::Display for GraphCompositionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Archetype(error) => write!(formatter, "graph archetype composition failed: {error}"),
+            Self::Archetype(error) => {
+                write!(formatter, "graph archetype composition failed: {error}")
+            }
             Self::Review(error) => write!(formatter, "graph review composition failed: {error}"),
         }
     }
@@ -98,30 +98,28 @@ pub fn compose_initial_work_graph<R>(
 where
     R: TouchesResolver + RepoShapeFactsProvider,
 {
-    let (mut graph, lineage, review_templates, checkpoints) = if let Some(archetype_id) = archetype_id {
-        let stage = instantiate_named_archetype_into(
-            base_graph,
-            project_path,
-            institutional_wiki_root,
-            archetype_id,
-            session_parameters,
-            resolver,
-        )?;
-        (
-            stage.instance.graph,
-            Some(stage.instance.lineage),
-            stage.review_templates,
-            stage.checkpoints,
-        )
-    } else {
-        (base_graph, None, Vec::new(), Vec::new())
-    };
+    let (mut graph, lineage, review_templates, checkpoints) =
+        if let Some(archetype_id) = archetype_id {
+            let stage = instantiate_named_archetype_into(
+                base_graph,
+                project_path,
+                institutional_wiki_root,
+                archetype_id,
+                session_parameters,
+                resolver,
+            )?;
+            (
+                stage.instance.graph,
+                Some(stage.instance.lineage),
+                stage.review_templates,
+                stage.checkpoints,
+            )
+        } else {
+            (base_graph, None, Vec::new(), Vec::new())
+        };
     let codegraph = derive_codegraph_touches(&mut graph, resolver);
-    let context = derive_project_context_from_coverage(
-        &mut graph,
-        project_path,
-        &codegraph.coverage(),
-    );
+    let context =
+        derive_project_context_from_coverage(&mut graph, project_path, &codegraph.coverage());
     let expansions = instantiate_review_templates(&mut graph, &review_templates)?;
     let reviews = ReviewExpansionSidecar::from_expansions(&review_templates, expansions)?;
     stamp_checkpoint_waves(&mut graph, &checkpoints)?;
@@ -149,7 +147,7 @@ pub fn reconcile_composed_work_graph(
     Ok(reconciled)
 }
 
-fn dedupe_graph_omissions(graph: &mut TaskGraph) {
+pub(crate) fn dedupe_graph_omissions(graph: &mut TaskGraph) {
     let mut unique = Vec::new();
     for omission in graph.omissions.drain(..) {
         if !unique.contains(&omission) {
@@ -188,8 +186,7 @@ pub struct GraphMutationDelta {
     pub source_refs: Vec<String>,
 }
 
-static MUTATION_LOGS: OnceLock<Mutex<HashMap<String, Vec<GraphMutationDelta>>>> =
-    OnceLock::new();
+static MUTATION_LOGS: OnceLock<Mutex<HashMap<String, Vec<GraphMutationDelta>>>> = OnceLock::new();
 
 fn mutation_logs() -> &'static Mutex<HashMap<String, Vec<GraphMutationDelta>>> {
     MUTATION_LOGS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -308,13 +305,7 @@ where
         }
     };
     mark_new_edges_runtime(&before, graph);
-    let delta = match record_graph_change(
-        session_id,
-        mutation_type,
-        &before,
-        graph,
-        source_refs,
-    ) {
+    let delta = match record_graph_change(session_id, mutation_type, &before, graph, source_refs) {
         Ok(delta) => delta,
         Err(error) => {
             *graph = before;
@@ -327,12 +318,16 @@ where
 fn mark_new_edges_runtime(before: &WorkGraph, after: &mut WorkGraph) {
     let mut consumed = vec![false; before.edges.len()];
     for edge in &mut after.edges {
-        let prior = before.edges.iter().enumerate().position(|(index, candidate)| {
-            !consumed[index]
-                && candidate.source == edge.source
-                && candidate.target == edge.target
-                && candidate.kind == edge.kind
-        });
+        let prior = before
+            .edges
+            .iter()
+            .enumerate()
+            .position(|(index, candidate)| {
+                !consumed[index]
+                    && candidate.source == edge.source
+                    && candidate.target == edge.target
+                    && candidate.kind == edge.kind
+            });
         if let Some(index) = prior {
             consumed[index] = true;
         } else {
@@ -348,10 +343,8 @@ pub fn instantiate_review_templates_and_record(
     session_id: &str,
     graph: &mut WorkGraph,
     templates: &[ReviewTemplate],
-) -> Result<
-    (Vec<ReviewExpansion>, Option<GraphMutationDelta>),
-    GraphMutationError<ReviewGraphError>,
-> {
+) -> Result<(Vec<ReviewExpansion>, Option<GraphMutationDelta>), GraphMutationError<ReviewGraphError>>
+{
     let refs = templates
         .iter()
         .map(|template| format!("review-template:{}", template.id))
@@ -370,10 +363,8 @@ pub fn route_failed_verdict_and_record(
     graph: &mut WorkGraph,
     template: &ReviewTemplate,
     expansion: &mut ReviewExpansion,
-) -> Result<
-    (ReviewRoundExpansion, Option<GraphMutationDelta>),
-    GraphMutationError<ReviewGraphError>,
-> {
+) -> Result<(ReviewRoundExpansion, Option<GraphMutationDelta>), GraphMutationError<ReviewGraphError>>
+{
     let before_expansion = expansion.clone();
     let verdict = expansion
         .rounds
@@ -487,9 +478,7 @@ pub fn route_contradictory_verdicts_and_record(
                 .iter()
                 .position(|node| node.id == review_verdict_id)
                 .ok_or_else(|| {
-                    AdjudicationGraphError::UnknownReviewVerdict(
-                        review_verdict_id.to_string(),
-                    )
+                    AdjudicationGraphError::UnknownReviewVerdict(review_verdict_id.to_string())
                 })?;
             let mut known_ids = graph
                 .nodes
@@ -502,10 +491,7 @@ pub fn route_contradictory_verdicts_and_record(
                 .map(|verdict| {
                     (
                         verdict.clone(),
-                        format!(
-                            "{review_verdict_id}::source-verdict::{}",
-                            verdict.source_id
-                        ),
+                        format!("{review_verdict_id}::source-verdict::{}", verdict.source_id),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -559,8 +545,7 @@ pub fn route_contradictory_verdicts_and_record(
             let mut parameters = BTreeMap::new();
             parameters.insert(
                 "policy".to_string(),
-                serde_json::to_string(&record.policy)
-                    .expect("adjudication policy is serializable"),
+                serde_json::to_string(&record.policy).expect("adjudication policy is serializable"),
             );
             parameters.insert(
                 "adjudicator".to_string(),
@@ -578,8 +563,9 @@ pub fn route_contradictory_verdicts_and_record(
                     .expect("source verdict records are serializable"),
             );
             let adjudication_status = match &record.resolution {
-                AdjudicationResolution::ConsensusPass
-                | AdjudicationResolution::Findings { .. } => NodeStatus::Completed,
+                AdjudicationResolution::ConsensusPass | AdjudicationResolution::Findings { .. } => {
+                    NodeStatus::Completed
+                }
                 AdjudicationResolution::ConsensusFail => NodeStatus::Failed,
                 AdjudicationResolution::ConsensusUnresolved { .. }
                 | AdjudicationResolution::Escalated { .. }
@@ -596,7 +582,7 @@ pub fn route_contradictory_verdicts_and_record(
                         .collect(),
                     outputs: vec![format!("{adjudication_id}:resolution")],
                     acceptance: vec![
-                        "apply the declared policy without arrival-order bias".to_string(),
+                        "apply the declared policy without arrival-order bias".to_string()
                     ],
                 },
                 BindingRef::Role(record.adjudicator.role_id.clone()),
@@ -629,10 +615,7 @@ pub fn instantiate_checkpoint_wave_and_record(
     session_id: &str,
     graph: &mut WorkGraph,
     wave: &CheckpointWave,
-) -> Result<
-    (Option<TaskId>, Option<GraphMutationDelta>),
-    GraphMutationError<ReviewGraphError>,
-> {
+) -> Result<(Option<TaskId>, Option<GraphMutationDelta>), GraphMutationError<ReviewGraphError>> {
     mutate_and_record(
         session_id,
         graph,
@@ -760,6 +743,13 @@ pub enum RuntimeOutcomeStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CompletionEvidenceClass {
+    Observed,
+    Inferred,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReviewVerdict {
     Passed,
     Failed,
@@ -789,6 +779,8 @@ pub struct RuntimeOutcome {
     pub effects: Vec<RuntimeEffect>,
     #[serde(default)]
     pub source_refs: Vec<String>,
+    #[serde(default)]
+    pub completion_evidence: Option<CompletionEvidenceClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -805,6 +797,44 @@ pub fn derive_runtime_graph(
     journal: &[RunJournalEntry],
     ledger: &[LedgerEntry],
     deltas: &[GraphMutationDelta],
+) -> RuntimeDerivation {
+    derive_runtime_graph_with_principals(
+        plan_graph,
+        events,
+        journal,
+        ledger,
+        deltas,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn derive_runtime_graph_with_principals(
+    plan_graph: Option<&TaskGraph>,
+    events: &[Event],
+    journal: &[RunJournalEntry],
+    ledger: &[LedgerEntry],
+    deltas: &[GraphMutationDelta],
+    agent_principals: &BTreeMap<String, String>,
+) -> RuntimeDerivation {
+    derive_runtime_graph_with_completion_facts(
+        plan_graph,
+        events,
+        journal,
+        ledger,
+        deltas,
+        &[],
+        agent_principals,
+    )
+}
+
+pub fn derive_runtime_graph_with_completion_facts(
+    plan_graph: Option<&TaskGraph>,
+    events: &[Event],
+    journal: &[RunJournalEntry],
+    ledger: &[LedgerEntry],
+    deltas: &[GraphMutationDelta],
+    completion_facts: &[NodeCompletionFact],
+    agent_principals: &BTreeMap<String, String>,
 ) -> RuntimeDerivation {
     let mut graph = plan_graph.cloned().unwrap_or_default();
     if plan_graph.is_none() {
@@ -824,11 +854,14 @@ pub fn derive_runtime_graph(
         .iter()
         .map(|node| (node.id.clone(), node.clone()))
         .collect();
-    let structural_ids: std::collections::BTreeSet<_> =
-        structural_nodes.keys().cloned().collect();
+    let structural_ids: std::collections::BTreeSet<_> = structural_nodes.keys().cloned().collect();
     let mut last_agent_observation = BTreeMap::<String, String>::new();
     let mut current_task = BTreeMap::<String, TaskId>::new();
     let mut outcomes = BTreeMap::<String, RuntimeOutcome>::new();
+    let declared_agents = completion_facts
+        .iter()
+        .map(|fact| fact.agent_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
     for delta in deltas {
         update_mutation_outcomes(&mut outcomes, delta);
     }
@@ -839,10 +872,13 @@ pub fn derive_runtime_graph(
             None => continue,
         };
         let observation_id = format!("{RUNTIME_OBSERVATION_PREFIX}event:{}", event.id);
-        let agent_id = event
-            .agent_id
-            .clone()
-            .or_else(|| event.payload.get("worker_id").and_then(|v| v.as_str()).map(str::to_string));
+        let agent_id = event.agent_id.clone().or_else(|| {
+            event
+                .payload
+                .get("worker_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
         let task_id = event
             .payload
             .get("task_id")
@@ -867,9 +903,7 @@ pub fn derive_runtime_graph(
                         EdgeKind::DependsOn,
                         EdgeProvenance::Runtime,
                     )
-                    .with_rationale(format!(
-                        "ordered runtime observations for agent {agent_id}"
-                    )),
+                    .with_rationale(format!("ordered runtime observations for agent {agent_id}")),
                 );
             }
             last_agent_observation.insert(agent_id.to_string(), observation_id.clone());
@@ -974,29 +1008,49 @@ pub fn derive_runtime_graph(
                 kind,
                 event,
             );
-            if kind == RuntimeObservationKind::Completion {
+            if kind == RuntimeObservationKind::Completion
+                && event.event_type != EventType::WorkNodeCompleted
+                && !declared_agents.contains(agent_id.as_str())
+            {
                 let resolved = update_lane_completion_outcomes(
                     &mut outcomes,
                     &structural_nodes,
+                    agent_principals,
                     &agent_id,
                     resolved_event_task.as_deref(),
                     event,
                 );
-                if !resolved {
-                    record_omission(
+                match resolved {
+                    LaneCompletionResolution::Resolved => {}
+                    LaneCompletionResolution::BindingMissing => record_omission(
+                        &mut graph,
+                        WorkGraphOmissionReason::ResolutionIncomplete,
+                        &format!("binding:{agent_id}"),
+                    ),
+                    LaneCompletionResolution::LaneMissing => record_omission(
                         &mut graph,
                         WorkGraphOmissionReason::CompletionUnresolved,
                         &format!("event:{}:agent:{agent_id}", event.id),
-                    );
+                    ),
                 }
             }
         }
     }
 
-    let journal_step_ids: std::collections::BTreeSet<_> = journal
-        .iter()
-        .map(|entry| entry.step_id.as_str())
-        .collect();
+    for fact in completion_facts {
+        if structural_ids.contains(&fact.task_id) {
+            update_declared_completion_outcome(&mut outcomes, fact);
+        } else {
+            record_omission(
+                &mut graph,
+                WorkGraphOmissionReason::CompletionUnresolved,
+                &format!("{}:task:{}", fact.source_ref(), fact.task_id),
+            );
+        }
+    }
+
+    let journal_step_ids: std::collections::BTreeSet<_> =
+        journal.iter().map(|entry| entry.step_id.as_str()).collect();
     for entry in journal {
         let node_id = format!("{RUNTIME_OBSERVATION_PREFIX}journal:{}", entry.step_id);
         graph.nodes.push(journal_node(&node_id, entry));
@@ -1037,6 +1091,7 @@ pub fn derive_runtime_graph(
                 attempt_count: 1,
                 effects: matched_effects,
                 source_refs: vec![format!("journal:step:{}", entry.step_id)],
+                completion_evidence: None,
             },
         );
     }
@@ -1070,6 +1125,7 @@ pub fn derive_runtime_graph(
                 attempt_count: 1,
                 effects: vec![runtime_effect(effect)],
                 source_refs: vec![format!("ledger:step:{}", effect.step_id)],
+                completion_evidence: None,
             },
         );
     }
@@ -1091,14 +1147,11 @@ pub fn structural_projection(graph: &WorkGraph) -> WorkGraph {
         .filter(|node| !is_runtime_observation_node(node))
         .cloned()
         .collect();
-    let ids: std::collections::BTreeSet<_> =
-        nodes.iter().map(|node| node.id.as_str()).collect();
+    let ids: std::collections::BTreeSet<_> = nodes.iter().map(|node| node.id.as_str()).collect();
     let edges = graph
         .edges
         .iter()
-        .filter(|edge| {
-            ids.contains(edge.source.as_str()) && ids.contains(edge.target.as_str())
-        })
+        .filter(|edge| ids.contains(edge.source.as_str()) && ids.contains(edge.target.as_str()))
         .cloned()
         .collect();
     WorkGraph {
@@ -1117,11 +1170,7 @@ fn is_runtime_observation_node(node: &WorkNode) -> bool {
         )
 }
 
-pub fn record_omission(
-    graph: &mut WorkGraph,
-    reason: WorkGraphOmissionReason,
-    example: &str,
-) {
+pub fn record_omission(graph: &mut WorkGraph, reason: WorkGraphOmissionReason, example: &str) {
     let omission = if let Some(existing) = graph
         .omissions
         .iter_mut()
@@ -1154,6 +1203,7 @@ fn observation_kind(event_type: &EventType) -> Option<RuntimeObservationKind> {
         EventType::AgentCompleted => Some(RuntimeObservationKind::Completion),
         EventType::AgentFailed => Some(RuntimeObservationKind::Failure),
         EventType::WorkerFinalized => Some(RuntimeObservationKind::Finalization),
+        EventType::WorkNodeCompleted => Some(RuntimeObservationKind::Completion),
         EventType::ArtifactUpdated => Some(RuntimeObservationKind::Artifact),
         _ => None,
     }
@@ -1164,9 +1214,7 @@ fn observation_status(kind: RuntimeObservationKind) -> NodeStatus {
         RuntimeObservationKind::Claim
         | RuntimeObservationKind::Spawn
         | RuntimeObservationKind::JournalStep => NodeStatus::Running,
-        RuntimeObservationKind::ClaimFailed | RuntimeObservationKind::Failure => {
-            NodeStatus::Failed
-        }
+        RuntimeObservationKind::ClaimFailed | RuntimeObservationKind::Failure => NodeStatus::Failed,
         RuntimeObservationKind::Retry => NodeStatus::Ready,
         RuntimeObservationKind::Completion
         | RuntimeObservationKind::Finalization
@@ -1297,6 +1345,7 @@ fn update_mutation_outcomes(
                 attempt_count: 1,
                 effects: Vec::new(),
                 source_refs: Vec::new(),
+                completion_evidence: None,
             });
         outcome.status = status;
         if status == RuntimeOutcomeStatus::Running {
@@ -1307,7 +1356,9 @@ fn update_mutation_outcomes(
         outcome
             .source_refs
             .push(format!("mutation:delta:{}", delta.sequence));
-        outcome.source_refs.extend(delta.source_refs.iter().cloned());
+        outcome
+            .source_refs
+            .extend(delta.source_refs.iter().cloned());
     }
 }
 
@@ -1340,6 +1391,7 @@ fn update_event_outcome(
             attempt_count: 0,
             effects: Vec::new(),
             source_refs: Vec::new(),
+            completion_evidence: None,
         });
     if !outcome.agent_ids.iter().any(|known| known == agent_id) {
         outcome.agent_ids.push(agent_id.to_string());
@@ -1348,6 +1400,12 @@ fn update_event_outcome(
         outcome.task_id = task_id;
     }
     outcome.source_refs.push(format!("event:{}", event.id));
+    if matches!(
+        kind,
+        RuntimeObservationKind::Completion | RuntimeObservationKind::Finalization
+    ) {
+        merge_completion_evidence(outcome, CompletionEvidenceClass::Observed);
+    }
     match kind {
         RuntimeObservationKind::Claim => {
             outcome.attempt_count = outcome.attempt_count.saturating_add(1);
@@ -1390,24 +1448,27 @@ fn update_event_outcome(
                 source_ref: format!("event:{}", event.id),
             });
         }
-        RuntimeObservationKind::JournalStep
-        | RuntimeObservationKind::LedgerEffect => {}
+        RuntimeObservationKind::JournalStep | RuntimeObservationKind::LedgerEffect => {}
     }
 }
 
 fn update_lane_completion_outcomes(
     outcomes: &mut BTreeMap<String, RuntimeOutcome>,
     structural_nodes: &BTreeMap<TaskId, WorkNode>,
+    agent_principals: &BTreeMap<String, String>,
     agent_id: &str,
     anchor_task_id: Option<&str>,
     event: &Event,
-) -> bool {
-    let binding = anchor_task_id
+) -> LaneCompletionResolution {
+    let binding = if let Some(binding) = anchor_task_id
         .and_then(|task_id| structural_nodes.get(task_id))
         .map(|node| node.binding.clone())
-        .or_else(|| completion_role_binding(agent_id, structural_nodes));
-    let Some(binding) = binding else {
-        return false;
+    {
+        binding
+    } else if let Some(binding) = completion_role_binding(agent_id, agent_principals) {
+        binding
+    } else {
+        return LaneCompletionResolution::BindingMissing;
     };
 
     let source_ref = format!("event:{}", event.id);
@@ -1428,7 +1489,16 @@ fn update_lane_completion_outcomes(
                 attempt_count: 1,
                 effects: Vec::new(),
                 source_refs: Vec::new(),
+                completion_evidence: None,
             });
+        merge_completion_evidence(
+            outcome,
+            if anchor_task_id == Some(node.id.as_str()) {
+                CompletionEvidenceClass::Observed
+            } else {
+                CompletionEvidenceClass::Inferred
+            },
+        );
         if !outcome.agent_ids.iter().any(|known| known == agent_id) {
             outcome.agent_ids.push(agent_id.to_string());
         }
@@ -1444,22 +1514,74 @@ fn update_lane_completion_outcomes(
             outcome.source_refs.push(source_ref.clone());
         }
     }
-    matched
+    if matched {
+        LaneCompletionResolution::Resolved
+    } else {
+        LaneCompletionResolution::LaneMissing
+    }
+}
+
+fn update_declared_completion_outcome(
+    outcomes: &mut BTreeMap<String, RuntimeOutcome>,
+    fact: &NodeCompletionFact,
+) {
+    let outcome = outcomes
+        .entry(fact.task_id.clone())
+        .or_insert_with(|| RuntimeOutcome {
+            subject_id: fact.task_id.clone(),
+            task_id: Some(fact.task_id.clone()),
+            agent_ids: Vec::new(),
+            status: RuntimeOutcomeStatus::Completed,
+            started_at: None,
+            finished_at: Some(fact.completed_at),
+            attempt_count: 1,
+            effects: Vec::new(),
+            source_refs: Vec::new(),
+            completion_evidence: None,
+        });
+    outcome.task_id = Some(fact.task_id.clone());
+    if !outcome
+        .agent_ids
+        .iter()
+        .any(|agent| agent == &fact.agent_id)
+    {
+        outcome.agent_ids.push(fact.agent_id.clone());
+    }
+    outcome.status = RuntimeOutcomeStatus::Completed;
+    outcome.finished_at = Some(fact.completed_at);
+    if outcome.attempt_count == 0 {
+        outcome.attempt_count = 1;
+    }
+    let source_ref = fact.source_ref();
+    if !outcome.source_refs.iter().any(|known| known == &source_ref) {
+        outcome.source_refs.push(source_ref);
+    }
+    merge_completion_evidence(outcome, CompletionEvidenceClass::Observed);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaneCompletionResolution {
+    Resolved,
+    BindingMissing,
+    LaneMissing,
+}
+
+fn merge_completion_evidence(outcome: &mut RuntimeOutcome, candidate: CompletionEvidenceClass) {
+    let current = outcome.completion_evidence;
+    if current == Some(CompletionEvidenceClass::Observed) || current == Some(candidate) {
+        return;
+    }
+    outcome.completion_evidence = Some(candidate);
 }
 
 fn completion_role_binding(
     agent_id: &str,
-    structural_nodes: &BTreeMap<TaskId, WorkNode>,
+    agent_principals: &BTreeMap<String, String>,
 ) -> Option<BindingRef> {
-    let mut matches = structural_nodes.values().filter_map(|node| {
-        let BindingRef::Role(role) = &node.binding else {
-            return None;
-        };
-        (agent_id == role || agent_id.ends_with(&format!("-{role}")))
-            .then(|| node.binding.clone())
-    });
-    let binding = matches.next()?;
-    matches.all(|candidate| candidate == binding).then_some(binding)
+    agent_principals
+        .get(agent_id)
+        .cloned()
+        .map(BindingRef::Role)
 }
 
 fn project_outcome_statuses(

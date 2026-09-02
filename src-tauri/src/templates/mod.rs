@@ -62,13 +62,17 @@ pub fn heartbeat_snippet(
     agent_id: &str,
     status: &str,
     summary: &str,
+    completed_nodes: &[&str],
 ) -> String {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "agent_id": agent_id,
         "status": status,
         "summary": summary,
-    })
-    .to_string();
+    });
+    if !completed_nodes.is_empty() {
+        body["completed_nodes"] = serde_json::json!(completed_nodes);
+    }
+    let body = body.to_string();
 
     format!(
         r#"cat <<'JSON' | curl -fsS -X POST "{api_base_url}/api/sessions/{session_id}/heartbeat" \
@@ -2048,6 +2052,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
                 "queen",
                 "working",
                 "Monitoring workers",
+                &[],
             ),
         );
         if rendered.contains("{{generic_heartbeat_snippet}}") {
@@ -2062,6 +2067,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
                     agent_id,
                     heartbeat_status,
                     heartbeat_summary,
+                    &[],
                 ),
             );
         }
@@ -2073,6 +2079,7 @@ You are a Planner agent managing the {{domain}} domain in a Swarm session.
                 &format!("{}-evaluator", context.session_id),
                 "idle",
                 "Waiting for milestone handoff",
+                &[],
             ),
         );
 
@@ -2367,15 +2374,12 @@ mod tests {
                 .render_template(template_name, &context)
                 .expect("render Queen prompt");
 
-            assert!(prompt.contains(
-                "/api/sessions/session-245/conversations/session-245-queen?since="
-            ));
-            assert!(prompt.contains(
-                "/api/sessions/session-245/conversations/session-245-worker-N/append"
-            ));
-            assert!(prompt.contains(
-                "/api/sessions/session-245/conversations/shared/append"
-            ));
+            assert!(
+                prompt.contains("/api/sessions/session-245/conversations/session-245-queen?since=")
+            );
+            assert!(prompt
+                .contains("/api/sessions/session-245/conversations/session-245-worker-N/append"));
+            assert!(prompt.contains("/api/sessions/session-245/conversations/shared/append"));
             assert!(prompt.contains("reserved session-wide key `shared`"));
             assert!(!prompt.contains("/conversations/queen"));
             assert!(!prompt.contains("/conversations/worker-N"));
@@ -2384,7 +2388,12 @@ mod tests {
 
     #[test]
     fn builtin_queen_prompts_require_marking_verified_completions() {
-        for template_name in ["queen-hive", "queen-research", "queen-fusion", "queen-swarm"] {
+        for template_name in [
+            "queen-hive",
+            "queen-research",
+            "queen-fusion",
+            "queen-swarm",
+        ] {
             let prompt = TemplateEngine::default()
                 .render_template(
                     template_name,
@@ -2398,9 +2407,7 @@ mod tests {
                 .expect("render Queen prompt");
 
             assert!(prompt.contains("Completion Status (MANDATORY)"));
-            assert!(prompt.contains(
-                ".hive-manager/session-123/tools/mark-worker-status.md"
-            ));
+            assert!(prompt.contains(".hive-manager/session-123/tools/mark-worker-status.md"));
             assert!(prompt.contains("UI completion checkoff and stall monitor depend on it"));
         }
     }
@@ -2519,7 +2526,12 @@ mod tests {
             let Some(rest) = line.trim().strip_prefix("while [ \"$WAITED\" -lt ") else {
                 continue;
             };
-            let token = rest.split(']').next().unwrap_or("").trim().trim_matches('"');
+            let token = rest
+                .split(']')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"');
             if let Ok(secs) = token.parse::<u64>() {
                 window = Some((token.to_string(), secs));
                 continue;
@@ -2730,7 +2742,10 @@ mod tests {
             for owner in ["roles/evaluator", "roles/prince"] {
                 let expected = format!("{profile}/{owner}");
                 // Two clamped loops apiece: evaluator idle + QA poll, prince verdict + fixers.
-                let found = clamped_sleeps.iter().filter(|got| **got == expected).count();
+                let found = clamped_sleeps
+                    .iter()
+                    .filter(|got| **got == expected)
+                    .count();
                 assert_eq!(
                     found, 2,
                     "expected 2 clamped heartbeat sleeps in {expected}, found {found} — the \
@@ -2797,13 +2812,37 @@ mod tests {
             "worker-1",
             "working",
             "Don't block",
+            &[],
         );
 
         assert!(rendered.contains("cat <<'JSON' | curl"));
         assert!(rendered.contains("curl -fsS -X POST"));
         assert!(rendered.contains("--data-binary @-"));
         assert!(rendered.contains(r#""summary":"Don't block""#));
+        assert!(!rendered.contains("completed_nodes"));
         assert!(!rendered.contains(" -d '"));
+        assert_eq!(
+            rendered,
+            "cat <<'JSON' | curl -fsS -X POST \"http://localhost:18800/api/sessions/session-123/heartbeat\" \\\n  -H \"Content-Type: application/json\" \\\n  --data-binary @-\n{\"agent_id\":\"worker-1\",\"status\":\"working\",\"summary\":\"Don't block\"}\nJSON"
+        );
+    }
+
+    #[test]
+    fn heartbeat_snippet_emits_completed_nodes_only_when_opted_in() {
+        let rendered = heartbeat_snippet(
+            "http://localhost:18800",
+            "session-123",
+            "session-123-worker-1",
+            "completed",
+            "Finished exact nodes",
+            &["T2", "T3"],
+        );
+        let body = rendered
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .expect("heartbeat JSON body");
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["completed_nodes"], serde_json::json!(["T2", "T3"]));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Immutable work-graph instance archives for issue #214, owned by WS-5.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -14,19 +15,17 @@ use uuid::Uuid;
 use crate::coordination::StateManager;
 use crate::domain::event::Event;
 use crate::domain::run_journal::{LedgerEntry, RunJournalEntry};
-use crate::storage::{
-    LearningSubmission, RunJournalStore, SessionStorage,
-};
+use crate::storage::{LearningSubmission, RunJournalStore, SessionStorage};
 
+use super::completion_ledger::read_node_completion_facts;
 use super::divergence::{compute_divergence, DivergenceSummary};
 use super::retro::{
-    evaluate_archive_paths, evaluate_completed_session, IndependentEvaluator,
-    RetroArchivePath, RetroOmission, RetroOmissionReason, RetroReport,
-    UNREVIEWED_OUTCOME,
+    evaluate_archive_paths, evaluate_completed_session, IndependentEvaluator, RetroArchivePath,
+    RetroOmission, RetroOmissionReason, RetroReport, UNREVIEWED_OUTCOME,
 };
 use super::runtime::{
-    derive_runtime_graph, mutation_log_snapshot, reconstruct_structural_history,
-    record_omission, GraphMutationDelta, RuntimeOutcome,
+    derive_runtime_graph_with_completion_facts, mutation_log_snapshot,
+    reconstruct_structural_history, record_omission, GraphMutationDelta, RuntimeOutcome,
 };
 use super::schema::{TaskGraph, WorkGraph, WorkGraphOmission, WorkGraphOmissionReason};
 
@@ -353,6 +352,21 @@ pub fn archive_completed_session(
 
     let event_log_path = storage_base_dir.join(session_id).join("events.jsonl");
     let (events, event_report) = read_event_log(&event_log_path, session_id);
+    let (completion_facts, completion_ledger_omission) =
+        match read_node_completion_facts(&session_dir) {
+            Ok(facts) => (facts, None),
+            Err(error) => {
+                let mut omission = WorkGraphOmission::new(
+                    WorkGraphOmissionReason::SourceUnreadable,
+                    1,
+                    vec!["state/work-graph-completions.jsonl".to_string()],
+                );
+                omission.detail = format!(
+                    "declared node completions could not be read and were omitted: {error}"
+                );
+                (Vec::new(), Some(omission))
+            }
+        };
     let (journal, journal_report, ledger, ledger_report) =
         read_run_sources(run_journal, session_id);
     let mutation_snapshot = mutation_log_snapshot(session_id);
@@ -391,12 +405,35 @@ pub fn archive_completed_session(
     // Source reporting owns the legacy-plan omission in an archive. Passing an
     // explicit empty derivation base avoids counting the same absent file twice.
     let derivation_base = plan_graph.clone().unwrap_or_default();
-    let mut derivation = derive_runtime_graph(
+    let (agent_principals, hierarchy_omission): (BTreeMap<String, String>, _) =
+        match state.read_hierarchy() {
+            Ok(hierarchy) => (
+                hierarchy
+                    .into_iter()
+                    .filter_map(|node| node.principal.map(|principal| (node.id, principal)))
+                    .collect(),
+                None,
+            ),
+            Err(error) => {
+                let mut omission = WorkGraphOmission::new(
+                    WorkGraphOmissionReason::SourceUnreadable,
+                    1,
+                    vec!["state/hierarchy.json".to_string()],
+                );
+                omission.detail = format!(
+                    "agent hierarchy could not be read; lane attribution may be incomplete: {error}"
+                );
+                (BTreeMap::new(), Some(omission))
+            }
+        };
+    let mut derivation = derive_runtime_graph_with_completion_facts(
         Some(&derivation_base),
         &events,
         &journal,
         &ledger,
         &deltas,
+        &completion_facts,
+        &agent_principals,
     );
     let sources = vec![
         plan_report.clone(),
@@ -410,11 +447,13 @@ pub fn archive_completed_session(
             merge_omission(&mut derivation.runtime_graph, omission);
         }
     }
-    let divergence = compute_divergence(
-        plan_graph.as_ref(),
-        &derivation.runtime_graph,
-        &deltas,
-    );
+    if let Some(omission) = completion_ledger_omission.as_ref() {
+        merge_omission(&mut derivation.runtime_graph, omission);
+    }
+    if let Some(omission) = hierarchy_omission.as_ref() {
+        merge_omission(&mut derivation.runtime_graph, omission);
+    }
+    let divergence = compute_divergence(plan_graph.as_ref(), &derivation.runtime_graph, &deltas);
     let archive = WorkGraphArchive {
         schema_version: WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
         archive_id,
@@ -469,11 +508,7 @@ pub fn complete_session_archive_and_retro(
     let storage = SessionStorage::new_with_base(storage_base_dir.to_path_buf())
         .map_err(|error| ArchiveError::Storage(error.to_string()))?;
     let session_dir = storage.session_dir(session_id);
-    let archive_result = archive_completed_session(
-        storage_base_dir,
-        run_journal,
-        session_id,
-    );
+    let archive_result = archive_completed_session(storage_base_dir, run_journal, session_id);
     let archive_id = archive_result
         .as_ref()
         .map(|completion| completion.archive.archive_id.clone())
@@ -482,7 +517,9 @@ pub fn complete_session_archive_and_retro(
     let provenance_path = retro_provenance_path(&session_dir);
     let provenance = fs::read_to_string(&provenance_path)
         .map_err(ArchiveError::Io)
-        .and_then(|json| serde_json::from_str::<RetroEvaluatorProvenance>(&json).map_err(ArchiveError::Json));
+        .and_then(|json| {
+            serde_json::from_str::<RetroEvaluatorProvenance>(&json).map_err(ArchiveError::Json)
+        });
 
     let mut report = match (&archive_result, provenance) {
         (Ok(_), Ok(provenance)) => match IndependentEvaluator::new(
@@ -490,62 +527,71 @@ pub fn complete_session_archive_and_retro(
             provenance.planner_agent_ids.clone(),
             provenance.supervisor_agent_ids.clone(),
         ) {
-            Ok(evaluator) => evaluate_archive_corpus(
-                &evaluator,
-                &storage,
-                &session_dir,
-                &provenance,
-            )
-            .unwrap_or_else(|error| {
-                tracing::warn!(session_id, "Post-run work-graph evaluation failed: {error}");
-                RetroReport::unavailable(
-                    provenance.evaluator_id,
-                    RetroOmission::new(
-                        RetroOmissionReason::ArchiveUnreadable,
-                        "retro_completion",
-                        format!("post-run evaluation failed: {error}"),
-                        vec![session_id.to_string()],
-                    )
-                    .for_archive(&archive_id),
-                )
-            }),
+            Ok(evaluator) => {
+                evaluate_archive_corpus(&evaluator, &storage, &session_dir, &provenance)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            session_id,
+                            "Post-run work-graph evaluation failed: {error}"
+                        );
+                        RetroReport::unavailable(
+                            provenance.evaluator_id,
+                            RetroOmission::new(
+                                RetroOmissionReason::ArchiveUnreadable,
+                                "retro_completion",
+                                format!("post-run evaluation failed: {error}"),
+                                vec![session_id.to_string()],
+                            )
+                            .for_archive(&archive_id),
+                        )
+                    })
+            }
             Err(error) => {
-                tracing::warn!(session_id, "Retro evaluator provenance is not independent: {error}");
+                tracing::warn!(
+                    session_id,
+                    "Retro evaluator provenance is not independent: {error}"
+                );
                 RetroReport::unavailable(
                     provenance.evaluator_id,
                     RetroOmission::new(
-                    RetroOmissionReason::EvaluatorProvenanceUnavailable,
-                    "retro_completion",
-                    error.to_string(),
-                    vec![provenance_path.display().to_string()],
-                )
+                        RetroOmissionReason::EvaluatorProvenanceUnavailable,
+                        "retro_completion",
+                        error.to_string(),
+                        vec![provenance_path.display().to_string()],
+                    )
                     .for_archive(&archive_id),
                 )
             }
         },
         (Ok(_), Err(error)) => {
-            tracing::warn!(session_id, "Retro evaluator provenance could not be read: {error}");
+            tracing::warn!(
+                session_id,
+                "Retro evaluator provenance could not be read: {error}"
+            );
             RetroReport::unavailable(
                 "unavailable",
                 RetroOmission::new(
-                RetroOmissionReason::EvaluatorProvenanceUnavailable,
-                "retro_completion",
-                format!("retro evaluator provenance could not be read: {error}"),
-                vec![provenance_path.display().to_string()],
-            )
+                    RetroOmissionReason::EvaluatorProvenanceUnavailable,
+                    "retro_completion",
+                    format!("retro evaluator provenance could not be read: {error}"),
+                    vec![provenance_path.display().to_string()],
+                )
                 .for_archive(&archive_id),
             )
         }
         (Err(error), _) => {
-            tracing::warn!(session_id, "Work-graph archival failed before retro evaluation: {error}");
+            tracing::warn!(
+                session_id,
+                "Work-graph archival failed before retro evaluation: {error}"
+            );
             RetroReport::unavailable(
                 "unavailable",
                 RetroOmission::new(
-                RetroOmissionReason::ArchiveUnreadable,
-                "retro_completion",
-                format!("work-graph archival failed before retro evaluation: {error}"),
-                vec![session_id.to_string()],
-            )
+                    RetroOmissionReason::ArchiveUnreadable,
+                    "retro_completion",
+                    format!("work-graph archival failed before retro evaluation: {error}"),
+                    vec![session_id.to_string()],
+                )
                 .for_archive(&archive_id),
             )
         }
@@ -584,21 +630,19 @@ pub fn complete_session_archive_and_retro(
             insight: submission.insight,
             files_touched: submission.files_touched,
         };
-        match storage.submit_learning_session_with_id(
-            &request.session,
-            &request,
-            &learning_id,
-        ) {
+        match storage.submit_learning_session_with_id(&request.session, &request, &learning_id) {
             Ok(result) => submitted_learning_ids.push(result.learning_id),
             Err(error) => {
                 tracing::warn!(session_id, "Retro learning submission failed: {error}");
-                report.omissions.push(RetroOmission::new(
-                    RetroOmissionReason::LearningSubmissionFailed,
-                    "learning_submission",
-                    format!("unreviewed retro learning was not submitted: {error}"),
-                    vec![learning_id],
-                )
-                .for_archive(&archive_id));
+                report.omissions.push(
+                    RetroOmission::new(
+                        RetroOmissionReason::LearningSubmissionFailed,
+                        "learning_submission",
+                        format!("unreviewed retro learning was not submitted: {error}"),
+                        vec![learning_id],
+                    )
+                    .for_archive(&archive_id),
+                );
             }
         }
     }
@@ -622,15 +666,20 @@ pub fn schedule_completed_session_archive_and_retro(
     session_id: String,
 ) {
     let thread_name = format!("work-graph-archive-retro-{session_id}");
-    let spawn = std::thread::Builder::new().name(thread_name).spawn(move || {
-        if let Err(error) = complete_session_archive_and_retro(
-            &storage_base_dir,
-            run_journal.as_ref(),
-            &session_id,
-        ) {
-            tracing::warn!(session_id, "Failed to archive completed work graph: {error}");
-        }
-    });
+    let spawn = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            if let Err(error) = complete_session_archive_and_retro(
+                &storage_base_dir,
+                run_journal.as_ref(),
+                &session_id,
+            ) {
+                tracing::warn!(
+                    session_id,
+                    "Failed to archive completed work graph: {error}"
+                );
+            }
+        });
     if let Err(error) = spawn {
         tracing::warn!("Failed to schedule completed work-graph archive: {error}");
     }
@@ -643,11 +692,7 @@ pub fn schedule_completed_session_archive(
     run_journal: Option<RunJournalStore>,
     session_id: String,
 ) {
-    schedule_completed_session_archive_and_retro(
-        storage_base_dir,
-        run_journal,
-        session_id,
-    );
+    schedule_completed_session_archive_and_retro(storage_base_dir, run_journal, session_id);
 }
 
 pub fn read_archive(path: &Path) -> Result<WorkGraphArchive, ArchiveError> {
@@ -679,12 +724,7 @@ pub fn list_archives(session_dir: &Path) -> Result<Vec<PathBuf>, ArchiveError> {
 }
 
 fn read_event_log(path: &Path, session_id: &str) -> (Vec<Event>, ArchiveSourceReport) {
-    let mut report = source_report(
-        ArchiveSourceKind::EventLog,
-        "events.jsonl",
-        false,
-        0,
-    );
+    let mut report = source_report(ArchiveSourceKind::EventLog, "events.jsonl", false, 0);
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(_) => {
@@ -774,9 +814,8 @@ fn read_run_sources(
                 WorkGraphOmissionReason::SourceUnreadable,
                 "run_journal:read-failed",
             );
-            journal_report.omissions[0].detail = format!(
-                "run journal could not be read; runtime evidence is incomplete: {error}"
-            );
+            journal_report.omissions[0].detail =
+                format!("run journal could not be read; runtime evidence is incomplete: {error}");
             Vec::new()
         }
     };
@@ -792,9 +831,8 @@ fn read_run_sources(
                 WorkGraphOmissionReason::SourceUnreadable,
                 "run_ledger:read-failed",
             );
-            ledger_report.omissions[0].detail = format!(
-                "run ledger could not be read; runtime evidence is incomplete: {error}"
-            );
+            ledger_report.omissions[0].detail =
+                format!("run ledger could not be read; runtime evidence is incomplete: {error}");
             Vec::new()
         }
     };
@@ -827,17 +865,13 @@ fn source_omission(
         .find(|omission| omission.reason == reason)
     {
         omission.count = omission.count.saturating_add(1);
-        if omission.examples.len() < 5
-            && !omission.examples.iter().any(|seen| seen == example)
-        {
+        if omission.examples.len() < 5 && !omission.examples.iter().any(|seen| seen == example) {
             omission.examples.push(example.to_string());
         }
     } else {
-        report.omissions.push(WorkGraphOmission::new(
-            reason,
-            1,
-            vec![example.to_string()],
-        ));
+        report
+            .omissions
+            .push(WorkGraphOmission::new(reason, 1, vec![example.to_string()]));
     }
 }
 

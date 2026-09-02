@@ -13,8 +13,10 @@
   } from '$lib/workgraph/graphUtils';
   import type {
     BindingRef,
+    CompletionProvenance,
     NodeStatus,
     WorkGraphNode,
+    WorkGraphOmission,
     WorkGraphOmissionReason,
     WorkGraphResponse
   } from '$lib/workgraph/types';
@@ -48,6 +50,22 @@
     resolution_incomplete: 'Resolution incomplete',
     completion_unresolved: 'Completion unresolved'
   };
+
+  const COMPLETION_PROVENANCE_LABELS: Record<CompletionProvenance, string> = {
+    declared: 'declared fact',
+    queue: 'queue finalization',
+    observed: 'direct observation',
+    inferred: 'lane inference',
+    plan: 'persisted plan status'
+  };
+
+  function isExpectedBindingAbsence(omission: WorkGraphOmission): boolean {
+    return (
+      omission.reason === 'resolution_incomplete' &&
+      omission.examples.length > 0 &&
+      omission.examples.every((example) => example.startsWith('binding:'))
+    );
+  }
 
   const POLL_MS = 3000;
   const CLOCK_TICK_MS = 1000;
@@ -184,7 +202,11 @@
   );
 
   let waveStatistics = $derived(
-    calculateWaveStatistics(graph?.waves ?? [], completedNodeIds)
+    calculateWaveStatistics(
+      graph?.waves ?? [],
+      completedNodeIds,
+      graph?.completion_provenance ?? {}
+    )
   );
   let criticalPathRemaining = $derived(
     calculateCriticalPathRemaining(graph?.critical_path ?? [], completedNodeIds)
@@ -193,6 +215,9 @@
   let graphOmissions = $derived(graph?.omissions ?? []);
   let omittedItemCount = $derived(
     graphOmissions.reduce((total, omission) => total + omission.count, 0)
+  );
+  let hasOnlyExpectedBindingAbsences = $derived(
+    graphOmissions.length > 0 && graphOmissions.every(isExpectedBindingAbsence)
   );
 
   let inspectedNode = $derived(
@@ -219,6 +244,16 @@
       .filter((node): node is WorkGraphNode => node !== undefined)
       .map((node) => ({ id: node.id, title: node.title, kind: node.kind }));
   });
+
+  let inspectorCompletionProvenance = $derived(
+    inspectedNode && graph
+      ? graph.completion_provenance?.[inspectedNode.id] ?? null
+      : null
+  );
+
+  let inspectorCompletionSourceRefs = $derived(
+    inspectedNode && graph ? graph.completion_source_refs?.[inspectedNode.id] ?? [] : []
+  );
 
   async function positionInspector(id: string) {
     await tick();
@@ -341,6 +376,7 @@
     x: number;
     y: number;
     status: NodeStatus;
+    completionProvenance: CompletionProvenance | null;
     laneK: string;
     onCritical: boolean;
     title: string;
@@ -399,6 +435,7 @@
           x,
           y: PAD + row * (NODE_H + GAP_Y),
           status,
+          completionProvenance: graph?.completion_provenance?.[id] ?? null,
           laneK: laneKey(assignment[id]),
           onCritical: critical.has(id),
           title: payloadNode?.title || id,
@@ -479,24 +516,40 @@
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <section
       class="wg-omissions lattice-forced-colors-boundary"
+      class:wg-omissions--informational={hasOnlyExpectedBindingAbsences}
       aria-label="Work graph omissions"
       tabindex="0"
     >
       <header class="wg-omissions-header">
-        <h2>Not everything is shown</h2>
+        <h2>
+          {hasOnlyExpectedBindingAbsences
+            ? 'Principal attribution not recorded'
+            : 'Not everything is shown'}
+        </h2>
         <span class="wg-omissions-total">
           {omittedItemCount} omitted {omittedItemCount === 1 ? 'item' : 'items'}
         </span>
       </header>
       <p class="wg-omissions-intro">
-        Some work-graph evidence could not be represented in this projection.
+        {hasOnlyExpectedBindingAbsences
+          ? 'Some system roles do not record a principal binding by design; completed work remains valid.'
+          : 'Some work-graph evidence could not be represented in this projection.'}
       </p>
       <ul class="wg-omission-list">
         {#each graphOmissions as omission, index (`${omission.reason}:${index}`)}
-          <li class="wg-omission">
+          <li
+            class="wg-omission"
+            class:wg-omission--expected={isExpectedBindingAbsence(omission)}
+          >
             <div class="wg-omission-header">
-              <strong>{OMISSION_LABELS[omission.reason]}</strong>
-              <span>Count {omission.count}</span>
+              <strong>
+                {isExpectedBindingAbsence(omission)
+                  ? 'Expected binding absence'
+                  : OMISSION_LABELS[omission.reason]}
+              </strong>
+              <span>
+                {isExpectedBindingAbsence(omission) ? 'Informational · ' : ''}Count {omission.count}
+              </span>
             </div>
             <p>{omission.detail}</p>
             {#if omission.examples.length > 0}
@@ -519,6 +572,8 @@
     <div class="wg-progress">
       <ProgressHeader
         nodesComplete={waveStatistics.nodesComplete}
+        nodesObserved={waveStatistics.nodesObserved}
+        nodesInferred={waveStatistics.nodesInferred}
         nodesTotal={waveStatistics.nodesTotal}
         wavesComplete={waveStatistics.wavesComplete}
         wavesTotal={waveStatistics.wavesTotal}
@@ -595,10 +650,11 @@
               data-node-id={node.id}
               data-node-kind={node.kind}
               data-heartbeat-state={node.heartbeatState}
+              data-completion-provenance={node.completionProvenance}
               use:registerNode={node.id}
               role="button"
               tabindex="0"
-              aria-label={`${node.title} — ${node.id}, ${node.kind}, ${node.status}, ${node.laneK}`}
+              aria-label={`${node.title} — ${node.id}, ${node.kind}, ${node.status}, ${node.laneK}${node.completionProvenance ? `, completion provenance ${COMPLETION_PROVENANCE_LABELS[node.completionProvenance]}` : ''}`}
               aria-expanded={visibleNodeId === node.id}
               aria-controls={visibleNodeId === node.id ? 'wg-node-inspector' : undefined}
               onmouseenter={() => handleNodeEnter(node.id)}
@@ -616,6 +672,7 @@
                 height={NODE_H}
                 rx={node.kind === 'context' ? NODE_H / 2 : 5}
                 class={`wg-box wg-box--${node.status}`}
+                class:wg-box--inferred={node.status === 'completed' && node.completionProvenance === 'inferred'}
                 style={`--lane: ${laneColour(node.laneK)}`}
               />
               <svg
@@ -676,6 +733,8 @@
           node={inspectorNode}
           dependencies={inspectorDependencies}
           progress={inspectedNode?.progress ?? null}
+          completionProvenance={inspectorCompletionProvenance}
+          completionSourceRefs={inspectorCompletionSourceRefs}
         />
       </div>
     {/if}
@@ -684,6 +743,7 @@
   {#if graph && graph.nodes.length > 0}
     <div class="wg-legend">
       <span class="wg-key"><i class="sw sw--completed"></i>done</span>
+      <span class="wg-key"><i class="sw sw--inferred"></i>done · lane inferred</span>
       <span class="wg-key"><i class="sw sw--running"></i>running</span>
       <span class="wg-key"><i class="sw sw--ready"></i>ready</span>
       <span class="wg-key"><i class="sw sw--blocked"></i>blocked</span>
@@ -751,6 +811,15 @@
   .wg-omissions:focus-visible {
     outline: 2px solid var(--accent-cyan);
     outline-offset: 2px;
+  }
+
+  .wg-omissions--informational {
+    border-color: var(--border-structural);
+    background: color-mix(in srgb, var(--accent-cyan) 5%, var(--bg-panel));
+  }
+
+  .wg-omission--expected .wg-omission-header strong {
+    color: var(--text-secondary);
   }
 
   .wg-omissions-header,
@@ -939,6 +1008,13 @@
     fill: color-mix(in srgb, var(--status-success) 40%, transparent);
   }
 
+  /* Inference is still a completed state: keep the success fill and use a
+     measured lane-style dash to disclose attribution without implying error. */
+  .wg-box--inferred {
+    fill: color-mix(in srgb, var(--status-success) 40%, transparent);
+    stroke-dasharray: 7 2;
+  }
+
   .wg-box--blocked {
     fill: color-mix(in srgb, var(--status-error) 45%, transparent);
   }
@@ -1045,6 +1121,12 @@
     background: color-mix(in srgb, var(--status-success) 40%, transparent);
   }
 
+  .sw--inferred {
+    border-color: var(--status-success);
+    border-style: dashed;
+    background: color-mix(in srgb, var(--status-success) 40%, transparent);
+  }
+
   .sw--running {
     background: color-mix(in srgb, var(--accent-cyan) 45%, transparent);
   }
@@ -1094,6 +1176,13 @@
 
     .wg-box--completed {
       stroke-dasharray: 1 3;
+      stroke-linecap: round;
+    }
+
+    /* The rect owns this boundary; attaching the fallback to an ancestor
+       would not preserve the inferred-vs-observed seam in forced colours. */
+    .wg-box--inferred {
+      stroke-dasharray: 7 2 1 2;
       stroke-linecap: round;
     }
 

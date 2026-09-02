@@ -83,21 +83,23 @@ The inject response reports measured facts, not request echoes:
   after an Enter write, over a bounded 1,500 ms window per attempt: `true` means sustained ring
   activity consistent with the composer accepting Enter and starting a turn, `false` means
   the Enter produced no observable ring reaction at all, and `null` means unknown,
-  unobservable, or `"submit": false`. An agent that was already streaming output can
-  produce a false positive; the field never upgrades an ambiguous buffer observation to a
-  sweep PASS.
+  unobservable, or `"submit": false`. The handler also samples a bounded pre-write activity
+  baseline. When that baseline shows the receiver was already streaming, a would-be positive is
+  downgraded to `null` with basis `busy-receiver-indeterminate`; the field never upgrades an
+  ambiguous buffer observation to a sweep PASS.
 - The retry is keyed strictly on the first `false` verdict and is capped at one extra CR.
   Its observation baseline is captured after that CR so local echo cannot become false
   receiver evidence. The response reports the retry observation as the final verdict; two
   quiet windows therefore remain `false`. A false negative can double-execute a turn on a
   non-idempotent composer, so the matrix measurement must settle that risk before any widening.
-- Issue #260 tracks the opposite live failure: during this session, four injects to three
-  busy codex principals returned `submit_confirmed: true` with
-  `sustained-post-submit-activity` even though each payload remained visibly staged and needed
-  a later bare-Enter flush. Busy receiver output can therefore create a false positive that
-  bypasses this strictly `Some(false)`-keyed retry. The classifier and retry key remain
-  unchanged for #259; the sweep must treat `true` as sender-side evidence, never as a PASS
-  without controlled receiver-buffer confirmation.
+- Issue #260 is addressed by the bounded pre-write baseline and the
+  `busy-receiver-indeterminate` downgrade. Pre-write changes must span at least 125 ms — half
+  the 250 ms baseline window — before the receiver is considered already streaming. The
+  motivating observation remains four injects to three busy codex principals that returned
+  `submit_confirmed: true` with `sustained-post-submit-activity` even though each payload stayed
+  visibly staged and needed a later bare-Enter flush. The baseline prevents that busy receiver
+  output from remaining a confident positive. A `true` is still sender-side evidence, never a
+  sweep PASS without controlled receiver-buffer confirmation.
 
 ## Two-call workaround
 

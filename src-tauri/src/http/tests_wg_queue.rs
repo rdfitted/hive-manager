@@ -1,7 +1,7 @@
 //! Readiness-queue tests for issue #212, owned by WS-4.
 
-use std::path::Path;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
@@ -13,8 +13,8 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use crate::coordination::queue_manager::{
-    ClaimOutcome, QueueManager, FIRST_HEARTBEAT_GRACE_MS,
-    FIRST_HEARTBEAT_LATENCY_MS_BY_CLI, STUCK_CUTOFF_MS,
+    ClaimOutcome, QueueManager, FIRST_HEARTBEAT_GRACE_MS, FIRST_HEARTBEAT_LATENCY_MS_BY_CLI,
+    STUCK_CUTOFF_MS,
 };
 use crate::coordination::{InjectionManager, StateManager};
 use crate::domain::event::{EventType, Severity};
@@ -24,18 +24,22 @@ use crate::http::handlers::heartbeats::PostHeartbeatRequest;
 use crate::http::handlers::workers::AddWorkerRequest;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
+use crate::orchestrator::work_graph::completion_ledger::{
+    read_node_completion_facts, NodeCompletionProvenance,
+};
+use crate::orchestrator::work_graph::plan_parse::promote_initial_ready_nodes;
 use crate::orchestrator::work_graph::review::checkpoint_aware_claimable_nodes;
 use crate::orchestrator::work_graph::{
-    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph,
-    WorkEdge, WorkNode,
+    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkEdge,
+    WorkNode,
 };
 use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager};
 use crate::session::{
     AgentInfo, AuthStrategy, Session, SessionController, SessionState, SessionType,
 };
 use crate::storage::queue::{
-    QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate,
-    QueueRow, QueueStatus,
+    QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate, QueueRow,
+    QueueStatus,
 };
 use crate::storage::{ApplicationStateDb, QueueRepo, SessionStorage};
 
@@ -49,13 +53,7 @@ fn queue_repo() -> QueueRepo {
 }
 
 fn queued_row(id: &str, worker_id: &str, task_id: Option<&str>, created_at: i64) -> QueueRow {
-    queue_row(
-        id,
-        worker_id,
-        task_id,
-        QueueStatus::Queued,
-        created_at,
-    )
+    queue_row(id, worker_id, task_id, QueueStatus::Queued, created_at)
 }
 
 fn queue_row(
@@ -143,13 +141,8 @@ fn race_bound_claims(
             let worker_id = worker_id.to_string();
             std::thread::spawn(move || {
                 barrier.wait();
-                repo.try_claim_for_worker(
-                    &id,
-                    Some(&worker_id),
-                    now_ms - 90_000,
-                    now_ms,
-                )
-                .unwrap()
+                repo.try_claim_for_worker(&id, Some(&worker_id), now_ms - 90_000, now_ms)
+                    .unwrap()
             })
         })
         .collect::<Vec<_>>();
@@ -164,10 +157,7 @@ fn race_bound_claims(
 async fn slow_spawn_reservation_prevents_stale_reclaim_and_second_spawn() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
-    let manager = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
     manager
         .enqueue_worker(
             "run-slow",
@@ -233,7 +223,9 @@ async fn slow_spawn_reservation_prevents_stale_reclaim_and_second_spawn() {
         "a slow epoch-1 spawn must not be reclaimed and double-spawned as epoch 2"
     );
     assert_eq!(protected.heartbeat_at, Some(claimed_heartbeat + 2));
-    assert!(manager.complete_spawn_handoff("run-slow", 1, "worker-1").unwrap());
+    assert!(manager
+        .complete_spawn_handoff("run-slow", 1, "worker-1")
+        .unwrap());
     assert!(manager.spawn_in_flight("run-slow").is_none());
 }
 
@@ -241,10 +233,7 @@ async fn slow_spawn_reservation_prevents_stale_reclaim_and_second_spawn() {
 async fn stale_epoch_one_cannot_release_or_reacquire_after_epoch_two_exists() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
-    let manager = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
     manager
         .enqueue_worker(
             "run-epoch",
@@ -287,7 +276,9 @@ async fn stale_epoch_one_cannot_release_or_reacquire_after_epoch_two_exists() {
             .unwrap(),
         crate::coordination::ReleaseAfterFailure::NotHeld
     );
-    assert!(!manager.complete_spawn_handoff("run-epoch", 1, "worker-1").unwrap());
+    assert!(!manager
+        .complete_spawn_handoff("run-epoch", 1, "worker-1")
+        .unwrap());
     assert_eq!(
         manager.spawn_in_flight("run-epoch").unwrap().epoch,
         2,
@@ -314,9 +305,16 @@ async fn stale_epoch_one_cannot_release_or_reacquire_after_epoch_two_exists() {
     let row = repo.get_row("run-epoch").unwrap().unwrap();
     assert_eq!(
         (reclaimed, retry, row.attempts, row.worker_id.as_str()),
-        (Vec::<String>::new(), ClaimOutcome::AlreadyClaimed, 2, "worker-2")
+        (
+            Vec::<String>::new(),
+            ClaimOutcome::AlreadyClaimed,
+            2,
+            "worker-2"
+        )
     );
-    assert!(manager.complete_spawn_handoff("run-epoch", 2, "worker-2").unwrap());
+    assert!(manager
+        .complete_spawn_handoff("run-epoch", 2, "worker-2")
+        .unwrap());
 
     // Manual recovery resets only the independent spawn-failure budget, never the fencing
     // epoch. Reuse worker-1 deliberately: even matching the old worker ID cannot make the stale
@@ -338,7 +336,9 @@ async fn stale_epoch_one_cannot_release_or_reacquire_after_epoch_two_exists() {
     assert!(!repo
         .refresh_claimed_spawn("run-epoch", 1, "worker-1", 2)
         .unwrap());
-    assert!(!manager.complete_spawn_handoff("run-epoch", 1, "worker-1").unwrap());
+    assert!(!manager
+        .complete_spawn_handoff("run-epoch", 1, "worker-1")
+        .unwrap());
     assert_eq!(
         manager
             .release_after_failed_spawn(SESSION_ID, "worker-1", "run-epoch", 1)
@@ -353,10 +353,7 @@ async fn stale_epoch_one_cannot_release_or_reacquire_after_epoch_two_exists() {
 async fn spawn_failure_budget_resets_without_resetting_claim_epoch() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
-    let manager = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
     manager
         .enqueue_worker(
             "run-budget",
@@ -373,12 +370,7 @@ async fn spawn_failure_budget_resets_without_resetting_claim_epoch() {
     for epoch in 1..=3 {
         assert_eq!(
             manager
-                .claim_and_reserve_spawn(
-                    "run-budget",
-                    SESSION_ID,
-                    "worker-1",
-                    Some("BUDGET"),
-                )
+                .claim_and_reserve_spawn("run-budget", SESSION_ID, "worker-1", Some("BUDGET"),)
                 .await
                 .unwrap(),
             ClaimOutcome::Claimed { epoch }
@@ -397,7 +389,10 @@ async fn spawn_failure_budget_resets_without_resetting_claim_epoch() {
         }
     }
     let exhausted = repo.get_row("run-budget").unwrap().unwrap();
-    assert_eq!((exhausted.status, exhausted.attempts), (QueueStatus::Failed, 3));
+    assert_eq!(
+        (exhausted.status, exhausted.attempts),
+        (QueueStatus::Failed, 3)
+    );
 
     assert_eq!(
         manager.release_claim(SESSION_ID, "worker-1").await.unwrap(),
@@ -407,12 +402,7 @@ async fn spawn_failure_budget_resets_without_resetting_claim_epoch() {
     );
     assert_eq!(
         manager
-            .claim_and_reserve_spawn(
-                "run-budget",
-                SESSION_ID,
-                "worker-1",
-                Some("BUDGET"),
-            )
+            .claim_and_reserve_spawn("run-budget", SESSION_ID, "worker-1", Some("BUDGET"),)
             .await
             .unwrap(),
         ClaimOutcome::Claimed { epoch: 4 },
@@ -433,10 +423,7 @@ async fn spawn_failure_budget_resets_without_resetting_claim_epoch() {
 async fn in_flight_spawn_denies_manual_and_same_process_reconcile_but_drops_on_restart() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
-    let manager = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
     manager
         .enqueue_worker(
             "run-restart",
@@ -466,15 +453,15 @@ async fn in_flight_spawn_denies_manual_and_same_process_reconcile_but_drops_on_r
         crate::coordination::ReleaseOutcome::SpawnInFlight { epoch: 1 }
     );
     assert!(manager.reconcile(SESSION_ID, &[]).await.unwrap().is_empty());
-    assert_eq!(repo.get_row("run-restart").unwrap().unwrap().status, QueueStatus::Running);
+    assert_eq!(
+        repo.get_row("run-restart").unwrap().unwrap().status,
+        QueueStatus::Running
+    );
 
     // A new manager models process restart: its in-memory marker set is empty, so the normal
     // durable startup reconciliation repairs the orphaned running row.
     drop(manager);
-    let restarted = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let restarted = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
     assert_eq!(
         restarted.reconcile(SESSION_ID, &[]).await.unwrap(),
         vec!["run-restart".to_string()]
@@ -525,7 +512,10 @@ fn diamond_claims_are_dependency_gated_atomic_and_eventually_unblock() {
 
     let same_ready_row = race_claims(&repo, &["run-d", "run-d"], 90);
     assert_eq!(
-        same_ready_row.iter().filter(|epoch| epoch.is_some()).count(),
+        same_ready_row
+            .iter()
+            .filter(|epoch| epoch.is_some())
+            .count(),
         1,
         "exactly one concurrent claimer may win the same ready row: {same_ready_row:?}"
     );
@@ -535,19 +525,16 @@ fn diamond_claims_are_dependency_gated_atomic_and_eventually_unblock() {
 }
 
 fn serialized_conflict_rows(session_id: &str) -> Vec<QueueConflictRow> {
-    [
-        ("T1", "T2"),
-        ("T2", "T1"),
-    ]
-    .into_iter()
-    .map(|(task_id, conflicting_task_id)| QueueConflictRow {
-        session_id: session_id.to_string(),
-        task_id: task_id.to_string(),
-        conflicting_task_id: conflicting_task_id.to_string(),
-        action: QueueConflictAction::Serialize,
-        reason: "T1 and T2 overlap src/shared.rs".to_string(),
-    })
-    .collect()
+    [("T1", "T2"), ("T2", "T1")]
+        .into_iter()
+        .map(|(task_id, conflicting_task_id)| QueueConflictRow {
+            session_id: session_id.to_string(),
+            task_id: task_id.to_string(),
+            conflicting_task_id: conflicting_task_id.to_string(),
+            action: QueueConflictAction::Serialize,
+            reason: "T1 and T2 overlap src/shared.rs".to_string(),
+        })
+        .collect()
 }
 
 #[test]
@@ -596,8 +583,14 @@ fn materialized_serialize_conflict_is_atomic_and_partial_coverage_stays_visible(
     repo.record_heartbeat(SESSION_ID, winner_worker, "completed", 30)
         .unwrap();
     assert!(repo.try_claim(loser_id, -90_000, 40).unwrap().is_some());
-    assert_eq!(repo.get_row(winner_id).unwrap().unwrap().status, QueueStatus::Finalized);
-    assert_eq!(repo.snapshot(SESSION_ID).unwrap().conflict_coverage, Some(coverage));
+    assert_eq!(
+        repo.get_row(winner_id).unwrap().unwrap().status,
+        QueueStatus::Finalized
+    );
+    assert_eq!(
+        repo.snapshot(SESSION_ID).unwrap().conflict_coverage,
+        Some(coverage)
+    );
 }
 
 #[test]
@@ -737,7 +730,13 @@ fn unresolved_binding_blocks_until_exact_queued_intent_is_reconciled() {
     )
     .unwrap();
     assert_eq!(repo.try_claim("run-unknown", -90_000, 10).unwrap(), None);
-    assert_eq!(repo.snapshot(SESSION_ID).unwrap().resolution_incomplete.len(), 1);
+    assert_eq!(
+        repo.snapshot(SESSION_ID)
+            .unwrap()
+            .resolution_incomplete
+            .len(),
+        1
+    );
 
     // A wrong binding under the same queue id cannot clear or rewrite the omission.
     let wrong = queued_row("run-unknown", "pending:run-unknown", Some("OTHER"), 2);
@@ -753,17 +752,13 @@ fn unresolved_binding_blocks_until_exact_queued_intent_is_reconciled() {
     assert!(repo.resolution_issue("run-unknown").unwrap().is_some());
 
     // Reconciliation is allowed only for the exact still-queued intent.
-    repo.enqueue_with_scheduling(
-        &row,
-        &[],
-        &QueueResolutionUpdate::Resolved,
-        &[],
-        None,
-        None,
-    )
-    .unwrap();
+    repo.enqueue_with_scheduling(&row, &[], &QueueResolutionUpdate::Resolved, &[], None, None)
+        .unwrap();
     assert!(repo.resolution_issue("run-unknown").unwrap().is_none());
-    assert!(repo.try_claim("run-unknown", -90_000, 20).unwrap().is_some());
+    assert!(repo
+        .try_claim("run-unknown", -90_000, 20)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -809,11 +804,10 @@ fn cancellation_blocks_root_and_transitive_descendants_with_reason() {
     for id in &blocked {
         let row = repo.get_row(id).unwrap().unwrap();
         assert_eq!(row.status, QueueStatus::Blocked);
-        assert!(
-            row.blocked_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("A") && reason.contains("cancelled"))
-        );
+        assert!(row
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("A") && reason.contains("cancelled")));
         assert_eq!(repo.try_claim(id, -90_000, 20).unwrap(), None);
     }
     assert!(repo.try_claim("run-e", -90_000, 20).unwrap().is_some());
@@ -936,10 +930,16 @@ fn assignment_ids_advance_across_claim_rebind_and_release_paths() {
 
     assert!(repo.fail_claimed("run-a", epoch_2, 10).unwrap());
     let failed = repo.get_row("run-a").unwrap().unwrap().assignment_id;
-    assert!(failed > claim_2, "terminal claim failure invalidates its identity");
+    assert!(
+        failed > claim_2,
+        "terminal claim failure invalidates its identity"
+    );
     assert!(repo.release_claim_manual("run-a", 10).unwrap());
     let manual_release = repo.get_row("run-a").unwrap().unwrap().assignment_id;
-    assert!(manual_release > failed, "manual recovery mints a new identity");
+    assert!(
+        manual_release > failed,
+        "manual recovery mints a new identity"
+    );
 
     repo.try_claim_for_worker("run-a", Some("worker-1"), -90_000, 10)
         .unwrap()
@@ -950,7 +950,10 @@ fn assignment_ids_advance_across_claim_rebind_and_release_paths() {
         vec!["run-a".to_string()]
     );
     let reclaimed = repo.get_row("run-a").unwrap().unwrap().assignment_id;
-    assert!(reclaimed > before_reclaim, "stale reclaim invalidates the assignment");
+    assert!(
+        reclaimed > before_reclaim,
+        "stale reclaim invalidates the assignment"
+    );
 
     let epoch_4 = repo
         .try_claim_for_worker("run-a", Some("worker-1"), -90_000, 10)
@@ -1052,7 +1055,11 @@ fn spawned_identity_survives_every_worker_sentinel_rewrite() {
 
         let released = repo.get_row(&id).unwrap().unwrap();
         assert_eq!(released.status, QueueStatus::Queued, "{release_path}");
-        assert_eq!(released.worker_id, format!("pending:{id}"), "{release_path}");
+        assert_eq!(
+            released.worker_id,
+            format!("pending:{id}"),
+            "{release_path}"
+        );
         assert!(
             repo.record_heartbeat(SESSION_ID, &worker_id, "completed", 30)
                 .unwrap(),
@@ -1168,10 +1175,7 @@ async fn first_heartbeat_grace_is_separate_from_steady_state_cutoff() {
     repo.enqueue(&awaiting_first).unwrap();
     repo.enqueue(&steady).unwrap();
 
-    let manager = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
     assert_eq!(
         manager
             .reclaim_stuck_at(2, STUCK_CUTOFF_MS + 2)
@@ -1233,12 +1237,7 @@ fn new_assignment_resets_first_heartbeat_grace_across_every_retry_route() {
             .unwrap()
             .expect("first worker claims the row");
         assert!(repo
-            .record_heartbeat(
-                SESSION_ID,
-                &first_worker,
-                "working",
-                FIRST_HEARTBEAT_AT,
-            )
+            .record_heartbeat(SESSION_ID, &first_worker, "working", FIRST_HEARTBEAT_AT,)
             .unwrap());
         assert_eq!(
             repo.get_row(&id).unwrap().unwrap().last_status.as_deref(),
@@ -1264,14 +1263,8 @@ fn new_assignment_resets_first_heartbeat_grace_across_every_retry_route() {
                     assert!(repo.requeue_claimed(&id, first_epoch, RELEASE_AT).unwrap())
                 }
                 "release_failed_spawn" => assert_eq!(
-                    repo.release_failed_spawn(
-                        &id,
-                        first_epoch,
-                        &first_worker,
-                        3,
-                        RELEASE_AT,
-                    )
-                    .unwrap(),
+                    repo.release_failed_spawn(&id, first_epoch, &first_worker, 3, RELEASE_AT,)
+                        .unwrap(),
                     SpawnFailureRelease::Requeued { failures: 1 }
                 ),
                 "release_claim_manual" => {
@@ -1303,8 +1296,8 @@ fn new_assignment_resets_first_heartbeat_grace_across_every_retry_route() {
 
         let just_past_steady_cutoff = RETRY_CLAIM_AT + STUCK_CUTOFF_MS + 1;
         let reclaimable_worker = vec![(id.clone(), retry.worker_id.clone())];
-        assert!(repo
-            .reclaim_stuck_with_grace(
+        assert!(
+            repo.reclaim_stuck_with_grace(
                 just_past_steady_cutoff - STUCK_CUTOFF_MS,
                 just_past_steady_cutoff - FIRST_HEARTBEAT_GRACE_MS,
                 just_past_steady_cutoff,
@@ -1361,8 +1354,13 @@ fn heartbeat_updates_only_the_current_finalized_assignment_for_a_reused_slot() {
     repo.record_heartbeat(SESSION_ID, "worker-1", "completed", 20)
         .unwrap();
 
-    repo.enqueue(&queued_row("aa-current", "pending:aa-current", Some("CURRENT"), 2))
-        .unwrap();
+    repo.enqueue(&queued_row(
+        "aa-current",
+        "pending:aa-current",
+        Some("CURRENT"),
+        2,
+    ))
+    .unwrap();
     repo.try_claim_for_worker("aa-current", Some("worker-1"), -90_000, 30)
         .unwrap()
         .unwrap();
@@ -1386,7 +1384,10 @@ fn heartbeat_updates_only_the_current_finalized_assignment_for_a_reused_slot() {
         (old_before.heartbeat_at, old_before.updated_at),
         "the sibling's historical liveness bytes must remain unchanged"
     );
-    assert_eq!((current_after.heartbeat_at, current_after.updated_at), (Some(999), 999));
+    assert_eq!(
+        (current_after.heartbeat_at, current_after.updated_at),
+        (Some(999), 999)
+    );
 
     let impossible_assignment = current_after.assignment_id + 100;
     assert_eq!(
@@ -1427,8 +1428,13 @@ fn heartbeat_body_keeps_assignment_identity_optional_for_legacy_prompts() {
 async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
-    repo.enqueue(&queued_row("old-run", "pending:old-run", Some("old-task"), 1))
-        .unwrap();
+    repo.enqueue(&queued_row(
+        "old-run",
+        "pending:old-run",
+        Some("old-task"),
+        1,
+    ))
+    .unwrap();
     repo.try_claim_for_worker("old-run", Some("worker-1"), -90_000, 10)
         .unwrap()
         .unwrap();
@@ -1436,16 +1442,17 @@ async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse
         .unwrap();
     let old_assignment = repo.get_row("old-run").unwrap().unwrap().assignment_id;
 
-    repo.enqueue(&queued_row("current-run", "pending:current-run", Some("current-task"), 2))
-        .unwrap();
+    repo.enqueue(&queued_row(
+        "current-run",
+        "pending:current-run",
+        Some("current-task"),
+        2,
+    ))
+    .unwrap();
     repo.try_claim_for_worker("current-run", Some("worker-1"), -90_000, 30)
         .unwrap()
         .unwrap();
-    let current_assignment = repo
-        .get_row("current-run")
-        .unwrap()
-        .unwrap()
-        .assignment_id;
+    let current_assignment = repo.get_row("current-run").unwrap().unwrap().assignment_id;
     assert!(current_assignment > old_assignment);
 
     let event_bus = EventBus::new(temp.path().to_path_buf());
@@ -1462,6 +1469,21 @@ async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse
         .unwrap();
     assert_eq!(event.event_type, EventType::WorkerFinalized);
     assert_eq!(event.payload["task_id"], "current-task");
+    let completion_event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("queue completion must emit WorkNodeCompleted promptly")
+        .unwrap();
+    assert_eq!(completion_event.event_type, EventType::WorkNodeCompleted);
+    assert_eq!(completion_event.payload["task_id"], "current-task");
+    let completion_facts =
+        read_node_completion_facts(&temp.path().join("sessions").join(SESSION_ID)).unwrap();
+    assert_eq!(completion_facts.len(), 1);
+    assert_eq!(completion_facts[0].task_id, "current-task");
+    assert_eq!(completion_facts[0].agent_id, "worker-1");
+    assert_eq!(
+        completion_facts[0].provenance,
+        NodeCompletionProvenance::QueueFinalize
+    );
     assert_eq!(
         repo.get_row("current-run").unwrap().unwrap().status,
         QueueStatus::Finalized
@@ -1470,6 +1492,55 @@ async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse
         repo.get_row("old-run").unwrap().unwrap().status,
         QueueStatus::Finalized
     );
+}
+
+#[tokio::test]
+async fn completion_ledger_failure_preserves_committed_finalization_and_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(queue_repo());
+    repo.enqueue(&queued_row(
+        "current-run",
+        "pending:current-run",
+        Some("current-task"),
+        1,
+    ))
+    .unwrap();
+    repo.try_claim_for_worker("current-run", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+
+    // A file where the ledger expects the session directory deterministically forces the
+    // append to fail without preventing EventBus from persisting either lifecycle event.
+    let sessions_dir = temp.path().join("sessions");
+    std::fs::create_dir(&sessions_dir).unwrap();
+    std::fs::write(sessions_dir.join(SESSION_ID), b"not a directory").unwrap();
+
+    let event_bus = EventBus::new(temp.path().to_path_buf());
+    let mut events = event_bus.subscribe();
+    let manager = QueueManager::new(Arc::clone(&repo), event_bus);
+
+    assert!(manager
+        .record_heartbeat(SESSION_ID, "worker-1", "completed")
+        .await
+        .expect("a failed ledger append must not reject an already committed finalization"));
+    assert_eq!(
+        repo.get_row("current-run").unwrap().unwrap().status,
+        QueueStatus::Finalized
+    );
+
+    let finalized = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("completion heartbeat must emit WorkerFinalized despite ledger failure")
+        .unwrap();
+    assert_eq!(finalized.event_type, EventType::WorkerFinalized);
+    assert_eq!(finalized.payload["task_id"], "current-task");
+
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("ledger failure must not suppress WorkNodeCompleted")
+        .unwrap();
+    assert_eq!(completed.event_type, EventType::WorkNodeCompleted);
+    assert_eq!(completed.payload["task_id"], "current-task");
 }
 
 #[tokio::test]
@@ -1500,10 +1571,7 @@ async fn recovery_prioritizes_live_claim_over_older_terminal_slot_history() {
         3,
     ))
     .unwrap();
-    let manager = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
 
     assert_eq!(
         manager.release_claim(SESSION_ID, "worker-1").await.unwrap(),
@@ -1511,9 +1579,18 @@ async fn recovery_prioritizes_live_claim_over_older_terminal_slot_history() {
             previous: QueueStatus::Running
         }
     );
-    assert_eq!(repo.get_row("live-running").unwrap().unwrap().status, QueueStatus::Queued);
-    assert_eq!(repo.get_row("old-failed").unwrap().unwrap().status, QueueStatus::Failed);
-    assert_eq!(repo.get_row("old-finalized").unwrap().unwrap().status, QueueStatus::Finalized);
+    assert_eq!(
+        repo.get_row("live-running").unwrap().unwrap().status,
+        QueueStatus::Queued
+    );
+    assert_eq!(
+        repo.get_row("old-failed").unwrap().unwrap().status,
+        QueueStatus::Failed
+    );
+    assert_eq!(
+        repo.get_row("old-finalized").unwrap().unwrap().status,
+        QueueStatus::Finalized
+    );
 
     assert_eq!(
         manager.release_claim(SESSION_ID, "worker-1").await.unwrap(),
@@ -1521,7 +1598,10 @@ async fn recovery_prioritizes_live_claim_over_older_terminal_slot_history() {
             previous: QueueStatus::Failed
         }
     );
-    assert_eq!(repo.get_row("old-failed").unwrap().unwrap().status, QueueStatus::Queued);
+    assert_eq!(
+        repo.get_row("old-failed").unwrap().unwrap().status,
+        QueueStatus::Queued
+    );
     assert_eq!(
         manager.release_claim(SESSION_ID, "worker-1").await.unwrap(),
         crate::coordination::ReleaseOutcome::Terminal {
@@ -1592,7 +1672,10 @@ async fn typed_pending_outcome_retries_to_real_claim_and_events_keep_task_id() {
             .unwrap(),
         ClaimOutcome::Claimed { epoch: 1 }
     ));
-    assert_eq!(repo.get_row("run-b").unwrap().unwrap().task_id.as_deref(), Some("B"));
+    assert_eq!(
+        repo.get_row("run-b").unwrap().unwrap().task_id.as_deref(),
+        Some("B")
+    );
 
     let mut observed = Vec::new();
     for _ in 0..6 {
@@ -1607,7 +1690,9 @@ async fn typed_pending_outcome_retries_to_real_claim_and_events_keep_task_id() {
         .expect("normal dependency wait event");
     assert_eq!(pending.severity, Severity::Info);
     assert_eq!(pending.payload["task_id"], "B");
-    assert!(observed.iter().all(|event| event.payload.get("task_id").is_some()));
+    assert!(observed
+        .iter()
+        .all(|event| event.payload.get("task_id").is_some()));
 }
 
 #[test]
@@ -1640,10 +1725,7 @@ fn checkpoint_projection_and_queue_sql_agree_on_claimability() {
     );
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
-    let manager = QueueManager::new(
-        Arc::clone(&repo),
-        EventBus::new(temp.path().to_path_buf()),
-    );
+    let manager = QueueManager::new(Arc::clone(&repo), EventBus::new(temp.path().to_path_buf()));
     repo.enqueue(&queue_row(
         "run-a",
         "worker-a",
@@ -1672,6 +1754,53 @@ fn checkpoint_projection_and_queue_sql_agree_on_claimability() {
     let after_gate = manager.project_queue_statuses(SESSION_ID, &graph).unwrap();
     assert_eq!(checkpoint_aware_claimable_nodes(&after_gate), vec!["B"]);
     assert!(repo.try_claim("run-b", -90_000, 30).unwrap().is_some());
+}
+
+#[test]
+fn operational_queue_projection_preserves_worker_conflict_claimability() {
+    let node = |id: &str, status: NodeStatus| {
+        WorkNode::new(
+            id,
+            NodeKind::Task,
+            id,
+            NodeContract::default(),
+            BindingRef::Role("worker".to_string()),
+            status,
+        )
+    };
+    let graph = TaskGraph::new(
+        vec![
+            node("persisted-completed", NodeStatus::Completed),
+            node("dependent", NodeStatus::Pending),
+        ],
+        vec![WorkEdge::new(
+            "persisted-completed",
+            "dependent",
+            EdgeKind::DependsOn,
+            EdgeProvenance::Planner,
+        )],
+    );
+    let mut legacy_operational_projection = graph.clone();
+    legacy_operational_projection.nodes[0].status = NodeStatus::Pending;
+    promote_initial_ready_nodes(&mut legacy_operational_projection);
+    let before = checkpoint_aware_claimable_nodes(&legacy_operational_projection);
+
+    let temp = tempfile::tempdir().unwrap();
+    let manager = QueueManager::new(
+        Arc::new(queue_repo()),
+        EventBus::new(temp.path().to_path_buf()),
+    );
+    let after = checkpoint_aware_claimable_nodes(
+        &manager
+            .project_queue_statuses(SESSION_ID, &graph)
+            .expect("operational projection"),
+    );
+
+    assert_eq!(before, vec!["persisted-completed"]);
+    assert_eq!(
+        after, before,
+        "workers.rs conflict analysis must retain the pre-split claimable set"
+    );
 }
 
 #[test]
@@ -1784,6 +1913,148 @@ async fn post_heartbeat_with_assignment(
         )
         .await
         .unwrap()
+}
+
+async fn post_heartbeat_with_completed_nodes(
+    app: &axum::Router,
+    session_id: &str,
+    agent_id: &str,
+    completed_nodes: &[&str],
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "agent_id": agent_id,
+                        "status": "completed",
+                        "summary": "declared node completion",
+                        "completed_nodes": completed_nodes,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state, controller) = dependency_http_fixture(&temp);
+    let session_id = "declared-heartbeat-session";
+    let worker_id = format!("{session_id}-worker-1");
+    let project = temp.path().join("declared-project");
+    std::fs::create_dir_all(&project).unwrap();
+    let session_dir = state.storage.create_session_dir(session_id).unwrap();
+    StateManager::new(session_dir.clone())
+        .write_work_graph(&TaskGraph::new(
+            vec![
+                queue_test_node("T1", NodeStatus::Pending),
+                queue_test_node("T2", NodeStatus::Pending),
+                queue_test_node("T3", NodeStatus::Pending),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+    let mut session = quiet_hive_session(session_id, &project);
+    session.agents.push(AgentInfo {
+        id: worker_id.clone(),
+        role: AgentRole::Worker {
+            index: 1,
+            parent: Some(format!("{session_id}-queen")),
+        },
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: Some(format!("{session_id}-queen")),
+        commit_sha: None,
+        base_commit_sha: None,
+        role_definition_id: None,
+        role_definition_version: None,
+    });
+    controller.read().insert_test_session(session);
+
+    let rejected =
+        post_heartbeat_with_completed_nodes(&app, session_id, "worker-1", &["T2", "UNKNOWN"]).await;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let rejected_body = String::from_utf8(
+        to_bytes(rejected.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(rejected_body.contains("UNKNOWN"));
+    assert!(StateManager::new(session_dir.clone())
+        .read_node_completion_facts()
+        .unwrap()
+        .is_empty());
+    assert!(!controller
+        .read()
+        .get_heartbeat_info(session_id)
+        .contains_key(&worker_id));
+
+    let repo = QueueRepo::new(Arc::clone(&state.app_state_db));
+    let mut observed = queue_row(
+        "declared-observed-t2",
+        "observed-worker",
+        Some("T2"),
+        QueueStatus::Running,
+        1,
+    );
+    observed.session_id = session_id.to_string();
+    observed.attempts = 3;
+    observed.heartbeat_at = Some(1_700_000_000_000);
+    repo.enqueue(&observed).unwrap();
+
+    let accepted =
+        post_heartbeat_with_completed_nodes(&app, session_id, "worker-1", &["T2", "T3"]).await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let facts = StateManager::new(session_dir)
+        .read_node_completion_facts()
+        .unwrap();
+    assert_eq!(facts.len(), 2);
+    assert!(facts.iter().all(|fact| {
+        fact.agent_id == worker_id && fact.provenance == NodeCompletionProvenance::Heartbeat
+    }));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/sessions/{session_id}/work-graph?view=runtime&source=live"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    for task_id in ["T2", "T3"] {
+        let node = body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == task_id)
+            .unwrap();
+        assert_eq!(node["status"], "completed");
+        assert_eq!(node["progress"]["agent_id"], worker_id);
+        assert_eq!(body["completion_provenance"][task_id], "declared");
+        if task_id == "T2" {
+            assert_eq!(node["progress"]["attempts"], 3);
+            assert_ne!(
+                node["progress"]["last_heartbeat_at"],
+                serde_json::Value::Null
+            );
+        }
+    }
 }
 
 async fn post_queen_injection(
@@ -2022,17 +2293,17 @@ async fn http_manual_release_fails_closed_before_touching_an_in_flight_spawn() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/sessions/{session_id}/workers/{worker_id}/release"))
+                .uri(format!(
+                    "/api/sessions/{session_id}/workers/{worker_id}/release"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["reason"], "spawn_in_flight");
     assert_eq!(body["epoch"], 1);
     let protected = state
@@ -2045,7 +2316,12 @@ async fn http_manual_release_fails_closed_before_touching_an_in_flight_spawn() {
         .unwrap();
     assert_eq!(protected.status, QueueStatus::Running);
     assert_eq!(protected.attempts, 1);
-    assert!(controller.read().get_session(session_id).unwrap().agents.is_empty());
+    assert!(controller
+        .read()
+        .get_session(session_id)
+        .unwrap()
+        .agents
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2079,23 +2355,38 @@ async fn http_retry_spawns_dependent_without_reusing_another_tasks_queue_identit
 
     let waiting_b = post_task_worker(&app, "B").await;
     let waiting_status = waiting_b.status();
-    let waiting_body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(waiting_b.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let waiting_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(waiting_b.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
     assert_eq!(
         waiting_status,
         StatusCode::CONFLICT,
         "unexpected dependency wait response: {waiting_body}"
     );
     assert_eq!(waiting_body["reason"], "dependencies_pending");
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 0);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        0
+    );
 
     // C is ready and must not collide with B's dependency-pending queue intent even though
     // both requests initially reserve worker-1.
     let spawned_c = post_task_worker(&app, "C").await;
     assert_eq!(spawned_c.status(), StatusCode::CREATED);
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 1);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        1
+    );
     let after_c = state.queue_manager.queue_snapshot(session_id).unwrap();
     assert!(after_c
         .rows
@@ -2143,10 +2434,9 @@ async fn http_retry_spawns_dependent_without_reusing_another_tasks_queue_identit
     // the roster's current worker-2 slot, and reaches the real controller/PTy spawn path.
     let spawned_b = post_task_worker(&app, "B").await;
     let spawned_b_status = spawned_b.status();
-    let spawned_b_body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(spawned_b.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let spawned_b_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(spawned_b.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
     assert_eq!(spawned_b_status, StatusCode::CREATED);
     let task_file = spawned_b_body["task_file"].as_str().unwrap();
     let task_file_body = std::fs::read_to_string(task_file).unwrap();
@@ -2154,7 +2444,10 @@ async fn http_retry_spawns_dependent_without_reusing_another_tasks_queue_identit
     assert!(task_file_body.contains("\"B\""));
     let session = controller.read().get_session(session_id).unwrap();
     assert_eq!(session.agents.len(), 2);
-    assert!(session.agents.iter().any(|agent| agent.id.ends_with("worker-2")));
+    assert!(session
+        .agents
+        .iter()
+        .any(|agent| agent.id.ends_with("worker-2")));
 
     let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
     let b = snapshot
@@ -2204,13 +2497,20 @@ async fn http_unknown_task_is_persisted_nonclaimable_then_reconciles_and_spawns(
 
     let unresolved = post_task_worker(&app, "UNKNOWN").await;
     assert_eq!(unresolved.status(), StatusCode::CONFLICT);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(unresolved.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(unresolved.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
     assert_eq!(body["reason"], "resolution_incomplete");
     assert_eq!(body["task_id"], "UNKNOWN");
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 0);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        0
+    );
     let pending = state.queue_manager.queue_snapshot(session_id).unwrap();
     assert_eq!(pending.queued, 1);
     assert_eq!(pending.resolution_incomplete.len(), 1);
@@ -2224,7 +2524,15 @@ async fn http_unknown_task_is_persisted_nonclaimable_then_reconciles_and_spawns(
     let reconciled = state.queue_manager.queue_snapshot(session_id).unwrap();
     assert!(reconciled.resolution_incomplete.is_empty());
     assert_eq!(reconciled.running, 1);
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 1);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2253,8 +2561,14 @@ async fn http_materializes_known_code_conflict_then_spawns_after_peer_finalizes(
             available: true,
             artifact_languages: BTreeSet::from(["rust".to_string()]),
             touches: BTreeMap::from([
-                ("T1".to_string(), BTreeSet::from(["src/shared.rs".to_string()])),
-                ("T2".to_string(), BTreeSet::from(["src/shared.rs".to_string()])),
+                (
+                    "T1".to_string(),
+                    BTreeSet::from(["src/shared.rs".to_string()]),
+                ),
+                (
+                    "T2".to_string(),
+                    BTreeSet::from(["src/shared.rs".to_string()]),
+                ),
             ]),
             unresolved_task_ids: Vec::new(),
             module_node_count: 1,
@@ -2274,20 +2588,29 @@ async fn http_materializes_known_code_conflict_then_spawns_after_peer_finalizes(
         .write_graph_composition_state(&composition)
         .unwrap();
 
-    assert_eq!(post_task_worker(&app, "T1").await.status(), StatusCode::CREATED);
+    assert_eq!(
+        post_task_worker(&app, "T1").await.status(),
+        StatusCode::CREATED
+    );
     let waiting = post_task_worker(&app, "T2").await;
     assert_eq!(waiting.status(), StatusCode::CONFLICT);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(waiting.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(waiting.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["reason"], "conflicts_pending");
     assert_eq!(body["blocking_task_ids"], json!(["T1"]));
     assert!(body["conflict_reasons"][0]
         .as_str()
         .unwrap()
         .contains("src/shared.rs"));
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 1);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        1
+    );
     assert_eq!(
         state
             .queue_manager
@@ -2304,8 +2627,19 @@ async fn http_materializes_known_code_conflict_then_spawns_after_peer_finalizes(
         .record_heartbeat(session_id, "http-dependency-session-worker-1", "completed")
         .await
         .unwrap();
-    assert_eq!(post_task_worker(&app, "T2").await.status(), StatusCode::CREATED);
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 2);
+    assert_eq!(
+        post_task_worker(&app, "T2").await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -2336,9 +2670,15 @@ async fn http_staggered_readiness_serializes_against_an_already_running_peer() {
     let composition = queue_test_composition(
         graph,
         BTreeMap::from([
-            ("T1".to_string(), BTreeSet::from(["src/shared.rs".to_string()])),
+            (
+                "T1".to_string(),
+                BTreeSet::from(["src/shared.rs".to_string()]),
+            ),
             ("DEP".to_string(), BTreeSet::new()),
-            ("T2".to_string(), BTreeSet::from(["src/shared.rs".to_string()])),
+            (
+                "T2".to_string(),
+                BTreeSet::from(["src/shared.rs".to_string()]),
+            ),
         ]),
         Vec::new(),
     );
@@ -2346,11 +2686,16 @@ async fn http_staggered_readiness_serializes_against_an_already_running_peer() {
         .write_graph_composition_state(&composition)
         .unwrap();
 
-    assert_eq!(post_task_worker(&app, "T1").await.status(), StatusCode::CREATED);
+    assert_eq!(
+        post_task_worker(&app, "T1").await.status(),
+        StatusCode::CREATED
+    );
     let dependency_wait = post_task_worker(&app, "T2").await;
     assert_eq!(dependency_wait.status(), StatusCode::CONFLICT);
     let dependency_body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(dependency_wait.into_body(), usize::MAX).await.unwrap(),
+        &to_bytes(dependency_wait.into_body(), usize::MAX)
+            .await
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(dependency_body["reason"], "dependencies_pending");
@@ -2387,7 +2732,9 @@ async fn http_staggered_readiness_serializes_against_an_already_running_peer() {
     let conflict_wait = post_task_worker(&app, "T2").await;
     assert_eq!(conflict_wait.status(), StatusCode::CONFLICT);
     let conflict_body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(conflict_wait.into_body(), usize::MAX).await.unwrap(),
+        &to_bytes(conflict_wait.into_body(), usize::MAX)
+            .await
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(conflict_body["reason"], "conflicts_pending");
@@ -2398,7 +2745,10 @@ async fn http_staggered_readiness_serializes_against_an_already_running_peer() {
         .record_heartbeat(session_id, "http-dependency-session-worker-1", "completed")
         .await
         .unwrap();
-    assert_eq!(post_task_worker(&app, "T2").await.status(), StatusCode::CREATED);
+    assert_eq!(
+        post_task_worker(&app, "T2").await.status(),
+        StatusCode::CREATED
+    );
 }
 
 #[tokio::test]
@@ -2469,13 +2819,19 @@ async fn complete_edgeless_graph_rejects_unknown_explicit_task_without_spawning(
 
     let response = post_task_worker(&app, "UNKNOWN").await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["reason"], "resolution_incomplete");
     assert_eq!(body["task_id"], "UNKNOWN");
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 0);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        0
+    );
     let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
     assert_eq!(snapshot.queued, 1);
     assert_eq!(snapshot.running, 0);
@@ -2500,11 +2856,22 @@ async fn complete_edgeless_graph_admits_known_explicit_task() {
         ))
         .unwrap();
 
-    assert_eq!(post_task_worker(&app, "KNOWN").await.status(), StatusCode::CREATED);
+    assert_eq!(
+        post_task_worker(&app, "KNOWN").await.status(),
+        StatusCode::CREATED
+    );
     let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
     assert!(snapshot.resolution_incomplete.is_empty());
     assert_eq!(snapshot.running, 1);
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 1);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2519,28 +2886,34 @@ async fn degraded_empty_graph_rejects_unknown_and_retains_its_omission() {
         .read()
         .insert_test_session(quiet_hive_session(session_id, &project));
     let mut degraded = TaskGraph::default();
-    degraded.omissions.push(
-        crate::orchestrator::work_graph::WorkGraphOmission::new(
+    degraded
+        .omissions
+        .push(crate::orchestrator::work_graph::WorkGraphOmission::new(
             crate::orchestrator::work_graph::WorkGraphOmissionReason::ResolutionIncomplete,
             1,
             vec!["planner metadata malformed".to_string()],
-        ),
-    );
+        ));
     let state_manager = StateManager::new(state.storage.session_dir(session_id));
     state_manager.write_work_graph(&degraded).unwrap();
 
     let response = post_task_worker(&app, "UNKNOWN").await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["reason"], "resolution_incomplete");
     assert_eq!(body["task_id"], "UNKNOWN");
     assert_eq!(state_manager.read_work_graph().unwrap(), Some(degraded));
     let snapshot = state.queue_manager.queue_snapshot(session_id).unwrap();
     assert_eq!(snapshot.resolution_incomplete.len(), 1);
-    assert_eq!(controller.read().get_session(session_id).unwrap().agents.len(), 0);
+    assert_eq!(
+        controller
+            .read()
+            .get_session(session_id)
+            .unwrap()
+            .agents
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -2554,7 +2927,11 @@ async fn unreadable_authoritative_graph_fails_closed_before_enqueue() {
     controller
         .read()
         .insert_test_session(quiet_hive_session(session_id, &project));
-    std::fs::write(session_dir.join("state").join("work-graph.json"), "not-json").unwrap();
+    std::fs::write(
+        session_dir.join("state").join("work-graph.json"),
+        "not-json",
+    )
+    .unwrap();
 
     let response = post_task_worker(&app, "B").await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -2666,9 +3043,7 @@ fn quiet_fusion_session(session_id: &str, project_path: &Path) -> Session {
 fn mark_session_completed_schedules_archive_after_persistence() {
     let temp = tempfile::tempdir().unwrap();
     let session_id = "completion-archive";
-    let storage = Arc::new(
-        SessionStorage::new_with_base(temp.path().join("storage")).unwrap(),
-    );
+    let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
     let session_dir = storage.create_session_dir(session_id).unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
