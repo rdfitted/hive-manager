@@ -83,9 +83,10 @@ The inject response reports measured facts, not request echoes:
   after an Enter write, over a bounded 1,500 ms window per attempt: `true` means sustained ring
   activity consistent with the composer accepting Enter and starting a turn, `false` means
   the Enter produced no observable ring reaction at all, and `null` means unknown,
-  unobservable, or `"submit": false`. An agent that was already streaming output can
-  produce a false positive; the field never upgrades an ambiguous buffer observation to a
-  sweep PASS.
+  unobservable, or `"submit": false`. The handler also samples a bounded pre-write activity
+  baseline. When that baseline shows the receiver was already streaming, a would-be positive is
+  downgraded to `null` with basis `busy-receiver-indeterminate`; the field never upgrades an
+  ambiguous buffer observation to a sweep PASS.
 - The retry is keyed strictly on the first `false` verdict and is capped at one extra CR.
   Its observation baseline is captured after that CR so local echo cannot become false
   receiver evidence. The response reports the retry observation as the final verdict; two

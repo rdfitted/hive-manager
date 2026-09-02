@@ -17,7 +17,7 @@ fn default_submit() -> bool {
     true
 }
 
-const INJECTION_EVIDENCE_SCOPE: &str = "These facts prove only that bytes were written and the PTY output ring was observed for a bounded window; they do not prove that the agent took a turn. submit_confirmed is heuristic: true means sustained post-submit ring activity consistent with the composer accepting Enter, false means Enter produced no observable reaction within the confirmation window, null means unknown or not applicable. An agent that was already streaming output can produce a false positive.";
+const INJECTION_EVIDENCE_SCOPE: &str = "These facts prove only that bytes were written and the PTY output ring was observed for bounded windows; they do not prove that the agent took a turn. submit_confirmed is heuristic: true means sustained post-submit ring activity consistent with the composer accepting Enter from a receiver that was quiet before the payload write, false means Enter produced no observable reaction within the confirmation window, null means unknown or not applicable. Sustained pre-write receiver activity makes an otherwise positive observation indeterminate.";
 const INJECTION_ACTIVITY_OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
 const INJECTION_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SUBMIT_KEYSTROKE: &[u8] = b"\r";
@@ -26,6 +26,19 @@ const SUBMIT_CONFIRMATION_WINDOW: Duration = Duration::from_millis(1500);
 /// Minimum spread between the first and last observed ring change for the activity to
 /// count as sustained rather than a single composer repaint.
 const SUBMIT_CONFIRMATION_MIN_SPAN: Duration = Duration::from_millis(250);
+
+struct PreWriteActivityBaseline {
+    pty_observation_available: bool,
+    change_offsets: Vec<Duration>,
+    observation_elapsed_ms: u64,
+}
+
+impl PreWriteActivityBaseline {
+    fn receiver_busy(&self) -> Option<bool> {
+        self.pty_observation_available
+            .then_some(pre_write_activity_is_sustained(&self.change_offsets))
+    }
+}
 
 struct InjectionObservation {
     pty_observation_available: bool,
@@ -40,6 +53,7 @@ struct InjectionObservation {
 }
 
 struct InjectionMeasurement {
+    pre_write_baseline: PreWriteActivityBaseline,
     observation: InjectionObservation,
     submit_attempts: usize,
     submit_bytes_written: usize,
@@ -123,21 +137,80 @@ impl InjectionObservation {
     }
 }
 
-/// Classify post-Enter ring behaviour into the tri-state delivery signal (#256).
+/// Classify post-Enter ring behaviour into the tri-state delivery signal (#256, #260).
 ///
-/// `change_offsets` holds the elapsed time of every poll at which the ring content
+/// `post_submit_change_offsets` holds the elapsed time of every poll at which the ring content
 /// differed from the previous poll. Changes spread over at least
 /// [`SUBMIT_CONFIRMATION_MIN_SPAN`] are the signature of a composer that accepted Enter
 /// and started a turn. A short isolated burst is ambiguous — a swallowed Enter also
 /// repaints the composer once. Zero changes mean the Enter provably produced no visible
-/// reaction, which a live TUI never does for an accepted submit.
-fn classify_submit_confirmation(change_offsets: &[Duration]) -> (Option<bool>, &'static str) {
-    match change_offsets {
+/// reaction, which a live TUI never does for an accepted submit. Two or more changes in
+/// the fixed pre-write baseline identify an already-streaming receiver; only a would-be
+/// positive is downgraded because that output cannot be attributed to Enter.
+fn classify_submit_confirmation(
+    post_submit_change_offsets: &[Duration],
+    pre_write_change_offsets: &[Duration],
+) -> (Option<bool>, &'static str) {
+    let classification = match post_submit_change_offsets {
         [] => (Some(false), "no-post-submit-activity"),
         [first, .., last] if last.saturating_sub(*first) >= SUBMIT_CONFIRMATION_MIN_SPAN => {
             (Some(true), "sustained-post-submit-activity")
         }
         _ => (None, "ambiguous-post-submit-activity"),
+    };
+
+    if classification.0 == Some(true) && pre_write_activity_is_sustained(pre_write_change_offsets) {
+        (None, "busy-receiver-indeterminate")
+    } else {
+        classification
+    }
+}
+
+fn pre_write_activity_is_sustained(change_offsets: &[Duration]) -> bool {
+    matches!(change_offsets, [_, _, ..])
+}
+
+fn post_submit_activity_is_sustained(change_offsets: &[Duration]) -> bool {
+    matches!(
+        change_offsets,
+        [first, .., last]
+            if last.saturating_sub(*first) >= SUBMIT_CONFIRMATION_MIN_SPAN
+    )
+}
+
+async fn observe_pre_write_activity(state: &AppState, agent_id: &str) -> PreWriteActivityBaseline {
+    let observation_started = Instant::now();
+    let observation_deadline = observation_started + INJECTION_ACTIVITY_OBSERVATION_WINDOW;
+    let Some(mut previous) = state.pty_manager.read().recent_output(agent_id) else {
+        return PreWriteActivityBaseline {
+            pty_observation_available: false,
+            change_offsets: Vec::new(),
+            observation_elapsed_ms: 0,
+        };
+    };
+    let mut change_offsets = Vec::new();
+    let mut pty_observation_available = true;
+
+    loop {
+        let remaining = observation_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(INJECTION_ACTIVITY_POLL_INTERVAL.min(remaining)).await;
+        let Some(current) = state.pty_manager.read().recent_output(agent_id) else {
+            pty_observation_available = false;
+            break;
+        };
+        if current != previous {
+            change_offsets.push(observation_started.elapsed());
+            previous = current;
+        }
+    }
+
+    PreWriteActivityBaseline {
+        pty_observation_available,
+        change_offsets,
+        observation_elapsed_ms: observation_started.elapsed().as_millis() as u64,
     }
 }
 
@@ -146,6 +219,7 @@ async fn observe_submit(
     agent_id: &str,
     submit_keystroke_issued: bool,
     pty_output_after_write: Option<&str>,
+    pre_write_change_offsets: &[Duration],
 ) -> InjectionObservation {
     if !submit_keystroke_issued {
         return InjectionObservation::unobserved(
@@ -189,7 +263,7 @@ async fn observe_submit(
         }
         output_after = Some(current);
         // Once the sustained-activity criterion is met, the verdict cannot change.
-        if classify_submit_confirmation(&change_offsets).0 == Some(true) {
+        if post_submit_activity_is_sustained(&change_offsets) {
             break;
         }
     }
@@ -197,7 +271,7 @@ async fn observe_submit(
     let (submit_confirmed, submit_confirmation_basis) = if ring_lost {
         (None, "pty-unobservable")
     } else {
-        classify_submit_confirmation(&change_offsets)
+        classify_submit_confirmation(&change_offsets, pre_write_change_offsets)
     };
 
     // The legacy activity fields keep their pre-#256 meaning: did the ring change within
@@ -226,12 +300,14 @@ async fn observe_injection_with_retry(
     state: &AppState,
     agent_id: &str,
     receipt: &InjectionReceipt,
+    pre_write_baseline: PreWriteActivityBaseline,
 ) -> InjectionMeasurement {
     let mut observation = observe_submit(
         state,
         agent_id,
         receipt.submit_keystroke_issued,
         receipt.pty_output_after_write.as_deref(),
+        &pre_write_baseline.change_offsets,
     )
     .await;
     let mut submit_attempts = usize::from(receipt.submit_keystroke_issued);
@@ -262,8 +338,14 @@ async fn observe_injection_with_retry(
                 // (including the Windows test stub) mirror the CR into the ring; observing
                 // from the old baseline would misclassify that self-echo as receiver activity.
                 let retry_baseline = state.pty_manager.read().recent_output(agent_id);
-                let mut retry_observation =
-                    observe_submit(state, agent_id, true, retry_baseline.as_deref()).await;
+                let mut retry_observation = observe_submit(
+                    state,
+                    agent_id,
+                    true,
+                    retry_baseline.as_deref(),
+                    &pre_write_baseline.change_offsets,
+                )
+                .await;
                 retry_observation.submit_confirmation_elapsed_ms = first_confirmation_elapsed_ms
                     .saturating_add(retry_observation.submit_confirmation_elapsed_ms);
                 observation = retry_observation;
@@ -278,6 +360,7 @@ async fn observe_injection_with_retry(
     }
 
     InjectionMeasurement {
+        pre_write_baseline,
         observation,
         submit_attempts,
         submit_bytes_written,
@@ -308,6 +391,7 @@ fn measured_response(
     receipt: &InjectionReceipt,
     measurement: &InjectionMeasurement,
 ) -> Value {
+    let pre_write_baseline = &measurement.pre_write_baseline;
     let observation = &measurement.observation;
     json!({
         "status": "success",
@@ -321,6 +405,11 @@ fn measured_response(
         "submit_attempts": measurement.submit_attempts,
         "submit_retry_failed": measurement.submit_retry_failure.is_some(),
         "submit_retry_failure": measurement.submit_retry_failure,
+        "pre_write_pty_observation_available": pre_write_baseline.pty_observation_available,
+        "pre_write_activity_change_count": pre_write_baseline.change_offsets.len(),
+        "receiver_busy_before_write": pre_write_baseline.receiver_busy(),
+        "pre_write_observation_window_ms": INJECTION_ACTIVITY_OBSERVATION_WINDOW.as_millis() as u64,
+        "pre_write_observation_elapsed_ms": pre_write_baseline.observation_elapsed_ms,
         "pty_observation_available": observation.pty_observation_available,
         "pty_output_bytes_before": receipt.pty_output_before.as_ref().map(String::len),
         "pty_output_bytes_after_write": receipt.pty_output_after_write.as_ref().map(String::len),
@@ -373,6 +462,7 @@ pub async fn operator_inject(
     let target_agent_id = payload.target_agent_id.clone();
     let transaction_lock = injection_transaction_lock(&state, &target_agent_id);
     let _transaction_guard = transaction_lock.lock().await;
+    let pre_write_baseline = observe_pre_write_activity(&state, &target_agent_id).await;
     let injection_target_agent_id = target_agent_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
@@ -387,7 +477,8 @@ pub async fn operator_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(|error| ApiError::internal(error.to_string()))?;
-    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await;
+    let measurement =
+        observe_injection_with_retry(&state, &target_agent_id, &receipt, pre_write_baseline).await;
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
     Ok(Json(measured_response(
@@ -409,6 +500,7 @@ pub async fn queen_inject(
     let target_worker_id = payload.target_worker_id.clone();
     let transaction_lock = injection_transaction_lock(&state, &target_worker_id);
     let _transaction_guard = transaction_lock.lock().await;
+    let pre_write_baseline = observe_pre_write_activity(&state, &target_worker_id).await;
     let injection_target_worker_id = target_worker_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
@@ -424,7 +516,8 @@ pub async fn queen_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(map_injection_error)?;
-    let measurement = observe_injection_with_retry(&state, &target_worker_id, &receipt).await;
+    let measurement =
+        observe_injection_with_retry(&state, &target_worker_id, &receipt, pre_write_baseline).await;
     record_injection_submission(&state, &id, &target_worker_id, &receipt);
 
     Ok(Json(measured_response(
@@ -446,6 +539,7 @@ pub async fn evaluator_inject(
     let target_agent_id = payload.target_agent_id.clone();
     let transaction_lock = injection_transaction_lock(&state, &target_agent_id);
     let _transaction_guard = transaction_lock.lock().await;
+    let pre_write_baseline = observe_pre_write_activity(&state, &target_agent_id).await;
     let injection_target_agent_id = target_agent_id.clone();
     let manager = Arc::clone(&state.injection_manager);
     let injection_session_id = id.clone();
@@ -461,7 +555,8 @@ pub async fn evaluator_inject(
     .await
     .map_err(|error| ApiError::internal(format!("Injection task failed: {error}")))?;
     let receipt = injection_result.map_err(map_injection_error)?;
-    let measurement = observe_injection_with_retry(&state, &target_agent_id, &receipt).await;
+    let measurement =
+        observe_injection_with_retry(&state, &target_agent_id, &receipt, pre_write_baseline).await;
     record_injection_submission(&state, &id, &target_agent_id, &receipt);
 
     Ok(Json(measured_response(
@@ -697,6 +792,16 @@ mod tests {
         assert_eq!(response["submit_attempts"], 2);
         assert_eq!(response["submit_retry_failed"], false);
         assert_eq!(response["submit_retry_failure"], Value::Null);
+        assert_eq!(response["pre_write_pty_observation_available"], true);
+        assert_eq!(response["pre_write_activity_change_count"], 0);
+        assert_eq!(response["receiver_busy_before_write"], false);
+        assert_eq!(response["pre_write_observation_window_ms"], 250);
+        assert!(
+            response["pre_write_observation_elapsed_ms"]
+                .as_u64()
+                .unwrap()
+                >= 240
+        );
         assert_eq!(response["pty_observation_available"], true);
         assert_eq!(response["pty_output_bytes_before"], 0);
         // The stub mirrors stdin into the ring: 6-byte start marker + 5-byte payload
@@ -868,6 +973,19 @@ mod tests {
             assert_eq!(response["submit_attempts"], 2, "{path}");
             assert_eq!(response["submit_retry_failed"], false, "{path}");
             assert_eq!(response["submit_retry_failure"], Value::Null, "{path}");
+            assert_eq!(
+                response["pre_write_pty_observation_available"], true,
+                "{path}"
+            );
+            assert!(
+                response["pre_write_activity_change_count"].is_number(),
+                "{path}"
+            );
+            assert!(
+                response["receiver_busy_before_write"].is_boolean(),
+                "{path}"
+            );
+            assert_eq!(response["pre_write_observation_window_ms"], 250, "{path}");
             assert_eq!(response["pty_observation_available"], true, "{path}");
             assert!(response["pty_output_bytes_before"].is_number(), "{path}");
             assert!(
@@ -980,9 +1098,9 @@ mod tests {
 
         let pty_manager = Arc::clone(&state.pty_manager);
         let repainter = tokio::spawn(async move {
-            // The initial submit holds a 50 ms adapter gap before capturing its receipt
-            // baseline. Wait well past that gap so this is post-submit receiver activity.
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Wait past the 250 ms pre-write baseline and the 50 ms adapter gap so this
+            // remains one isolated post-submit receiver repaint.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             pty_manager
                 .read()
                 .record_output_for_test(AGENT_ID, b"one-frame;");
@@ -1039,10 +1157,15 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(2), retry_ready_rx)
-            .await
-            .expect("initial quiet confirmation window")
-            .expect("retry hook signal");
+        tokio::time::timeout(
+            SUBMIT_CONFIRMATION_WINDOW
+                + INJECTION_ACTIVITY_OBSERVATION_WINDOW
+                + Duration::from_secs(1),
+            retry_ready_rx,
+        )
+        .await
+        .expect("initial quiet confirmation window")
+        .expect("retry hook signal");
 
         let staged = tokio::spawn(async move {
             post_inject(
@@ -1125,16 +1248,18 @@ mod tests {
         ));
     }
 
-    /// #256: sustained post-submit ring activity flips submit_confirmed to true. A
-    /// background task plays the role of the child TUI repainting after it accepted
-    /// the Enter.
+    /// #256/#260: a receiver that stays quiet through the pre-write baseline can still
+    /// produce a confident positive from sustained post-submit activity.
     #[tokio::test]
-    async fn operator_inject_confirms_submit_on_sustained_post_submit_activity() {
+    async fn operator_inject_confirms_submit_when_quiet_before_sustained_activity() {
         let (_temp_dir, app, state) = setup_test_app();
 
         let pty_manager = Arc::clone(&state.pty_manager);
         let repainter = tokio::spawn(async move {
-            for tick in 0..12u32 {
+            // Let the 250 ms pre-write baseline finish before simulating the child TUI's
+            // sustained reaction to Enter.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            for tick in 0..8u32 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 pty_manager
                     .read()
@@ -1151,6 +1276,8 @@ mod tests {
         repainter.abort();
 
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["pre_write_activity_change_count"], 0);
+        assert_eq!(response["receiver_busy_before_write"], false);
         assert_eq!(response["submit_confirmed"], true);
         assert_eq!(
             response["submit_confirmation_basis"],
@@ -1173,31 +1300,118 @@ mod tests {
         );
     }
 
+    /// #260: output already streaming before the payload write makes an otherwise
+    /// confident positive indeterminate. The retry remains keyed strictly to false,
+    /// so this busy receiver must receive exactly one Enter.
+    #[tokio::test]
+    async fn operator_inject_downgrades_sustained_activity_from_busy_receiver() {
+        let (_temp_dir, app, state) = setup_test_app();
+
+        let pty_manager = Arc::clone(&state.pty_manager);
+        let repainter = tokio::spawn(async move {
+            for tick in 0..16u32 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                pty_manager
+                    .read()
+                    .record_output_for_test(AGENT_ID, format!("busy-frame-{tick};").as_bytes());
+            }
+        });
+
+        let (status, response) = post_inject(
+            app,
+            "/api/sessions/inject-test/inject",
+            json!({ "target_agent_id": AGENT_ID, "message": "go" }),
+        )
+        .await;
+        repainter.abort();
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            response["pre_write_activity_change_count"]
+                .as_u64()
+                .unwrap()
+                >= 2
+        );
+        assert_eq!(response["receiver_busy_before_write"], true);
+        assert_eq!(response["submit_confirmed"], Value::Null);
+        assert_eq!(
+            response["submit_confirmation_basis"],
+            "busy-receiver-indeterminate"
+        );
+        assert_eq!(
+            response["submit_attempts"], 1,
+            "an indeterminate busy receiver must not trigger the Some(false)-only retry"
+        );
+        assert_eq!(response["submit_bytes_written"], 1);
+        let writes = state
+            .pty_manager
+            .read()
+            .write_records_for_test(AGENT_ID)
+            .unwrap();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| write.as_slice() == b"\r")
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn submit_confirmation_classifier_distinguishes_all_three_verdicts() {
         use std::time::Duration;
 
         assert_eq!(
-            classify_submit_confirmation(&[]),
+            classify_submit_confirmation(&[], &[]),
             (Some(false), "no-post-submit-activity")
         );
         assert_eq!(
-            classify_submit_confirmation(&[Duration::from_millis(40)]),
+            classify_submit_confirmation(&[Duration::from_millis(40)], &[]),
             (None, "ambiguous-post-submit-activity"),
             "a single repaint also matches a swallowed Enter"
         );
         assert_eq!(
-            classify_submit_confirmation(&[Duration::from_millis(40), Duration::from_millis(120)]),
+            classify_submit_confirmation(
+                &[Duration::from_millis(40), Duration::from_millis(120)],
+                &[]
+            ),
             (None, "ambiguous-post-submit-activity"),
             "a short burst is not sustained activity"
         );
         assert_eq!(
-            classify_submit_confirmation(&[
-                Duration::from_millis(40),
-                Duration::from_millis(120),
-                Duration::from_millis(290)
-            ]),
+            classify_submit_confirmation(
+                &[
+                    Duration::from_millis(40),
+                    Duration::from_millis(120),
+                    Duration::from_millis(290)
+                ],
+                &[]
+            ),
             (Some(true), "sustained-post-submit-activity")
+        );
+
+        let busy_baseline = [Duration::from_millis(40), Duration::from_millis(120)];
+        assert_eq!(
+            classify_submit_confirmation(&[], &busy_baseline),
+            (Some(false), "no-post-submit-activity"),
+            "a busy baseline does not change a confident negative"
+        );
+        assert_eq!(
+            classify_submit_confirmation(&[Duration::from_millis(40)], &busy_baseline),
+            (None, "ambiguous-post-submit-activity"),
+            "a busy baseline does not change an ambiguous verdict"
+        );
+        assert_eq!(
+            classify_submit_confirmation(
+                &[
+                    Duration::from_millis(40),
+                    Duration::from_millis(120),
+                    Duration::from_millis(290)
+                ],
+                &busy_baseline
+            ),
+            (None, "busy-receiver-indeterminate"),
+            "pre-write streaming invalidates only the would-be confident positive"
         );
     }
 

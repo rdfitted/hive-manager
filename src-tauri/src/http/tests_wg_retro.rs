@@ -96,6 +96,7 @@ fn outcome(
         subject_id: id.to_string(),
         task_id: Some(id.to_string()),
         agent_ids: vec![format!("agent-{id}")],
+        completion_evidence: None,
         status,
         started_at,
         finished_at,

@@ -10,14 +10,15 @@ use std::{fmt, sync::Arc};
 use crate::coordination::{CoordinationMessage, StateManager};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::orchestrator::work_graph::completion_ledger::{
+    NodeCompletionFact, NodeCompletionProvenance,
+};
 use crate::orchestrator::work_graph::review::ReviewExpansionSidecar;
 use crate::orchestrator::work_graph::runtime::{
     record_review_verdict_and_record, route_failed_verdict_and_record, GraphCompositionState,
     ReviewVerdict,
 };
-use crate::orchestrator::work_graph::{
-    WorkGraph, WorkGraphOmission, WorkGraphOmissionReason,
-};
+use crate::orchestrator::work_graph::{WorkGraph, WorkGraphOmission, WorkGraphOmissionReason};
 use crate::pty::{AgentConfig, AgentRole};
 use crate::session::{AuthStrategy, SessionController, SessionState};
 
@@ -296,9 +297,9 @@ pub async fn add_qa_worker(
             status: "Running".to_string(),
             task_file: {
                 let controller = state.session_controller.read();
-                let session = controller
-                    .get_session(&session_id)
-                    .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+                let session = controller.get_session(&session_id).ok_or_else(|| {
+                    ApiError::not_found(format!("Session {} not found", session_id))
+                })?;
                 SessionController::absolute_task_file_path_for_qa_worker(
                     &session.project_path,
                     &session_id,
@@ -365,19 +366,16 @@ pub async fn dev_login(
         .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
 
     match &session.auth_strategy {
-        AuthStrategy::DevBypass { token } if *token == query.token => {
-            Ok(Json(json!({
-                "session_id": session_id,
-                "auth": "dev-bypass",
-                "granted": true
-            })))
-        }
-        AuthStrategy::DevBypass { .. } => {
-            Err(ApiError::new(StatusCode::UNAUTHORIZED, "Invalid dev-bypass token"))
-        }
-        AuthStrategy::None => {
-            Err(ApiError::not_found("Auth not configured for this session"))
-        }
+        AuthStrategy::DevBypass { token } if *token == query.token => Ok(Json(json!({
+            "session_id": session_id,
+            "auth": "dev-bypass",
+            "granted": true
+        }))),
+        AuthStrategy::DevBypass { .. } => Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "Invalid dev-bypass token",
+        )),
+        AuthStrategy::None => Err(ApiError::not_found("Auth not configured for this session")),
     }
 }
 
@@ -545,10 +543,7 @@ pub(crate) enum WorkGraphVerdictError {
     MissingGraph,
     MissingSidecar,
     UnknownVerdict(String),
-    StaleVerdict {
-        requested: String,
-        current: String,
-    },
+    StaleVerdict { requested: String, current: String },
     Mutation(String),
 }
 
@@ -618,7 +613,15 @@ fn persist_work_graph_verdict(
     graph: &WorkGraph,
     sidecar: &ReviewExpansionSidecar,
     mut composition: Option<GraphCompositionState>,
+    completion_facts: &[NodeCompletionFact],
 ) -> Result<(), WorkGraphVerdictError> {
+    state_manager
+        .append_node_completion_facts(completion_facts)
+        .map_err(|error| {
+            WorkGraphVerdictError::State(format!(
+                "Failed to persist declared completion after QA verdict: {error}"
+            ))
+        })?;
     state_manager.write_work_graph(graph).map_err(|error| {
         WorkGraphVerdictError::State(format!(
             "Failed to persist work graph after QA verdict: {error}"
@@ -677,6 +680,23 @@ pub(crate) fn apply_work_graph_verdict(
     work_graph_verdict_id: Option<&str>,
     verdict: &str,
 ) -> Result<WorkGraphVerdictRouting, WorkGraphVerdictError> {
+    apply_work_graph_verdict_for_agent(
+        state_manager,
+        session_id,
+        work_graph_verdict_id,
+        verdict,
+        None,
+    )
+    .map(|(routing, _)| routing)
+}
+
+fn apply_work_graph_verdict_for_agent(
+    state_manager: &StateManager,
+    session_id: &str,
+    work_graph_verdict_id: Option<&str>,
+    verdict: &str,
+    evaluator_agent_id: Option<&str>,
+) -> Result<(WorkGraphVerdictRouting, Vec<NodeCompletionFact>), WorkGraphVerdictError> {
     let verdict_id = work_graph_verdict_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -688,9 +708,12 @@ pub(crate) fn apply_work_graph_verdict(
                 omission = MISSING_WORK_GRAPH_VERDICT_ID,
                 "QA verdict has no explicit work-graph verdict id; no graph node was guessed"
             );
-            return Ok(WorkGraphVerdictRouting::OmittedMissingVerdictId {
-                omission_persisted: false,
-            });
+            return Ok((
+                WorkGraphVerdictRouting::OmittedMissingVerdictId {
+                    omission_persisted: false,
+                },
+                Vec::new(),
+            ));
         };
         let omission = WorkGraphOmission::new(
             WorkGraphOmissionReason::ResolutionIncomplete,
@@ -709,9 +732,12 @@ pub(crate) fn apply_work_graph_verdict(
                 "Could not persist missing work-graph verdict-id omission"
             );
         }
-        return Ok(WorkGraphVerdictRouting::OmittedMissingVerdictId {
-            omission_persisted: persisted,
-        });
+        return Ok((
+            WorkGraphVerdictRouting::OmittedMissingVerdictId {
+                omission_persisted: persisted,
+            },
+            Vec::new(),
+        ));
     }
     let verdict_id = verdict_id.expect("checked above").to_string();
     let (mut graph, composition) = load_authoritative_work_graph(state_manager)?;
@@ -789,8 +815,24 @@ pub(crate) fn apply_work_graph_verdict(
             )))
         }
     };
-    persist_work_graph_verdict(state_manager, &graph, &sidecar, composition)?;
-    Ok(routing)
+    let completion_facts = match (&routing, evaluator_agent_id) {
+        (WorkGraphVerdictRouting::Passed { verdict_id, .. }, Some(agent_id)) => {
+            vec![NodeCompletionFact::new(
+                verdict_id.clone(),
+                agent_id.to_string(),
+                NodeCompletionProvenance::EvaluatorVerdict,
+            )]
+        }
+        _ => Vec::new(),
+    };
+    persist_work_graph_verdict(
+        state_manager,
+        &graph,
+        &sidecar,
+        composition,
+        &completion_facts,
+    )?;
+    Ok((routing, completion_facts))
 }
 
 pub(crate) fn apply_verdict(
@@ -942,7 +984,8 @@ pub async fn post_verdict(
             ))
         })?;
 
-    let verdict_message = CoordinationMessage::qa_verdict(&evaluator_id, &queen_id, &verdict_content);
+    let verdict_message =
+        CoordinationMessage::qa_verdict(&evaluator_id, &queen_id, &verdict_content);
     if let Err(err) = state
         .storage
         .append_coordination_log(&session_id, &verdict_message)
@@ -958,13 +1001,23 @@ pub async fn post_verdict(
     // explicitly supplied join id may mutate the graph; the legacy request
     // shape records a ResolutionIncomplete omission without selecting a node.
     let graph_state_manager = StateManager::new(state.storage.session_dir(&session_id));
-    let work_graph_routing = apply_work_graph_verdict(
+    let (work_graph_routing, completion_facts) = apply_work_graph_verdict_for_agent(
         &graph_state_manager,
         &session_id,
         req.work_graph_verdict_id.as_deref(),
         verdict,
+        Some(&evaluator_id),
     )
     .map_err(map_work_graph_verdict_error)?;
+    for fact in completion_facts {
+        if let Err(error) = state.event_bus.publish(fact.event(&session_id)).await {
+            tracing::warn!(
+                session_id = %session_id,
+                task_id = %fact.task_id,
+                "Failed to publish durable evaluator completion event: {error}"
+            );
+        }
+    }
 
     let new_state = {
         let controller = state.session_controller.read();
@@ -993,19 +1046,24 @@ fn blocked_reason_message(
     blocked_detail: Option<&str>,
     rationale: Option<&str>,
 ) -> String {
-    let category = match blocked_reason.map(str::trim).filter(|value| !value.is_empty()) {
+    let category = match blocked_reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some("ui-unavailable") | Some("ui_unavailable") => {
             "A pass-criterion requires a UI/host that isn't running, so it can't be exercised."
         }
         Some("http-failure") | Some("http_failure") => {
             "One or more QA-worker verdicts could not be delivered over HTTP."
         }
-        Some(other) => return match blocked_detail.or(rationale) {
-            Some(detail) if !detail.trim().is_empty() => {
-                format!("QA blocked ({}): {}", other, detail.trim())
+        Some(other) => {
+            return match blocked_detail.or(rationale) {
+                Some(detail) if !detail.trim().is_empty() => {
+                    format!("QA blocked ({}): {}", other, detail.trim())
+                }
+                _ => format!("QA blocked: {}", other),
             }
-            _ => format!("QA blocked: {}", other),
-        },
+        }
         None => "QA could not reach a PASS/FAIL verdict.",
     };
     match blocked_detail.or(rationale) {
@@ -1201,8 +1259,18 @@ pub async fn force_fail(
 
 #[cfg(test)]
 mod tests {
-    use super::map_add_qa_worker_error;
+    use super::{apply_work_graph_verdict_for_agent, map_add_qa_worker_error};
     use axum::http::StatusCode;
+    use tempfile::TempDir;
+
+    use crate::coordination::StateManager;
+    use crate::orchestrator::work_graph::completion_ledger::NodeCompletionProvenance;
+    use crate::orchestrator::work_graph::review::{
+        instantiate_review_templates, ReviewExpansionSidecar, ReviewTemplate,
+    };
+    use crate::orchestrator::work_graph::{
+        BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
+    };
 
     #[test]
     fn maps_missing_session_to_not_found() {
@@ -1222,5 +1290,51 @@ mod tests {
     fn maps_spawn_failures_to_internal() {
         let error = map_add_qa_worker_error("Failed to spawn QA worker 1: boom".to_string());
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn passing_evaluator_verdict_appends_an_exact_completion_fact() {
+        let temp = TempDir::new().unwrap();
+        let manager = StateManager::new(temp.path().to_path_buf());
+        let session_id = format!("evaluator-completion-{}", uuid::Uuid::new_v4());
+        let mut graph = TaskGraph::new(
+            vec![WorkNode::new(
+                "implementation",
+                NodeKind::Task,
+                "Implementation",
+                NodeContract {
+                    inputs: Vec::new(),
+                    outputs: vec!["code".to_string()],
+                    acceptance: vec!["accepted".to_string()],
+                },
+                BindingRef::Role("worker".to_string()),
+                NodeStatus::Pending,
+            )],
+            Vec::new(),
+        );
+        let template = ReviewTemplate::code_tasks("qa");
+        let expansions = instantiate_review_templates(&mut graph, &[template.clone()]).unwrap();
+        let verdict_id = expansions[0].rounds[0].verdict_id.clone();
+        let sidecar = ReviewExpansionSidecar::from_expansions(&[template], expansions).unwrap();
+        manager.write_work_graph(&graph).unwrap();
+        manager.write_review_expansion_sidecar(&sidecar).unwrap();
+
+        let (_, facts) = apply_work_graph_verdict_for_agent(
+            &manager,
+            &session_id,
+            Some(&verdict_id),
+            "PASS",
+            Some("session-evaluator"),
+        )
+        .unwrap();
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].task_id, verdict_id);
+        assert_eq!(facts[0].agent_id, "session-evaluator");
+        assert_eq!(
+            facts[0].provenance,
+            NodeCompletionProvenance::EvaluatorVerdict
+        );
+        assert_eq!(manager.read_node_completion_facts().unwrap(), facts);
     }
 }

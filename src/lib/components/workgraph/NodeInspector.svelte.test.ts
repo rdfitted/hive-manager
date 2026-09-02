@@ -107,6 +107,35 @@ describe('NodeInspector', () => {
     expect(within(progressRegion).getByText('Not recorded')).toBeTruthy();
   });
 
+  it('renders inferred completion provenance and every source reference', () => {
+    render(NodeInspector, {
+      props: {
+        node: {
+          id: 'T4',
+          title: 'Lane fan-out completion',
+          kind: 'task',
+          lane: 'role:P1',
+          status: 'completed',
+          contract: { inputs: [], outputs: [], acceptance: [] },
+        },
+        dependencies: [],
+        completionProvenance: 'inferred',
+        completionSourceRefs: ['event:lane-complete', 'event:worker-finalized'],
+      },
+    });
+
+    const evidence = screen.getByRole('region', { name: 'Completion evidence' });
+    expect(within(evidence).getByTestId('completion-provenance').textContent).toBe('Inferred');
+    expect(within(evidence).getByText('Completed through lane fan-out')).toBeTruthy();
+
+    const sourceRefs = within(evidence).getByRole('list', {
+      name: 'Completion source references',
+    });
+    expect(within(sourceRefs).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(sourceRefs).getByText('event:lane-complete')).toBeTruthy();
+    expect(within(sourceRefs).getByText('event:worker-finalized')).toBeTruthy();
+  });
+
   it('renders exactly one fallback line for an empty contract without empty headings', () => {
     render(NodeInspector, {
       props: {

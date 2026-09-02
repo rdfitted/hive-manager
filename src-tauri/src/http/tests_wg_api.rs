@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use crate::coordination::{InjectionManager, QueueManager, StateManager};
+use crate::coordination::{HierarchyNode, InjectionManager, QueueManager, StateManager};
 use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
 use crate::http::routes::create_router;
@@ -21,7 +21,8 @@ use crate::orchestrator::work_graph::archive::{
 };
 use crate::orchestrator::work_graph::divergence::DivergenceSummary;
 use crate::orchestrator::work_graph::runtime::{
-    record_graph_change, GraphMutationType, RuntimeOutcome, RuntimeOutcomeStatus,
+    record_graph_change, CompletionEvidenceClass, GraphMutationType, RuntimeOutcome,
+    RuntimeOutcomeStatus,
 };
 use crate::orchestrator::work_graph::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
@@ -380,7 +381,7 @@ async fn node_payload_shape_is_identical_across_live_views_and_archive() {
 }
 
 #[tokio::test]
-async fn source_selectors_choose_live_archive_and_auto_prefers_live() {
+async fn source_selectors_choose_live_archive_and_auto_tracks_session_lifecycle() {
     const SESSION_ID: &str = "wg-api-source-selector";
     let app = test_app().await;
     let session_dir = app
@@ -415,6 +416,10 @@ async fn source_selectors_choose_live_archive_and_auto_prefers_live() {
     state
         .write_work_graph(&live_graph)
         .expect("persisted newer live graph");
+    app.state
+        .session_controller
+        .read()
+        .insert_test_session(running_session_with_agent(SESSION_ID, "selector-queen"));
 
     for (selector, expected_source, expected_node) in [
         ("source=live", "live", "live-node"),
@@ -436,6 +441,26 @@ async fn source_selectors_choose_live_archive_and_auto_prefers_live() {
         );
     }
 
+    let mut terminal = app
+        .state
+        .session_controller
+        .read()
+        .get_session(SESSION_ID)
+        .expect("running selector session");
+    terminal.state = SessionState::Completed;
+    app.state
+        .session_controller
+        .read()
+        .insert_test_session(terminal);
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=plan&source=auto"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(response["source"], "archive");
+    assert_eq!(response["nodes"][0]["id"], "archived-node");
+
     std::fs::remove_file(session_dir.join("state").join("work-graph.json"))
         .expect("remove only the temporary live graph fixture");
     let (status, body, response) = get(
@@ -446,6 +471,51 @@ async fn source_selectors_choose_live_archive_and_auto_prefers_live() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(response["source"], "archive");
     assert_eq!(response["nodes"][0]["id"], "archived-node");
+}
+
+#[tokio::test]
+async fn terminal_session_without_archive_serves_live_with_typed_omission() {
+    const SESSION_ID: &str = "wg-api-terminal-missing-archive";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    StateManager::new(session_dir)
+        .write_work_graph(&TaskGraph::new(
+            vec![node(
+                "live-terminal-node",
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Completed,
+                "live-terminal",
+            )],
+            vec![],
+        ))
+        .expect("persisted live terminal graph");
+    let mut session = running_session_with_agent(SESSION_ID, "terminal-queen");
+    session.state = SessionState::Failed("expected test failure".to_string());
+    app.state
+        .session_controller
+        .read()
+        .insert_test_session(session);
+
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=plan&source=auto"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(response["source"], "live");
+    assert_eq!(response["nodes"][0]["id"], "live-terminal-node");
+    assert!(response["omissions"]
+        .as_array()
+        .expect("typed omissions")
+        .iter()
+        .any(|omission| {
+            omission["reason"] == "source_unreadable"
+                && omission["examples"] == json!(["archive:missing"])
+        }));
 }
 
 #[tokio::test]
@@ -546,6 +616,111 @@ async fn runtime_graph_projects_a_blocked_subtree_from_the_durable_queue() {
         2,
         "the dependent branch must remain visibly blocked"
     );
+}
+
+#[tokio::test]
+async fn live_view_preserves_unbacked_terminal_status_and_reports_provenance() {
+    const SESSION_ID: &str = "wg-api-view-provenance";
+    let app = test_app().await;
+    let session_dir = app
+        .storage()
+        .create_session_dir(SESSION_ID)
+        .expect("session directory");
+    let graph = TaskGraph::new(
+        vec![
+            node(
+                "plan-completed",
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Completed,
+                "plan-completed",
+            ),
+            node(
+                "queue-completed",
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Pending,
+                "queue-completed",
+            ),
+            node(
+                "dependent",
+                BindingRef::Role("reviewer".to_string()),
+                NodeStatus::Pending,
+                "dependent",
+            ),
+        ],
+        vec![WorkEdge::new(
+            "plan-completed",
+            "dependent",
+            EdgeKind::DependsOn,
+            EdgeProvenance::Planner,
+        )],
+    );
+    let state_manager = StateManager::new(session_dir);
+    state_manager
+        .write_work_graph(&graph)
+        .expect("persisted live graph");
+    state_manager
+        .update_hierarchy(&[
+            HierarchyNode {
+                id: "worker-queue-completed".to_string(),
+                role: "Worker-1".to_string(),
+                principal: Some("backend".to_string()),
+                parent_id: Some("view-queen".to_string()),
+                children: Vec::new(),
+            },
+            HierarchyNode {
+                id: "view-queen".to_string(),
+                role: "Queen".to_string(),
+                principal: None,
+                parent_id: None,
+                children: vec!["worker-queue-completed".to_string()],
+            },
+        ])
+        .expect("persisted observed principal mapping");
+    app.state
+        .queue_manager
+        .repo()
+        .enqueue(&queue_row(
+            SESSION_ID,
+            "run-queue-completed",
+            "queue-completed",
+            QueueStatus::Finalized,
+            1,
+        ))
+        .expect("finalized queue evidence");
+
+    let (status, body, response) = get(
+        &app.router,
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=runtime&source=live"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(response["status_by_node"]["plan-completed"], "completed");
+    assert_eq!(response["status_by_node"]["queue-completed"], "completed");
+    assert_eq!(
+        response["status_by_node"]["dependent"], "pending",
+        "the view projection must not feed persisted completion into readiness promotion"
+    );
+    assert_eq!(response["completion_provenance"]["plan-completed"], "plan");
+    assert_eq!(response["completion_provenance"]["queue-completed"], "queue");
+    assert_eq!(
+        response["lane_assignment"]["queue-completed"],
+        json!({"kind":"role","value":"worker-queue-completed"})
+    );
+    assert_eq!(
+        response["agents_by_lane"]["backend"],
+        json!(["worker-queue-completed"])
+    );
+    assert!(response["omissions"]
+        .as_array()
+        .expect("typed omissions")
+        .iter()
+        .any(|omission| {
+            omission["reason"] == "resolution_incomplete"
+                && omission["examples"]
+                    .as_array()
+                    .is_some_and(|examples| examples.iter().any(|example| example == "queue:plan-completed"))
+        }));
 }
 
 #[tokio::test]
@@ -764,6 +939,7 @@ async fn archived_progress_keeps_target_and_expansion_outcomes_distinct_in_any_o
         attempt_count: 1,
         effects: Vec::new(),
         source_refs: vec!["event:review-a".to_string()],
+        completion_evidence: Some(CompletionEvidenceClass::Inferred),
     };
     let task_outcome = RuntimeOutcome {
         subject_id: "task-a".to_string(),
@@ -775,6 +951,7 @@ async fn archived_progress_keeps_target_and_expansion_outcomes_distinct_in_any_o
         attempt_count: 3,
         effects: Vec::new(),
         source_refs: vec!["event:task-a".to_string()],
+        completion_evidence: Some(CompletionEvidenceClass::Observed),
     };
     let fixture_orders = [
         (
@@ -829,6 +1006,16 @@ async fn archived_progress_keeps_target_and_expansion_outcomes_distinct_in_any_o
             .find(|node| node["id"] == "review-a")
             .expect("review node")["progress"];
         assert_eq!(task_progress["attempts"], 3, "{body}");
+        assert_eq!(response["completion_provenance"]["task-a"], "observed");
+        assert_eq!(response["completion_provenance"]["review-a"], "inferred");
+        assert_eq!(
+            response["completion_source_refs"]["task-a"],
+            json!(["event:task-a"])
+        );
+        assert_eq!(
+            response["completion_source_refs"]["review-a"],
+            json!(["event:review-a"])
+        );
         assert_eq!(task_progress["agent_id"], "agent-task", "{body}");
         assert_eq!(task_progress["started_at"], json!(task_started), "{body}");
         assert_eq!(task_progress["finished_at"], json!(task_finished), "{body}");
@@ -898,10 +1085,16 @@ async fn completed_session_falls_back_to_archive_with_divergence() {
     let completion = archive_completed_session(app.storage().base_dir(), None, SESSION_ID)
         .expect("completed archive");
     assert!(completion.created);
+    let mut session = running_session_with_agent(SESSION_ID, "archived-queen");
+    session.state = SessionState::Completed;
+    app.state
+        .session_controller
+        .read()
+        .insert_test_session(session);
 
     let (status, body, response) = get(
         &app.router,
-        &format!("/api/sessions/{SESSION_ID}/work-graph?view=divergence&source=archive"),
+        &format!("/api/sessions/{SESSION_ID}/work-graph?view=divergence&source=auto"),
     )
     .await;
 

@@ -59,6 +59,8 @@ pub struct PlanTask {
     pub description: String,
     pub status: String,
     pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee_label: Option<String>,
     pub priority: Option<String>,
     #[serde(default)]
     pub depends_on: Vec<TaskId>,
@@ -74,6 +76,14 @@ pub struct PlanTask {
     pub(crate) explicit_id: bool,
     #[serde(skip)]
     pub(crate) checkbox_source: bool,
+    /// Whether the assignee was normalized from a supported principal token.
+    /// Unknown values remain schedulable and are surfaced as PlanReady warnings.
+    #[serde(skip, default = "default_binding_recognized")]
+    pub(crate) assignee_recognized: bool,
+}
+
+fn default_binding_recognized() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -870,7 +880,7 @@ fn parse_task_line_with_diagnostics(
     let (title, priority) = extract_priority(&rest);
     let (title, explicit_id) = extract_explicit_task_id(&title);
     let has_explicit_id = explicit_id.is_some();
-    let (title, assignee) = extract_assignee(&title);
+    let (title, assignee, assignee_label, assignee_recognized) = extract_assignee(&title);
 
     (
         Some(PlanTask {
@@ -879,6 +889,7 @@ fn parse_task_line_with_diagnostics(
             description: String::new(),
             status: status.to_string(),
             assignee,
+            assignee_label,
             priority,
             depends_on: metadata.depends_on,
             inputs: metadata.inputs,
@@ -886,6 +897,7 @@ fn parse_task_line_with_diagnostics(
             acceptance: metadata.acceptance,
             explicit_id: has_explicit_id,
             checkbox_source,
+            assignee_recognized,
         }),
         metadata_error,
     )
@@ -986,14 +998,62 @@ fn extract_priority(text: &str) -> (String, Option<String>) {
     (text.to_string(), None)
 }
 
-fn extract_assignee(text: &str) -> (String, Option<String>) {
+fn extract_assignee(
+    text: &str,
+) -> (String, Option<String>, Option<String>, bool) {
     for separator in ["->", "\u{2192}"] {
         if let Some((title, assignee)) = text.split_once(separator) {
-            return (title.to_string(), Some(assignee.trim().to_string()));
+            let assignee = assignee.trim();
+            if assignee.is_empty() {
+                return (title.to_string(), None, None, false);
+            }
+            let first_token = assignee.split_whitespace().next().unwrap_or(assignee);
+            let normalized = normalize_principal_token(first_token);
+            if let Some(principal) = normalized {
+                let label = assignee[first_token.len()..].trim();
+                return (
+                    title.to_string(),
+                    Some(principal),
+                    (!label.is_empty()).then(|| label.to_string()),
+                    true,
+                );
+            }
+            return (
+                title.to_string(),
+                Some(assignee.to_string()),
+                None,
+                false,
+            );
         }
     }
 
-    (text.to_string(), None)
+    (text.to_string(), None, None, true)
+}
+
+fn normalize_principal_token(token: &str) -> Option<String> {
+    let mut characters = token.chars();
+    if matches!(characters.next(), Some('P' | 'p')) {
+        let digits = characters.as_str();
+        if !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit()) {
+            return Some(format!("P{digits}"));
+        }
+    }
+    if token.eq_ignore_ascii_case("queen") {
+        return Some("Queen".to_string());
+    }
+    if token.eq_ignore_ascii_case("operator") {
+        return Some("Operator".to_string());
+    }
+    if let Some(index) = token
+        .to_ascii_lowercase()
+        .strip_prefix("worker-")
+        .filter(|index| {
+            !index.is_empty() && index.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        return Some(format!("worker-{index}"));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1077,11 +1137,69 @@ mod tests {
     fn extract_assignee_supports_ascii_and_unicode_arrows() {
         assert_eq!(
             extract_assignee("Fix launch -> worker-8"),
-            ("Fix launch ".to_string(), Some("worker-8".to_string()))
+            (
+                "Fix launch ".to_string(),
+                Some("worker-8".to_string()),
+                None,
+                true,
+            )
         );
         assert_eq!(
             extract_assignee("Fix launch \u{2192} worker-9"),
-            ("Fix launch ".to_string(), Some("worker-9".to_string()))
+            (
+                "Fix launch ".to_string(),
+                Some("worker-9".to_string()),
+                None,
+                true,
+            )
+        );
+    }
+
+    #[test]
+    fn assignee_normalizes_principal_and_preserves_display_label() {
+        let mut counter = 0;
+        let task = parse_task_line(
+            "- [ ] [P1] T1: Implement completion truth -> P1 WS-A #126",
+            &mut counter,
+        )
+        .expect("principal-bound task");
+
+        assert_eq!(task.assignee.as_deref(), Some("P1"));
+        assert_eq!(task.assignee_label.as_deref(), Some("WS-A #126"));
+        assert!(task.assignee_recognized);
+
+        let plan = super::SessionPlan {
+            title: "Principal plan".to_string(),
+            summary: String::new(),
+            tasks: vec![task],
+            generated_at: String::new(),
+            raw_content: String::new(),
+        };
+        let graph = crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan);
+        assert_eq!(
+            graph.nodes[0].binding,
+            crate::orchestrator::work_graph::BindingRef::Role("P1".to_string())
+        );
+    }
+
+    #[test]
+    fn unrecognized_assignee_is_preserved_as_plan_ready_warning() {
+        let plan = super::parse_plan_markdown_checked(
+            "# Plan\n\n## Tasks\n- [ ] T1: Custom lane -> Planner 1\n",
+        )
+        .expect("unrecognized bindings are warnings, not parse errors");
+        assert_eq!(plan.tasks[0].assignee.as_deref(), Some("Planner 1"));
+        assert!(!plan.tasks[0].assignee_recognized);
+
+        let graph = crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan);
+        assert_eq!(
+            graph.nodes[0].binding,
+            crate::orchestrator::work_graph::BindingRef::Role("Planner 1".to_string())
+        );
+        assert_eq!(graph.omissions.len(), 1);
+        assert_eq!(
+            graph.omissions[0].reason,
+            crate::orchestrator::work_graph::WorkGraphOmissionReason::ResolutionIncomplete
         );
     }
 
@@ -1095,6 +1213,7 @@ mod tests {
         assert_eq!(task.title, "Fix launch regression");
         assert_eq!(task.priority.as_deref(), Some("high"));
         assert_eq!(task.assignee.as_deref(), Some("worker-8"));
+        assert_eq!(task.assignee_label, None);
     }
 
     #[test]
@@ -1109,7 +1228,12 @@ mod tests {
         );
         assert_eq!(
             extract_assignee("Title -> worker-1 -> trailing"),
-            ("Title ".to_string(), Some("worker-1 -> trailing".to_string()))
+            (
+                "Title ".to_string(),
+                Some("worker-1".to_string()),
+                Some("-> trailing".to_string()),
+                true,
+            )
         );
     }
 

@@ -547,6 +547,7 @@ async fn a16_role_construction_paths_produce_explicit_template_keys() {
             id: "coordination-reviewer".to_string(),
             role: "Reviewer".to_string(),
             parent_id: Some("coordination-queen".to_string()),
+            principal: None,
             children: Vec::new(),
         }])
         .expect("write hierarchy fixture");

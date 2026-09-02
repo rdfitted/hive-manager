@@ -12,6 +12,9 @@ use crate::orchestrator::org_graph::ownership::{
     derive_path_ownership, LivePrincipal, OrchestratorWriteAttempt, OrchestratorWriteOutcome,
     OwnershipSessionState,
 };
+use crate::orchestrator::work_graph::completion_ledger::{
+    append_node_completion_facts, read_node_completion_facts, NodeCompletionFact,
+};
 use crate::orchestrator::work_graph::divergence::DivergenceSummary;
 use crate::orchestrator::work_graph::review::ReviewExpansionSidecar;
 use crate::orchestrator::work_graph::runtime::GraphCompositionState;
@@ -54,6 +57,8 @@ pub struct WorkerStateInfo {
 pub struct HierarchyNode {
     pub id: String,
     pub role: String,
+    #[serde(default)]
+    pub principal: Option<String>,
     pub parent_id: Option<String>,
     pub children: Vec<String>,
 }
@@ -108,6 +113,17 @@ impl StateManager {
         Self { session_path }
     }
 
+    pub fn append_node_completion_facts(
+        &self,
+        facts: &[NodeCompletionFact],
+    ) -> Result<(), StateError> {
+        append_node_completion_facts(&self.session_path, facts).map_err(StateError::Io)
+    }
+
+    pub fn read_node_completion_facts(&self) -> Result<Vec<NodeCompletionFact>, StateError> {
+        read_node_completion_facts(&self.session_path).map_err(StateError::Io)
+    }
+
     /// Get path to state directory
     fn state_dir(&self) -> PathBuf {
         self.session_path.join("state")
@@ -138,9 +154,9 @@ impl StateManager {
     }
 
     fn write_atomic_text(&self, target: PathBuf, content: &str) -> Result<(), StateError> {
-        let parent = target
-            .parent()
-            .ok_or_else(|| StateError::Io(std::io::Error::other("target has no parent directory")))?;
+        let parent = target.parent().ok_or_else(|| {
+            StateError::Io(std::io::Error::other("target has no parent directory"))
+        })?;
         fs::create_dir_all(parent)?;
 
         let mut temp = NamedTempFile::new_in(parent)?;
@@ -191,7 +207,10 @@ impl StateManager {
             for worker in workers {
                 content.push_str(&format!("### {} ({})\n", worker.id, worker.role.label));
                 content.push_str(&format!("- CLI: {}\n", worker.cli));
-                content.push_str(&format!("- Specialization: {}\n", self.get_role_description(&worker.role)));
+                content.push_str(&format!(
+                    "- Specialization: {}\n",
+                    self.get_role_description(&worker.role)
+                ));
                 content.push_str("\n");
             }
 
@@ -229,8 +248,12 @@ impl StateManager {
         // For now, we read from hierarchy.json instead since that's more reliable
         // workers.md is mainly for the Queen to read
         self.read_hierarchy().map(|nodes| {
-            nodes.into_iter().filter(|n| n.role != "Queen" && n.role != "Evaluator" && !n.role.starts_with("QaWorker-")).map(|n| {
-                WorkerStateInfo {
+            nodes
+                .into_iter()
+                .filter(|n| {
+                    n.role != "Queen" && n.role != "Evaluator" && !n.role.starts_with("QaWorker-")
+                })
+                .map(|n| WorkerStateInfo {
                     id: n.id,
                     role: WorkerRole {
                         role_type: n.role.clone(),
@@ -244,8 +267,8 @@ impl StateManager {
                     current_task: None,
                     last_update: Utc::now(),
                     last_heartbeat: None,
-                }
-            }).collect()
+                })
+                .collect()
         })
     }
 
@@ -323,13 +346,19 @@ impl StateManager {
         let commit_sha = commit_sha.map(str::to_string);
 
         tokio::task::spawn_blocking(move || {
-            StateManager::new(session_path)
-                .write_qa_verdict(&from, &to, &content, commit_sha.as_deref())
+            StateManager::new(session_path).write_qa_verdict(
+                &from,
+                &to,
+                &content,
+                commit_sha.as_deref(),
+            )
         })
         .await
-        .map_err(|err| StateError::Io(std::io::Error::other(format!(
-            "QA verdict write task failed: {err}"
-        ))))?
+        .map_err(|err| {
+            StateError::Io(std::io::Error::other(format!(
+                "QA verdict write task failed: {err}"
+            )))
+        })?
     }
 
     /// Write the Prince's remediation verdict (peer/prince-verdict.json). The Queen
@@ -368,8 +397,12 @@ impl StateManager {
         let commit_sha = commit_sha.map(str::to_string);
 
         tokio::task::spawn_blocking(move || {
-            StateManager::new(session_path)
-                .write_prince_verdict(&from, &to, &content, commit_sha.as_deref())
+            StateManager::new(session_path).write_prince_verdict(
+                &from,
+                &to,
+                &content,
+                commit_sha.as_deref(),
+            )
         })
         .await
         .map_err(|err| {
@@ -443,11 +476,7 @@ impl StateManager {
         let Some(graph) = self.read_work_graph()? else {
             return Ok(None);
         };
-        let artifact = self.write_portable_work_graph_artifact(
-            lifecycle_stage,
-            &graph,
-            None,
-        )?;
+        let artifact = self.write_portable_work_graph_artifact(lifecycle_stage, &graph, None)?;
         let snapshot = WorkGraphLifecycleSnapshot {
             lifecycle_stage: lifecycle_stage.to_string(),
             emitted_at: Utc::now(),
@@ -457,10 +486,7 @@ impl StateManager {
         };
         self.ensure_state_dir()?;
         let json = serde_json::to_string_pretty(&snapshot)?;
-        self.write_atomic_text(
-            self.state_dir().join("work-graph-lifecycle.json"),
-            &json,
-        )?;
+        self.write_atomic_text(self.state_dir().join("work-graph-lifecycle.json"), &json)?;
         Ok(Some(artifact))
     }
 
@@ -638,13 +664,16 @@ impl StateManager {
             HashMap::new()
         };
 
-        assignments.insert(worker_id.to_string(), TaskAssignment {
-            worker_id: worker_id.to_string(),
-            task: task.to_string(),
-            assigned_at: Utc::now(),
-            status: AssignmentStatus::Pending,
-            plan_task_id,
-        });
+        assignments.insert(
+            worker_id.to_string(),
+            TaskAssignment {
+                worker_id: worker_id.to_string(),
+                task: task.to_string(),
+                assigned_at: Utc::now(),
+                status: AssignmentStatus::Pending,
+                plan_task_id,
+            },
+        );
 
         let json = serde_json::to_string_pretty(&assignments)?;
         fs::write(assignments_path, json)?;
@@ -695,7 +724,10 @@ impl StateManager {
 
     /// Get assignment for a specific worker
     #[allow(dead_code)]
-    pub fn get_worker_assignment(&self, worker_id: &str) -> Result<Option<TaskAssignment>, StateError> {
+    pub fn get_worker_assignment(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<TaskAssignment>, StateError> {
         let assignments = self.get_assignments()?;
         Ok(assignments.get(worker_id).cloned())
     }
@@ -737,7 +769,6 @@ impl StateManager {
             .map_err(|err| StateError::ContractParse(err.to_string()))?;
         Ok(Some(contract))
     }
-
 }
 
 const PORTABLE_WORK_GRAPH_HTML: &str = r##"<!doctype html>
@@ -851,12 +882,17 @@ mod tests {
             .unwrap();
 
         let path = temp.path().join("peer").join("milestone-ready.json");
-        let record: PeerMessageRecord = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let record: PeerMessageRecord =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
 
         assert_eq!(record.kind, "milestone-ready");
         assert_eq!(record.content, "Milestone B is ready");
         assert!(temp.path().join("peer").read_dir().unwrap().all(|entry| {
-            !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
         }));
     }
 
@@ -881,7 +917,10 @@ mod tests {
         let read_back = manager.read_contract(2).unwrap().unwrap();
 
         assert_eq!(written, read_back);
-        assert_eq!(read_back.criterion(1).unwrap().description, "Dashboard loads with current account data");
+        assert_eq!(
+            read_back.criterion(1).unwrap().description,
+            "Dashboard loads with current account data"
+        );
     }
 
     #[test]

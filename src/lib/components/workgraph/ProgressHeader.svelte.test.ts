@@ -8,6 +8,8 @@ describe('ProgressHeader', () => {
   it('renders complete-graph counts with no critical path remaining', () => {
     render(ProgressHeader, {
       nodesComplete: 4,
+      nodesObserved: 3,
+      nodesInferred: 1,
       nodesTotal: 4,
       wavesComplete: 3,
       wavesTotal: 3,
@@ -15,6 +17,8 @@ describe('ProgressHeader', () => {
     });
 
     expect(screen.getByTestId('nodes-progress').textContent).toBe('4 / 4');
+    expect(screen.getByTestId('observed-progress').textContent).toBe('3');
+    expect(screen.getByTestId('inferred-progress').textContent).toBe('1');
     expect(screen.getByTestId('waves-progress').textContent).toBe('3 / 3');
     expect(screen.getByTestId('critical-path-remaining').textContent).toBe('0');
 
@@ -25,6 +29,8 @@ describe('ProgressHeader', () => {
   it('renders partial-graph counts and the remaining critical-path length', () => {
     render(ProgressHeader, {
       nodesComplete: 2,
+      nodesObserved: 1,
+      nodesInferred: 1,
       nodesTotal: 5,
       wavesComplete: 1,
       wavesTotal: 3,
@@ -32,6 +38,8 @@ describe('ProgressHeader', () => {
     });
 
     expect(screen.getByTestId('nodes-progress').textContent).toBe('2 / 5');
+    expect(screen.getByTestId('observed-progress').textContent).toBe('1');
+    expect(screen.getByTestId('inferred-progress').textContent).toBe('1');
     expect(screen.getByTestId('waves-progress').textContent).toBe('1 / 3');
     expect(screen.getByTestId('critical-path-remaining').textContent).toBe('2');
   });

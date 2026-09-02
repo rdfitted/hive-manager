@@ -12,11 +12,17 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::event::{Event, EventType, Severity};
 use crate::events::EventBus;
+use crate::orchestrator::work_graph::completion_ledger::{
+    append_node_completion_facts, NodeCompletionFact, NodeCompletionProvenance,
+};
 use crate::orchestrator::work_graph::plan_parse::promote_initial_ready_nodes;
-use crate::orchestrator::work_graph::{NodeStatus, TaskGraph};
+use crate::orchestrator::work_graph::{
+    NodeStatus, TaskGraph, TaskId, WorkGraphOmission, WorkGraphOmissionReason,
+};
 use crate::storage::queue::{
     QueueConflictCoverage, QueueConflictRow, QueueConflictWait, QueueRepo, QueueResolutionUpdate,
     QueueRow, QueueSnapshot, QueueStatus, SpawnFailureRelease,
@@ -28,6 +34,19 @@ use crate::storage::StorageError;
 /// threshold. Reclaim only flips the row back to claimable — it never kills a live PTY, so a
 /// genuinely-working-but-quiet worker that keeps heartbeating is never reclaimed.
 pub const STUCK_CUTOFF_MS: i64 = 90_000;
+
+/// Evidence source for a terminal status in a read-only work-graph projection.
+/// Later evidence layers deliberately use this precedence:
+/// declared > queue > inferred > plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionProvenance {
+    Declared,
+    Queue,
+    Observed,
+    Inferred,
+    Plan,
+}
 
 /// Grace allowed between a successful spawn claim and the worker's first heartbeat.
 ///
@@ -133,9 +152,8 @@ pub const NO_PROGRESS_WINDOW_SECS: u64 = 1_800;
 /// `record_heartbeat` matches no rows and `reclaim_stuck` can never recover it.
 ///
 /// Ceiling division so the realised budget is never shorter than the window.
-pub const MAX_NO_PROGRESS_CONTINUATIONS: i64 = NO_PROGRESS_WINDOW_SECS
-    .div_ceil(HEARTBEAT_MIN_INTERVAL_SECS)
-    as i64;
+pub const MAX_NO_PROGRESS_CONTINUATIONS: i64 =
+    NO_PROGRESS_WINDOW_SECS.div_ceil(HEARTBEAT_MIN_INTERVAL_SECS) as i64;
 
 /// How many times a single queue row may be claimed for a spawn that then fails
 /// before the row is retired as terminally `failed` (#175d). Bounds the retry
@@ -157,11 +175,17 @@ pub enum ReleaseAfterFailure {
 /// Outcome of an operator/agent claim release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReleaseOutcome {
-    Released { previous: QueueStatus },
+    Released {
+        previous: QueueStatus,
+    },
     /// The exact claim is still constructing its worktree/PTY in this process.
-    SpawnInFlight { epoch: i64 },
+    SpawnInFlight {
+        epoch: i64,
+    },
     AlreadyQueued,
-    Terminal { status: QueueStatus },
+    Terminal {
+        status: QueueStatus,
+    },
     NoRow,
 }
 
@@ -174,7 +198,10 @@ pub enum ReleaseOutcome {
 pub enum GuardedRelease<T, E> {
     SpawnInFlight(SpawnInFlightReservation),
     PreparationFailed(E),
-    Complete { prepared: T, outcome: ReleaseOutcome },
+    Complete {
+        prepared: T,
+        outcome: ReleaseOutcome,
+    },
 }
 
 /// An in-process reservation protecting the interval between an atomic queue claim and the
@@ -217,9 +244,12 @@ impl Drop for ReservationReturnGuard<'_> {
         if self.armed {
             let reservation = &self.reservation;
             let mut reservations = self.reservations.lock();
-            if reservations.get(&reservation.queue_id).is_some_and(|current| {
-                current.epoch == reservation.epoch && current.worker_id == reservation.worker_id
-            }) {
+            if reservations
+                .get(&reservation.queue_id)
+                .is_some_and(|current| {
+                    current.epoch == reservation.epoch && current.worker_id == reservation.worker_id
+                })
+            {
                 reservations.remove(&reservation.queue_id);
             }
         }
@@ -229,13 +259,22 @@ impl Drop for ReservationReturnGuard<'_> {
 /// Result of the atomic claim UPDATE. Dependency diagnostics are gathered only after a loss.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimOutcome {
-    Claimed { epoch: i64 },
-    ResolutionIncomplete { task_id: String, reason: String },
+    Claimed {
+        epoch: i64,
+    },
+    ResolutionIncomplete {
+        task_id: String,
+        reason: String,
+    },
     /// Retryable serialization wait. This post-loss snapshot is advisory by construction.
-    ConflictsPending { conflicts: Vec<QueueConflictWait> },
+    ConflictsPending {
+        conflicts: Vec<QueueConflictWait>,
+    },
     /// Retryable queue wait. The advisory prerequisite snapshot may be stale or empty when
     /// readiness changed after the loss, or when another task briefly reserved the worker slot.
-    DependenciesPending { task_ids: Vec<String> },
+    DependenciesPending {
+        task_ids: Vec<String>,
+    },
     AlreadyClaimed,
 }
 
@@ -365,7 +404,7 @@ impl QueueManager {
             EventType::WorkerQueued,
             Severity::Info,
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -421,7 +460,7 @@ impl QueueManager {
             EventType::WorkerQueued,
             Severity::Info,
         )
-            .await;
+        .await;
         Ok(())
     }
 
@@ -541,7 +580,7 @@ impl QueueManager {
                     EventType::WorkerClaimed,
                     Severity::Info,
                 )
-                    .await;
+                .await;
                 return_guard.disarm();
             } else {
                 self.emit(
@@ -551,16 +590,14 @@ impl QueueManager {
                     EventType::WorkerClaimed,
                     Severity::Info,
                 )
-                    .await;
+                .await;
             }
             Ok(ClaimOutcome::Claimed { epoch })
         } else {
             // Losing the atomic UPDATE is authoritative. Reads below are diagnostic only and
             // cannot authorize or retry a claim.
             let row_after_claim = self.repo.get_row(id)?;
-            let task_id = row_after_claim
-                .as_ref()
-                .and_then(|row| row.task_id.clone());
+            let task_id = row_after_claim.as_ref().and_then(|row| row.task_id.clone());
             let queued_after_loss = row_after_claim
                 .as_ref()
                 .is_some_and(|row| row.status == QueueStatus::Queued);
@@ -573,14 +610,12 @@ impl QueueManager {
             } else {
                 Vec::new()
             };
-            let task_ids = if queued_after_loss
-                && resolution_issue.is_none()
-                && conflicts.is_empty()
-            {
-                self.repo.pending_dependencies(id)?
-            } else {
-                Vec::new()
-            };
+            let task_ids =
+                if queued_after_loss && resolution_issue.is_none() && conflicts.is_empty() {
+                    self.repo.pending_dependencies(id)?
+                } else {
+                    Vec::new()
+                };
             self.emit(
                 session_id,
                 worker_id,
@@ -646,10 +681,7 @@ impl QueueManager {
 
     /// Find a protected spawn by its reserved worker slot. This is a deny-only lookup used by
     /// the manual release handler before it touches roster or PTY state.
-    pub fn spawn_in_flight_for_worker(
-        &self,
-        worker_id: &str,
-    ) -> Option<SpawnInFlightReservation> {
+    pub fn spawn_in_flight_for_worker(&self, worker_id: &str) -> Option<SpawnInFlightReservation> {
         self.spawn_in_flight
             .lock()
             .values()
@@ -712,7 +744,7 @@ impl QueueManager {
         match result {
             ReleaseAfterFailure::Exhausted { attempts } => {
                 self.emit_for_row(id, EventType::WorkerFinalized, Severity::Warning)
-                .await;
+                    .await;
                 Ok(ReleaseAfterFailure::Exhausted { attempts })
             }
             ReleaseAfterFailure::Released => {
@@ -769,10 +801,7 @@ impl QueueManager {
                     QueueStatus::Running | QueueStatus::Failed => {
                         let previous = row.status;
                         if self.repo.release_claim_manual(&row.id, Self::now_ms())? {
-                            (
-                                ReleaseOutcome::Released { previous },
-                                Some(row.id.clone()),
-                            )
+                            (ReleaseOutcome::Released { previous }, Some(row.id.clone()))
                         } else {
                             (ReleaseOutcome::NoRow, None)
                         }
@@ -781,10 +810,7 @@ impl QueueManager {
                     other => (ReleaseOutcome::Terminal { status: other }, None),
                 },
             };
-            (
-                GuardedRelease::Complete { prepared, outcome },
-                reclaimed_id,
-            )
+            (GuardedRelease::Complete { prepared, outcome }, reclaimed_id)
         };
 
         if let Some(id) = reclaimed_id {
@@ -833,10 +859,7 @@ impl QueueManager {
                 QueueStatus::Running | QueueStatus::Failed => {
                     let previous = row.status;
                     if self.repo.release_claim_manual(&row.id, Self::now_ms())? {
-                        (
-                            ReleaseOutcome::Released { previous },
-                            Some(row.id.clone()),
-                        )
+                        (ReleaseOutcome::Released { previous }, Some(row.id.clone()))
                     } else {
                         (ReleaseOutcome::NoRow, None)
                     }
@@ -876,19 +899,46 @@ impl QueueManager {
         status: &str,
     ) -> Result<bool, StorageError> {
         let now = Self::now_ms();
-        let updated_row_id = self
-            .repo
-            .record_heartbeat_for_assignment(
-                session_id,
-                worker_id,
-                assignment_id,
-                status,
-                now,
-            )?;
+        let updated_row_id = self.repo.record_heartbeat_for_assignment(
+            session_id,
+            worker_id,
+            assignment_id,
+            status,
+            now,
+        )?;
         if status == "completed" {
             if let Some(row_id) = updated_row_id.as_deref() {
+                let completion = self.repo.get_row(row_id)?.and_then(|row| {
+                    row.task_id.map(|task_id| {
+                        (
+                            row.session_id,
+                            NodeCompletionFact::new(
+                                task_id,
+                                row.worker_id,
+                                NodeCompletionProvenance::QueueFinalize,
+                            ),
+                        )
+                    })
+                });
+                if let Some((fact_session_id, fact)) = completion.as_ref() {
+                    let session_dir = self
+                        .event_bus
+                        .data_dir()
+                        .join("sessions")
+                        .join(fact_session_id);
+                    append_node_completion_facts(&session_dir, std::slice::from_ref(fact))?;
+                }
                 self.emit_for_row(row_id, EventType::WorkerFinalized, Severity::Info)
                     .await;
+                if let Some((fact_session_id, fact)) = completion {
+                    if let Err(error) = self.event_bus.publish(fact.event(&fact_session_id)).await {
+                        tracing::warn!(
+                            session_id = %fact_session_id,
+                            task_id = %fact.task_id,
+                            "Failed to publish work-node completion event: {error}"
+                        );
+                    }
+                }
             }
         }
         Ok(updated_row_id.is_some())
@@ -954,9 +1004,11 @@ impl QueueManager {
     /// `WorkerFinalized` per finalized row.
     pub async fn finalize_no_progress(&self) -> Result<Vec<String>, StorageError> {
         let now = Self::now_ms();
-        let ids = self
-            .repo
-            .finalize_no_progress(MAX_CONTINUATIONS, MAX_NO_PROGRESS_CONTINUATIONS, now)?;
+        let ids = self.repo.finalize_no_progress(
+            MAX_CONTINUATIONS,
+            MAX_NO_PROGRESS_CONTINUATIONS,
+            now,
+        )?;
         for id in &ids {
             self.emit_for_row(id, EventType::WorkerFinalized, Severity::Info)
                 .await;
@@ -1019,22 +1071,90 @@ impl QueueManager {
         session_id: &str,
         graph: &TaskGraph,
     ) -> Result<TaskGraph, StorageError> {
-        let mut projected = graph.clone();
-        let mut latest: BTreeMap<&str, &QueueRow> = BTreeMap::new();
-        let rows = self.repo.rows_for_session(session_id)?;
-        for row in &rows {
-            let Some(task_id) = row.task_id.as_deref() else {
+        let latest = self.latest_queue_rows_by_task(session_id)?;
+        let mut projected = Self::overlay_queue_rows(graph, &latest);
+
+        for node in &mut projected.nodes {
+            if !latest.contains_key(&node.id)
+                && matches!(
+                    node.status,
+                    NodeStatus::Running
+                        | NodeStatus::Completed
+                        | NodeStatus::Failed
+                        | NodeStatus::Blocked
+                        | NodeStatus::Cancelled
+                )
+            {
+                // A persisted runtime-looking status without a queue row cannot satisfy the SQL
+                // prerequisite lookup. Reset it conservatively before readiness promotion.
+                node.status = NodeStatus::Pending;
+            }
+        }
+        promote_initial_ready_nodes(&mut projected);
+        Ok(projected)
+    }
+
+    /// Project queue evidence for the read API without changing readiness or erasing
+    /// persisted terminal statuses that have no queue row.
+    pub fn project_queue_statuses_for_view(
+        &self,
+        session_id: &str,
+        graph: &TaskGraph,
+    ) -> Result<(TaskGraph, BTreeMap<TaskId, CompletionProvenance>), StorageError> {
+        let latest = self.latest_queue_rows_by_task(session_id)?;
+        let mut projected = Self::overlay_queue_rows(graph, &latest);
+        let mut provenance = BTreeMap::new();
+        let mut unbacked_terminal = Vec::new();
+
+        for node in &projected.nodes {
+            if matches!(node.status, NodeStatus::Completed | NodeStatus::Failed) {
+                if latest.contains_key(&node.id) {
+                    provenance.insert(node.id.clone(), CompletionProvenance::Queue);
+                } else {
+                    provenance.insert(node.id.clone(), CompletionProvenance::Plan);
+                    unbacked_terminal.push(format!("queue:{}", node.id));
+                }
+            }
+        }
+        if !unbacked_terminal.is_empty() {
+            let mut omission = WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                unbacked_terminal.len(),
+                unbacked_terminal,
+            );
+            omission.detail = "persisted terminal node status had no backing queue row; the plan value was preserved for view projection".to_string();
+            projected.omissions.push(omission);
+        }
+
+        Ok((projected, provenance))
+    }
+
+    fn latest_queue_rows_by_task(
+        &self,
+        session_id: &str,
+    ) -> Result<BTreeMap<TaskId, QueueRow>, StorageError> {
+        let mut latest: BTreeMap<TaskId, QueueRow> = BTreeMap::new();
+        for row in self.repo.rows_for_session(session_id)? {
+            let Some(task_id) = row.task_id.clone() else {
                 continue;
             };
-            let replace = latest.get(task_id).is_none_or(|existing| {
+            let replace = latest.get(&task_id).is_none_or(|existing| {
                 (row.updated_at, row.created_at, row.id.as_str())
-                    > (existing.updated_at, existing.created_at, existing.id.as_str())
+                    > (
+                        existing.updated_at,
+                        existing.created_at,
+                        existing.id.as_str(),
+                    )
             });
             if replace {
                 latest.insert(task_id, row);
             }
         }
+        Ok(latest)
+    }
 
+    fn overlay_queue_rows(graph: &TaskGraph, latest: &BTreeMap<TaskId, QueueRow>) -> TaskGraph {
+        let mut projected = graph.clone();
         for node in &mut projected.nodes {
             if let Some(row) = latest.get(node.id.as_str()) {
                 node.status = match row.status {
@@ -1044,21 +1164,9 @@ impl QueueManager {
                     QueueStatus::Failed => NodeStatus::Failed,
                     QueueStatus::Blocked => NodeStatus::Blocked,
                 };
-            } else if matches!(
-                node.status,
-                NodeStatus::Running
-                    | NodeStatus::Completed
-                    | NodeStatus::Failed
-                    | NodeStatus::Blocked
-                    | NodeStatus::Cancelled
-            ) {
-                // A persisted runtime-looking status without a queue row cannot satisfy the SQL
-                // prerequisite lookup. Reset it conservatively before readiness promotion.
-                node.status = NodeStatus::Pending;
             }
         }
-        promote_initial_ready_nodes(&mut projected);
-        Ok(projected)
+        projected
     }
 
     /// Cancel a task and block all downstream queue rows with a visible reason.
@@ -1113,7 +1221,7 @@ impl QueueManager {
                     event_type,
                     severity,
                 )
-                    .await
+                .await
             }
             Ok(None) => {}
             Err(e) => tracing::warn!("Failed to load queue row {id} for event: {e}"),
@@ -1156,8 +1264,16 @@ mod tests {
         assert_eq!(snap.queued, 1);
 
         // First claim wins, second loses (already running, fresh).
-        assert!(mgr.claim_and_spawn("s1-worker-1", "s1", "s1-worker-1").await.unwrap().is_some());
-        assert!(mgr.claim_and_spawn("s1-worker-1", "s1", "s1-worker-1").await.unwrap().is_none());
+        assert!(mgr
+            .claim_and_spawn("s1-worker-1", "s1", "s1-worker-1")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(mgr
+            .claim_and_spawn("s1-worker-1", "s1", "s1-worker-1")
+            .await
+            .unwrap()
+            .is_none());
 
         let snap = mgr.queue_snapshot("s1").unwrap();
         assert_eq!(snap.running, 1);
@@ -1170,10 +1286,20 @@ mod tests {
         // Subscribe BEFORE the operations so we capture every event.
         let mut rx = mgr.event_bus.subscribe();
 
-        mgr.enqueue_worker("r1", "s1", "s1-worker-1", "backend", "codex", json!({}), None)
+        mgr.enqueue_worker(
+            "r1",
+            "s1",
+            "s1-worker-1",
+            "backend",
+            "codex",
+            json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+        mgr.claim_and_spawn("r1", "s1", "s1-worker-1")
             .await
             .unwrap();
-        mgr.claim_and_spawn("r1", "s1", "s1-worker-1").await.unwrap();
 
         let e1 = rx.recv().await.unwrap();
         assert_eq!(e1.event_type, EventType::WorkerQueued);
@@ -1183,7 +1309,9 @@ mod tests {
         assert_eq!(e2.event_type, EventType::WorkerClaimed);
 
         // A lost claim emits WorkerClaimFailed.
-        mgr.claim_and_spawn("r1", "s1", "s1-worker-1").await.unwrap();
+        mgr.claim_and_spawn("r1", "s1", "s1-worker-1")
+            .await
+            .unwrap();
         let e3 = rx.recv().await.unwrap();
         assert_eq!(e3.event_type, EventType::WorkerClaimFailed);
     }
@@ -1266,18 +1394,33 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_repairs_orphaned_running() {
         let (_dir, mgr) = manager();
-        mgr.enqueue_worker("r1", "s1", "s1-worker-1", "backend", "codex", json!({}), None)
+        mgr.enqueue_worker(
+            "r1",
+            "s1",
+            "s1-worker-1",
+            "backend",
+            "codex",
+            json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+        mgr.claim_and_spawn("r1", "s1", "s1-worker-1")
             .await
             .unwrap();
-        mgr.claim_and_spawn("r1", "s1", "s1-worker-1").await.unwrap();
         // After a crash there is no live PTY for s1-worker-1 → reconcile requeues it.
         let reclaimed = mgr.reconcile("s1", &[]).await.unwrap();
         assert_eq!(reclaimed, vec!["r1".to_string()]);
         assert_eq!(mgr.queue_snapshot("s1").unwrap().queued, 1);
 
         // If the worker is still live, reconcile leaves it running.
-        mgr.claim_and_spawn("r1", "s1", "s1-worker-1").await.unwrap();
-        let reclaimed = mgr.reconcile("s1", &["s1-worker-1".to_string()]).await.unwrap();
+        mgr.claim_and_spawn("r1", "s1", "s1-worker-1")
+            .await
+            .unwrap();
+        let reclaimed = mgr
+            .reconcile("s1", &["s1-worker-1".to_string()])
+            .await
+            .unwrap();
         assert!(reclaimed.is_empty());
         assert_eq!(mgr.queue_snapshot("s1").unwrap().running, 1);
     }

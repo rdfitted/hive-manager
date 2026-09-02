@@ -1,5 +1,7 @@
 <script lang="ts">
   export let nodesComplete: number;
+  export let nodesObserved: number;
+  export let nodesInferred: number;
   export let nodesTotal: number;
   export let wavesComplete: number;
   export let wavesTotal: number;
@@ -15,6 +17,14 @@
     <div class="progress-stat">
       <dt>Nodes completed</dt>
       <dd data-testid="nodes-progress">{nodesComplete} / {nodesTotal}</dd>
+    </div>
+    <div class="progress-stat progress-stat--observed">
+      <dt>Direct evidence</dt>
+      <dd data-testid="observed-progress">{nodesObserved}</dd>
+    </div>
+    <div class="progress-stat progress-stat--inferred">
+      <dt>Lane inferred</dt>
+      <dd data-testid="inferred-progress">{nodesInferred}</dd>
     </div>
     <div class="progress-stat">
       <dt>Waves completed</dt>
@@ -68,5 +78,14 @@
     font-size: var(--text-base);
     font-weight: 700;
     white-space: nowrap;
+  }
+
+  .progress-stat--observed dd,
+  .progress-stat--inferred dd {
+    color: var(--status-success);
+  }
+
+  .progress-stat--inferred dd {
+    opacity: 0.75;
   }
 </style>

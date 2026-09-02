@@ -337,6 +337,7 @@ fn role_archive(
             subject_id: "verification-task".to_string(),
             task_id: Some("verification-task".to_string()),
             agent_ids: vec![agent_id.to_string()],
+            completion_evidence: None,
             status: RuntimeOutcomeStatus::Completed,
             started_at: Some(timestamp),
             finished_at: Some(timestamp),

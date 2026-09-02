@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import type { BindingRef, NodeStatus, WorkGraphNode } from '$lib/workgraph/types';
 
@@ -58,7 +58,10 @@ function payload(overrides: Record<string, unknown> = {}) {
     ],
     waves: [['T1'], ['T2', 'T3']],
     status_by_node: { T1: 'completed', T2: 'blocked', T3: 'pending' },
+    completion_provenance: { T1: 'observed' },
+    completion_source_refs: { T1: ['event:prepare-api'] },
     lane_assignment: { T1: ROLE('backend'), T2: ROLE('backend'), T3: ROLE('frontend') },
+    agents_by_lane: { backend: ['worker-backend'], frontend: ['worker-frontend'] },
     critical_path: ['T1', 'T2'],
     provenance_by_edge: [],
     divergence: null,
@@ -242,6 +245,63 @@ describe('WorkGraphView', () => {
     const focusInspector = screen.getByLabelText('Node inspector for Wire node inspector');
     expect(focusInspector.textContent?.replace(/\s+/g, ' ').trim()).toBe(hoverContent);
     expect(node.querySelector('title')).toBeNull();
+  });
+
+  it('keeps lane-inferred work completed while disclosing distinct evidence', async () => {
+    const observed = graphNode('observed', 'completed', ROLE('P1'), {
+      title: 'Observed anchor',
+    });
+    const inferred = graphNode('inferred', 'completed', ROLE('P1'), {
+      title: 'Inferred lane peer',
+    });
+    mockFetch(
+      payload({
+        nodes: [observed, inferred],
+        edges: [],
+        waves: [[observed.id, inferred.id]],
+        status_by_node: { observed: 'completed', inferred: 'completed' },
+        completion_provenance: { observed: 'observed', inferred: 'inferred' },
+        completion_source_refs: {
+          observed: ['event:anchor-complete'],
+          inferred: ['event:lane-complete', 'event:worker-finalized'],
+        },
+        lane_assignment: { observed: observed.lane, inferred: inferred.lane },
+        agents_by_lane: { P1: ['worker-1'] },
+        critical_path: [observed.id, inferred.id],
+      })
+    );
+    const { container } = render(WorkGraphView);
+    await settle();
+
+    const observedBox = boxFor(container, observed.id);
+    const inferredBox = boxFor(container, inferred.id);
+    expect(observedBox?.classList.contains('wg-box--completed')).toBe(true);
+    expect(observedBox?.classList.contains('wg-box--inferred')).toBe(false);
+    expect(inferredBox?.classList.contains('wg-box--completed')).toBe(true);
+    expect(inferredBox?.classList.contains('wg-box--inferred')).toBe(true);
+
+    expect(screen.getByTestId('nodes-progress').textContent).toBe('2 / 2');
+    expect(screen.getByTestId('observed-progress').textContent).toBe('1');
+    expect(screen.getByTestId('inferred-progress').textContent).toBe('1');
+
+    const inferredNode = container.querySelector(
+      `[data-node-id="${inferred.id}"]`
+    ) as SVGGElement;
+    expect(inferredNode.getAttribute('aria-label')).toContain(
+      'completion provenance lane inference'
+    );
+    await fireEvent.focus(inferredNode);
+    await tick();
+
+    const evidence = screen.getByRole('region', { name: 'Completion evidence' });
+    expect(within(evidence).getByTestId('completion-provenance').textContent).toBe('Inferred');
+    expect(within(evidence).getByText('Completed through lane fan-out')).toBeTruthy();
+    const sourceRefs = within(evidence).getByRole('list', {
+      name: 'Completion source references',
+    });
+    expect(within(sourceRefs).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(sourceRefs).getByText('event:lane-complete')).toBeTruthy();
+    expect(within(sourceRefs).getByText('event:worker-finalized')).toBeTruthy();
   });
 
   it('pins the inspector and unpins it with Escape and click-away', async () => {
@@ -459,6 +519,26 @@ describe('WorkGraphView', () => {
     expect(patterns[statuses.indexOf('blocked')]).not.toBe(patterns[statuses.indexOf('pending')]);
   });
 
+  it('attaches a non-error forced-colors pattern to the inferred rect boundary itself', () => {
+    const forcedColors = workGraphViewSource.slice(
+      workGraphViewSource.indexOf('@media (forced-colors: active)')
+    );
+    const inferredRule = forcedColors.match(/\.wg-box--inferred\s*\{([^}]*)\}/)?.[1];
+    const completedRule = forcedColors.match(/\.wg-box--completed\s*\{([^}]*)\}/)?.[1];
+    const inferredPattern = inferredRule?.match(/stroke-dasharray:\s*([^;]+);/)?.[1].trim();
+    const completedPattern = completedRule?.match(/stroke-dasharray:\s*([^;]+);/)?.[1].trim();
+
+    expect(inferredRule).toBeTruthy();
+    expect(inferredPattern).toBeTruthy();
+    expect(inferredPattern).not.toBe(completedPattern);
+    expect(workGraphViewSource).toMatch(
+      /\.wg-box--inferred\s*\{[\s\S]*?var\(--status-success\)/
+    );
+    expect(workGraphViewSource).not.toMatch(
+      /\.wg-box--inferred\s*\{[^}]*var\(--status-error\)/
+    );
+  });
+
   it('separates and labels the source badge outside the view controls', async () => {
     mockFetch(payload());
     const { container } = render(WorkGraphView);
@@ -571,6 +651,41 @@ describe('WorkGraphView', () => {
     expect(notice.querySelector('a, button, input, select, textarea, [tabindex]')).toBeNull();
     notice.focus();
     expect(document.activeElement).toBe(notice);
+  });
+
+  it('renders an unbound system role as expected attribution absence, not an error', async () => {
+    mockFetch(
+      payload({
+        nodes: [],
+        edges: [],
+        waves: [],
+        status_by_node: {},
+        completion_provenance: {},
+        completion_source_refs: {},
+        lane_assignment: {},
+        agents_by_lane: {},
+        critical_path: [],
+        omissions: [
+          {
+            reason: 'resolution_incomplete',
+            count: 1,
+            detail: 'No recorded principal binding exists for this system role.',
+            examples: ['binding:session-a-queen'],
+          },
+        ],
+      })
+    );
+    render(WorkGraphView);
+    await settle();
+
+    const notice = screen.getByRole('region', { name: 'Work graph omissions' });
+    expect(notice.classList.contains('wg-omissions--informational')).toBe(true);
+    expect(notice.textContent).toContain('Principal attribution not recorded');
+    expect(notice.textContent).toContain('Expected binding absence');
+    expect(notice.textContent).toContain('Informational · Count 1');
+    expect(notice.textContent).toContain('completed work remains valid');
+    expect(notice.textContent).not.toContain('Not everything is shown');
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('surfaces a failed request rather than an empty state', async () => {

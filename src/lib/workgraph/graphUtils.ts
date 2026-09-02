@@ -1,5 +1,13 @@
+import type { CompletionProvenance } from './types';
+
 export const DEFAULT_LABEL_MAX_CHARACTERS = 9;
 export const DEFAULT_HEARTBEAT_STALE_AFTER_MS = 3 * 60 * 1000;
+
+const DIRECT_COMPLETION_PROVENANCE = new Set<CompletionProvenance>([
+  'declared',
+  'queue',
+  'observed',
+]);
 
 export type TimestampLike = string | number | Date | null | undefined;
 
@@ -10,6 +18,10 @@ export interface DirectedEdge {
 
 export interface WaveStatistics {
   nodesComplete: number;
+  /** Completed nodes backed by declared, queue, or directly observed evidence. */
+  nodesObserved: number;
+  /** Completed nodes attributed through lane fan-out. */
+  nodesInferred: number;
   nodesTotal: number;
   wavesComplete: number;
   wavesTotal: number;
@@ -42,16 +54,29 @@ export function truncateLabel(
 
 /**
  * Counts unique graph nodes and treats a wave as complete only when it has at
- * least one node and every node in it is complete.
+ * least one node and every node in it is complete. Direct evidence and lane
+ * inference are counted separately; plan-only or absent provenance remains in
+ * the completed total without being mislabeled as either evidence class.
  */
 export function calculateWaveStatistics(
   waves: readonly (readonly string[])[],
   completedNodeIds: ReadonlySet<string>,
+  completionProvenance: Readonly<Record<string, CompletionProvenance>> = {},
 ): WaveStatistics {
   const nodeIds = new Set(waves.flatMap((wave) => wave));
   let nodesComplete = 0;
+  let nodesObserved = 0;
+  let nodesInferred = 0;
   for (const id of nodeIds) {
-    if (completedNodeIds.has(id)) nodesComplete += 1;
+    if (!completedNodeIds.has(id)) continue;
+
+    nodesComplete += 1;
+    const provenance = completionProvenance[id];
+    if (provenance === 'inferred') {
+      nodesInferred += 1;
+    } else if (provenance && DIRECT_COMPLETION_PROVENANCE.has(provenance)) {
+      nodesObserved += 1;
+    }
   }
 
   const wavesComplete = waves.filter(
@@ -60,6 +85,8 @@ export function calculateWaveStatistics(
 
   return {
     nodesComplete,
+    nodesObserved,
+    nodesInferred,
     nodesTotal: nodeIds.size,
     wavesComplete,
     wavesTotal: waves.length,

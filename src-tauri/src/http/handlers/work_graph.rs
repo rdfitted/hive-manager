@@ -7,12 +7,18 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::coordination::StateManager;
+use crate::coordination::queue_manager::CompletionProvenance;
+use crate::coordination::{HierarchyNode, StateManager};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::archive::{list_archives, read_archive, WorkGraphArchive};
+use crate::orchestrator::work_graph::completion_ledger::{
+    read_node_completion_facts, NodeCompletionProvenance,
+};
 use crate::orchestrator::work_graph::divergence::{compute_divergence, DivergenceSummary};
-use crate::orchestrator::work_graph::runtime::{mutation_log_snapshot, RuntimeOutcome};
+use crate::orchestrator::work_graph::runtime::{
+    mutation_log_snapshot, CompletionEvidenceClass, RuntimeOutcome,
+};
 use crate::orchestrator::work_graph::{
     topological_sort, BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract,
     NodeKind, NodeStatus, TaskGraph, TaskId, WorkGraphOmission, WorkGraphOmissionReason,
@@ -107,7 +113,10 @@ pub struct WorkGraphResponse {
     pub edges: Vec<WorkGraphEdgeResponse>,
     pub waves: Vec<Vec<TaskId>>,
     pub status_by_node: BTreeMap<TaskId, NodeStatus>,
+    pub completion_provenance: BTreeMap<TaskId, CompletionProvenance>,
+    pub completion_source_refs: BTreeMap<TaskId, Vec<String>>,
     pub lane_assignment: BTreeMap<TaskId, BindingRef>,
+    pub agents_by_lane: BTreeMap<String, Vec<String>>,
     pub critical_path: Vec<TaskId>,
     pub provenance_by_edge: Vec<EdgeProvenanceResponse>,
     pub divergence: Option<DivergenceSummary>,
@@ -131,7 +140,15 @@ pub async fn get_work_graph(
         )));
     }
 
-    let (source, graph, divergence, progress_by_node, omissions) = match query.source {
+    let (
+        source,
+        graph,
+        divergence,
+        progress_by_node,
+        completion_provenance,
+        completion_source_refs,
+        omissions,
+    ) = match query.source {
         WorkGraphSourceSelector::Live => {
             let plan = read_live_graph(&session_dir)?.ok_or_else(|| {
                 ApiError::not_found(format!("Live work graph not found: {session_id}"))
@@ -145,7 +162,27 @@ pub async fn get_work_graph(
             graph_from_archive(&archive, query.view)
         }
         WorkGraphSourceSelector::Auto => {
-            if let Some(plan) = read_live_graph(&session_dir)? {
+            let is_terminal = state
+                .session_controller
+                .read()
+                .get_session(&session_id)
+                .is_some_and(|session| session.state.is_terminal());
+            if is_terminal {
+                if let Some(archive) = latest_archive(&session_dir, &session_id)? {
+                    graph_from_archive(&archive, query.view)
+                } else {
+                    let plan = read_live_graph(&session_dir)?.ok_or_else(|| {
+                        ApiError::not_found(format!("Work graph not found: {session_id}"))
+                    })?;
+                    let mut live = graph_from_live_state(&state, &session_id, query.view, plan)?;
+                    live.6.push(WorkGraphOmission::new(
+                        WorkGraphOmissionReason::SourceUnreadable,
+                        1,
+                        vec!["archive:missing".to_string()],
+                    ));
+                    live
+                }
+            } else if let Some(plan) = read_live_graph(&session_dir)? {
                 graph_from_live_state(&state, &session_id, query.view, plan)?
             } else {
                 let archive = latest_archive(&session_dir, &session_id)?.ok_or_else(|| {
@@ -156,12 +193,19 @@ pub async fn get_work_graph(
         }
     };
 
+    let hierarchy = StateManager::new(session_dir)
+        .read_hierarchy()
+        .map_err(|error| ApiError::internal(format!("Failed to read agent hierarchy: {error}")))?;
+
     let response = project_graph(
         query.view,
         source,
         graph,
         divergence,
         &progress_by_node,
+        completion_provenance,
+        completion_source_refs,
+        &hierarchy,
         omissions,
     )?;
     Ok(Json(response))
@@ -211,6 +255,8 @@ fn graph_from_archive(
     TaskGraph,
     Option<DivergenceSummary>,
     BTreeMap<TaskId, WorkGraphNodeProgress>,
+    BTreeMap<TaskId, CompletionProvenance>,
+    BTreeMap<TaskId, Vec<String>>,
     Vec<WorkGraphOmission>,
 ) {
     match view {
@@ -222,6 +268,8 @@ fn graph_from_archive(
                 .unwrap_or_else(|| archive.runtime_graph.clone()),
             None,
             BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             Vec::new(),
         ),
         WorkGraphView::Runtime => (
@@ -229,6 +277,8 @@ fn graph_from_archive(
             archive.runtime_graph.clone(),
             None,
             archive_progress_by_node(archive),
+            archive_completion_provenance(archive),
+            archive_completion_source_refs(archive),
             Vec::new(),
         ),
         WorkGraphView::Divergence => (
@@ -236,9 +286,84 @@ fn graph_from_archive(
             archive.runtime_graph.clone(),
             Some(archive.divergence.clone()),
             archive_progress_by_node(archive),
+            archive_completion_provenance(archive),
+            archive_completion_source_refs(archive),
             Vec::new(),
         ),
     }
+}
+
+fn archive_completion_source_refs(archive: &WorkGraphArchive) -> BTreeMap<TaskId, Vec<String>> {
+    let structural_node_ids: BTreeSet<&str> = archive
+        .runtime_graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    let mut refs_by_node = BTreeMap::<TaskId, Vec<String>>::new();
+    for outcome in archive
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.completion_evidence.is_some())
+    {
+        let task_id = if structural_node_ids.contains(outcome.subject_id.as_str()) {
+            Some(outcome.subject_id.clone())
+        } else {
+            outcome
+                .task_id
+                .clone()
+                .filter(|task_id| structural_node_ids.contains(task_id.as_str()))
+        };
+        let Some(task_id) = task_id else {
+            continue;
+        };
+        refs_by_node
+            .entry(task_id)
+            .or_default()
+            .extend(outcome.source_refs.iter().cloned());
+    }
+    for source_refs in refs_by_node.values_mut() {
+        source_refs.sort();
+        source_refs.dedup();
+    }
+    refs_by_node
+}
+
+fn archive_completion_provenance(
+    archive: &WorkGraphArchive,
+) -> BTreeMap<TaskId, CompletionProvenance> {
+    let structural_node_ids: BTreeSet<&str> = archive
+        .runtime_graph
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect();
+    let mut provenance = BTreeMap::new();
+    for outcome in &archive.outcomes {
+        let Some(class) = outcome.completion_evidence else {
+            continue;
+        };
+        let task_id = if structural_node_ids.contains(outcome.subject_id.as_str()) {
+            Some(outcome.subject_id.clone())
+        } else {
+            outcome
+                .task_id
+                .clone()
+                .filter(|task_id| structural_node_ids.contains(task_id.as_str()))
+        };
+        let Some(task_id) = task_id else {
+            continue;
+        };
+        let candidate = match class {
+            CompletionEvidenceClass::Observed => CompletionProvenance::Observed,
+            CompletionEvidenceClass::Inferred => CompletionProvenance::Inferred,
+        };
+        let existing = provenance.get(&task_id).copied();
+        if existing != Some(CompletionProvenance::Observed) {
+            provenance.insert(task_id, candidate);
+        }
+    }
+    provenance
 }
 
 fn archive_progress_by_node(archive: &WorkGraphArchive) -> BTreeMap<TaskId, WorkGraphNodeProgress> {
@@ -301,6 +426,8 @@ fn graph_from_live_state(
         TaskGraph,
         Option<DivergenceSummary>,
         BTreeMap<TaskId, WorkGraphNodeProgress>,
+        BTreeMap<TaskId, CompletionProvenance>,
+        BTreeMap<TaskId, Vec<String>>,
         Vec<WorkGraphOmission>,
     ),
     ApiError,
@@ -311,17 +438,64 @@ fn graph_from_live_state(
             plan,
             None,
             BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
             Vec::new(),
         ));
     }
 
-    let runtime = state
+    let (mut runtime, mut completion_provenance) = state
         .queue_manager
-        .project_queue_statuses(session_id, &plan)
+        .project_queue_statuses_for_view(session_id, &plan)
         .map_err(|error| {
             ApiError::internal(format!("Failed to project live work-graph status: {error}"))
         })?;
-    let (divergence, omissions) = if matches!(view, WorkGraphView::Divergence) {
+    let (completion_facts, mut ledger_source_omissions) =
+        match read_node_completion_facts(&state.storage.session_dir(session_id)) {
+            Ok(facts) => (facts, Vec::new()),
+            Err(error) => {
+                let mut omission = WorkGraphOmission::new(
+                    WorkGraphOmissionReason::SourceUnreadable,
+                    1,
+                    vec!["state/work-graph-completions.jsonl".to_string()],
+                );
+                omission.detail = format!(
+                    "declared node completions could not be read and were omitted: {error}"
+                );
+                (Vec::new(), vec![omission])
+            }
+        };
+    let mut completion_source_refs = BTreeMap::<TaskId, Vec<String>>::new();
+    let mut declared_progress = BTreeMap::<TaskId, WorkGraphNodeProgress>::new();
+    let mut declared_omissions = Vec::new();
+    for fact in completion_facts {
+        if let Some(node) = runtime
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == fact.task_id)
+        {
+            node.status = NodeStatus::Completed;
+            completion_provenance.insert(fact.task_id.clone(), CompletionProvenance::Declared);
+            completion_source_refs
+                .entry(fact.task_id.clone())
+                .or_default()
+                .push(fact.source_ref());
+            declared_progress.insert(
+                fact.task_id,
+                WorkGraphNodeProgress {
+                    started_at: None,
+                    finished_at: Some(fact.completed_at),
+                    attempts: 1,
+                    agent_id: Some(fact.agent_id),
+                    last_heartbeat_at: (fact.provenance == NodeCompletionProvenance::Heartbeat)
+                        .then_some(fact.completed_at),
+                },
+            );
+        } else {
+            declared_omissions.push(format!("{}:task:{}", fact.source_ref(), fact.task_id));
+        }
+    }
+    let (divergence, mut omissions) = if matches!(view, WorkGraphView::Divergence) {
         let mutation_snapshot = mutation_log_snapshot(session_id);
         let omissions = (!mutation_snapshot.tracked)
             .then(|| {
@@ -346,12 +520,27 @@ fn graph_from_live_state(
     } else {
         (None, Vec::new())
     };
-    let progress = live_progress_by_node(state, session_id)?;
+    omissions.append(&mut ledger_source_omissions);
+    if !declared_omissions.is_empty() {
+        let mut omission = WorkGraphOmission::new(
+            WorkGraphOmissionReason::CompletionUnresolved,
+            declared_omissions.len(),
+            declared_omissions,
+        );
+        omission.detail =
+            "declared completion referenced a node absent from the current live work graph"
+                .to_string();
+        omissions.push(omission);
+    }
+    let mut progress = live_progress_by_node(state, session_id)?;
+    progress.extend(declared_progress);
     Ok((
         WorkGraphSource::Live,
         runtime,
         divergence,
         progress,
+        completion_provenance,
+        completion_source_refs,
         omissions,
     ))
 }
@@ -426,6 +615,9 @@ fn project_graph(
     graph: TaskGraph,
     divergence: Option<DivergenceSummary>,
     progress_by_node: &BTreeMap<TaskId, WorkGraphNodeProgress>,
+    completion_provenance: BTreeMap<TaskId, CompletionProvenance>,
+    completion_source_refs: BTreeMap<TaskId, Vec<String>>,
+    hierarchy: &[HierarchyNode],
     supplemental_omissions: Vec<WorkGraphOmission>,
 ) -> Result<WorkGraphResponse, ApiError> {
     let order = topological_sort(&graph).map_err(|error| {
@@ -470,10 +662,48 @@ fn project_graph(
         .iter()
         .map(|node| (node.id.clone(), node.status))
         .collect();
+    let principal_by_agent: BTreeMap<&str, &str> = hierarchy
+        .iter()
+        .filter_map(|agent| {
+            agent
+                .principal
+                .as_deref()
+                .map(|principal| (agent.id.as_str(), principal))
+        })
+        .collect();
+    let mut agents_by_lane = BTreeMap::<String, Vec<String>>::new();
+    for agent in hierarchy {
+        if let Some(principal) = agent.principal.as_deref() {
+            agents_by_lane
+                .entry(principal.to_string())
+                .or_default()
+                .push(agent.id.clone());
+        }
+    }
+    for agents in agents_by_lane.values_mut() {
+        agents.sort();
+        agents.dedup();
+    }
     let lane_assignment = graph
         .nodes
         .iter()
-        .map(|node| (node.id.clone(), node.binding.clone()))
+        .map(|node| {
+            let principal = binding_value(&node.binding);
+            let progress_agent = progress_by_node
+                .get(&node.id)
+                .and_then(|progress| progress.agent_id.as_deref())
+                .filter(|agent_id| principal_by_agent.get(agent_id).copied() == Some(principal));
+            let observed_agent = progress_agent.or_else(|| {
+                agents_by_lane
+                    .get(principal)
+                    .and_then(|agents| agents.first())
+                    .map(String::as_str)
+            });
+            let assignment = observed_agent
+                .map(|agent_id| BindingRef::Role(agent_id.to_string()))
+                .unwrap_or_else(|| node.binding.clone());
+            (node.id.clone(), assignment)
+        })
         .collect();
     let provenance_by_edge = graph
         .edges
@@ -493,12 +723,21 @@ fn project_graph(
         edges,
         waves,
         status_by_node,
+        completion_provenance,
+        completion_source_refs,
         lane_assignment,
+        agents_by_lane,
         critical_path,
         provenance_by_edge,
         divergence,
         omissions,
     })
+}
+
+fn binding_value(binding: &BindingRef) -> &str {
+    match binding {
+        BindingRef::Role(value) | BindingRef::Zone(value) => value,
+    }
 }
 
 fn topological_waves(graph: &TaskGraph, order: &[TaskId]) -> Vec<Vec<TaskId>> {

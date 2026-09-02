@@ -7,37 +7,32 @@ use chrono::Utc;
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::coordination::StateManager;
+use crate::coordination::{HierarchyNode, StateManager};
 use crate::domain::event::{Event, EventType, Severity};
-use crate::domain::run_journal::{
-    Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus,
-};
+use crate::domain::run_journal::{Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus};
 use crate::events::EventBus;
 use crate::orchestrator::work_graph::archive::{
-    archive_completed_session, list_archives, read_archive,
-    schedule_completed_session_archive, ArchiveSourceKind, ArchiveSourceReport,
-    WorkGraphArchive,
-    WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+    archive_completed_session, list_archives, read_archive, schedule_completed_session_archive,
+    ArchiveSourceKind, ArchiveSourceReport, WorkGraphArchive, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
 };
-use crate::orchestrator::work_graph::divergence::{
-    compute_divergence, DivergenceKind,
+use crate::orchestrator::work_graph::completion_ledger::{
+    append_node_completion_facts, NodeCompletionFact, NodeCompletionProvenance,
 };
-use crate::orchestrator::work_graph::review::{
-    instantiate_review_templates, ReviewTemplate,
-};
+use crate::orchestrator::work_graph::divergence::{compute_divergence, DivergenceKind};
 use crate::orchestrator::work_graph::retro::{
     evaluate_archives, IndependentEvaluator, RetroRunInput,
 };
+use crate::orchestrator::work_graph::review::{instantiate_review_templates, ReviewTemplate};
 use crate::orchestrator::work_graph::runtime::{
-    derive_runtime_graph, instantiate_review_templates_and_record,
-    mutate_and_record, mutation_log, reconstruct_structural_history,
-    record_graph_change, record_review_verdict_and_record,
-    route_failed_verdict_and_record, GraphMutationDelta, GraphMutationType, ReviewVerdict,
-    RuntimeOutcomeStatus,
+    derive_runtime_graph, derive_runtime_graph_with_completion_facts,
+    derive_runtime_graph_with_principals, instantiate_review_templates_and_record,
+    mutate_and_record, mutation_log, reconstruct_structural_history, record_graph_change,
+    record_review_verdict_and_record, route_failed_verdict_and_record, CompletionEvidenceClass,
+    GraphMutationDelta, GraphMutationType, ReviewVerdict, RuntimeOutcomeStatus,
 };
 use crate::orchestrator::work_graph::{
-    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
-    TaskGraph, WorkEdge, WorkGraphOmissionReason, WorkNode,
+    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkEdge,
+    WorkGraphOmissionReason, WorkNode,
 };
 use crate::storage::{ApplicationStateDb, RunJournalStore, SessionStorage};
 
@@ -152,7 +147,10 @@ fn retry_records_total_attempts_and_retro_reports_one_additional_attempt() {
         .iter()
         .find(|outcome| outcome.task_id.as_deref() == Some("task-a"))
         .unwrap();
-    assert_eq!(outcome.attempt_count, 2, "attempt_count stores total attempts");
+    assert_eq!(
+        outcome.attempt_count, 2,
+        "attempt_count stores total attempts"
+    );
 
     let report = evaluate_runtime_retro(&plan, derived, events.len());
     let node_metrics = report.runs[0].nodes.value().unwrap();
@@ -263,7 +261,10 @@ fn journal_observation_interrupted_status_remains_blocked() {
 #[test]
 fn lane_completion_records_event_backed_outcomes_and_reaches_retro() {
     let plan = TaskGraph::new(
-        vec![task("queue-backed", &["root"]), task("in-lane", &["follow-up"])],
+        vec![
+            task("queue-backed", &["root"]),
+            task("in-lane", &["follow-up"]),
+        ],
         vec![WorkEdge::new(
             "queue-backed",
             "in-lane",
@@ -302,7 +303,10 @@ fn lane_completion_records_event_backed_outcomes_and_reaches_retro() {
             );
         }
         assert!(
-            outcome.source_refs.iter().any(|source| source == "event:lane-complete"),
+            outcome
+                .source_refs
+                .iter()
+                .any(|source| source == "event:lane-complete"),
             "{task_id} outcome is not event-backed by the real lane completion"
         );
     }
@@ -336,39 +340,248 @@ fn lane_completion_records_event_backed_outcomes_and_reaches_retro() {
 }
 
 #[test]
-fn unresolved_completion_is_reported_as_typed_omission() {
-    let plan = TaskGraph::new(vec![task("unresolved-task", &["code"])], Vec::new());
-    let events = vec![event(
-        "unresolved-complete",
-        EventType::AgentCompleted,
-        Some("unmapped-agent"),
-        json!({}),
-    )];
-
-    let derived = derive_runtime_graph(Some(&plan), &events, &[], &[], &[]);
-    let omission = derived
-        .runtime_graph
-        .omissions
-        .iter()
-        .find(|omission| {
-            omission.reason == WorkGraphOmissionReason::CompletionUnresolved
-        })
-        .expect("unresolvable completion must not be reported as an ordinary pending task");
-    assert_eq!(omission.count, 1);
-    assert_eq!(
-        omission.examples,
-        vec!["event:unresolved-complete:agent:unmapped-agent"]
+fn anchored_lane_fanout_records_one_observed_and_eight_inferred_through_archive() {
+    const SESSION_ID: &str = "archive-lane-provenance";
+    let plan = TaskGraph::new(
+        (1..=9)
+            .map(|index| {
+                WorkNode::new(
+                    format!("T{index}"),
+                    NodeKind::Task,
+                    format!("Task T{index}"),
+                    NodeContract::default(),
+                    BindingRef::Role("P1".to_string()),
+                    NodeStatus::Pending,
+                )
+            })
+            .collect(),
+        Vec::new(),
     );
-    assert!(!derived.outcomes.iter().any(|outcome| {
-        outcome.task_id.as_deref() == Some("unresolved-task")
-    }));
-    let agent_outcome = derived
+    let mut completion = event(
+        "single-lane-completion",
+        EventType::AgentCompleted,
+        Some("worker-1"),
+        json!({"task_id":"T1"}),
+    );
+    completion.session_id = SESSION_ID.to_string();
+
+    let derived = derive_runtime_graph(
+        Some(&plan),
+        std::slice::from_ref(&completion),
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(
+        derived
+            .outcomes
+            .iter()
+            .filter(|outcome| {
+                outcome.completion_evidence == Some(CompletionEvidenceClass::Observed)
+                    && outcome.task_id.is_some()
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        derived
+            .outcomes
+            .iter()
+            .filter(|outcome| {
+                outcome.completion_evidence == Some(CompletionEvidenceClass::Inferred)
+                    && outcome.task_id.is_some()
+            })
+            .count(),
+        8
+    );
+
+    let temp = TempDir::new().unwrap();
+    let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+    let session_dir = storage.create_session_dir(SESSION_ID).unwrap();
+    StateManager::new(session_dir)
+        .write_work_graph(&plan)
+        .unwrap();
+    let event_bus = EventBus::new(temp.path().to_path_buf());
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(event_bus.publish(completion))
+        .unwrap();
+    drop(event_bus);
+
+    let completion = archive_completed_session(temp.path(), None, SESSION_ID).unwrap();
+    let reread = read_archive(&completion.path).unwrap();
+    assert_eq!(
+        reread
+            .outcomes
+            .iter()
+            .filter(|outcome| {
+                outcome.completion_evidence == Some(CompletionEvidenceClass::Observed)
+                    && outcome.task_id.is_some()
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        reread
+            .outcomes
+            .iter()
+            .filter(|outcome| {
+                outcome.completion_evidence == Some(CompletionEvidenceClass::Inferred)
+                    && outcome.task_id.is_some()
+            })
+            .count(),
+        8
+    );
+}
+
+#[test]
+fn recorded_principal_resolves_completion_without_agent_id_suffix_guessing() {
+    const SESSION_ID: &str = "recorded-principal-runtime";
+    const AGENT_ID: &str = "recorded-principal-runtime-worker-3";
+    let plan = TaskGraph::new(
+        vec![WorkNode::new(
+            "T1",
+            NodeKind::Task,
+            "Principal task",
+            NodeContract::default(),
+            BindingRef::Role("P1".to_string()),
+            NodeStatus::Pending,
+        )],
+        Vec::new(),
+    );
+    let mut completion = event(
+        "principal-completion",
+        EventType::AgentCompleted,
+        Some(AGENT_ID),
+        json!({}),
+    );
+    completion.session_id = SESSION_ID.to_string();
+    let principals = std::collections::BTreeMap::from([(AGENT_ID.to_string(), "P1".to_string())]);
+
+    let derived = derive_runtime_graph_with_principals(
+        Some(&plan),
+        std::slice::from_ref(&completion),
+        &[],
+        &[],
+        &[],
+        &principals,
+    );
+    let task_outcome = derived
         .outcomes
         .iter()
-        .find(|outcome| outcome.subject_id == "agent:unmapped-agent")
+        .find(|outcome| outcome.task_id.as_deref() == Some("T1"))
+        .expect("recorded principal resolves the task");
+    assert_eq!(task_outcome.status, RuntimeOutcomeStatus::Completed);
+    assert_eq!(
+        task_outcome.completion_evidence,
+        Some(CompletionEvidenceClass::Inferred)
+    );
+    assert!(!derived.runtime_graph.omissions.iter().any(|omission| {
+        matches!(
+            omission.reason,
+            WorkGraphOmissionReason::CompletionUnresolved
+                | WorkGraphOmissionReason::ResolutionIncomplete
+        )
+    }));
+
+    let temp = TempDir::new().unwrap();
+    let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+    let session_dir = storage.create_session_dir(SESSION_ID).unwrap();
+    let state = StateManager::new(session_dir);
+    state.write_work_graph(&plan).unwrap();
+    state
+        .update_hierarchy(&[HierarchyNode {
+            id: AGENT_ID.to_string(),
+            role: "Worker-3".to_string(),
+            principal: Some("P1".to_string()),
+            parent_id: Some(format!("{SESSION_ID}-queen")),
+            children: Vec::new(),
+        }])
         .unwrap();
-    assert_eq!(agent_outcome.started_at, None);
-    assert!(agent_outcome.finished_at.is_some());
+    let event_bus = EventBus::new(temp.path().to_path_buf());
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(event_bus.publish(completion))
+        .unwrap();
+    drop(event_bus);
+
+    let archived = archive_completed_session(temp.path(), None, SESSION_ID).unwrap();
+    let reread = read_archive(&archived.path).unwrap();
+    assert_eq!(
+        reread
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id.as_deref() == Some("T1"))
+            .expect("hierarchy binding survives into archive attribution")
+            .status,
+        RuntimeOutcomeStatus::Completed
+    );
+
+    let legacy = TaskGraph::new(
+        vec![WorkNode::new(
+            "legacy",
+            NodeKind::Task,
+            "Legacy worker binding",
+            NodeContract::default(),
+            BindingRef::Role("worker-8".to_string()),
+            NodeStatus::Pending,
+        )],
+        Vec::new(),
+    );
+    let legacy_agent = "legacy-session-worker-8";
+    let legacy_derived = derive_runtime_graph_with_principals(
+        Some(&legacy),
+        &[event(
+            "legacy-completion",
+            EventType::AgentCompleted,
+            Some(legacy_agent),
+            json!({}),
+        )],
+        &[],
+        &[],
+        &[],
+        &std::collections::BTreeMap::from([(legacy_agent.to_string(), "worker-8".to_string())]),
+    );
+    assert_eq!(
+        legacy_derived.runtime_graph.nodes[0].status,
+        NodeStatus::Completed
+    );
+}
+
+#[test]
+fn missing_principal_binding_is_expected_typed_absence_without_guessing() {
+    let plan = TaskGraph::new(vec![task("unresolved-task", &["code"])], Vec::new());
+    for agent_id in ["session-queen", "session-evaluator", "session-judge-1"] {
+        let derived = derive_runtime_graph(
+            Some(&plan),
+            &[event(
+                &format!("unresolved-{agent_id}"),
+                EventType::AgentCompleted,
+                Some(agent_id),
+                json!({}),
+            )],
+            &[],
+            &[],
+            &[],
+        );
+        let omission = derived
+            .runtime_graph
+            .omissions
+            .iter()
+            .find(|omission| omission.reason == WorkGraphOmissionReason::ResolutionIncomplete)
+            .expect("an unbound supervisory agent is expected typed absence");
+        assert_eq!(omission.count, 1, "{agent_id}");
+        assert_eq!(omission.examples, vec![format!("binding:{agent_id}")]);
+        assert!(!derived
+            .runtime_graph
+            .omissions
+            .iter()
+            .any(|omission| { omission.reason == WorkGraphOmissionReason::CompletionUnresolved }));
+        assert!(!derived
+            .outcomes
+            .iter()
+            .any(|outcome| { outcome.task_id.as_deref() == Some("unresolved-task") }));
+    }
 }
 
 #[test]
@@ -420,18 +633,13 @@ fn claims_resolve_by_task_id_and_null_task_ids_report_omissions() {
             && edge.kind == EdgeKind::Consumes
     });
     assert!(resolved_edge.is_some());
-    assert_eq!(
-        resolved_edge.unwrap().provenance,
-        EdgeProvenance::Runtime
-    );
+    assert_eq!(resolved_edge.unwrap().provenance, EdgeProvenance::Runtime);
 
     let omission = derived
         .runtime_graph
         .omissions
         .iter()
-        .find(|omission| {
-            omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
-        })
+        .find(|omission| omission.reason == WorkGraphOmissionReason::ResolutionIncomplete)
         .unwrap();
     assert_eq!(omission.count, 1);
     assert!(omission.examples[0].contains("null-task-id"));
@@ -458,8 +666,7 @@ fn claims_resolve_by_task_id_and_null_task_ids_report_omissions() {
         .unwrap();
     assert_eq!(task_outcome.status, RuntimeOutcomeStatus::Completed);
     assert!(task_outcome.effects.iter().any(|effect| {
-        effect.kind == "artifact"
-            && effect.reference.as_deref() == Some("artifacts/task-a.json")
+        effect.kind == "artifact" && effect.reference.as_deref() == Some("artifacts/task-a.json")
     }));
 }
 
@@ -489,24 +696,25 @@ fn review_and_remediation_mutations_are_append_only_and_reconstructable() {
     .expect("failed review verdict changes the graph");
 
     let expansion = expansions.first_mut().unwrap();
-    let (_, second_delta) = route_failed_verdict_and_record(
-        session_id,
-        &mut graph,
-        &template,
-        expansion,
-    )
-    .unwrap();
+    let (_, second_delta) =
+        route_failed_verdict_and_record(session_id, &mut graph, &template, expansion).unwrap();
     let second_delta = second_delta.expect("failed verdict adds remediation");
 
     assert_eq!(first_delta.sequence, 1);
     assert_eq!(verdict_delta.sequence, 2);
     assert_eq!(second_delta.sequence, 3);
-    assert_eq!(first_delta.mutation_type, GraphMutationType::ReviewRoundAdded);
+    assert_eq!(
+        first_delta.mutation_type,
+        GraphMutationType::ReviewRoundAdded
+    );
     assert_eq!(
         verdict_delta.mutation_type,
         GraphMutationType::ReviewVerdictRecorded
     );
-    assert_eq!(second_delta.mutation_type, GraphMutationType::RemediationDetour);
+    assert_eq!(
+        second_delta.mutation_type,
+        GraphMutationType::RemediationDetour
+    );
     assert_eq!(first_delta.before, initial);
     assert_eq!(first_delta.after, verdict_delta.before);
     assert_eq!(verdict_delta.after, second_delta.before);
@@ -536,11 +744,7 @@ fn review_and_remediation_mutations_are_append_only_and_reconstructable() {
     broken_sequence.sequence = 4;
     assert!(reconstruct_structural_history(
         &graph,
-        &[
-            first_delta.clone(),
-            verdict_delta.clone(),
-            broken_sequence,
-        ],
+        &[first_delta.clone(), verdict_delta.clone(), broken_sequence,],
     )
     .is_err());
     assert_eq!(
@@ -557,15 +761,10 @@ fn review_and_remediation_mutations_are_append_only_and_reconstructable() {
         &[],
         &[],
         &[],
-        &[
-            first_delta,
-            verdict_delta,
-            second_delta.clone(),
-        ],
+        &[first_delta, verdict_delta, second_delta.clone()],
     );
     assert!(derived.outcomes.iter().any(|outcome| {
-        outcome.subject_id == verdict_id
-            && outcome.status == RuntimeOutcomeStatus::Failed
+        outcome.subject_id == verdict_id && outcome.status == RuntimeOutcomeStatus::Failed
     }));
 
     let before_failed_mutation = history.last().unwrap().clone();
@@ -634,11 +833,8 @@ fn structural_history_rejects_shape_divergence_and_duplicates_but_accepts_status
     };
     assert_eq!(duplicate_ids.nodes.len(), duplicate_delta.after.nodes.len());
     assert_eq!(
-        reconstruct_structural_history(
-            &duplicate_ids,
-            std::slice::from_ref(&duplicate_delta),
-        )
-        .unwrap_err(),
+        reconstruct_structural_history(&duplicate_ids, std::slice::from_ref(&duplicate_delta),)
+            .unwrap_err(),
         "final runtime graph does not match mutation delta 1"
     );
 
@@ -728,12 +924,7 @@ fn archive_round_trip_preserves_corpus_and_never_mutates_runtime_sources() {
         .record_step_finished(session_id, &spawn_step, StepStatus::Completed)
         .unwrap();
     let commit_step = journal
-        .record_step_started(
-            session_id,
-            StepKind::GitCommit,
-            1,
-            Some("worker-a"),
-        )
+        .record_step_started(session_id, StepKind::GitCommit, 1, Some("worker-a"))
         .unwrap();
     journal
         .record_ledger(
@@ -745,12 +936,7 @@ fn archive_round_trip_preserves_corpus_and_never_mutates_runtime_sources() {
         )
         .unwrap();
     journal
-        .confirm_ledger(
-            session_id,
-            &commit_step,
-            Some("abc123"),
-            Confidence::High,
-        )
+        .confirm_ledger(session_id, &commit_step, Some("abc123"), Confidence::High)
         .unwrap();
     journal
         .record_step_finished(session_id, &commit_step, StepStatus::Completed)
@@ -818,10 +1004,7 @@ fn archive_round_trip_preserves_corpus_and_never_mutates_runtime_sources() {
             .get(&GraphMutationType::CompositeExpanded),
         Some(&1)
     );
-    assert!(archived
-        .divergence
-        .count(DivergenceKind::NodeAdded)
-        > 0);
+    assert!(archived.divergence.count(DivergenceKind::NodeAdded) > 0);
     assert!(archived.outcomes.iter().any(|outcome| {
         outcome.task_id.as_deref() == Some("task-a")
             && outcome.status == RuntimeOutcomeStatus::Completed
@@ -840,12 +1023,7 @@ fn archive_round_trip_preserves_corpus_and_never_mutates_runtime_sources() {
         reread.reconstruct_structural_history().unwrap(),
         vec![plan, runtime_structure]
     );
-    let repeated = archive_completed_session(
-        temp.path(),
-        Some(&journal),
-        session_id,
-    )
-    .unwrap();
+    let repeated = archive_completed_session(temp.path(), Some(&journal), session_id).unwrap();
     assert!(!repeated.created);
     assert_eq!(repeated.path, paths[0]);
     assert_eq!(repeated.archive, archived);
@@ -901,7 +1079,123 @@ fn legacy_session_without_graph_or_sources_archives_cleanly_with_omissions() {
         .find(|source| source.kind == ArchiveSourceKind::MutationLog)
         .unwrap();
     assert!(!mutation_source.available);
-    assert_eq!(mutation_source.omissions[0].reason, WorkGraphOmissionReason::ResolutionIncomplete);
+    assert_eq!(
+        mutation_source.omissions[0].reason,
+        WorkGraphOmissionReason::ResolutionIncomplete
+    );
+}
+
+#[test]
+fn declared_completion_facts_resolve_null_task_events_and_archive_task_ids() {
+    let temp = TempDir::new().unwrap();
+    let session_id = "declared-completion-093d-shape";
+    let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+    let session_dir = storage.create_session_dir(session_id).unwrap();
+    let plan = TaskGraph::new(
+        (1..=10)
+            .map(|index| task(&format!("T{index}"), &[]))
+            .collect(),
+        Vec::new(),
+    );
+    StateManager::new(session_dir.clone())
+        .write_work_graph(&plan)
+        .unwrap();
+
+    let declared = vec![
+        NodeCompletionFact::new(
+            "T2",
+            format!("{session_id}-worker-2"),
+            NodeCompletionProvenance::Heartbeat,
+        ),
+        NodeCompletionFact::new(
+            "T3",
+            format!("{session_id}-worker-3"),
+            NodeCompletionProvenance::Heartbeat,
+        ),
+    ];
+    append_node_completion_facts(&session_dir, &declared).unwrap();
+
+    let events = (1..=5)
+        .map(|index| Event {
+            id: format!("completed-{index}"),
+            session_id: session_id.to_string(),
+            cell_id: None,
+            agent_id: Some(format!("{session_id}-worker-{index}")),
+            event_type: EventType::AgentCompleted,
+            timestamp: Utc::now(),
+            payload: json!({}),
+            severity: Severity::Info,
+        })
+        .collect::<Vec<_>>();
+    let event_dir = temp.path().join(session_id);
+    fs::create_dir_all(&event_dir).unwrap();
+    fs::write(
+        event_dir.join("events.jsonl"),
+        events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+
+    let direct = derive_runtime_graph_with_completion_facts(
+        Some(&plan),
+        &events,
+        &[],
+        &[],
+        &[],
+        &declared,
+        &Default::default(),
+    );
+    for task_id in ["T2", "T3"] {
+        assert_eq!(
+            direct
+                .runtime_graph
+                .nodes
+                .iter()
+                .find(|node| node.id == task_id)
+                .unwrap()
+                .status,
+            NodeStatus::Completed
+        );
+        let outcome = direct
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.subject_id == task_id)
+            .unwrap();
+        assert_eq!(outcome.task_id.as_deref(), Some(task_id));
+        assert_eq!(
+            outcome.completion_evidence,
+            Some(CompletionEvidenceClass::Observed)
+        );
+    }
+    assert!(direct.runtime_graph.omissions.iter().all(|omission| {
+        omission.reason != WorkGraphOmissionReason::CompletionUnresolved
+            || omission.examples.iter().all(|example| {
+                !example.contains(&format!("{session_id}-worker-2"))
+                    && !example.contains(&format!("{session_id}-worker-3"))
+            })
+    }));
+
+    let archived = archive_completed_session(temp.path(), None, session_id)
+        .unwrap()
+        .archive;
+    for task_id in ["T2", "T3"] {
+        assert_eq!(
+            archived
+                .runtime_graph
+                .nodes
+                .iter()
+                .find(|node| node.id == task_id)
+                .unwrap()
+                .status,
+            NodeStatus::Completed
+        );
+        assert!(archived.outcomes.iter().any(|outcome| {
+            outcome.subject_id == task_id && outcome.task_id.as_deref() == Some(task_id)
+        }));
+    }
 }
 
 #[test]
@@ -915,13 +1209,7 @@ fn orphan_ledger_effect_is_preserved_and_reported_incomplete() {
         confidence: Confidence::High,
         recorded_at: Utc::now(),
     };
-    let derived = derive_runtime_graph(
-        Some(&TaskGraph::default()),
-        &[],
-        &[],
-        &[effect],
-        &[],
-    );
+    let derived = derive_runtime_graph(Some(&TaskGraph::default()), &[], &[], &[effect], &[]);
     assert!(derived.outcomes.iter().any(|outcome| {
         outcome.effects.iter().any(|effect| {
             effect.kind == "git_commit" && effect.reference.as_deref() == Some("deadbeef")
@@ -929,7 +1217,10 @@ fn orphan_ledger_effect_is_preserved_and_reported_incomplete() {
     }));
     assert!(derived.runtime_graph.omissions.iter().any(|omission| {
         omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
-            && omission.examples.iter().any(|example| example == "orphan-ledger-step:missing-step")
+            && omission
+                .examples
+                .iter()
+                .any(|example| example == "orphan-ledger-step:missing-step")
     }));
 }
 
@@ -952,7 +1243,10 @@ fn unreadable_and_cross_session_event_lines_are_reported() {
     );
     fs::write(
         event_dir.join("events.jsonl"),
-        format!("{{not-json}}\n{}\n", serde_json::to_string(&foreign_event).unwrap()),
+        format!(
+            "{{not-json}}\n{}\n",
+            serde_json::to_string(&foreign_event).unwrap()
+        ),
     )
     .unwrap();
 
@@ -965,12 +1259,14 @@ fn unreadable_and_cross_session_event_lines_are_reported() {
         .unwrap();
     assert!(event_source.available);
     assert_eq!(event_source.record_count, 0);
-    assert!(event_source.omissions.iter().any(|omission| {
-        omission.reason == WorkGraphOmissionReason::SourceUnreadable
-    }));
-    assert!(event_source.omissions.iter().any(|omission| {
-        omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
-    }));
+    assert!(event_source
+        .omissions
+        .iter()
+        .any(|omission| { omission.reason == WorkGraphOmissionReason::SourceUnreadable }));
+    assert!(event_source
+        .omissions
+        .iter()
+        .any(|omission| { omission.reason == WorkGraphOmissionReason::ResolutionIncomplete }));
 }
 
 #[test]

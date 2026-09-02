@@ -13,6 +13,14 @@ export type NodeStatus =
   | 'blocked'
   | 'cancelled';
 
+/** Evidence source for a terminal status, in backend precedence order. */
+export type CompletionProvenance =
+  | 'declared'
+  | 'queue'
+  | 'observed'
+  | 'inferred'
+  | 'plan';
+
 export type BindingRef =
   | { kind: 'role'; value: string }
   | { kind: 'zone'; value: string };
@@ -135,7 +143,10 @@ export interface WorkGraphResponse {
   edges: WorkGraphEdge[];
   waves: string[][];
   status_by_node: Record<string, NodeStatus>;
+  completion_provenance: Record<string, CompletionProvenance>;
+  completion_source_refs: Record<string, string[]>;
   lane_assignment: Record<string, BindingRef>;
+  agents_by_lane: Record<string, string[]>;
   critical_path: string[];
   provenance_by_edge: EdgeProvenanceResponse[];
   divergence: DivergenceSummary | null;
