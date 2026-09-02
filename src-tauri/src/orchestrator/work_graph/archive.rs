@@ -405,12 +405,27 @@ pub fn archive_completed_session(
     // Source reporting owns the legacy-plan omission in an archive. Passing an
     // explicit empty derivation base avoids counting the same absent file twice.
     let derivation_base = plan_graph.clone().unwrap_or_default();
-    let agent_principals: BTreeMap<String, String> = state
-        .read_hierarchy()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|node| node.principal.map(|principal| (node.id, principal)))
-        .collect();
+    let (agent_principals, hierarchy_omission): (BTreeMap<String, String>, _) =
+        match state.read_hierarchy() {
+            Ok(hierarchy) => (
+                hierarchy
+                    .into_iter()
+                    .filter_map(|node| node.principal.map(|principal| (node.id, principal)))
+                    .collect(),
+                None,
+            ),
+            Err(error) => {
+                let mut omission = WorkGraphOmission::new(
+                    WorkGraphOmissionReason::SourceUnreadable,
+                    1,
+                    vec!["state/hierarchy.json".to_string()],
+                );
+                omission.detail = format!(
+                    "agent hierarchy could not be read; lane attribution may be incomplete: {error}"
+                );
+                (BTreeMap::new(), Some(omission))
+            }
+        };
     let mut derivation = derive_runtime_graph_with_completion_facts(
         Some(&derivation_base),
         &events,
@@ -433,6 +448,9 @@ pub fn archive_completed_session(
         }
     }
     if let Some(omission) = completion_ledger_omission.as_ref() {
+        merge_omission(&mut derivation.runtime_graph, omission);
+    }
+    if let Some(omission) = hierarchy_omission.as_ref() {
         merge_omission(&mut derivation.runtime_graph, omission);
     }
     let divergence = compute_divergence(plan_graph.as_ref(), &derivation.runtime_graph, &deltas);

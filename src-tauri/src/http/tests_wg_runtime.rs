@@ -1270,6 +1270,36 @@ fn unreadable_and_cross_session_event_lines_are_reported() {
 }
 
 #[test]
+fn unreadable_hierarchy_is_reported_in_the_archived_runtime_graph() {
+    let temp = TempDir::new().unwrap();
+    let session_id = "unreadable-hierarchy-session";
+    let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+    let session_dir = storage.create_session_dir(session_id).unwrap();
+    StateManager::new(session_dir.clone())
+        .write_work_graph(&TaskGraph::default())
+        .unwrap();
+    fs::write(
+        session_dir.join("state").join("hierarchy.json"),
+        "{not-json}",
+    )
+    .unwrap();
+
+    let completion = archive_completed_session(temp.path(), None, session_id).unwrap();
+    assert!(completion
+        .archive
+        .runtime_graph
+        .omissions
+        .iter()
+        .any(|omission| {
+            omission.reason == WorkGraphOmissionReason::SourceUnreadable
+                && omission
+                    .examples
+                    .iter()
+                    .any(|example| example == "state/hierarchy.json")
+        }));
+}
+
+#[test]
 fn divergence_is_neutral_queryable_data_and_detects_rewiring() {
     let plan = TaskGraph::new(
         vec![task("a", &[]), task("b", &[]), task("c", &[])],

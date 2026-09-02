@@ -92,13 +92,14 @@ The inject response reports measured facts, not request echoes:
   receiver evidence. The response reports the retry observation as the final verdict; two
   quiet windows therefore remain `false`. A false negative can double-execute a turn on a
   non-idempotent composer, so the matrix measurement must settle that risk before any widening.
-- Issue #260 tracks the opposite live failure: during this session, four injects to three
-  busy codex principals returned `submit_confirmed: true` with
-  `sustained-post-submit-activity` even though each payload remained visibly staged and needed
-  a later bare-Enter flush. Busy receiver output can therefore create a false positive that
-  bypasses this strictly `Some(false)`-keyed retry. The classifier and retry key remain
-  unchanged for #259; the sweep must treat `true` as sender-side evidence, never as a PASS
-  without controlled receiver-buffer confirmation.
+- Issue #260 is addressed by the bounded pre-write baseline and the
+  `busy-receiver-indeterminate` downgrade. Pre-write changes must span at least 125 ms — half
+  the 250 ms baseline window — before the receiver is considered already streaming. The
+  motivating observation remains four injects to three busy codex principals that returned
+  `submit_confirmed: true` with `sustained-post-submit-activity` even though each payload stayed
+  visibly staged and needed a later bare-Enter flush. The baseline prevents that busy receiver
+  output from remaining a confident positive. A `true` is still sender-side evidence, never a
+  sweep PASS without controlled receiver-buffer confirmation.
 
 ## Two-call workaround
 

@@ -615,13 +615,6 @@ fn persist_work_graph_verdict(
     mut composition: Option<GraphCompositionState>,
     completion_facts: &[NodeCompletionFact],
 ) -> Result<(), WorkGraphVerdictError> {
-    state_manager
-        .append_node_completion_facts(completion_facts)
-        .map_err(|error| {
-            WorkGraphVerdictError::State(format!(
-                "Failed to persist declared completion after QA verdict: {error}"
-            ))
-        })?;
     state_manager.write_work_graph(graph).map_err(|error| {
         WorkGraphVerdictError::State(format!(
             "Failed to persist work graph after QA verdict: {error}"
@@ -645,6 +638,13 @@ fn persist_work_graph_verdict(
                 ))
             })?;
     }
+    state_manager
+        .append_node_completion_facts(completion_facts)
+        .map_err(|error| {
+            WorkGraphVerdictError::State(format!(
+                "Failed to persist declared completion after QA verdict: {error}"
+            ))
+        })?;
     Ok(())
 }
 
@@ -1259,12 +1259,16 @@ pub async fn force_fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_work_graph_verdict_for_agent, map_add_qa_worker_error};
+    use super::{
+        apply_work_graph_verdict_for_agent, map_add_qa_worker_error, persist_work_graph_verdict,
+    };
     use axum::http::StatusCode;
     use tempfile::TempDir;
 
     use crate::coordination::StateManager;
-    use crate::orchestrator::work_graph::completion_ledger::NodeCompletionProvenance;
+    use crate::orchestrator::work_graph::completion_ledger::{
+        NodeCompletionFact, NodeCompletionProvenance,
+    };
     use crate::orchestrator::work_graph::review::{
         instantiate_review_templates, ReviewExpansionSidecar, ReviewTemplate,
     };
@@ -1336,5 +1340,33 @@ mod tests {
             NodeCompletionProvenance::EvaluatorVerdict
         );
         assert_eq!(manager.read_node_completion_facts().unwrap(), facts);
+    }
+
+    #[test]
+    fn later_verdict_state_write_failure_does_not_append_completion_fact() {
+        let temp = TempDir::new().unwrap();
+        let manager = StateManager::new(temp.path().to_path_buf());
+        let graph = TaskGraph::new(Vec::new(), Vec::new());
+        let sidecar = ReviewExpansionSidecar::default();
+        let fact = NodeCompletionFact::new(
+            "qa-verdict",
+            "session-evaluator",
+            NodeCompletionProvenance::EvaluatorVerdict,
+        );
+        std::fs::create_dir_all(temp.path().join("state/work-graph-reviews.json")).unwrap();
+
+        let error = persist_work_graph_verdict(
+            &manager,
+            &graph,
+            &sidecar,
+            None,
+            std::slice::from_ref(&fact),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Failed to persist review expansion sidecar after QA verdict"));
+        assert!(manager.read_node_completion_facts().unwrap().is_empty());
     }
 }

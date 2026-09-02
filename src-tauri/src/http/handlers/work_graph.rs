@@ -533,7 +533,7 @@ fn graph_from_live_state(
         omissions.push(omission);
     }
     let mut progress = live_progress_by_node(state, session_id)?;
-    progress.extend(declared_progress);
+    merge_declared_progress(&mut progress, declared_progress);
     Ok((
         WorkGraphSource::Live,
         runtime,
@@ -543,6 +543,26 @@ fn graph_from_live_state(
         completion_source_refs,
         omissions,
     ))
+}
+
+fn merge_declared_progress(
+    progress: &mut BTreeMap<TaskId, WorkGraphNodeProgress>,
+    declared_progress: BTreeMap<TaskId, WorkGraphNodeProgress>,
+) {
+    for (task_id, declared) in declared_progress {
+        match progress.get_mut(&task_id) {
+            Some(observed) => {
+                observed.started_at = observed.started_at.or(declared.started_at);
+                observed.finished_at = declared.finished_at.or(observed.finished_at);
+                observed.agent_id = declared.agent_id.or(observed.agent_id.take());
+                observed.last_heartbeat_at =
+                    observed.last_heartbeat_at.or(declared.last_heartbeat_at);
+            }
+            None => {
+                progress.insert(task_id, declared);
+            }
+        }
+    }
 }
 
 fn live_progress_by_node(
@@ -821,4 +841,61 @@ fn critical_path(graph: &TaskGraph, order: &[TaskId]) -> Vec<TaskId> {
         paths.insert(id.as_str(), best);
     }
     longest
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::{DateTime, Utc};
+
+    use super::{merge_declared_progress, WorkGraphNodeProgress};
+
+    #[test]
+    fn declared_completion_preserves_observed_queue_progress() {
+        let observed_started_at = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let observed_heartbeat_at = DateTime::<Utc>::from_timestamp(1_700_000_100, 0).unwrap();
+        let declared_finished_at = DateTime::<Utc>::from_timestamp(1_700_000_200, 0).unwrap();
+        let task_id = "T-observed".to_string();
+        let mut progress = BTreeMap::from([(
+            task_id.clone(),
+            WorkGraphNodeProgress {
+                started_at: Some(observed_started_at),
+                finished_at: None,
+                attempts: 4,
+                agent_id: Some("queue-worker".to_string()),
+                last_heartbeat_at: Some(observed_heartbeat_at),
+            },
+        )]);
+        let declared_progress = BTreeMap::from([(
+            task_id.clone(),
+            WorkGraphNodeProgress {
+                started_at: None,
+                finished_at: Some(declared_finished_at),
+                attempts: 1,
+                agent_id: Some("completing-agent".to_string()),
+                last_heartbeat_at: None,
+            },
+        )]);
+
+        merge_declared_progress(&mut progress, declared_progress);
+
+        let merged = progress.get(&task_id).unwrap();
+        assert_eq!(
+            (
+                merged.started_at,
+                merged.attempts,
+                merged.last_heartbeat_at,
+                merged.finished_at,
+                merged.agent_id.as_deref(),
+            ),
+            (
+                Some(observed_started_at),
+                4,
+                Some(observed_heartbeat_at),
+                Some(declared_finished_at),
+                Some("completing-agent"),
+            )
+        );
+    }
 }

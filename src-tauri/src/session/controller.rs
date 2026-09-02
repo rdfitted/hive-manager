@@ -16129,11 +16129,20 @@ mod tests {
         ];
         controller.insert_test_session(session);
 
+        let test_cli = std::env::current_exe()
+            .expect("current test executable")
+            .to_string_lossy()
+            .into_owned();
+        let worker_config = AgentConfig {
+            cli: test_cli.clone(),
+            ..AgentConfig::default()
+        };
+
         let spawned = controller
             .add_worker_for_plan_task(
                 SESSION_ID,
-                AgentConfig::default(),
-                WorkerRole::new("general", "General", "claude"),
+                worker_config,
+                WorkerRole::new("general", "General", &test_cli),
                 None,
                 Some(3),
                 Some("T1"),

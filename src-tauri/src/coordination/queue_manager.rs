@@ -920,17 +920,23 @@ impl QueueManager {
                         )
                     })
                 });
-                if let Some((fact_session_id, fact)) = completion.as_ref() {
+                self.emit_for_row(row_id, EventType::WorkerFinalized, Severity::Info)
+                    .await;
+                if let Some((fact_session_id, fact)) = completion {
                     let session_dir = self
                         .event_bus
                         .data_dir()
                         .join("sessions")
-                        .join(fact_session_id);
-                    append_node_completion_facts(&session_dir, std::slice::from_ref(fact))?;
-                }
-                self.emit_for_row(row_id, EventType::WorkerFinalized, Severity::Info)
-                    .await;
-                if let Some((fact_session_id, fact)) = completion {
+                        .join(&fact_session_id);
+                    if let Err(error) =
+                        append_node_completion_facts(&session_dir, std::slice::from_ref(&fact))
+                    {
+                        tracing::warn!(
+                            session_id = %fact_session_id,
+                            task_id = %fact.task_id,
+                            "Failed to append work-node completion fact: {error}"
+                        );
+                    }
                     if let Err(error) = self.event_bus.publish(fact.event(&fact_session_id)).await {
                         tracing::warn!(
                             session_id = %fact_session_id,

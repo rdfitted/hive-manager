@@ -1495,6 +1495,55 @@ async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse
 }
 
 #[tokio::test]
+async fn completion_ledger_failure_preserves_committed_finalization_and_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(queue_repo());
+    repo.enqueue(&queued_row(
+        "current-run",
+        "pending:current-run",
+        Some("current-task"),
+        1,
+    ))
+    .unwrap();
+    repo.try_claim_for_worker("current-run", Some("worker-1"), -90_000, 10)
+        .unwrap()
+        .unwrap();
+
+    // A file where the ledger expects the session directory deterministically forces the
+    // append to fail without preventing EventBus from persisting either lifecycle event.
+    let sessions_dir = temp.path().join("sessions");
+    std::fs::create_dir(&sessions_dir).unwrap();
+    std::fs::write(sessions_dir.join(SESSION_ID), b"not a directory").unwrap();
+
+    let event_bus = EventBus::new(temp.path().to_path_buf());
+    let mut events = event_bus.subscribe();
+    let manager = QueueManager::new(Arc::clone(&repo), event_bus);
+
+    assert!(manager
+        .record_heartbeat(SESSION_ID, "worker-1", "completed")
+        .await
+        .expect("a failed ledger append must not reject an already committed finalization"));
+    assert_eq!(
+        repo.get_row("current-run").unwrap().unwrap().status,
+        QueueStatus::Finalized
+    );
+
+    let finalized = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("completion heartbeat must emit WorkerFinalized despite ledger failure")
+        .unwrap();
+    assert_eq!(finalized.event_type, EventType::WorkerFinalized);
+    assert_eq!(finalized.payload["task_id"], "current-task");
+
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("ledger failure must not suppress WorkNodeCompleted")
+        .unwrap();
+    assert_eq!(completed.event_type, EventType::WorkNodeCompleted);
+    assert_eq!(completed.payload["task_id"], "current-task");
+}
+
+#[tokio::test]
 async fn recovery_prioritizes_live_claim_over_older_terminal_slot_history() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
@@ -1949,6 +1998,19 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
         .get_heartbeat_info(session_id)
         .contains_key(&worker_id));
 
+    let repo = QueueRepo::new(Arc::clone(&state.app_state_db));
+    let mut observed = queue_row(
+        "declared-observed-t2",
+        "observed-worker",
+        Some("T2"),
+        QueueStatus::Running,
+        1,
+    );
+    observed.session_id = session_id.to_string();
+    observed.attempts = 3;
+    observed.heartbeat_at = Some(1_700_000_000_000);
+    repo.enqueue(&observed).unwrap();
+
     let accepted =
         post_heartbeat_with_completed_nodes(&app, session_id, "worker-1", &["T2", "T3"]).await;
     assert_eq!(accepted.status(), StatusCode::OK);
@@ -1985,6 +2047,13 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
         assert_eq!(node["status"], "completed");
         assert_eq!(node["progress"]["agent_id"], worker_id);
         assert_eq!(body["completion_provenance"][task_id], "declared");
+        if task_id == "T2" {
+            assert_eq!(node["progress"]["attempts"], 3);
+            assert_ne!(
+                node["progress"]["last_heartbeat_at"],
+                serde_json::Value::Null
+            );
+        }
     }
 }
 

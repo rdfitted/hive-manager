@@ -144,9 +144,9 @@ impl InjectionObservation {
 /// [`SUBMIT_CONFIRMATION_MIN_SPAN`] are the signature of a composer that accepted Enter
 /// and started a turn. A short isolated burst is ambiguous — a swallowed Enter also
 /// repaints the composer once. Zero changes mean the Enter provably produced no visible
-/// reaction, which a live TUI never does for an accepted submit. Two or more changes in
-/// the fixed pre-write baseline identify an already-streaming receiver; only a would-be
-/// positive is downgraded because that output cannot be attributed to Enter.
+/// reaction, which a live TUI never does for an accepted submit. Changes spanning at least
+/// half the fixed pre-write baseline identify an already-streaming receiver; only a
+/// would-be positive is downgraded because that output cannot be attributed to Enter.
 fn classify_submit_confirmation(
     post_submit_change_offsets: &[Duration],
     pre_write_change_offsets: &[Duration],
@@ -167,7 +167,13 @@ fn classify_submit_confirmation(
 }
 
 fn pre_write_activity_is_sustained(change_offsets: &[Duration]) -> bool {
-    matches!(change_offsets, [_, _, ..])
+    // Half the bounded window separates a clustered repaint burst from activity that persists
+    // across a meaningful portion of the baseline, while leaving ample polling-jitter headroom.
+    let minimum_busy_span = INJECTION_ACTIVITY_OBSERVATION_WINDOW / 2;
+    matches!(
+        change_offsets,
+        [first, .., last] if last.saturating_sub(*first) >= minimum_busy_span
+    )
 }
 
 fn post_submit_activity_is_sustained(change_offsets: &[Duration]) -> bool {
@@ -1390,7 +1396,7 @@ mod tests {
             (Some(true), "sustained-post-submit-activity")
         );
 
-        let busy_baseline = [Duration::from_millis(40), Duration::from_millis(120)];
+        let busy_baseline = [Duration::from_millis(40), Duration::from_millis(180)];
         assert_eq!(
             classify_submit_confirmation(&[], &busy_baseline),
             (Some(false), "no-post-submit-activity"),
@@ -1412,6 +1418,22 @@ mod tests {
             ),
             (None, "busy-receiver-indeterminate"),
             "pre-write streaming invalidates only the would-be confident positive"
+        );
+    }
+
+    #[test]
+    fn short_pre_write_burst_does_not_suppress_confident_positive() {
+        let sustained_submit = [
+            Duration::from_millis(40),
+            Duration::from_millis(120),
+            Duration::from_millis(290),
+        ];
+        let short_pre_write_burst = [Duration::from_millis(40), Duration::from_millis(120)];
+
+        assert_eq!(
+            classify_submit_confirmation(&sustained_submit, &short_pre_write_burst),
+            (Some(true), "sustained-post-submit-activity"),
+            "an 80 ms pre-write burst is shorter than half the 250 ms baseline window"
         );
     }
 
