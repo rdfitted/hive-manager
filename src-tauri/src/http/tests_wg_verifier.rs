@@ -12,42 +12,35 @@ use crate::domain::run_journal::Confidence;
 use crate::domain::HiveExecutionPolicy;
 use crate::orchestrator::org_graph::{
     adjudication::{
-        AdjudicationDeclaration, AdjudicationPolicy, DeclaredAdjudicator,
-        VerificationDuty,
+        AdjudicationDeclaration, AdjudicationPolicy, DeclaredAdjudicator, VerificationDuty,
     },
     boundary::{
-        context_boundary_satisfies, includes_artifact_context,
-        includes_spawner_conversation, required_context_boundary,
-        verification_duty_declares_signal_class, verification_duty_has_named_signal,
+        context_boundary_satisfies, includes_artifact_context, includes_spawner_conversation,
+        required_context_boundary, verification_duty_declares_signal_class,
+        verification_duty_has_named_signal,
     },
     composition::{ConversationContext, SpawnContext},
     definitions::resolve_role_definition,
     ContextBoundary, SignalClass,
 };
 use crate::orchestrator::work_graph::archive::{
-    ArchiveSourceKind, ArchiveSourceReport, WorkGraphArchive,
-    WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+    ArchiveSourceKind, ArchiveSourceReport, WorkGraphArchive, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
 };
 use crate::orchestrator::work_graph::divergence::DivergenceSummary;
 use crate::orchestrator::work_graph::retro::{
     evaluate_archives_with_role_attributions, propose_role_definition_refinements,
-    AgentRoleDefinitionAttribution, IndependentEvaluator, RetroRunInput,
-    RoleDefinitionKey, RoleDefinitionRefinementObservation, RoleRefinementSignal,
-    ScopeImpact, UNREVIEWED_OUTCOME,
+    AgentRoleDefinitionAttribution, IndependentEvaluator, RetroRunInput, RoleDefinitionKey,
+    RoleDefinitionRefinementObservation, RoleRefinementSignal, ScopeImpact, UNREVIEWED_OUTCOME,
+};
+use crate::orchestrator::work_graph::review::{
+    ADJUDICATION_DECLARATION_PARAMETER, MULTI_LENS_REVIEW_TEMPLATE, VERIFICATION_DUTY_PARAMETER,
 };
 use crate::orchestrator::work_graph::runtime::{
     RuntimeEffect, RuntimeOutcome, RuntimeOutcomeStatus,
 };
-use crate::orchestrator::work_graph::review::{
-    ADJUDICATION_DECLARATION_PARAMETER, MULTI_LENS_REVIEW_TEMPLATE,
-    VERIFICATION_DUTY_PARAMETER,
-};
-use crate::orchestrator::work_graph::validate::{
-    validate_plan_ready, PlanReadyError,
-};
+use crate::orchestrator::work_graph::validate::{validate_plan_ready, PlanReadyError};
 use crate::orchestrator::work_graph::{
-    BindingRef, CompositeExpansion, NodeContract, NodeKind, NodeStatus,
-    TaskGraph, WorkNode,
+    BindingRef, CompositeExpansion, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
 };
 use crate::pty::{AgentConfig, WorkerRole};
 use crate::session::SessionController;
@@ -55,8 +48,7 @@ use crate::session::SessionController;
 const TASK_SENTINEL: &str = "TASK_SENTINEL_VERIFIER_OBJECTIVE";
 const COMPOSER_SENTINEL: &str = "COMPOSER_SENTINEL_RENDERED_TASK_CONTEXT";
 const ARTIFACT_SENTINEL: &str = "ARTIFACT_SENTINEL_INHERITED_CONTEXT";
-const SPAWNER_CONVERSATION_POISON: &str =
-    "SPAWNER_CONVERSATION_POISON_EXPECT_PRIOR_VERDICT";
+const SPAWNER_CONVERSATION_POISON: &str = "SPAWNER_CONVERSATION_POISON_EXPECT_PRIOR_VERDICT";
 
 #[test]
 fn signal_class_derives_the_least_isolated_permitted_boundary() {
@@ -204,11 +196,14 @@ fn a24_none_boundary_removes_inherited_context_from_the_composed_prompt() {
 
 #[test]
 fn a25_judgmental_full_context_fails_with_required_artifact() {
-    let error = validate_plan_ready(&verification_plan(VerificationDuty {
-        signal_name: Some("architecture-review".to_string()),
-        signal_class: Some(SignalClass::Judgmental),
-        context_boundary: ContextBoundary::Full,
-    }))
+    let error = validate_plan_ready(
+        &verification_plan(VerificationDuty {
+            signal_name: Some("architecture-review".to_string()),
+            signal_class: Some(SignalClass::Judgmental),
+            context_boundary: ContextBoundary::Full,
+        }),
+        Default::default(),
+    )
     .expect_err("judgmental verification must reject full inherited context");
 
     assert_eq!(
@@ -228,11 +223,14 @@ fn a25_judgmental_full_context_fails_with_required_artifact() {
 
 #[test]
 fn a25_blank_verification_signal_fails_separately() {
-    let error = validate_plan_ready(&verification_plan(VerificationDuty {
-        signal_name: Some(" \t\r\n".to_string()),
-        signal_class: Some(SignalClass::Judgmental),
-        context_boundary: ContextBoundary::None,
-    }))
+    let error = validate_plan_ready(
+        &verification_plan(VerificationDuty {
+            signal_name: Some(" \t\r\n".to_string()),
+            signal_class: Some(SignalClass::Judgmental),
+            context_boundary: ContextBoundary::None,
+        }),
+        Default::default(),
+    )
     .expect_err("verification duties require a real named signal");
 
     assert_eq!(
@@ -249,11 +247,14 @@ fn a25_blank_verification_signal_fails_separately() {
 
 #[test]
 fn a26_mechanical_full_context_validates_and_keeps_spawner_conversation() {
-    let validation = validate_plan_ready(&verification_plan(VerificationDuty {
-        signal_name: Some("cargo-test".to_string()),
-        signal_class: Some(SignalClass::Mechanical),
-        context_boundary: ContextBoundary::Full,
-    }))
+    let validation = validate_plan_ready(
+        &verification_plan(VerificationDuty {
+            signal_name: Some("cargo-test".to_string()),
+            signal_class: Some(SignalClass::Mechanical),
+            context_boundary: ContextBoundary::Full,
+        }),
+        Default::default(),
+    )
     .expect("mechanical verification deliberately permits full inherited context");
     assert!(validation.warnings.is_empty());
 
@@ -337,6 +338,7 @@ fn role_archive(
             subject_id: "verification-task".to_string(),
             task_id: Some("verification-task".to_string()),
             agent_ids: vec![agent_id.to_string()],
+            executed_as: None,
             completion_evidence: None,
             status: RuntimeOutcomeStatus::Completed,
             started_at: Some(timestamp),
@@ -360,13 +362,7 @@ fn role_input(
 ) -> RetroRunInput {
     RetroRunInput {
         repo_id: repo_id.to_string(),
-        archive: role_archive(
-            archive_id,
-            session_id,
-            agent_id,
-            attempts,
-            scope_gap,
-        ),
+        archive: role_archive(archive_id, session_id, agent_id, attempts, scope_gap),
     }
 }
 
@@ -410,7 +406,10 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
 fn review_6_git_fixture_ignores_hostile_signing_and_hooks() {
     let temp = TempDir::new().expect("hostile git fixture root");
     git_output(temp.path(), &["init"]);
-    git_output(temp.path(), &["config", "user.email", "retro@example.invalid"]);
+    git_output(
+        temp.path(),
+        &["config", "user.email", "retro@example.invalid"],
+    );
     git_output(temp.path(), &["config", "user.name", "Retro Fixture"]);
 
     let hostile_hooks = temp.path().join("hostile-hooks");
@@ -422,13 +421,9 @@ fn review_6_git_fixture_ignores_hostile_signing_and_hooks() {
     .expect("hostile pre-commit hook");
     let hostile_hooks = hostile_hooks.to_string_lossy().to_string();
     git_output(temp.path(), &["config", "commit.gpgSign", "true"]);
-    git_output(
-        temp.path(),
-        &["config", "core.hooksPath", &hostile_hooks],
-    );
+    git_output(temp.path(), &["config", "core.hooksPath", &hostile_hooks]);
 
-    fs::write(temp.path().join("fixture.txt"), "hermetic fixture")
-        .expect("fixture content");
+    fs::write(temp.path().join("fixture.txt"), "hermetic fixture").expect("fixture content");
     git_output(temp.path(), &["add", "fixture.txt"]);
     git_output(temp.path(), &["commit", "-m", "hermetic fixture"]);
 
@@ -449,12 +444,9 @@ fn a30_retro_attribution_separates_versions_of_the_same_role_definition() {
         role_attribution("session-v2", "agent-v2", 2),
     ];
 
-    let report = evaluate_archives_with_role_attributions(
-        &verifier_evaluator(),
-        &inputs,
-        &attributions,
-    )
-    .expect("role-attributed retro");
+    let report =
+        evaluate_archives_with_role_attributions(&verifier_evaluator(), &inputs, &attributions)
+            .expect("role-attributed retro");
 
     assert_eq!(report.role_definition_aggregates.len(), 2);
     assert_eq!(
@@ -601,7 +593,10 @@ fn a31_role_refinement_is_unreviewed_and_does_not_apply_or_commit() {
     fs::create_dir_all(definition_path.parent().unwrap()).expect("roles directory");
     fs::write(&definition_path, "definition-canary").expect("definition canary");
     git_output(temp.path(), &["init"]);
-    git_output(temp.path(), &["config", "user.email", "retro@example.invalid"]);
+    git_output(
+        temp.path(),
+        &["config", "user.email", "retro@example.invalid"],
+    );
     git_output(temp.path(), &["config", "user.name", "Retro Fixture"]);
     git_output(temp.path(), &["add", "."]);
     git_output(temp.path(), &["commit", "-m", "definition canary"]);
@@ -615,12 +610,9 @@ fn a31_role_refinement_is_unreviewed_and_does_not_apply_or_commit() {
         role_attribution("session-b", "agent-b", 7),
     ];
 
-    let report = evaluate_archives_with_role_attributions(
-        &verifier_evaluator(),
-        &inputs,
-        &attributions,
-    )
-    .expect("role refinement retro");
+    let report =
+        evaluate_archives_with_role_attributions(&verifier_evaluator(), &inputs, &attributions)
+            .expect("role refinement retro");
 
     assert_eq!(report.role_refinement_proposals.len(), 1);
     let proposal = &report.role_refinement_proposals[0];
@@ -636,18 +628,16 @@ fn a31_role_refinement_is_unreviewed_and_does_not_apply_or_commit() {
     assert_eq!(learning.outcome, UNREVIEWED_OUTCOME);
     assert!(learning.files_touched.is_empty());
 
-    let guard_observations = ["guard-a", "guard-b"].map(|id| {
-        RoleDefinitionRefinementObservation {
-            repo_id: temp.path().display().to_string(),
-            session_id: format!("session-{id}"),
-            archive_id: format!("archive-{id}"),
-            definition: RoleDefinitionKey {
-                definition_id: "evaluator".to_string(),
-                definition_version: 7,
-            },
-            signal: RoleRefinementSignal::AdditionalAttempts,
-            evidence_refs: vec![definition_path.display().to_string()],
-        }
+    let guard_observations = ["guard-a", "guard-b"].map(|id| RoleDefinitionRefinementObservation {
+        repo_id: temp.path().display().to_string(),
+        session_id: format!("session-{id}"),
+        archive_id: format!("archive-{id}"),
+        definition: RoleDefinitionKey {
+            definition_id: "evaluator".to_string(),
+            definition_version: 7,
+        },
+        signal: RoleRefinementSignal::AdditionalAttempts,
+        evidence_refs: vec![definition_path.display().to_string()],
     });
     assert_eq!(
         propose_role_definition_refinements(&guard_observations).len(),
@@ -712,8 +702,22 @@ fn widening_and_narrowing_role_refinements_are_flagged_distinctly() {
         definition_version: 9,
     };
     let widening_inputs = [
-        role_input("repo-a", "scope-a", "scope-session-a", "scope-agent-a", 1, true),
-        role_input("repo-a", "scope-b", "scope-session-b", "scope-agent-b", 1, true),
+        role_input(
+            "repo-a",
+            "scope-a",
+            "scope-session-a",
+            "scope-agent-a",
+            1,
+            true,
+        ),
+        role_input(
+            "repo-a",
+            "scope-b",
+            "scope-session-b",
+            "scope-agent-b",
+            1,
+            true,
+        ),
     ];
     let widening_attributions = [
         role_attribution("scope-session-a", "scope-agent-a", 9),
@@ -732,21 +736,20 @@ fn widening_and_narrowing_role_refinements_are_flagged_distinctly() {
     }));
 
     let observations = ["review-a", "review-b"]
-    .into_iter()
-    .map(|id| RoleDefinitionRefinementObservation {
-        repo_id: "repo-a".to_string(),
-        session_id: format!("session-{id}"),
-        archive_id: format!("archive-{id}"),
-        definition: definition.clone(),
-        signal: RoleRefinementSignal::ReviewEscapes,
-        evidence_refs: vec![format!("evidence:{id}")],
-    })
-    .collect::<Vec<_>>();
+        .into_iter()
+        .map(|id| RoleDefinitionRefinementObservation {
+            repo_id: "repo-a".to_string(),
+            session_id: format!("session-{id}"),
+            archive_id: format!("archive-{id}"),
+            definition: definition.clone(),
+            signal: RoleRefinementSignal::ReviewEscapes,
+            evidence_refs: vec![format!("evidence:{id}")],
+        })
+        .collect::<Vec<_>>();
 
     let proposals = propose_role_definition_refinements(&observations);
     assert_eq!(proposals.len(), 1);
     assert!(proposals.iter().any(|proposal| {
-        proposal.change_key == "review_escapes"
-            && proposal.scope_impact == ScopeImpact::Narrowing
+        proposal.change_key == "review_escapes" && proposal.scope_impact == ScopeImpact::Narrowing
     }));
 }

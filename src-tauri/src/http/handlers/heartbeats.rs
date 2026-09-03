@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::validate_agent_id;
@@ -16,6 +16,30 @@ use crate::orchestrator::work_graph::completion_ledger::{
     NodeCompletionFact, NodeCompletionProvenance,
 };
 use crate::orchestrator::work_graph::BindingRef;
+
+use super::workers::ExecutedAs;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum CompletedNodeEntry {
+    Legacy(String),
+    Detailed {
+        node_id: String,
+        executed_as: ExecutedAs,
+    },
+}
+
+impl CompletedNodeEntry {
+    fn into_parts(self) -> (String, Option<ExecutedAs>) {
+        match self {
+            Self::Legacy(node_id) => (node_id, None),
+            Self::Detailed {
+                node_id,
+                executed_as,
+            } => (node_id, Some(executed_as)),
+        }
+    }
+}
 
 /// POST /api/sessions/{id}/heartbeat - Body
 #[derive(Debug, Deserialize)]
@@ -30,7 +54,7 @@ pub struct PostHeartbeatRequest {
     pub assignment_id: Option<i64>,
     /// Exact work-graph node ids completed by this heartbeat's resolved agent.
     #[serde(default)]
-    pub completed_nodes: Vec<String>,
+    pub(crate) completed_nodes: Vec<CompletedNodeEntry>,
 }
 
 /// Response for POST heartbeat
@@ -161,6 +185,20 @@ pub async fn post_heartbeat(
                 "completed_nodes may only be supplied with status completed",
             ));
         }
+        let mut normalized = BTreeMap::<String, Option<ExecutedAs>>::new();
+        for entry in req.completed_nodes.iter().cloned() {
+            let (node_id, executed_as) = entry.into_parts();
+            if let Some(existing) = normalized.get(&node_id) {
+                if existing != &executed_as {
+                    return Err(ApiError::bad_request(format!(
+                        "Conflicting executed_as values for duplicate completed_nodes node_id: {node_id}"
+                    )));
+                }
+            } else {
+                normalized.insert(node_id, executed_as);
+            }
+        }
+
         let state_manager = StateManager::new(state.storage.session_dir(&session_id));
         let composition = state_manager
             .read_graph_composition_state()
@@ -183,9 +221,8 @@ pub async fn post_heartbeat(
             .into_iter()
             .flat_map(|graph| graph.nodes.iter().map(|node| node.id.as_str()))
             .collect();
-        let unknown: BTreeSet<&str> = req
-            .completed_nodes
-            .iter()
+        let unknown: BTreeSet<&str> = normalized
+            .keys()
             .map(String::as_str)
             .filter(|task_id| !known_ids.contains(task_id))
             .collect();
@@ -212,7 +249,7 @@ pub async fn post_heartbeat(
                 .as_ref()
                 .into_iter()
                 .flat_map(|graph| graph.nodes.iter())
-                .filter(|node| req.completed_nodes.iter().any(|task_id| task_id == &node.id))
+                .filter(|node| normalized.contains_key(&node.id))
                 .filter_map(|node| {
                     let node_principal = match &node.binding {
                         BindingRef::Role(principal) | BindingRef::Zone(principal) => principal.trim(),
@@ -232,12 +269,7 @@ pub async fn post_heartbeat(
                 )));
             }
         }
-        req.completed_nodes
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
+        normalized.into_iter().collect::<Vec<_>>()
     };
 
     // A supplied assignment identity is an exact durable fence. Check it before
@@ -287,12 +319,16 @@ pub async fn post_heartbeat(
     if !completed_nodes.is_empty() {
         let facts = completed_nodes
             .into_iter()
-            .map(|task_id| {
-                NodeCompletionFact::new(
+            .map(|(task_id, executed_as)| {
+                let fact = NodeCompletionFact::new(
                     task_id,
                     agent_id.clone(),
                     NodeCompletionProvenance::Heartbeat,
-                )
+                );
+                match executed_as {
+                    Some(executed_as) => fact.with_executed_as(executed_as),
+                    None => fact,
+                }
             })
             .collect::<Vec<_>>();
         StateManager::new(state.storage.session_dir(&session_id))
@@ -529,6 +565,26 @@ mod tests {
         assignment_id: Option<i64>,
         completed_nodes: &[&str],
     ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
+        heartbeat_with_completed_node_entries(
+            state,
+            agent_id,
+            status,
+            assignment_id,
+            completed_nodes
+                .iter()
+                .map(|task_id| CompletedNodeEntry::Legacy((*task_id).to_string()))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn heartbeat_with_completed_node_entries(
+        state: Arc<AppState>,
+        agent_id: &str,
+        status: &str,
+        assignment_id: Option<i64>,
+        completed_nodes: Vec<CompletedNodeEntry>,
+    ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
         post_heartbeat(
             State(state),
             Path(SESSION_ID.to_string()),
@@ -537,10 +593,7 @@ mod tests {
                 status: status.to_string(),
                 summary: Some(format!("{status} from handler test")),
                 assignment_id,
-                completed_nodes: completed_nodes
-                    .iter()
-                    .map(|task_id| (*task_id).to_string())
-                    .collect(),
+                completed_nodes,
             }),
         )
         .await
@@ -816,5 +869,110 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].task_id, "T-unbound");
         assert_eq!(facts[0].agent_id, WORKER_ID);
+    }
+
+    #[tokio::test]
+    async fn detailed_completed_node_records_declared_native_execution() {
+        let fixture = fixture();
+        let state_manager = write_graph_and_worker_principal(
+            &fixture,
+            TaskGraph::new(vec![work_node("T-native", "P1")], Vec::new()),
+            Some("P1"),
+        );
+        let executed_as_json = serde_json::json!({
+            "provider": "codex",
+            "tier": "high",
+            "model": "gpt-5.6-sol",
+            "flags": ["-c", "model_reasoning_effort=\"high\""],
+            "channel": "native",
+            "source": "node"
+        });
+        let executed_as: ExecutedAs =
+            serde_json::from_value(executed_as_json.clone()).expect("valid native execution");
+
+        let response = expect_success(
+            heartbeat_with_completed_node_entries(
+                Arc::clone(&fixture.state),
+                "worker-1",
+                "completed",
+                None,
+                vec![CompletedNodeEntry::Detailed {
+                    node_id: "T-native".to_string(),
+                    executed_as,
+                }],
+            )
+            .await,
+            "detailed native completion",
+        );
+
+        assert_eq!(response.0, StatusCode::OK);
+        let facts = state_manager
+            .read_node_completion_facts()
+            .expect("completion ledger");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].task_id, "T-native");
+        assert_eq!(facts[0].agent_id, WORKER_ID);
+        assert_eq!(
+            serde_json::to_value(facts[0].executed_as.as_ref().unwrap()).unwrap(),
+            executed_as_json
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_duplicate_completed_node_execution_is_rejected_before_mutation() {
+        let fixture = fixture();
+        let state_manager = write_graph_and_worker_principal(
+            &fixture,
+            TaskGraph::new(vec![work_node("T-native", "P1")], Vec::new()),
+            Some("P1"),
+        );
+        let execution = |model: &str| {
+            serde_json::from_value::<ExecutedAs>(serde_json::json!({
+                "provider": "codex",
+                "tier": "high",
+                "model": model,
+                "flags": ["-c", "model_reasoning_effort=\"high\""],
+                "channel": "native",
+                "source": "node"
+            }))
+            .unwrap()
+        };
+
+        let result = heartbeat_with_completed_node_entries(
+            Arc::clone(&fixture.state),
+            "worker-1",
+            "completed",
+            None,
+            vec![
+                CompletedNodeEntry::Detailed {
+                    node_id: "T-native".to_string(),
+                    executed_as: execution("gpt-5.6-sol"),
+                },
+                CompletedNodeEntry::Detailed {
+                    node_id: "T-native".to_string(),
+                    executed_as: execution("gpt-5.6-terra"),
+                },
+            ],
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok((status, _)) => {
+                panic!("conflicting duplicate execution tuples must fail closed: got {status}")
+            }
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("T-native"));
+        assert!(state_manager
+            .read_node_completion_facts()
+            .expect("completion ledger")
+            .is_empty());
+        assert!(fixture
+            .state
+            .session_controller
+            .read()
+            .get_heartbeat_info(SESSION_ID)
+            .is_empty());
     }
 }

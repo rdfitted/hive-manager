@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 use crate::domain::event::{Event, EventType, Severity};
+use crate::http::handlers::workers::ExecutedAs;
 
 use super::TaskId;
 
@@ -36,6 +37,8 @@ pub struct NodeCompletionFact {
     pub agent_id: String,
     pub provenance: NodeCompletionProvenance,
     pub completed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub(crate) executed_as: Option<ExecutedAs>,
 }
 
 impl NodeCompletionFact {
@@ -50,7 +53,13 @@ impl NodeCompletionFact {
             agent_id: agent_id.into(),
             provenance,
             completed_at: Utc::now(),
+            executed_as: None,
         }
+    }
+
+    pub(crate) fn with_executed_as(mut self, executed_as: ExecutedAs) -> Self {
+        self.executed_as = Some(executed_as);
+        self
     }
 
     pub fn source_ref(&self) -> String {
@@ -58,6 +67,14 @@ impl NodeCompletionFact {
     }
 
     pub fn event(&self, session_id: &str) -> Event {
+        let mut payload = serde_json::json!({
+            "task_id": self.task_id,
+            "fact_id": self.id,
+            "provenance": self.provenance,
+        });
+        if let Some(executed_as) = &self.executed_as {
+            payload["executed_as"] = serde_json::json!(executed_as);
+        }
         Event {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
@@ -65,11 +82,7 @@ impl NodeCompletionFact {
             agent_id: Some(self.agent_id.clone()),
             event_type: EventType::WorkNodeCompleted,
             timestamp: self.completed_at,
-            payload: serde_json::json!({
-                "task_id": self.task_id,
-                "fact_id": self.id,
-                "provenance": self.provenance,
-            }),
+            payload,
             severity: Severity::Info,
         }
     }
@@ -170,6 +183,57 @@ mod tests {
         assert_eq!(
             read_node_completion_facts(temp.path()).unwrap(),
             vec![first, second]
+        );
+    }
+
+    #[test]
+    fn legacy_jsonl_without_executed_as_deserializes_as_none() {
+        let temp = TempDir::new().unwrap();
+        let path = ledger_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            r#"{"id":"legacy-fact","task_id":"T1","agent_id":"session-worker-1","provenance":"heartbeat","completed_at":"2026-01-02T03:04:05Z"}
+"#,
+        )
+        .unwrap();
+
+        let facts = read_node_completion_facts(temp.path()).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].id, "legacy-fact");
+        assert!(facts[0].executed_as.is_none());
+    }
+
+    #[test]
+    fn completion_event_conditionally_includes_executed_as() {
+        let legacy = NodeCompletionFact::new(
+            "T1",
+            "session-worker-1",
+            NodeCompletionProvenance::Heartbeat,
+        );
+        let legacy_event = legacy.event("session");
+        assert_eq!(legacy_event.payload.as_object().unwrap().len(), 3);
+        assert!(legacy_event.payload.get("executed_as").is_none());
+
+        let executed_as_json = serde_json::json!({
+            "provider": "codex",
+            "tier": "high",
+            "model": "gpt-5.6-sol",
+            "flags": ["-c", "model_reasoning_effort=\"high\""],
+            "channel": "native",
+            "source": "node"
+        });
+        let executed_as = serde_json::from_value(executed_as_json.clone()).unwrap();
+        let detailed = NodeCompletionFact::new(
+            "T2",
+            "session-worker-1",
+            NodeCompletionProvenance::Heartbeat,
+        )
+        .with_executed_as(executed_as);
+
+        assert_eq!(
+            detailed.event("session").payload["executed_as"],
+            executed_as_json
         );
     }
 }

@@ -1,11 +1,18 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{CapabilityCard, CapabilitySupport, DelegationPolicy, NativeDelegationMode};
 use crate::orchestrator::org_graph::RoleDefinition;
+use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::pty::AgentConfig;
 use crate::storage::{AppConfig, CliConfig};
+
+use super::tier_ladder::{
+    embedded_resolved_tier_ladder, expand_preset, resolve_tier_ladder, ResolvedTier,
+    ResolvedTierLadder, TierLadder,
+};
 
 /// CLI behavioral profiles for characterizing how different CLI tools behave
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,12 +31,34 @@ pub enum CliBehavior {
 /// CLI Registry for building commands from agent configurations
 pub struct CliRegistry {
     config: AppConfig,
+    tier_ladder: ResolvedTierLadder,
 }
 
 impl CliRegistry {
     /// Create a new CLI registry with the given config
     pub fn new(config: AppConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            tier_ladder: embedded_resolved_tier_ladder(),
+        }
+    }
+
+    /// Create a registry whose tier ladder is resolved from the explicit
+    /// institutional and project roots.
+    pub fn new_with_tier_sources(
+        config: AppConfig,
+        project_path: &Path,
+        institutional_wiki_root: Option<&Path>,
+    ) -> Self {
+        Self {
+            config,
+            tier_ladder: resolve_tier_ladder(project_path, institutional_wiki_root),
+        }
+    }
+
+    /// Return the resolved snapshot and its load-time issues.
+    pub fn tier_ladder_resolution(&self) -> &ResolvedTierLadder {
+        &self.tier_ladder
     }
 
     /// Get CLI configuration for a specific CLI name
@@ -200,6 +229,24 @@ impl CliRegistry {
         (model, extra_flags)
     }
 
+    /// Resolve one task tier from this registry's layered ladder snapshot.
+    /// Unsupported providers and an unavailable maintained base return `None`.
+    pub fn resolve_tier(&self, provider: &str, tier: TaskTier) -> Option<ResolvedTier> {
+        let ladder = self.tier_ladder.ladder.as_ref()?;
+        Self::resolve_tier_from_ladder(ladder, provider, tier)
+    }
+
+    /// Expand one cell from a previously resolved ladder through the registry's
+    /// authoritative eight-preset table.
+    pub fn resolve_tier_from_ladder(
+        ladder: &TierLadder,
+        provider: &str,
+        tier: TaskTier,
+    ) -> Option<ResolvedTier> {
+        let preset_id = ladder.preset_id(provider, tier)?;
+        expand_preset(provider, preset_id).map(|preset| preset.resolved)
+    }
+
     /// Infer runtime capability facts for a CLI harness.
     ///
     /// Capability support and operator authorization are deliberately separate:
@@ -256,10 +303,7 @@ impl CliRegistry {
 
     /// A role may declare a behavior override; otherwise capability inheritance
     /// preserves the CLI's existing behavior exactly.
-    pub fn get_behavior_for_role(
-        cli: &str,
-        definition: Option<&RoleDefinition>,
-    ) -> CliBehavior {
+    pub fn get_behavior_for_role(cli: &str, definition: Option<&RoleDefinition>) -> CliBehavior {
         definition
             .and_then(|definition| definition.behavior)
             .unwrap_or_else(|| Self::get_behavior(cli))
@@ -689,6 +733,59 @@ mod tests {
             &policy(NativeDelegationMode::Encouraged)
         ));
         assert_eq!(unknown.native_delegation, CapabilitySupport::Unknown);
+    }
+
+    #[test]
+    fn test_resolve_tier_uses_provider_native_model_and_effort_flags() {
+        let registry = CliRegistry::new(test_config());
+        let codex = registry.resolve_tier("codex", TaskTier::High).unwrap();
+        assert_eq!(codex.model, "gpt-5.6-sol");
+        assert_eq!(codex.flags, vec!["-c", "model_reasoning_effort=\"xhigh\""]);
+
+        let claude = registry.resolve_tier("claude", TaskTier::Low).unwrap();
+        assert_eq!(claude.model, "claude-haiku-4-5");
+        assert!(claude.flags.is_empty());
+
+        assert!(registry.resolve_tier("droid", TaskTier::Medium).is_none());
+    }
+
+    #[test]
+    fn test_resolve_tier_uses_the_registrys_layered_project_override() {
+        let project = tempfile::tempdir().unwrap();
+        let tiers = project.path().join(".ai-docs/tiers");
+        std::fs::create_dir_all(&tiers).unwrap();
+        std::fs::write(
+            tiers.join("ladder.md"),
+            r#"---
+            {
+              "tier_ladder": {
+                "codex": { "low": "codex-gpt-5-6-sol-medium" }
+              }
+            }
+            ---
+            "#,
+        )
+        .unwrap();
+
+        let registry = CliRegistry::new_with_tier_sources(test_config(), project.path(), None);
+
+        assert_eq!(
+            registry.resolve_tier("codex", TaskTier::Low).unwrap(),
+            ResolvedTier {
+                model: "gpt-5.6-sol".to_string(),
+                flags: vec![
+                    "-c".to_string(),
+                    "model_reasoning_effort=\"medium\"".to_string()
+                ],
+            }
+        );
+        assert_eq!(
+            registry
+                .resolve_tier("codex", TaskTier::High)
+                .unwrap()
+                .flags,
+            vec!["-c", "model_reasoning_effort=\"xhigh\""]
+        );
     }
 
     #[test]

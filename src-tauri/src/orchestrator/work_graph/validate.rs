@@ -4,22 +4,34 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
-use crate::orchestrator::org_graph::adjudication::{
-    AdjudicationDeclaration, VerificationDuty,
-};
+use crate::orchestrator::org_graph::adjudication::{AdjudicationDeclaration, VerificationDuty};
 use crate::orchestrator::org_graph::boundary::{
-    context_boundary_satisfies, required_context_boundary,
-    verification_duty_declares_signal_class, verification_duty_has_named_signal,
+    context_boundary_satisfies, required_context_boundary, verification_duty_declares_signal_class,
+    verification_duty_has_named_signal,
 };
 use crate::orchestrator::org_graph::ownership::verification_duty_gaps;
 use crate::orchestrator::org_graph::{ContextBoundary, SignalClass};
 
 use super::review::{
-    ADJUDICATION_DECLARATION_PARAMETER, MULTI_LENS_REVIEW_TEMPLATE,
-    VERIFICATION_DUTY_PARAMETER,
+    ADJUDICATION_DECLARATION_PARAMETER, MULTI_LENS_REVIEW_TEMPLATE, VERIFICATION_DUTY_PARAMETER,
 };
-use super::schema::{EdgeKind, NodeKind, TaskGraph, TaskId};
+use super::schema::{EdgeKind, NodeKind, TaskGraph, TaskId, TaskTier};
 use super::toposort::topological_sort;
+
+pub const DEFAULT_TIER_CEILING_PERCENT: u8 = 34;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanReadyPolicy {
+    pub ceiling_percent: u8,
+}
+
+impl Default for PlanReadyPolicy {
+    fn default() -> Self {
+        Self {
+            ceiling_percent: DEFAULT_TIER_CEILING_PERCENT,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanReadyValidation {
@@ -28,7 +40,9 @@ pub struct PlanReadyValidation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanReadyWarning {
-    OrphanSubtrees { task_ids: Vec<TaskId> },
+    OrphanSubtrees {
+        task_ids: Vec<TaskId>,
+    },
     UnassignedVerificationDuty {
         task_class: String,
         task_ids: Vec<TaskId>,
@@ -63,20 +77,44 @@ pub struct DanglingDependency {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanReadyError {
-    DuplicateTaskIds { task_ids: Vec<TaskId> },
-    DanglingDependencies { references: Vec<DanglingDependency> },
-    Cycle { task_ids: Vec<TaskId> },
-    MissingVerificationSignal { review_id: TaskId },
-    MissingVerificationSignalClass { review_id: TaskId },
+    DuplicateTaskIds {
+        task_ids: Vec<TaskId>,
+    },
+    DanglingDependencies {
+        references: Vec<DanglingDependency>,
+    },
+    Cycle {
+        task_ids: Vec<TaskId>,
+    },
+    TierCeilingExceeded {
+        ceiling_percent: u8,
+        above_medium: usize,
+        total: usize,
+        task_ids: Vec<TaskId>,
+    },
+    MissingVerificationSignal {
+        review_id: TaskId,
+    },
+    MissingVerificationSignalClass {
+        review_id: TaskId,
+    },
     InsufficientVerificationIsolation {
         review_id: TaskId,
         signal_class: SignalClass,
         actual: ContextBoundary,
         required: ContextBoundary,
     },
-    InvalidReviewAuthorityMetadata { review_id: TaskId, field: String },
-    MissingAdjudicator { review_id: TaskId },
-    AdjudicatorLacksAuthority { review_id: TaskId, role_id: String },
+    InvalidReviewAuthorityMetadata {
+        review_id: TaskId,
+        field: String,
+    },
+    MissingAdjudicator {
+        review_id: TaskId,
+    },
+    AdjudicatorLacksAuthority {
+        review_id: TaskId,
+        role_id: String,
+    },
 }
 
 impl fmt::Display for PlanReadyError {
@@ -103,6 +141,16 @@ impl fmt::Display for PlanReadyError {
             Self::Cycle { task_ids } => write!(
                 formatter,
                 "PlanReady rejected: dependency cycle contains: {}",
+                task_ids.join(", ")
+            ),
+            Self::TierCeilingExceeded {
+                ceiling_percent,
+                above_medium,
+                total,
+                task_ids,
+            } => write!(
+                formatter,
+                "PlanReady rejected: {above_medium} of {total} planner-rated nodes exceed medium, above the inclusive {ceiling_percent}% ceiling: {}",
                 task_ids.join(", ")
             ),
             Self::MissingVerificationSignal { review_id } => write!(
@@ -188,7 +236,10 @@ pub fn quarantine_dangling_dependencies(graph: &mut TaskGraph) -> Vec<DanglingDe
     quarantined
 }
 
-pub fn validate_plan_ready(graph: &TaskGraph) -> Result<PlanReadyValidation, PlanReadyError> {
+pub fn validate_plan_ready(
+    graph: &TaskGraph,
+    policy: PlanReadyPolicy,
+) -> Result<PlanReadyValidation, PlanReadyError> {
     let mut counts = BTreeMap::<&str, usize>::new();
     for node in &graph.nodes {
         *counts.entry(&node.id).or_default() += 1;
@@ -238,25 +289,56 @@ pub fn validate_plan_ready(graph: &TaskGraph) -> Result<PlanReadyValidation, Pla
     }
 
     validate_review_authority(graph)?;
+    validate_tier_ceiling(graph, policy)?;
 
     let mut warnings = orphan_warnings(graph);
-    warnings.extend(
-        verification_duty_gaps(graph)
-            .into_iter()
-            .map(|gap| PlanReadyWarning::UnassignedVerificationDuty {
-                task_class: gap.task_class,
-                task_ids: gap.unassigned_task_ids,
-            }),
-    );
+    warnings.extend(verification_duty_gaps(graph).into_iter().map(|gap| {
+        PlanReadyWarning::UnassignedVerificationDuty {
+            task_class: gap.task_class,
+            task_ids: gap.unassigned_task_ids,
+        }
+    }));
     Ok(PlanReadyValidation { warnings })
+}
+
+fn validate_tier_ceiling(graph: &TaskGraph, policy: PlanReadyPolicy) -> Result<(), PlanReadyError> {
+    let total = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind != NodeKind::Review)
+        .count();
+    if total == 0 {
+        return Ok(());
+    }
+
+    let mut task_ids = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind != NodeKind::Review && node.tier > TaskTier::Medium)
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    task_ids.sort();
+    let above_medium = task_ids.len();
+
+    if above_medium * 100 > usize::from(policy.ceiling_percent) * total {
+        return Err(PlanReadyError::TierCeilingExceeded {
+            ceiling_percent: policy.ceiling_percent,
+            above_medium,
+            total,
+            task_ids,
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_review_authority(graph: &TaskGraph) -> Result<(), PlanReadyError> {
     for node in graph.nodes.iter().filter(|node| {
         node.kind == NodeKind::Join
-            && node.expansion.as_ref().is_some_and(|expansion| {
-                expansion.template == MULTI_LENS_REVIEW_TEMPLATE
-            })
+            && node
+                .expansion
+                .as_ref()
+                .is_some_and(|expansion| expansion.template == MULTI_LENS_REVIEW_TEMPLATE)
     }) {
         let expansion = node.expansion.as_ref().expect("review expansion checked");
         let duty = match expansion.parameters.get(VERIFICATION_DUTY_PARAMETER) {

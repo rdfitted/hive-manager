@@ -230,6 +230,7 @@
           id: inspectedNode.id,
           title: inspectedNode.title,
           kind: inspectedNode.kind,
+          tier: inspectedNode.tier,
           lane: laneKey(inspectedNode.lane),
           status: inspectedNode.status,
           contract: inspectedNode.contract

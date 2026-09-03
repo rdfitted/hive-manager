@@ -12,6 +12,7 @@
     createDefaultHiveFormState,
     nextCodingPrincipalIndex,
     type CodingPrincipalFormConfig,
+    type TierRoutingPolicy,
   } from './hiveLaunch';
   import TemplatePicker from './templates/TemplatePicker.svelte';
   import { routeFusionTemplateCells } from './templates/templateLaunch';
@@ -19,11 +20,30 @@
   import { Crown, CaretDown, CaretRight } from 'phosphor-svelte';
   import type { AgentConfig, DebateDebaterConfig, DebateLaunchConfig, DelegationMode, FusionLaunchConfig, FusionVariantConfig, HiveLaunchConfig, QaWorkerConfig, ResearchLaunchConfig, SoloLaunchConfig, WorkerRole } from '$lib/stores/sessions';
   import type { SessionTemplate } from '$lib/types/domain';
+  import type { TaskTier } from '$lib/workgraph/types';
   import { templates, selectedTemplate } from '$lib/stores/templates';
   import { defaultRoles } from '$lib/config/clis';
+  import { apiUrl } from '$lib/config';
 
   type SessionMode = 'templates' | 'hive' | 'fusion' | 'solo' | 'research' | 'debate';
   type WorkGraphParameterRow = { id: number; key: string; value: string };
+  type TierLadderPreviewCell = {
+    provider: string;
+    tier: TaskTier;
+    model: string;
+    flags: string[];
+  };
+  type TierLadderOmission = {
+    reason: string;
+    sourceRef: string;
+    detail: string;
+  };
+  type TierLadderPreviewResponse = {
+    cells: TierLadderPreviewCell[];
+    omissions: TierLadderOmission[];
+  };
+
+  const TASK_TIERS: TaskTier[] = ['low', 'medium', 'high', 'critical'];
 
   const WORK_GRAPH_ARCHETYPES = [
     { id: 'feature-build', label: 'Feature build' },
@@ -62,6 +82,76 @@
     } finally {
       cliHealthLoading = false;
     }
+  }
+
+  function isTaskTier(value: unknown): value is TaskTier {
+    return typeof value === 'string' && TASK_TIERS.includes(value as TaskTier);
+  }
+
+  function normalizeTierLadderPreview(payload: unknown): TierLadderPreviewResponse {
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('Tier ladder response was invalid');
+    }
+    const candidate = payload as { cells?: unknown; omissions?: unknown };
+    if (!Array.isArray(candidate.cells) || !Array.isArray(candidate.omissions)) {
+      throw new Error('Tier ladder response was invalid');
+    }
+
+    const cells = candidate.cells.filter((entry): entry is TierLadderPreviewCell => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const cell = entry as Record<string, unknown>;
+      return typeof cell.provider === 'string'
+        && isTaskTier(cell.tier)
+        && typeof cell.model === 'string'
+        && Array.isArray(cell.flags)
+        && cell.flags.every((flag) => typeof flag === 'string');
+    });
+    const omissions = candidate.omissions.filter((entry): entry is TierLadderOmission => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const omission = entry as Record<string, unknown>;
+      return typeof omission.reason === 'string'
+        && typeof omission.sourceRef === 'string'
+        && typeof omission.detail === 'string';
+    });
+
+    return { cells, omissions };
+  }
+
+  async function loadTierLadder(project: string) {
+    if (!project || project === tierLadderLoadedProject) return;
+    tierLadderLoadedProject = project;
+    const requestId = ++tierLadderRequestId;
+    tierLadderLoading = true;
+    tierLadderError = null;
+    tierLadderCells = [];
+    tierLadderOmissions = [];
+
+    try {
+      const response = await fetch(
+        apiUrl(`/api/tier-ladder?project_path=${encodeURIComponent(project)}`),
+      );
+      if (!response.ok) {
+        throw new Error(`Tier ladder request failed (${response.status})`);
+      }
+      const preview = normalizeTierLadderPreview(await response.json());
+      if (requestId !== tierLadderRequestId) return;
+      tierLadderCells = preview.cells;
+      tierLadderOmissions = preview.omissions;
+    } catch (err) {
+      if (requestId !== tierLadderRequestId) return;
+      tierLadderError = err instanceof Error ? err.message : String(err);
+    } finally {
+      if (requestId === tierLadderRequestId) tierLadderLoading = false;
+    }
+  }
+
+  function retryTierLadder() {
+    tierLadderLoadedProject = '';
+    void loadTierLadder(projectPath.trim());
+  }
+
+  function providerLabel(provider: string): string {
+    return provider.charAt(0).toUpperCase() + provider.slice(1);
   }
 
   // ... (predefinedRoles same)
@@ -199,6 +289,16 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   const defaultHiveForm = createDefaultHiveFormState();
   let queenConfig: AgentConfig = defaultHiveForm.queenConfig;
+  let tierPolicy: TierRoutingPolicy = {
+    ...defaultHiveForm.tierPolicy,
+    ladder: {},
+  };
+  let tierLadderCells: TierLadderPreviewCell[] = [];
+  let tierLadderOmissions: TierLadderOmission[] = [];
+  let tierLadderLoading = false;
+  let tierLadderError: string | null = null;
+  let tierLadderLoadedProject = '';
+  let tierLadderRequestId = 0;
 
   function createDefaultConfig(roleType: string = 'general'): LaunchWorkerConfig {
     const generalRole = predefinedRoles.find((r) => r.type === 'general')!;
@@ -228,6 +328,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   let nextWorkGraphParameterId = 0;
   let workGraphParameterRows: WorkGraphParameterRow[] = [];
   let showHiveAdvanced = false;
+  $: tierProviders = Array.from(new Set([
+    queenConfig.cli,
+    ...codingPrincipals.map((principal) => principal.cli),
+  ].filter(Boolean)));
+  $: if (show && mode === 'hive' && tierPolicy.enabled && projectPath.trim()) {
+    void loadTierLadder(projectPath.trim());
+  }
 
   function parameterRowsFromRecord(parameters: Record<string, string>): WorkGraphParameterRow[] {
     return Object.entries(parameters).map(([key, value]) => ({
@@ -502,6 +609,24 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     return 'Automatic when supported';
   }
 
+  function isValidTierRoutingCeiling(value: number): boolean {
+    return Number.isInteger(value) && value >= 1 && value <= 100;
+  }
+
+  // The form is `novalidate` so the popup owns its own error reporting. That also
+  // disables the browser's min/max enforcement on the delegation inputs, so those
+  // bounds have to be checked here or they stop being enforced at all.
+  function isValidDelegationLimit(value: number, max: number): boolean {
+    return Number.isInteger(value) && value >= 1 && value <= max;
+  }
+
+  function handleTierRoutingToggle(event: Event) {
+    const enabled = (event.currentTarget as HTMLInputElement).checked;
+    if (!enabled && !isValidTierRoutingCeiling(tierPolicy.ceiling_percent)) {
+      tierPolicy.ceiling_percent = 34;
+    }
+  }
+
   async function handleSubmit(smokeTest: boolean = false) {
     if (!projectPath.trim()) return;
     if (mode === 'templates') {
@@ -510,6 +635,30 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     }
 
     error = '';
+
+    if (
+      mode === 'hive'
+      && tierPolicy.enabled
+      && !isValidTierRoutingCeiling(tierPolicy.ceiling_percent)
+    ) {
+      error = 'Tier-routing ceiling must be a whole number from 1 to 100.';
+      return;
+    }
+
+    if (mode === 'hive') {
+      const delegationLimits: Array<[string, number, number]> = [
+        ['Queen target max children', queenMaxChildren, 8],
+        ['Queen target max depth', queenMaxDepth, 4],
+        ['Principal target max children', principalMaxChildren, 8],
+        ['Principal target max depth', principalMaxDepth, 4],
+      ];
+      for (const [label, value, max] of delegationLimits) {
+        if (!isValidDelegationLimit(value, max)) {
+          error = `${label} must be a whole number from 1 to ${max}.`;
+          return;
+        }
+      }
+    }
 
     try {
       if (mode === 'hive') {
@@ -534,6 +683,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
           queenMaxDepth,
           principalMaxChildren,
           principalMaxDepth,
+          tierPolicy,
           workGraphArchetype: workGraphArchetype.trim() || null,
           workGraphParameters: workGraphParametersFromRows(),
           prompt: prompt || undefined,
@@ -651,6 +801,12 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   }
   $: if (!show) {
     error = '';
+    tierLadderRequestId += 1;
+    tierLadderLoadedProject = '';
+    tierLadderCells = [];
+    tierLadderOmissions = [];
+    tierLadderLoading = false;
+    tierLadderError = null;
   }
 </script>
 
@@ -729,7 +885,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
         </button>
       </div>
 
-      <form on:submit={(e) => { e.preventDefault(); handleSubmit(false); }}>
+      <form novalidate on:submit={(e) => { e.preventDefault(); handleSubmit(false); }}>
         {#if mode === 'templates'}
           <div class="form-section">
             <TemplatePicker />
@@ -875,6 +1031,110 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                       </button>
                     </div>
                   {/each}
+                </div>
+              {/if}
+            </fieldset>
+
+            <fieldset class="policy-fieldset tier-policy-fieldset">
+              <legend>Tier routing</legend>
+              <label class="checkbox-label lattice-selectable tier-routing-toggle">
+                <input
+                  type="checkbox"
+                  bind:checked={tierPolicy.enabled}
+                  on:change={handleTierRoutingToggle}
+                />
+                <span class="checkbox-text">
+                  <span class="checkbox-title">Enable tier-based model routing</span>
+                  <span class="checkbox-description">Route planned tasks through provider-native model and effort presets.</span>
+                </span>
+              </label>
+
+              {#if tierPolicy.enabled}
+                <div class="tier-policy-controls">
+                  <div class="field">
+                    <label for="tier-routing-ceiling">Routing ceiling (%)</label>
+                    <input
+                      id="tier-routing-ceiling"
+                      class="lattice-input"
+                      type="number"
+                      min="1"
+                      max="100"
+                      step="1"
+                      bind:value={tierPolicy.ceiling_percent}
+                    />
+                    <span class="field-hint">Maximum share of planned tasks allowed above the review floor.</span>
+                  </div>
+                  <div class="field">
+                    <label for="tier-review-floor">Review floor</label>
+                    <select id="tier-review-floor" class="role-select lattice-input" bind:value={tierPolicy.review_floor}>
+                      {#each TASK_TIERS as tier}
+                        <option value={tier}>{providerLabel(tier)}</option>
+                      {/each}
+                    </select>
+                    <span class="field-hint">Tasks at or above this tier require the policy's review path.</span>
+                  </div>
+                </div>
+
+                <div class="tier-ladder-preview" aria-live="polite">
+                  <div class="tier-ladder-heading">
+                    <div>
+                      <h4>Provider ladder preview</h4>
+                      <p class="section-description">Read-only launch preview for each distinct provider currently in use.</p>
+                    </div>
+                    {#if tierLadderError}
+                      <button type="button" class="lattice-btn lattice-btn--secondary lattice-btn--compact" on:click={retryTierLadder}>Retry</button>
+                    {/if}
+                  </div>
+
+                  {#if !projectPath.trim()}
+                    <p class="policy-note">Choose a project folder to resolve its tier ladder.</p>
+                  {:else if tierLadderLoading}
+                    <p class="policy-note">Resolving tier ladders…</p>
+                  {:else if tierLadderError}
+                    <p class="tier-ladder-error" role="alert">{tierLadderError}</p>
+                  {/if}
+
+                  {#if projectPath.trim() && !tierLadderLoading && !tierLadderError}
+                    <div class="tier-ladder-grid">
+                      {#each tierProviders as provider}
+                        {@const providerCells = tierLadderCells.filter((cell) => cell.provider === provider)}
+                        <section class="tier-ladder-card lattice-panel" aria-label={`${providerLabel(provider)} tier ladder`}>
+                          <h4>{providerLabel(provider)} ladder</h4>
+                          {#if providerCells.length > 0}
+                            <dl>
+                              {#each TASK_TIERS as tier}
+                                {@const cell = providerCells.find((candidate) => candidate.tier === tier)}
+                                {#if cell}
+                                  <div class="tier-ladder-row">
+                                    <dt>{providerLabel(tier)}</dt>
+                                    <dd>
+                                      <span>{cell.model}</span>
+                                      {#if cell.flags.length > 0}
+                                        <code>{cell.flags.join(' ')}</code>
+                                      {/if}
+                                    </dd>
+                                  </div>
+                                {/if}
+                              {/each}
+                            </dl>
+                          {:else}
+                            <p class="policy-note">No maintained ladder is available for this provider.</p>
+                          {/if}
+                        </section>
+                      {/each}
+                    </div>
+
+                    {#if tierLadderOmissions.length > 0}
+                      <div class="tier-ladder-omissions">
+                        <strong>Resolution notes</strong>
+                        <ul>
+                          {#each tierLadderOmissions as omission}
+                            <li>{omission.detail}</li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+                  {/if}
                 </div>
               {/if}
             </fieldset>
@@ -1595,6 +1855,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .choice-grid,
   .delegation-grid,
+  .tier-policy-controls,
+  .tier-ladder-grid,
   .advanced-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1629,6 +1891,88 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   .delegation-grid {
     margin-bottom: 18px;
+  }
+
+  .tier-routing-toggle {
+    margin-bottom: 12px;
+  }
+
+  .tier-policy-controls .field {
+    margin-bottom: 4px;
+  }
+
+  .tier-ladder-preview {
+    margin-top: 12px;
+    padding-top: 12px;
+    box-shadow: var(--edge-seam-top);
+  }
+
+  .tier-ladder-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .tier-ladder-heading h4,
+  .tier-ladder-card h4 {
+    margin: 0 0 4px;
+  }
+
+  .tier-ladder-card {
+    padding: 10px 12px;
+  }
+
+  .tier-ladder-card dl {
+    display: grid;
+    gap: 6px;
+    margin: 8px 0 0;
+  }
+
+  .tier-ladder-row {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+  }
+
+  .tier-ladder-row dt {
+    font-size: 10px;
+    font-weight: 650;
+    color: var(--text-secondary);
+  }
+
+  .tier-ladder-row dd {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    margin: 0;
+    font-size: 10px;
+    color: var(--text-primary);
+  }
+
+  .tier-ladder-row code {
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+  }
+
+  .tier-ladder-error {
+    margin: 0;
+    font-size: 11px;
+    color: var(--status-error);
+  }
+
+  .tier-ladder-omissions {
+    margin-top: 10px;
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+  }
+
+  .tier-ladder-omissions ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
   }
 
   .principals-heading {
@@ -1671,6 +2015,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
   @media (max-width: 560px) {
     .choice-grid,
     .delegation-grid,
+    .tier-policy-controls,
+    .tier-ladder-grid,
     .advanced-grid {
       grid-template-columns: 1fr;
     }

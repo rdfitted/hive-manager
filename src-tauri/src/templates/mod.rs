@@ -62,7 +62,7 @@ pub fn heartbeat_snippet(
     agent_id: &str,
     status: &str,
     summary: &str,
-    completed_nodes: &[&str],
+    completed_nodes: &[serde_json::Value],
 ) -> String {
     let mut body = serde_json::json!({
         "agent_id": agent_id,
@@ -2828,14 +2828,14 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_snippet_emits_completed_nodes_only_when_opted_in() {
+    fn heartbeat_snippet_preserves_legacy_completed_node_strings() {
         let rendered = heartbeat_snippet(
             "http://localhost:18800",
             "session-123",
             "session-123-worker-1",
             "completed",
             "Finished exact nodes",
-            &["T2", "T3"],
+            &[serde_json::json!("T2"), serde_json::json!("T3")],
         );
         let body = rendered
             .lines()
@@ -2843,6 +2843,41 @@ mod tests {
             .expect("heartbeat JSON body");
         let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(parsed["completed_nodes"], serde_json::json!(["T2", "T3"]));
+    }
+
+    #[test]
+    fn heartbeat_snippet_emits_detailed_native_child_execution() {
+        let rendered = heartbeat_snippet(
+            "http://localhost:18800",
+            "session-123",
+            "session-123-worker-1",
+            "completed",
+            "Finished exact node through a native child",
+            &[serde_json::json!({
+                "node_id": "T2",
+                "executed_as": {
+                    "provider": "codex",
+                    "tier": "low",
+                    "model": "gpt-5.6-terra",
+                    "flags": ["-c", "model_reasoning_effort=\"medium\""],
+                    "channel": "native",
+                    "source": "node"
+                }
+            })],
+        );
+        let body = rendered
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .expect("heartbeat JSON body");
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        let completed = &parsed["completed_nodes"][0];
+
+        assert_eq!(completed["node_id"], "T2");
+        assert_eq!(completed["executed_as"]["provider"], "codex");
+        assert_eq!(completed["executed_as"]["tier"], "low");
+        assert_eq!(completed["executed_as"]["model"], "gpt-5.6-terra");
+        assert_eq!(completed["executed_as"]["channel"], "native");
+        assert_eq!(completed["executed_as"]["source"], "node");
     }
 
     #[test]

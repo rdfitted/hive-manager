@@ -13,13 +13,13 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::review::{
-    instantiate_checkpoint_wave, instantiate_review_templates, CheckpointWave,
-    ReviewGraphError, ReviewTemplate,
+    instantiate_checkpoint_wave, instantiate_review_templates, CheckpointWave, ReviewGraphError,
+    ReviewTemplate,
 };
+use super::schema::TaskTier;
 use super::{
-    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
-    NodeStatus, TaskGraph, TaskId, WorkEdge, WorkGraphOmission, WorkGraphOmissionReason,
-    WorkNode,
+    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
+    TaskGraph, TaskId, WorkEdge, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
 };
 
 pub const INSTITUTIONAL_ARCHETYPE_CATALOG: &str = "tools/work-graph-archetypes.json";
@@ -448,16 +448,15 @@ pub fn reconcile_planner_graph(
             reconciled.omissions.push(omission.clone());
         }
     }
-    reconciled.nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    reconciled
+        .nodes
+        .sort_by(|left, right| left.id.cmp(&right.id));
     reconciled.edges.sort_by(|left, right| {
         left.source
             .cmp(&right.source)
             .then(left.target.cmp(&right.target))
             .then(format!("{:?}", left.kind).cmp(&format!("{:?}", right.kind)))
-            .then(
-                format!("{:?}", left.provenance)
-                    .cmp(&format!("{:?}", right.provenance)),
-            )
+            .then(format!("{:?}", left.provenance).cmp(&format!("{:?}", right.provenance)))
             .then(left.rationale.cmp(&right.rationale))
     });
     Ok(reconciled)
@@ -476,7 +475,11 @@ pub fn stamp_checkpoint_waves(
 
 fn load_institutional_catalog(
     institutional_wiki_root: Option<&Path>,
-) -> (GraphArchetypeCatalog, ArchetypeSource, Vec<WorkGraphOmission>) {
+) -> (
+    GraphArchetypeCatalog,
+    ArchetypeSource,
+    Vec<WorkGraphOmission>,
+) {
     let fallback = || {
         (
             GraphArchetypeCatalog::built_in(),
@@ -498,11 +501,7 @@ fn load_institutional_catalog(
     let path = root.join(INSTITUTIONAL_ARCHETYPE_CATALOG);
     match fs::read_to_string(&path) {
         Ok(json) => match serde_json::from_str(&json) {
-            Ok(catalog) => (
-                catalog,
-                ArchetypeSource::InstitutionalCatalog,
-                Vec::new(),
-            ),
+            Ok(catalog) => (catalog, ArchetypeSource::InstitutionalCatalog, Vec::new()),
             Err(error) => {
                 let (catalog, source) = fallback();
                 (
@@ -684,9 +683,11 @@ fn fill_binding(binding: &mut BindingRef, parameters: &BTreeMap<String, String>)
 }
 
 fn fill(value: &str, parameters: &BTreeMap<String, String>) -> String {
-    parameters.iter().fold(value.to_string(), |rendered, (name, value)| {
-        rendered.replace(&format!("${{{name}}}"), value)
-    })
+    parameters
+        .iter()
+        .fold(value.to_string(), |rendered, (name, value)| {
+            rendered.replace(&format!("${{{name}}}"), value)
+        })
 }
 
 fn build_lane_graph(
@@ -802,6 +803,151 @@ pub struct DeviationPromotionProposal {
     pub rationale: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskTierCalibrationTarget {
+    Planner,
+    Ladder,
+}
+
+/// One independently archived signal supporting a planner-rubric or ladder-cell change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTierCalibrationObservation {
+    pub repo_id: String,
+    pub session_id: String,
+    pub archive_id: String,
+    pub target: TaskTierCalibrationTarget,
+    pub task_tier: TaskTier,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_tier: Option<TaskTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_flags: Vec<String>,
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+/// Review-gated calibration proposal keyed explicitly by task tier and provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTierCalibrationProposal {
+    pub promotion_tier: PromotionTier,
+    pub target: TaskTierCalibrationTarget,
+    pub task_tier: TaskTier,
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_tier: Option<TaskTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_flags: Vec<String>,
+    pub observation_count: usize,
+    pub repo_ids: Vec<String>,
+    pub session_ids: Vec<String>,
+    pub archive_ids: Vec<String>,
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    pub rationale: String,
+}
+
+/// Return in-memory calibration proposals only. This function has no filesystem,
+/// ladder, or planner write handle and therefore cannot apply a proposed change.
+pub fn propose_task_tier_calibrations(
+    observations: &[TaskTierCalibrationObservation],
+) -> Vec<TaskTierCalibrationProposal> {
+    type CalibrationKey = (
+        TaskTierCalibrationTarget,
+        TaskTier,
+        String,
+        Option<TaskTier>,
+        Option<String>,
+        Vec<String>,
+    );
+    let mut groups: BTreeMap<
+        CalibrationKey,
+        BTreeMap<(String, String, String), &TaskTierCalibrationObservation>,
+    > = BTreeMap::new();
+    for observation in observations {
+        groups
+            .entry((
+                observation.target,
+                observation.task_tier,
+                observation.provider.clone(),
+                observation.candidate_tier,
+                observation.candidate_model.clone(),
+                observation.candidate_flags.clone(),
+            ))
+            .or_default()
+            .entry((
+                observation.repo_id.clone(),
+                observation.session_id.clone(),
+                observation.archive_id.clone(),
+            ))
+            .or_insert(observation);
+    }
+
+    let mut proposals = Vec::new();
+    for (
+        (target, task_tier, provider, candidate_tier, candidate_model, candidate_flags),
+        instances,
+    ) in groups
+    {
+        let repo_ids: BTreeSet<_> = instances
+            .values()
+            .map(|item| item.repo_id.clone())
+            .collect();
+        if repo_ids.len() < 2 && instances.len() < 2 {
+            continue;
+        }
+        let promotion_tier = if repo_ids.len() >= 2 {
+            PromotionTier::InstitutionalRevision
+        } else {
+            PromotionTier::ProjectOverride
+        };
+        let session_ids: BTreeSet<_> = instances
+            .values()
+            .map(|item| item.session_id.clone())
+            .collect();
+        let archive_ids: BTreeSet<_> = instances
+            .values()
+            .map(|item| item.archive_id.clone())
+            .collect();
+        let node_ids: BTreeSet<_> = instances
+            .values()
+            .flat_map(|item| item.node_ids.iter().cloned())
+            .collect();
+        let evidence_refs: BTreeSet<_> = instances
+            .values()
+            .flat_map(|item| item.evidence_refs.iter().cloned())
+            .collect();
+        proposals.push(TaskTierCalibrationProposal {
+            promotion_tier,
+            target,
+            task_tier,
+            provider,
+            candidate_tier,
+            candidate_model,
+            candidate_flags,
+            observation_count: instances.len(),
+            repo_ids: repo_ids.into_iter().collect(),
+            session_ids: session_ids.into_iter().collect(),
+            archive_ids: archive_ids.into_iter().collect(),
+            node_ids: node_ids.into_iter().collect(),
+            evidence_refs: evidence_refs.into_iter().collect(),
+            rationale: match target {
+                TaskTierCalibrationTarget::Planner => "remediation affected more than half of the observed low- or medium-tier runs; propose raising the planner rubric or archetype default for human review".to_string(),
+                TaskTierCalibrationTarget::Ladder => "a repeated explicit execution override matched the configured cell's observed escape rate; propose reviewing that override as a replacement ladder cell".to_string(),
+            },
+        });
+    }
+    proposals
+}
+
 /// Return in-memory proposals only. This function has no filesystem argument
 /// and cannot write a project override or institutional wiki revision.
 pub fn propose_deviation_promotions(
@@ -868,10 +1014,14 @@ fn feature_build_archetype() -> GraphArchetype {
         parameters: BTreeMap::from([("component".to_string(), "feature".to_string())]),
         lanes: vec![
             lane("design", "Design ${component}", "plan", &[]),
-            lane("backend", "Build ${component} backend", "code", &["design"])
-                .requiring("backend"),
-            lane("frontend", "Build ${component} frontend", "code", &["design"])
-                .requiring("frontend"),
+            lane("backend", "Build ${component} backend", "code", &["design"]).requiring("backend"),
+            lane(
+                "frontend",
+                "Build ${component} frontend",
+                "code",
+                &["design"],
+            )
+            .requiring("frontend"),
             lane(
                 "integrate",
                 "Integrate ${component}",
@@ -893,7 +1043,12 @@ fn bug_hunt_archetype() -> GraphArchetype {
         parameters: BTreeMap::from([("component".to_string(), "defect".to_string())]),
         lanes: vec![
             lane("reproduce", "Reproduce ${component}", "evidence", &[]),
-            lane("isolate", "Isolate ${component}", "root-cause", &["reproduce"]),
+            lane(
+                "isolate",
+                "Isolate ${component}",
+                "root-cause",
+                &["reproduce"],
+            ),
             lane("fix", "Fix ${component}", "code", &["isolate"]),
             lane("verify", "Verify ${component}", "evidence", &["fix"]),
         ],
@@ -938,20 +1093,25 @@ fn audit_archetype() -> GraphArchetype {
         lanes: vec![
             lane("scope", "Scope ${component} audit", "plan", &[]),
             lane("inspect", "Inspect ${component}", "finding", &["scope"]),
-            lane("reconcile", "Reconcile ${component} findings", "finding", &["inspect"]),
-            lane("report", "Report ${component} audit", "artifact", &["reconcile"]),
+            lane(
+                "reconcile",
+                "Reconcile ${component} findings",
+                "finding",
+                &["inspect"],
+            ),
+            lane(
+                "report",
+                "Report ${component} audit",
+                "artifact",
+                &["reconcile"],
+            ),
         ],
         review_templates: vec![review],
         checkpoints: Vec::new(),
     }
 }
 
-fn lane(
-    id: &str,
-    title: &str,
-    output: &str,
-    depends_on: &[&str],
-) -> ArchetypeLane {
+fn lane(id: &str, title: &str, output: &str, depends_on: &[&str]) -> ArchetypeLane {
     ArchetypeLane {
         id: id.to_string(),
         title: title.to_string(),

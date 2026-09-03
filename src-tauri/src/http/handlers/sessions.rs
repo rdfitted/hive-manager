@@ -7,6 +7,8 @@ use axum::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use super::{validate_cli, validate_session_id};
@@ -18,6 +20,51 @@ use crate::session::{
     DebateLaunchConfig, FusionLaunchConfig, FusionVariantConfig, FusionVariantStatus,
     HiveLaunchConfig, QaWorkerConfig,
 };
+
+/// Reject a tier ceiling outside `1..=100` at the launch boundary, where the
+/// operator can still be told what was wrong.
+fn validate_tier_policy(policy: &crate::domain::TierPolicy) -> Result<(), ApiError> {
+    if !(1..=100).contains(&policy.ceiling_percent) {
+        return Err(ApiError::bad_request(format!(
+            "tier_policy.ceiling_percent must be between 1 and 100, got {}",
+            policy.ceiling_percent
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve the tier ladder once per distinct provider in the roster and freeze it
+/// into the launch policy. A running session never re-resolves these entries, so a
+/// later edit to the project override cannot change what an in-flight session does.
+fn snapshot_tier_ladders<'a>(
+    providers: impl IntoIterator<Item = &'a str>,
+    project_path: &FsPath,
+    institutional_wiki_root: Option<&FsPath>,
+) -> BTreeMap<String, crate::cli::ResolvedTierLadder> {
+    providers
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|provider| {
+            let ladder = crate::cli::resolve_tier_ladder(project_path, institutional_wiki_root);
+            (provider, ladder)
+        })
+        .collect()
+}
+
+/// Validate the operator's tier policy and attach the launch-time ladder snapshot.
+fn prepare_hive_execution_policy<'a>(
+    mut policy: crate::domain::HiveExecutionPolicy,
+    providers: impl IntoIterator<Item = &'a str>,
+    project_path: &FsPath,
+    institutional_wiki_root: Option<&FsPath>,
+) -> Result<crate::domain::HiveExecutionPolicy, ApiError> {
+    validate_tier_policy(&policy.tier_policy)?;
+    policy.tier_policy.ladder =
+        snapshot_tier_ladders(providers, project_path, institutional_wiki_root);
+    Ok(policy)
+}
 
 async fn dispatch_session_action(
     state: &Arc<AppState>,
@@ -421,13 +468,30 @@ pub async fn create_session(
             )?;
             let with_evaluator = req.with_evaluator.unwrap_or(false) || evaluator_config.is_some();
 
+            let execution_policy = {
+                // Resolve against the same institutional wiki root the /api/tier-ladder
+                // preview uses, so what the operator previewed is what gets frozen.
+                let institutional_wiki_root = {
+                    let config = state.config.read().await;
+                    crate::cli::health::configured_institutional_wiki_root(&config)
+                };
+                let mut providers: Vec<&str> = vec![queen_config.cli.as_str()];
+                providers.extend(workers.iter().map(|worker| worker.cli.as_str()));
+                prepare_hive_execution_policy(
+                    req.execution_policy.unwrap_or_default(),
+                    providers,
+                    FsPath::new(&req.project_path),
+                    institutional_wiki_root.as_deref(),
+                )?
+            };
+
             let config = HiveLaunchConfig {
                 project_path: req.project_path,
                 name: req.name,
                 color: req.color,
                 queen_config,
                 workers,
-                execution_policy: req.execution_policy.unwrap_or_default(),
+                execution_policy,
                 prompt: req.objective.filter(|value| !value.trim().is_empty()),
                 with_planning: req.with_planning.unwrap_or(false),
                 with_evaluator,
@@ -1248,4 +1312,79 @@ pub async fn get_run_journal(
     .map_err(|e| ApiError::internal(format!("Failed to read run journal: {e}")))?;
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tier_policy_launch_tests {
+    use super::*;
+    use crate::domain::TierPolicy;
+
+    #[test]
+    fn tier_policy_ceiling_range_is_enforced_at_launch_boundary() {
+        for bad in [0u8, 101u8] {
+            let policy = TierPolicy {
+                ceiling_percent: bad,
+                ..TierPolicy::default()
+            };
+            assert!(
+                validate_tier_policy(&policy).is_err(),
+                "ceiling_percent {bad} must be rejected"
+            );
+        }
+
+        for good in [1u8, 34u8, 100u8] {
+            let policy = TierPolicy {
+                ceiling_percent: good,
+                ..TierPolicy::default()
+            };
+            assert!(
+                validate_tier_policy(&policy).is_ok(),
+                "ceiling_percent {good} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_snapshot_persists_each_roster_provider_and_does_not_re_resolve() {
+        let project = tempfile::tempdir().expect("temp project");
+
+        // A claude queen with codex principals must freeze BOTH providers.
+        let policy = prepare_hive_execution_policy(
+            crate::domain::HiveExecutionPolicy::default(),
+            ["claude", "codex", "codex"],
+            project.path(),
+            None,
+        )
+        .unwrap_or_else(|_| panic!("default policy is valid"));
+
+        let snapshot = policy.tier_policy.ladder.clone();
+        assert_eq!(
+            snapshot.keys().cloned().collect::<Vec<_>>(),
+            vec!["claude".to_string(), "codex".to_string()],
+            "one frozen ladder per distinct roster provider"
+        );
+
+        // Edit the project override AFTER launch.
+        let override_dir = project.path().join(".ai-docs/tiers");
+        std::fs::create_dir_all(&override_dir).expect("override dir");
+        std::fs::write(
+            override_dir.join("ladder.md"),
+            "---\n{\"tier_ladder\":{\"codex\":{\"low\":\"codex-gpt-5-6-sol-medium\"}}}\n---\n",
+        )
+        .expect("write override");
+
+        // The already-captured snapshot must not change...
+        assert_eq!(
+            policy.tier_policy.ladder, snapshot,
+            "a launched session never re-resolves its frozen ladder"
+        );
+
+        // ...and the override must genuinely have been capable of changing it,
+        // so this assertion cannot pass vacuously.
+        let fresh = snapshot_tier_ladders(["claude", "codex"], project.path(), None);
+        assert_ne!(
+            fresh["codex"], snapshot["codex"],
+            "the post-launch override would have changed a fresh resolve"
+        );
+    }
 }

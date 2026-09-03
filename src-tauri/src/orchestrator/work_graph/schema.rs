@@ -2,10 +2,35 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Stable identifier assigned to a work node by the plan.
 pub type TaskId = String;
+
+/// Provider-independent effort level requested for a planned task.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskTier {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Critical,
+}
 
 /// A complete work graph. Dependency edges describe scheduling; the other edge
 /// kinds preserve data flow, review, context, and repository relationships.
@@ -43,6 +68,8 @@ pub struct WorkNode {
     pub id: TaskId,
     pub kind: NodeKind,
     pub title: String,
+    #[serde(default)]
+    pub tier: TaskTier,
     pub contract: NodeContract,
     /// A reusable role/zone selector. It is resolved against the session's
     /// `HierarchyNode`s at claim time, never against a plan-time agent id.
@@ -66,11 +93,17 @@ impl WorkNode {
             id: id.into(),
             kind,
             title: title.into(),
+            tier: TaskTier::default(),
             contract,
             binding,
             status,
             expansion: None,
         }
+    }
+
+    pub fn with_tier(mut self, tier: TaskTier) -> Self {
+        self.tier = tier;
+        self
     }
 }
 
@@ -189,11 +222,7 @@ pub struct WorkGraphOmission {
 }
 
 impl WorkGraphOmission {
-    pub fn new(
-        reason: WorkGraphOmissionReason,
-        count: usize,
-        examples: Vec<String>,
-    ) -> Self {
+    pub fn new(reason: WorkGraphOmissionReason, count: usize, examples: Vec<String>) -> Self {
         Self {
             reason,
             count,
@@ -225,12 +254,49 @@ impl WorkGraphOmissionReason {
             Self::SourceUnreadable => {
                 "a graph source could not be read, so derived relationships are incomplete"
             }
-            Self::ResolutionIncomplete => {
-                "one or more graph references could not be resolved"
-            }
+            Self::ResolutionIncomplete => "one or more graph references could not be resolved",
             Self::CompletionUnresolved => {
                 "a recorded completion could not be resolved to a plan node"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TaskTier, WorkNode};
+
+    #[test]
+    fn task_tier_wire_names_default_and_order_are_stable() {
+        assert_eq!(TaskTier::default(), TaskTier::Medium);
+        assert!(TaskTier::Low < TaskTier::Medium);
+        assert!(TaskTier::Medium < TaskTier::High);
+        assert!(TaskTier::High < TaskTier::Critical);
+
+        let cases = [
+            (TaskTier::Low, r#""low""#),
+            (TaskTier::Medium, r#""medium""#),
+            (TaskTier::High, r#""high""#),
+            (TaskTier::Critical, r#""critical""#),
+        ];
+        for (tier, expected) in cases {
+            assert_eq!(serde_json::to_string(&tier).unwrap(), expected);
+            assert_eq!(serde_json::from_str::<TaskTier>(expected).unwrap(), tier);
+        }
+    }
+
+    #[test]
+    fn legacy_work_node_without_tier_defaults_medium() {
+        let legacy = r#"{
+            "id": "legacy",
+            "kind": "task",
+            "title": "Legacy task",
+            "contract": {},
+            "binding": { "kind": "role", "value": "backend" },
+            "status": "pending"
+        }"#;
+
+        let node = serde_json::from_str::<WorkNode>(legacy).expect("legacy work node");
+        assert_eq!(node.tier, TaskTier::Medium);
     }
 }

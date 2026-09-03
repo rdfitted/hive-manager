@@ -11,29 +11,26 @@ use tempfile::TempDir;
 use crate::domain::run_journal::Confidence;
 use crate::orchestrator::work_graph::archive::{
     archive_completed_session, complete_session_archive_and_retro,
-    persist_retro_evaluator_provenance,
-    schedule_completed_session_archive_and_retro, ArchiveSourceKind,
-    ArchiveSourceReport, RetroEvaluatorProvenance, WorkGraphArchive,
+    persist_retro_evaluator_provenance, schedule_completed_session_archive_and_retro,
+    ArchiveSourceKind, ArchiveSourceReport, RetroEvaluatorProvenance, WorkGraphArchive,
     WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
 };
 use crate::orchestrator::work_graph::divergence::{
     DivergenceKind, DivergenceRecord, DivergenceSummary,
 };
 use crate::orchestrator::work_graph::retro::{
-    evaluate_archives, EvidenceMetric, IndependentEvaluator,
-    ReviewEvidenceState, RetroOmissionReason, RetroRunInput,
-    UNREVIEWED_OUTCOME,
-};
-use crate::orchestrator::work_graph::review::MULTI_LENS_REVIEW_TEMPLATE;
-use crate::orchestrator::work_graph::runtime::{
-    GraphMutationDelta, GraphMutationType, RuntimeEffect, RuntimeOutcome,
-    RuntimeOutcomeStatus,
-};
-use crate::orchestrator::work_graph::{
-    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract,
-    NodeKind, NodeStatus, TaskGraph, WorkEdge, WorkNode,
+    evaluate_archives, EvidenceMetric, IndependentEvaluator, RetroOmissionReason, RetroRunInput,
+    ReviewEvidenceState, UNREVIEWED_OUTCOME,
 };
 use crate::orchestrator::work_graph::review::JUDGE_PRINCE_REMEDIATION_TEMPLATE;
+use crate::orchestrator::work_graph::review::MULTI_LENS_REVIEW_TEMPLATE;
+use crate::orchestrator::work_graph::runtime::{
+    GraphMutationDelta, GraphMutationType, RuntimeEffect, RuntimeOutcome, RuntimeOutcomeStatus,
+};
+use crate::orchestrator::work_graph::{
+    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
+    TaskGraph, WorkEdge, WorkNode,
+};
 use crate::storage::SessionStorage;
 
 fn instant(seconds: i64) -> chrono::DateTime<Utc> {
@@ -96,6 +93,7 @@ fn outcome(
         subject_id: id.to_string(),
         task_id: Some(id.to_string()),
         agent_ids: vec![format!("agent-{id}")],
+        executed_as: None,
         completion_evidence: None,
         status,
         started_at,
@@ -197,23 +195,22 @@ fn pure_retro_returns_metrics_and_unreviewed_submission_proposals() {
     let report = evaluate_archives(&evaluator(), &inputs).expect("retro evaluates");
 
     assert_eq!(report.runs.len(), 2);
-    assert!(report.runs.iter().all(|run| matches!(
-        run.edit_distance,
-        EvidenceMetric::Available { .. }
-    )));
+    assert!(report
+        .runs
+        .iter()
+        .all(|run| matches!(run.edit_distance, EvidenceMetric::Available { .. })));
     assert_eq!(report.learning_submissions.len(), 1);
     assert!(report.learning_submissions.iter().all(|learning| {
         learning.outcome == UNREVIEWED_OUTCOME
-            && learning.endpoint_path()
-                == format!("/api/sessions/{}/learnings", learning.session)
+            && learning.endpoint_path() == format!("/api/sessions/{}/learnings", learning.session)
     }));
 }
 
 #[test]
 fn production_completion_hook_changes_only_retro_report_and_session_learning_paths() {
     let temp = TempDir::new().expect("temp storage root");
-    let storage = SessionStorage::new_with_base(temp.path().to_path_buf())
-        .expect("session storage");
+    let storage =
+        SessionStorage::new_with_base(temp.path().to_path_buf()).expect("session storage");
     let sessions = [
         ("hook-session-a", "hook-archive-a", instant(10)),
         ("hook-session-b", "hook-archive-b", instant(20)),
@@ -225,13 +222,7 @@ fn production_completion_hook_changes_only_retro_report_and_session_learning_pat
             .expect("session paths");
         let completion = archive_completed_session(temp.path(), None, session_id)
             .expect("seed canonical archive path");
-        let fixture = added_node_archive(
-            archive_id,
-            session_id,
-            archived_at,
-            "hook-feature",
-            1,
-        );
+        let fixture = added_node_archive(archive_id, session_id, archived_at, "hook-feature", 1);
         fs::write(
             &completion.path,
             serde_json::to_vec_pretty(&fixture).expect("fixture JSON"),
@@ -298,7 +289,10 @@ fn production_completion_hook_changes_only_retro_report_and_session_learning_pat
         }
         thread::sleep(StdDuration::from_millis(20));
     }
-    assert!(report_path.exists(), "detached hook did not persist its report");
+    assert!(
+        report_path.exists(),
+        "detached hook did not persist its report"
+    );
     assert!(lessons_path.exists());
     let first_report: crate::orchestrator::work_graph::retro::RetroReport =
         serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
@@ -315,18 +309,26 @@ fn production_completion_hook_changes_only_retro_report_and_session_learning_pat
     }
     let report_bytes = fs::read(&report_path).expect("retro report bytes");
     let learning_bytes = fs::read(&lessons_path).expect("learning bytes");
-    assert_eq!(storage.read_learnings_session("hook-session-b").unwrap().len(), 1);
+    assert_eq!(
+        storage
+            .read_learnings_session("hook-session-b")
+            .unwrap()
+            .len(),
+        1
+    );
 
-    let retry = complete_session_archive_and_retro(
-        temp.path(),
-        None,
-        "hook-session-b",
-    )
-    .expect("idempotent retry");
+    let retry = complete_session_archive_and_retro(temp.path(), None, "hook-session-b")
+        .expect("idempotent retry");
     assert_eq!(retry.submitted_learning_ids.len(), 1);
     assert_eq!(fs::read(&retry.report_path).unwrap(), report_bytes);
     assert_eq!(fs::read(&lessons_path).unwrap(), learning_bytes);
-    assert_eq!(storage.read_learnings_session("hook-session-b").unwrap().len(), 1);
+    assert_eq!(
+        storage
+            .read_learnings_session("hook-session-b")
+            .unwrap()
+            .len(),
+        1
+    );
     for (path, before) in source_paths.iter().zip(&source_snapshots) {
         assert_eq!(fs::read(path).unwrap(), *before);
     }
@@ -335,18 +337,14 @@ fn production_completion_hook_changes_only_retro_report_and_session_learning_pat
 #[test]
 fn completion_hook_persists_stated_absence_when_provenance_is_missing() {
     let temp = TempDir::new().expect("temp storage root");
-    let storage = SessionStorage::new_with_base(temp.path().to_path_buf())
-        .expect("session storage");
+    let storage =
+        SessionStorage::new_with_base(temp.path().to_path_buf()).expect("session storage");
     storage
         .create_session_dir("legacy-no-provenance")
         .expect("legacy session paths");
 
-    let completion = complete_session_archive_and_retro(
-        temp.path(),
-        None,
-        "legacy-no-provenance",
-    )
-    .expect("missing provenance is persisted, not propagated");
+    let completion = complete_session_archive_and_retro(temp.path(), None, "legacy-no-provenance")
+        .expect("missing provenance is persisted, not propagated");
 
     assert!(completion.archive.is_some());
     assert!(completion.report_path.exists());
@@ -366,8 +364,8 @@ fn systematic_divergence_requires_two_runs_of_the_same_template_version() {
         repo_id: "repo-a".to_string(),
         archive: added_node_archive("archive-1", "session-1", instant(10), "feature", 3),
     };
-    let single = evaluate_archives(&evaluator(), std::slice::from_ref(&first))
-        .expect("single-run retro");
+    let single =
+        evaluate_archives(&evaluator(), std::slice::from_ref(&first)).expect("single-run retro");
     assert!(
         single.promotion_proposals.is_empty(),
         "one occurrence is noise and must not emit a promotion proposal"
@@ -377,8 +375,7 @@ fn systematic_divergence_requires_two_runs_of_the_same_template_version() {
         repo_id: "repo-a".to_string(),
         archive: added_node_archive("archive-2", "session-2", instant(20), "feature", 3),
     };
-    let report =
-        evaluate_archives(&evaluator(), &[first, second]).expect("two-run retro");
+    let report = evaluate_archives(&evaluator(), &[first, second]).expect("two-run retro");
     assert_eq!(report.template_aggregates.len(), 1);
     assert_eq!(report.template_aggregates[0].run_count, 2);
     assert_eq!(report.promotion_proposals.len(), 1);
@@ -394,13 +391,7 @@ fn systematic_divergence_requires_two_runs_of_the_same_template_version() {
         &[
             RetroRunInput {
                 repo_id: "repo-a".to_string(),
-                archive: added_node_archive(
-                    "archive-4",
-                    "session-4",
-                    instant(40),
-                    "feature",
-                    3,
-                ),
+                archive: added_node_archive("archive-4", "session-4", instant(40), "feature", 3),
             },
             other_version,
         ],
@@ -445,7 +436,11 @@ fn later_explicit_escape_evidence_revises_an_earlier_review_verdict() {
         DivergenceSummary::default(),
     );
     let later_plan = TaskGraph::new(
-        vec![lineage(node("target", NodeKind::Task), "reviewed-feature", 1)],
+        vec![lineage(
+            node("target", NodeKind::Task),
+            "reviewed-feature",
+            1,
+        )],
         Vec::new(),
     );
     let mut later_outcome = outcome(
@@ -522,7 +517,11 @@ fn confirmed_escape_without_reference_downgrades_review_evidence_without_guessin
         DivergenceSummary::default(),
     );
     let later_plan = TaskGraph::new(
-        vec![lineage(node("target", NodeKind::Task), "reviewed-feature", 1)],
+        vec![lineage(
+            node("target", NodeKind::Task),
+            "reviewed-feature",
+            1,
+        )],
         Vec::new(),
     );
     let mut later_outcome = outcome(
@@ -578,7 +577,10 @@ fn confirmed_escape_without_reference_downgrades_review_evidence_without_guessin
         }
         other => panic!("expected downgraded review evidence, got {other:?}"),
     };
-    assert_eq!(old_reviews[0].state, ReviewEvidenceState::PassedNoKnownEscape);
+    assert_eq!(
+        old_reviews[0].state,
+        ReviewEvidenceState::PassedNoKnownEscape
+    );
     assert_eq!(old_reviews[0].escaped_defects, 0);
     assert!(matches!(
         report.template_aggregates[0].review_efficacy,
@@ -616,21 +618,16 @@ fn absent_plan_and_unsupported_schema_are_reported_instead_of_zeroed() {
         }],
     )
     .expect("legacy report");
-    assert!(legacy_report.omissions.iter().any(|omission| {
-        omission.reason == RetroOmissionReason::PlanGraphUnavailable
-    }));
+    assert!(legacy_report
+        .omissions
+        .iter()
+        .any(|omission| { omission.reason == RetroOmissionReason::PlanGraphUnavailable }));
     assert!(matches!(
         legacy_report.runs[0].edit_distance,
         EvidenceMetric::Unavailable { .. }
     ));
 
-    let mut unsupported = added_node_archive(
-        "future",
-        "future-session",
-        instant(20),
-        "feature",
-        1,
-    );
+    let mut unsupported = added_node_archive("future", "future-session", instant(20), "feature", 1);
     unsupported.schema_version = WORK_GRAPH_ARCHIVE_SCHEMA_VERSION + 1;
     let unsupported_report = evaluate_archives(
         &evaluator(),
@@ -641,20 +638,17 @@ fn absent_plan_and_unsupported_schema_are_reported_instead_of_zeroed() {
     )
     .expect("unsupported report");
     assert!(unsupported_report.runs.is_empty());
-    assert!(unsupported_report.omissions.iter().any(|omission| {
-        omission.reason == RetroOmissionReason::UnsupportedSchemaVersion
-    }));
+    assert!(unsupported_report
+        .omissions
+        .iter()
+        .any(|omission| { omission.reason == RetroOmissionReason::UnsupportedSchemaVersion }));
 }
 
 #[test]
 fn checkpoint_idle_is_attributed_to_each_checkpoint_without_causal_claims() {
     let fast = lineage(node("fast", NodeKind::Task), "parallel-wave", 2);
     let slow = lineage(node("slow", NodeKind::Task), "parallel-wave", 2);
-    let checkpoint = lineage(
-        node("barrier", NodeKind::Checkpoint),
-        "parallel-wave",
-        2,
-    );
+    let checkpoint = lineage(node("barrier", NodeKind::Checkpoint), "parallel-wave", 2);
     let plan = TaskGraph::new(
         vec![fast, slow, checkpoint],
         vec![
@@ -743,10 +737,7 @@ fn per_node_attempts_remediation_and_gotcha_reach_are_evidence_backed() {
     let mut remediation = node("remediation", NodeKind::Task);
     remediation.expansion = Some(CompositeExpansion {
         template: JUDGE_PRINCE_REMEDIATION_TEMPLATE.to_string(),
-        parameters: BTreeMap::from([(
-            "target".to_string(),
-            "task-a".to_string(),
-        )]),
+        parameters: BTreeMap::from([("target".to_string(), "task-a".to_string())]),
     });
     after.nodes.push(remediation);
     let archived = archive(

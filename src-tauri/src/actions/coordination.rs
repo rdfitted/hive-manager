@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::coordination::{
     CoordinationMessage, InjectionError, MessageType, StateManager, WorkerStateInfo,
 };
+use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::orchestrator::work_graph::TaskId;
 use crate::pty::{AgentConfig, AgentRole, WorkerRole};
 use crate::tauri_shim::Emitter;
@@ -63,6 +64,8 @@ pub struct PlanTask {
     pub assignee_label: Option<String>,
     pub priority: Option<String>,
     #[serde(default)]
+    pub tier: TaskTier,
+    #[serde(default)]
     pub depends_on: Vec<TaskId>,
     #[serde(default)]
     pub inputs: Vec<String>,
@@ -80,9 +83,20 @@ pub struct PlanTask {
     /// Unknown values remain schedulable and are surfaced as PlanReady warnings.
     #[serde(skip, default = "default_binding_recognized")]
     pub(crate) assignee_recognized: bool,
+    /// Whether an explicit tier token used the supported vocabulary. Missing
+    /// tokens are recognized and default to medium for legacy plans.
+    #[serde(skip, default = "default_tier_recognized")]
+    pub tier_recognized: bool,
+    /// Raw explicit value retained only so graph omissions can name it.
+    #[serde(skip)]
+    pub(crate) tier_source: Option<String>,
 }
 
 fn default_binding_recognized() -> bool {
+    true
+}
+
+fn default_tier_recognized() -> bool {
     true
 }
 
@@ -505,13 +519,9 @@ impl Action for AssignTask {
         let worker_id = parsed.worker_id.clone();
         let task = parsed.task.clone();
         run_blocking_injection(move || {
-            manager.read().queen_inject(
-                &injection_session_id,
-                &queen_id,
-                &worker_id,
-                &task,
-                true,
-            )
+            manager
+                .read()
+                .queen_inject(&injection_session_id, &queen_id, &worker_id, &task, true)
         })
         .await?;
 
@@ -729,9 +739,7 @@ pub(crate) fn parse_plan_markdown(content: &str) -> SessionPlan {
     parse_plan_markdown_with_diagnostics(content).0
 }
 
-pub(crate) fn parse_plan_markdown_checked(
-    content: &str,
-) -> Result<SessionPlan, PlanMarkdownError> {
+pub(crate) fn parse_plan_markdown_checked(content: &str) -> Result<SessionPlan, PlanMarkdownError> {
     let (plan, messages) = parse_plan_markdown_with_diagnostics(content);
     if messages.is_empty() {
         Ok(plan)
@@ -740,9 +748,7 @@ pub(crate) fn parse_plan_markdown_checked(
     }
 }
 
-pub(crate) fn parse_plan_markdown_with_diagnostics(
-    content: &str,
-) -> (SessionPlan, Vec<String>) {
+pub(crate) fn parse_plan_markdown_with_diagnostics(content: &str) -> (SessionPlan, Vec<String>) {
     let mut title = String::new();
     let mut summary = String::new();
     let mut tasks: Vec<PlanTask> = Vec::new();
@@ -821,18 +827,35 @@ fn parse_task_line(line: &str, counter: &mut i32) -> Option<PlanTask> {
     parse_task_line_with_diagnostics(line, counter).0
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TaskMetadata {
     depends_on: Vec<TaskId>,
     inputs: Vec<String>,
     outputs: Vec<String>,
     acceptance: Vec<String>,
+    tier: TaskTier,
+    tier_recognized: bool,
+    tier_source: Option<String>,
+}
+
+impl Default for TaskMetadata {
+    fn default() -> Self {
+        Self {
+            depends_on: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            acceptance: Vec::new(),
+            tier: TaskTier::default(),
+            tier_recognized: true,
+            tier_source: None,
+        }
+    }
 }
 
 /// Task-line extraction order is deliberately stable: checkbox/list marker ->
-/// graph metadata -> priority -> explicit `T<number>:` id -> assignee. Priority
-/// still precedes assignee exactly as it did for legacy lines; metadata is removed
-/// first so neither historical extractor can consume it.
+/// graph metadata (including tier) -> priority -> explicit `T<number>:` id ->
+/// assignee. Priority still precedes assignee exactly as it did for legacy lines;
+/// metadata is removed first so neither historical extractor can consume it.
 fn parse_task_line_with_diagnostics(
     line: &str,
     counter: &mut i32,
@@ -891,6 +914,7 @@ fn parse_task_line_with_diagnostics(
             assignee,
             assignee_label,
             priority,
+            tier: metadata.tier,
             depends_on: metadata.depends_on,
             inputs: metadata.inputs,
             outputs: metadata.outputs,
@@ -898,6 +922,8 @@ fn parse_task_line_with_diagnostics(
             explicit_id: has_explicit_id,
             checkbox_source,
             assignee_recognized,
+            tier_recognized: metadata.tier_recognized,
+            tier_source: metadata.tier_source,
         }),
         metadata_error,
     )
@@ -918,7 +944,10 @@ fn extract_explicit_task_id(text: &str) -> (String, Option<TaskId>) {
         && chars.all(|character| character.is_ascii_digit());
 
     if is_explicit_id {
-        (remainder.trim_start().to_string(), Some(candidate.to_string()))
+        (
+            remainder.trim_start().to_string(),
+            Some(candidate.to_string()),
+        )
     } else {
         (text.to_string(), None)
     }
@@ -928,9 +957,13 @@ fn extract_task_metadata(text: &str) -> (String, TaskMetadata, Option<String>) {
     let mut cleaned = text.to_string();
     let mut metadata = TaskMetadata::default();
 
-    for key in ["deps", "inputs", "outputs", "acceptance"] {
+    for key in ["deps", "inputs", "outputs", "acceptance", "tier"] {
         let marker = format!("({key}:");
-        while let Some(start) = cleaned.find(&marker) {
+        while let Some(start) = if key == "tier" {
+            cleaned.to_ascii_lowercase().find(&marker)
+        } else {
+            cleaned.find(&marker)
+        } {
             let value_start = start + marker.len();
             let Some(close_offset) = cleaned[value_start..].find(')') else {
                 return (
@@ -940,6 +973,7 @@ fn extract_task_metadata(text: &str) -> (String, TaskMetadata, Option<String>) {
                 );
             };
             let close = value_start + close_offset;
+            let raw_value = cleaned[value_start..close].trim().to_string();
             let values = cleaned[value_start..close]
                 .split(',')
                 .map(str::trim)
@@ -952,6 +986,27 @@ fn extract_task_metadata(text: &str) -> (String, TaskMetadata, Option<String>) {
                 "inputs" => append_unique(&mut metadata.inputs, values),
                 "outputs" => append_unique(&mut metadata.outputs, values),
                 "acceptance" => append_unique(&mut metadata.acceptance, values),
+                "tier" => {
+                    let (tier, recognized) = match raw_value.to_ascii_lowercase().as_str() {
+                        "low" => (TaskTier::Low, true),
+                        "medium" => (TaskTier::Medium, true),
+                        "high" => (TaskTier::High, true),
+                        "critical" => (TaskTier::Critical, true),
+                        _ => (TaskTier::Medium, false),
+                    };
+                    if recognized {
+                        if metadata.tier_recognized {
+                            metadata.tier = tier;
+                            metadata.tier_source = Some(raw_value);
+                        }
+                    } else {
+                        if metadata.tier_recognized {
+                            metadata.tier_source = Some(raw_value);
+                        }
+                        metadata.tier = TaskTier::Medium;
+                        metadata.tier_recognized = false;
+                    }
+                }
                 _ => unreachable!("metadata keys are fixed"),
             }
             cleaned.replace_range(start..=close, "");
@@ -998,9 +1053,7 @@ fn extract_priority(text: &str) -> (String, Option<String>) {
     (text.to_string(), None)
 }
 
-fn extract_assignee(
-    text: &str,
-) -> (String, Option<String>, Option<String>, bool) {
+fn extract_assignee(text: &str) -> (String, Option<String>, Option<String>, bool) {
     for separator in ["->", "\u{2192}"] {
         if let Some((title, assignee)) = text.split_once(separator) {
             let assignee = assignee.trim();
@@ -1018,12 +1071,7 @@ fn extract_assignee(
                     true,
                 );
             }
-            return (
-                title.to_string(),
-                Some(assignee.to_string()),
-                None,
-                false,
-            );
+            return (title.to_string(), Some(assignee.to_string()), None, false);
         }
     }
 
@@ -1063,6 +1111,8 @@ mod tests {
         run_blocking_injection,
     };
     use crate::coordination::InjectionError;
+    use crate::orchestrator::work_graph::schema::TaskTier;
+    use crate::orchestrator::work_graph::WorkGraphOmissionReason;
 
     #[tokio::test]
     async fn blocking_injection_preserves_operation_error_message() {
@@ -1131,6 +1181,111 @@ mod tests {
                 "{marker}"
             );
         }
+    }
+
+    #[test]
+    fn task_line_tier_is_copied_and_stripped_from_graph_title() {
+        let mut counter = 0;
+        let task = parse_task_line(
+            "- [ ] [P1] T3: Cross a trust boundary (tier: high) -> P1",
+            &mut counter,
+        )
+        .expect("tiered principal-bound task");
+
+        assert_eq!(task.id, "T3");
+        assert_eq!(task.priority.as_deref(), Some("high"));
+        assert_eq!(task.tier, TaskTier::High);
+        assert!(task.tier_recognized);
+
+        let plan = super::SessionPlan {
+            title: "Tiered plan".to_string(),
+            summary: String::new(),
+            tasks: vec![task],
+            generated_at: String::new(),
+            raw_content: String::new(),
+        };
+        let graph = crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan);
+
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].tier, TaskTier::High);
+        assert_eq!(graph.nodes[0].title, "Cross a trust boundary");
+    }
+
+    #[test]
+    fn task_line_tier_token_is_case_insensitive() {
+        let mut counter = 0;
+        let task = parse_task_line(
+            "- [ ] T3: Resolve architecture (TiEr: CrItIcAl)",
+            &mut counter,
+        )
+        .expect("case-insensitive tier token");
+
+        assert_eq!(task.tier, TaskTier::Critical);
+        assert_eq!(task.title, "Resolve architecture");
+        assert!(task.tier_recognized);
+    }
+
+    #[test]
+    fn task_line_without_tier_defaults_medium_independently_of_priority() {
+        let mut counter = 0;
+        let ordinary =
+            parse_task_line("- [ ] T1: Existing-test change", &mut counter).expect("ordinary task");
+        let urgent = parse_task_line("- [ ] [P1] T2: Urgent existing-test change", &mut counter)
+            .expect("urgent task");
+
+        assert_eq!(ordinary.tier, TaskTier::Medium);
+        assert_eq!(urgent.tier, TaskTier::Medium);
+        assert_eq!(urgent.priority.as_deref(), Some("high"));
+        assert!(ordinary.tier_recognized);
+        assert!(urgent.tier_recognized);
+    }
+
+    #[test]
+    fn unknown_tier_keeps_node_and_records_resolution_incomplete_omission() {
+        let plan = super::parse_plan_markdown_checked(
+            "# Plan\n\n## Tasks\n- [ ] T4: Keep this node (tier: huge) -> P1\n",
+        )
+        .expect("unknown tiers are omissions, not parse errors");
+
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].tier, TaskTier::Medium);
+        assert!(!plan.tasks[0].tier_recognized);
+        assert_eq!(plan.tasks[0].title, "Keep this node");
+
+        let graph = crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan);
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].id, "T4");
+        assert_eq!(graph.nodes[0].tier, TaskTier::Medium);
+        assert_eq!(graph.omissions.len(), 1);
+        assert_eq!(
+            graph.omissions[0].reason,
+            WorkGraphOmissionReason::ResolutionIncomplete
+        );
+        assert_eq!(graph.omissions[0].count, 1);
+        assert_eq!(
+            graph.omissions[0].examples,
+            vec!["task T4 preserved unrecognized tier huge as medium"]
+        );
+    }
+
+    #[test]
+    fn unknown_tier_remains_recorded_when_followed_by_valid_duplicate() {
+        let plan = super::parse_plan_markdown_checked(
+            "# Plan\n\n## Tasks\n- [ ] T5: Keep this node (tier: huge) (tier: high)\n",
+        )
+        .expect("duplicate tier tokens remain schedulable");
+
+        assert_eq!(plan.tasks[0].tier, TaskTier::Medium);
+        assert!(!plan.tasks[0].tier_recognized);
+        assert_eq!(plan.tasks[0].title, "Keep this node");
+
+        let graph = crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan);
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].tier, TaskTier::Medium);
+        assert_eq!(
+            graph.omissions[0].examples,
+            vec!["task T5 preserved unrecognized tier huge as medium"]
+        );
     }
 
     #[test]
@@ -1206,8 +1361,11 @@ mod tests {
     #[test]
     fn legacy_task_pipeline_pins_priority_then_assignee_order() {
         let mut counter = 0;
-        let task = parse_task_line("- [ ] [P1]   Fix launch regression   -> worker-8", &mut counter)
-            .expect("legacy checkbox task");
+        let task = parse_task_line(
+            "- [ ] [P1]   Fix launch regression   -> worker-8",
+            &mut counter,
+        )
+        .expect("legacy checkbox task");
 
         assert_eq!(task.id, "task-1");
         assert_eq!(task.title, "Fix launch regression");
@@ -1224,7 +1382,10 @@ mod tests {
         );
         assert_eq!(
             extract_priority("[P2]  Normalize   only when marked"),
-            ("Normalize only when marked".to_string(), Some("medium".to_string()))
+            (
+                "Normalize only when marked".to_string(),
+                Some("medium".to_string())
+            )
         );
         assert_eq!(
             extract_assignee("Title -> worker-1 -> trailing"),

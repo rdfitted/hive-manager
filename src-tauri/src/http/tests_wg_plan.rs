@@ -14,16 +14,17 @@ use crate::domain::HiveExecutionPolicy;
 use crate::orchestrator::work_graph::review::{
     MULTI_LENS_REVIEW_TEMPLATE, VERIFICATION_DUTY_PARAMETER,
 };
+use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::orchestrator::work_graph::validate::{
-    validate_plan_ready, PlanReadyWarning,
+    validate_plan_ready, PlanReadyError, PlanReadyPolicy, PlanReadyWarning,
+    DEFAULT_TIER_CEILING_PERCENT,
 };
 use crate::orchestrator::work_graph::{
-    EdgeKind, EdgeProvenance, NodeKind, NodeStatus, WorkGraphOmissionReason,
+    BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph,
+    WorkGraphOmissionReason, WorkNode,
 };
 use crate::pty::PtyManager;
-use crate::session::{
-    AuthStrategy, Session, SessionController, SessionState, SessionType,
-};
+use crate::session::{AuthStrategy, Session, SessionController, SessionState, SessionType};
 use crate::storage::SessionStorage;
 
 fn planning_session(session_id: &str, project_path: &Path) -> Session {
@@ -94,11 +95,30 @@ fn controller_with_plan_and_type(
     (temp, controller, storage)
 }
 
-fn assert_session_state(
-    controller: &SessionController,
-    session_id: &str,
-    expected: SessionState,
-) {
+fn tiered_plan_node(id: usize, kind: NodeKind, tier: TaskTier) -> WorkNode {
+    WorkNode::new(
+        format!("T{id}"),
+        kind,
+        format!("Task {id}"),
+        NodeContract::default(),
+        BindingRef::Role("worker".to_string()),
+        NodeStatus::Pending,
+    )
+    .with_tier(tier)
+}
+
+fn tiered_task_graph(tiers: &[TaskTier]) -> TaskGraph {
+    TaskGraph::new(
+        tiers
+            .iter()
+            .enumerate()
+            .map(|(index, tier)| tiered_plan_node(index + 1, NodeKind::Task, *tier))
+            .collect(),
+        Vec::new(),
+    )
+}
+
+fn assert_session_state(controller: &SessionController, session_id: &str, expected: SessionState) {
     assert_eq!(
         controller
             .get_session(session_id)
@@ -151,9 +171,9 @@ fn production_continue_builds_plan_graph_before_every_running_dispatch() {
             controller_with_plan_and_type(session_id, Some(plan), session_type);
 
         for attempt in 1..=2 {
-            let error = controller
-                .continue_after_planning(session_id)
-                .expect_err("missing launch config should stop inside the selected dispatch branch");
+            let error = controller.continue_after_planning(session_id).expect_err(
+                "missing launch config should stop inside the selected dispatch branch",
+            );
             assert!(
                 error.contains(expected_dispatch_error),
                 "attempt {attempt} did not reach {session_id}'s dispatch branch: {error}"
@@ -318,7 +338,8 @@ fn mark_plan_ready_is_always_ok_and_quarantines_dangling_dependency() {
         .unwrap()
         .unwrap();
     assert_eq!(graph.nodes.len(), 2);
-    validate_plan_ready(&graph).expect("the persisted graph must be valid after edge quarantine");
+    validate_plan_ready(&graph, Default::default())
+        .expect("the persisted graph must be valid after edge quarantine");
     assert!(
         graph.edges.is_empty(),
         "unresolved dependencies must not survive quarantine"
@@ -383,12 +404,7 @@ fn no_archetype_preparation_is_an_exact_persistence_noop() {
     let project_path = controller.get_session("no-archetype").unwrap().project_path;
 
     let composition = controller
-        .prepare_initial_work_graph(
-            &project_path,
-            "no-archetype",
-            None,
-            &BTreeMap::new(),
-        )
+        .prepare_initial_work_graph(&project_path, "no-archetype", None, &BTreeMap::new())
         .expect("missing archetype keeps the legacy launch path");
 
     assert!(composition.is_none());
@@ -411,12 +427,7 @@ fn selected_archetype_persists_skeleton_and_planner_contract_before_plan_ready()
     let parameters = BTreeMap::from([("component".to_string(), "billing".to_string())]);
 
     let composition = controller
-        .prepare_initial_work_graph(
-            &project_path,
-            "phase-a",
-            Some("feature-build"),
-            &parameters,
-        )
+        .prepare_initial_work_graph(&project_path, "phase-a", Some("feature-build"), &parameters)
         .expect("selected archetype composes")
         .expect("selected archetype produces state");
 
@@ -475,10 +486,7 @@ fn launch_time_retro_provenance_preserves_departed_identity_sets() {
         .join("retro-evaluator-provenance.json");
     let provenance: crate::orchestrator::work_graph::archive::RetroEvaluatorProvenance =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(
-        provenance.evaluator_id,
-        "retro-provenance-retro-evaluator"
-    );
+    assert_eq!(provenance.evaluator_id, "retro-provenance-retro-evaluator");
     assert_eq!(
         provenance.planner_agent_ids,
         vec!["retro-provenance-master-planner"]
@@ -541,8 +549,7 @@ fn phase_b_reconciliation_is_idempotent_after_a_persisted_retry() {
 #[test]
 fn mark_plan_ready_persists_one_authoritative_reconciled_graph() {
     let plan = "# Reconciled plan\n\n## Tasks\n- [ ] T1: Planner extension (deps: design, MISSING) (acceptance: reconciled)\n";
-    let (_temp, controller, storage) =
-        controller_with_plan("composed-plan-ready", Some(plan));
+    let (_temp, controller, storage) = controller_with_plan("composed-plan-ready", Some(plan));
     let project_path = controller
         .get_session("composed-plan-ready")
         .unwrap()
@@ -931,7 +938,8 @@ fn duplicate_explicit_ids_are_reported_without_blocking_readable_plan() {
         .unwrap()
         .unwrap();
     assert_eq!(graph.nodes.len(), 1);
-    validate_plan_ready(&graph).expect("the persisted graph must retain one unambiguous T1 node");
+    validate_plan_ready(&graph, Default::default())
+        .expect("the persisted graph must retain one unambiguous T1 node");
     assert!(graph
         .omissions
         .iter()
@@ -984,7 +992,8 @@ fn duplicate_dependency_metadata_is_omitted_without_manufacturing_a_cycle() {
             .all(|edge| !(edge.source == "T2" && edge.target == "T1")),
         "T1 must not inherit the duplicate declaration's dependency"
     );
-    validate_plan_ready(&graph).expect("the persisted graph must not contain a cycle");
+    validate_plan_ready(&graph, Default::default())
+        .expect("the persisted graph must not contain a cycle");
     assert!(graph.omissions.iter().any(|omission| {
         omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
             && omission
@@ -1006,7 +1015,8 @@ fn disconnected_dependency_component_warns_but_remains_valid() {
 "#;
     let parsed = parse_plan_markdown_checked(plan).expect("well-formed graph syntax");
     let graph = crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&parsed);
-    let validation = validate_plan_ready(&graph).expect("orphans warn rather than reject");
+    let validation =
+        validate_plan_ready(&graph, Default::default()).expect("orphans warn rather than reject");
 
     assert_eq!(
         validation.warnings,
@@ -1014,4 +1024,157 @@ fn disconnected_dependency_component_warns_but_remains_valid() {
             task_ids: vec!["T3".to_string(), "T4".to_string()]
         }]
     );
+}
+
+#[test]
+fn plan_ready_rejects_four_of_ten_above_medium_and_names_nodes() {
+    let graph = tiered_task_graph(&[
+        TaskTier::High,
+        TaskTier::Critical,
+        TaskTier::High,
+        TaskTier::Critical,
+        TaskTier::Medium,
+        TaskTier::Medium,
+        TaskTier::Low,
+        TaskTier::Medium,
+        TaskTier::Low,
+        TaskTier::Medium,
+    ]);
+
+    assert_eq!(
+        validate_plan_ready(&graph, PlanReadyPolicy::default()),
+        Err(PlanReadyError::TierCeilingExceeded {
+            ceiling_percent: DEFAULT_TIER_CEILING_PERCENT,
+            above_medium: 4,
+            total: 10,
+            task_ids: vec![
+                "T1".to_string(),
+                "T2".to_string(),
+                "T3".to_string(),
+                "T4".to_string(),
+            ],
+        })
+    );
+}
+
+#[test]
+fn plan_ready_accepts_three_of_ten_above_medium() {
+    let graph = tiered_task_graph(&[
+        TaskTier::High,
+        TaskTier::Critical,
+        TaskTier::High,
+        TaskTier::Medium,
+        TaskTier::Medium,
+        TaskTier::Medium,
+        TaskTier::Low,
+        TaskTier::Medium,
+        TaskTier::Low,
+        TaskTier::Medium,
+    ]);
+
+    validate_plan_ready(&graph, PlanReadyPolicy::default())
+        .expect("30 percent is below the inclusive 34 percent ceiling");
+}
+
+#[test]
+fn plan_ready_excludes_review_nodes_from_tier_ceiling_counts() {
+    let dilution_attempt = TaskGraph::new(
+        vec![
+            tiered_plan_node(1, NodeKind::Task, TaskTier::High),
+            tiered_plan_node(2, NodeKind::Task, TaskTier::Medium),
+            tiered_plan_node(3, NodeKind::Review, TaskTier::Low),
+            tiered_plan_node(4, NodeKind::Review, TaskTier::Low),
+        ],
+        Vec::new(),
+    );
+    assert_eq!(
+        validate_plan_ready(
+            &dilution_attempt,
+            PlanReadyPolicy {
+                ceiling_percent: 49,
+            },
+        ),
+        Err(PlanReadyError::TierCeilingExceeded {
+            ceiling_percent: 49,
+            above_medium: 1,
+            total: 2,
+            task_ids: vec!["T1".to_string()],
+        }),
+        "low-tier Review nodes must not dilute the denominator",
+    );
+
+    let numerator_attempt = TaskGraph::new(
+        vec![
+            tiered_plan_node(1, NodeKind::Task, TaskTier::Low),
+            tiered_plan_node(2, NodeKind::Task, TaskTier::Medium),
+            tiered_plan_node(3, NodeKind::Review, TaskTier::Critical),
+        ],
+        Vec::new(),
+    );
+    validate_plan_ready(&numerator_attempt, PlanReadyPolicy { ceiling_percent: 1 })
+        .expect("above-medium Review nodes must not enter the numerator");
+}
+
+#[test]
+fn plan_ready_inclusive_default_ceiling_accepts_exact_boundary() {
+    let tiers = (0..50)
+        .map(|index| {
+            if index < 17 {
+                TaskTier::High
+            } else {
+                TaskTier::Medium
+            }
+        })
+        .collect::<Vec<_>>();
+    let graph = tiered_task_graph(&tiers);
+
+    validate_plan_ready(&graph, PlanReadyPolicy::default())
+        .expect("17 of 50 is exactly 34 percent and the ceiling is inclusive");
+}
+
+#[test]
+fn plan_ready_accepts_empty_and_all_review_graphs() {
+    validate_plan_ready(&TaskGraph::default(), PlanReadyPolicy::default())
+        .expect("an empty graph has no planner-rated denominator");
+
+    let reviews = TaskGraph::new(
+        vec![
+            tiered_plan_node(1, NodeKind::Review, TaskTier::High),
+            tiered_plan_node(2, NodeKind::Review, TaskTier::Critical),
+        ],
+        Vec::new(),
+    );
+    validate_plan_ready(&reviews, PlanReadyPolicy::default())
+        .expect("an all-Review graph has no planner-rated denominator");
+}
+
+#[test]
+fn planner_rubric_defines_tiers_and_separates_priority() {
+    let [_, _, hive, swarm, hive_smoke, _] =
+        SessionController::planner_task_line_prompts_for_test();
+
+    for (name, prompt) in [("hive", hive), ("swarm", swarm), ("hive smoke", hive_smoke)] {
+        assert!(
+            prompt.contains("`(tier: low|medium|high|critical)`"),
+            "{name} planner prompt must document tier syntax",
+        );
+        assert!(
+            prompt.contains("Missing tier metadata defaults to `medium`"),
+            "{name} planner prompt must document the default tier",
+        );
+        assert!(
+            prompt.contains("PlanReady enforces a ceiling"),
+            "{name} planner prompt must disclose the inflation ceiling",
+        );
+        assert!(
+            prompt.contains(
+                "Priority brackets express scheduling urgency; tier controls effort/model routing"
+            ),
+            "{name} planner prompt must keep priority and tier orthogonal",
+        );
+        assert!(
+            prompt.contains("`[CRITICAL]` priority collapses to `high`"),
+            "{name} planner prompt must explain why priority cannot encode four tiers",
+        );
+    }
 }

@@ -11,6 +11,7 @@ use crate::coordination::{HierarchyNode, StateManager};
 use crate::domain::event::{Event, EventType, Severity};
 use crate::domain::run_journal::{Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus};
 use crate::events::EventBus;
+use crate::http::handlers::workers::ExecutedAs;
 use crate::orchestrator::work_graph::archive::{
     archive_completed_session, list_archives, read_archive, schedule_completed_session_archive,
     ArchiveSourceKind, ArchiveSourceReport, WorkGraphArchive, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
@@ -1101,12 +1102,22 @@ fn declared_completion_facts_resolve_null_task_events_and_archive_task_ids() {
         .write_work_graph(&plan)
         .unwrap();
 
+    let executed_as_json = json!({
+        "provider": "codex",
+        "tier": "high",
+        "model": "gpt-5.6-sol",
+        "flags": ["-c", "model_reasoning_effort=\"high\""],
+        "channel": "native",
+        "source": "node"
+    });
+    let executed_as: ExecutedAs = serde_json::from_value(executed_as_json.clone()).unwrap();
     let declared = vec![
         NodeCompletionFact::new(
             "T2",
             format!("{session_id}-worker-2"),
             NodeCompletionProvenance::Heartbeat,
-        ),
+        )
+        .with_executed_as(executed_as),
         NodeCompletionFact::new(
             "T3",
             format!("{session_id}-worker-3"),
@@ -1169,6 +1180,14 @@ fn declared_completion_facts_resolve_null_task_events_and_archive_task_ids() {
             outcome.completion_evidence,
             Some(CompletionEvidenceClass::Observed)
         );
+        if task_id == "T2" {
+            assert_eq!(
+                serde_json::to_value(outcome.executed_as.as_ref().unwrap()).unwrap(),
+                executed_as_json
+            );
+        } else {
+            assert!(outcome.executed_as.is_none());
+        }
     }
     assert!(direct.runtime_graph.omissions.iter().all(|omission| {
         omission.reason != WorkGraphOmissionReason::CompletionUnresolved
@@ -1192,9 +1211,21 @@ fn declared_completion_facts_resolve_null_task_events_and_archive_task_ids() {
                 .status,
             NodeStatus::Completed
         );
-        assert!(archived.outcomes.iter().any(|outcome| {
-            outcome.subject_id == task_id && outcome.task_id.as_deref() == Some(task_id)
-        }));
+        let outcome = archived
+            .outcomes
+            .iter()
+            .find(|outcome| {
+                outcome.subject_id == task_id && outcome.task_id.as_deref() == Some(task_id)
+            })
+            .unwrap();
+        if task_id == "T2" {
+            assert_eq!(
+                serde_json::to_value(outcome.executed_as.as_ref().unwrap()).unwrap(),
+                executed_as_json
+            );
+        } else {
+            assert!(outcome.executed_as.is_none());
+        }
     }
 }
 

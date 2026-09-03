@@ -19,21 +19,23 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::http::handlers::workers::TierResolutionSource;
+
 use super::archetypes::{
-    DeviationPromotionProposal, PromotionTier, GRAPH_ARCHETYPE_EXPANSION,
+    propose_task_tier_calibrations, DeviationPromotionProposal, PromotionTier,
+    TaskTierCalibrationObservation, TaskTierCalibrationProposal, TaskTierCalibrationTarget,
+    GRAPH_ARCHETYPE_EXPANSION,
 };
 use super::archive::{
     list_archives, read_archive, ArchiveSourceKind, WorkGraphArchive,
     WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
 };
 use super::divergence::{DivergenceKind, DivergenceRecord};
-use super::review::{
-    JUDGE_PRINCE_REMEDIATION_TEMPLATE, MULTI_LENS_REVIEW_TEMPLATE,
-};
+use super::review::{JUDGE_PRINCE_REMEDIATION_TEMPLATE, MULTI_LENS_REVIEW_TEMPLATE};
 use super::runtime::{GraphMutationType, RuntimeOutcome};
 use super::schema::{
-    EdgeKind, EdgeProvenance, NodeKind, NodeStatus, TaskGraph,
-    WorkGraphOmissionReason, WorkNode,
+    EdgeKind, EdgeProvenance, NodeKind, NodeStatus, TaskGraph, TaskTier, WorkGraphOmissionReason,
+    WorkNode,
 };
 
 pub const PROMOTION_RUN_THRESHOLD: usize = 2;
@@ -205,7 +207,10 @@ fn template_key(graph: &TaskGraph) -> Result<TemplateKey, RetroOmission> {
                 .collect(),
         ));
     }
-    Ok(keys.into_iter().next().expect("one lineage key was checked"))
+    Ok(keys
+        .into_iter()
+        .next()
+        .expect("one lineage key was checked"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +232,7 @@ pub enum RetroOmissionReason {
     InvalidEvidence,
     NoEligibleEdges,
     LearningSubmissionFailed,
+    ExecutedAsUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,12 +271,16 @@ impl RetroOmission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "availability", rename_all = "snake_case")]
 pub enum EvidenceMetric<T> {
-    Available { value: T },
+    Available {
+        value: T,
+    },
     Partial {
         value: T,
         omissions: Vec<RetroOmission>,
     },
-    Unavailable { omissions: Vec<RetroOmission> },
+    Unavailable {
+        omissions: Vec<RetroOmission>,
+    },
 }
 
 impl<T> EvidenceMetric<T> {
@@ -317,9 +327,7 @@ impl<T> EvidenceMetric<T> {
     fn omissions(&self) -> &[RetroOmission] {
         match self {
             Self::Available { .. } => &[],
-            Self::Partial { omissions, .. } | Self::Unavailable { omissions } => {
-                omissions
-            }
+            Self::Partial { omissions, .. } | Self::Unavailable { omissions } => omissions,
         }
     }
 }
@@ -366,12 +374,9 @@ impl IndependentEvaluator {
         if evaluator_id.trim().is_empty() {
             return Err(RetroError::MissingEvaluatorIdentity);
         }
-        let planner_agent_ids: BTreeSet<String> =
-            planner_agent_ids.into_iter().collect();
-        let supervisor_agent_ids: BTreeSet<String> =
-            supervisor_agent_ids.into_iter().collect();
-        if planner_agent_ids.contains(&evaluator_id)
-            || supervisor_agent_ids.contains(&evaluator_id)
+        let planner_agent_ids: BTreeSet<String> = planner_agent_ids.into_iter().collect();
+        let supervisor_agent_ids: BTreeSet<String> = supervisor_agent_ids.into_iter().collect();
+        if planner_agent_ids.contains(&evaluator_id) || supervisor_agent_ids.contains(&evaluator_id)
         {
             return Err(RetroError::EvaluatorNotIndependent(evaluator_id));
         }
@@ -504,6 +509,33 @@ pub struct RoleDefinitionRunMetric {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTierRunMetric {
+    pub tier: TaskTier,
+    pub provider: String,
+    pub completion_count: usize,
+    pub node_ids: Vec<String>,
+    pub additional_attempts: Option<usize>,
+    pub remediation_detours: Option<usize>,
+    pub caught_defects: Option<usize>,
+    pub escaped_defects: Option<usize>,
+    pub elapsed_millis: Option<i64>,
+    pub confirmed_scope_gaps: usize,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+fn task_tier_metric_unavailable() -> EvidenceMetric<Vec<TaskTierRunMetric>> {
+    EvidenceMetric::Unavailable {
+        omissions: vec![RetroOmission::new(
+            RetroOmissionReason::ExecutedAsUnavailable,
+            "task_tier",
+            "the persisted retro predates executed_as evidence",
+            Vec::new(),
+        )],
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleDefinitionAggregate {
     pub definition: RoleDefinitionKey,
     pub run_count: usize,
@@ -543,6 +575,8 @@ pub struct PerRunRetro {
     pub checkpoints: EvidenceMetric<Vec<CheckpointBarrierMetric>>,
     pub reviews: EvidenceMetric<Vec<ReviewEfficacyMetric>>,
     pub gotcha_edge_hit_rate: EvidenceMetric<GotchaEdgeHitRate>,
+    #[serde(default = "task_tier_metric_unavailable")]
+    pub task_tiers: EvidenceMetric<Vec<TaskTierRunMetric>>,
     #[serde(default)]
     pub role_definitions: Vec<RoleDefinitionRunMetric>,
     #[serde(default)]
@@ -594,6 +628,10 @@ pub struct RetroReport {
     pub role_definition_aggregates: Vec<RoleDefinitionAggregate>,
     #[serde(default)]
     pub role_refinement_proposals: Vec<RoleDefinitionRefinementProposal>,
+    #[serde(default)]
+    pub planner_calibration_proposals: Vec<TaskTierCalibrationProposal>,
+    #[serde(default)]
+    pub ladder_calibration_proposals: Vec<TaskTierCalibrationProposal>,
     /// Request bodies exposed for the sanctioned session-learning endpoint.
     pub learning_submissions: Vec<UnreviewedLearningSubmission>,
     #[serde(default)]
@@ -601,10 +639,7 @@ pub struct RetroReport {
 }
 
 impl RetroReport {
-    pub(super) fn unavailable(
-        evaluator_id: impl Into<String>,
-        omission: RetroOmission,
-    ) -> Self {
+    pub(super) fn unavailable(evaluator_id: impl Into<String>, omission: RetroOmission) -> Self {
         Self {
             evaluator_id: evaluator_id.into(),
             runs: Vec::new(),
@@ -612,6 +647,8 @@ impl RetroReport {
             promotion_proposals: Vec::new(),
             role_definition_aggregates: Vec::new(),
             role_refinement_proposals: Vec::new(),
+            planner_calibration_proposals: Vec::new(),
+            ladder_calibration_proposals: Vec::new(),
             learning_submissions: Vec::new(),
             omissions: vec![omission],
         }
@@ -729,8 +766,12 @@ fn evaluate_inputs(
 ) -> Result<RetroReport, RetroError> {
     // Re-check the invariant at execution time even though construction also
     // enforces it. This makes the safety boundary local to the evaluator.
-    if evaluator.planner_agent_ids.contains(&evaluator.evaluator_id)
-        || evaluator.supervisor_agent_ids.contains(&evaluator.evaluator_id)
+    if evaluator
+        .planner_agent_ids
+        .contains(&evaluator.evaluator_id)
+        || evaluator
+            .supervisor_agent_ids
+            .contains(&evaluator.evaluator_id)
     {
         return Err(RetroError::EvaluatorNotIndependent(
             evaluator.evaluator_id.clone(),
@@ -787,12 +828,8 @@ fn evaluate_inputs(
     let mut runs: Vec<_> = valid.iter().map(evaluate_run).collect();
     apply_review_escape_revisions(&valid, &mut runs, &mut omissions);
     for (input, run) in valid.iter().zip(runs.iter_mut()) {
-        let role_definitions = role_definition_metrics(
-            input,
-            run,
-            role_attributions,
-            &mut omissions,
-        );
+        let role_definitions =
+            role_definition_metrics(input, run, role_attributions, &mut omissions);
         run.role_definitions = role_definitions;
     }
     let (promotion_proposals, mut learning_submissions) =
@@ -800,10 +837,18 @@ fn evaluate_inputs(
     let template_aggregates = aggregate_templates(&runs);
     let role_definition_aggregates = aggregate_role_definitions(&runs);
     let role_observations = role_refinement_observations(&runs);
-    let role_refinement_proposals =
-        propose_role_definition_refinements(&role_observations);
-    learning_submissions.extend(role_refinement_learnings(
-        &role_refinement_proposals,
+    let role_refinement_proposals = propose_role_definition_refinements(&role_observations);
+    learning_submissions.extend(role_refinement_learnings(&role_refinement_proposals));
+    let calibration_observations = task_tier_calibration_observations(&valid, &runs);
+    let calibration_proposals = propose_task_tier_calibrations(&calibration_observations);
+    let (planner_calibration_proposals, ladder_calibration_proposals): (Vec<_>, Vec<_>) =
+        calibration_proposals
+            .into_iter()
+            .partition(|proposal| proposal.target == TaskTierCalibrationTarget::Planner);
+    learning_submissions.extend(task_tier_calibration_learnings(
+        planner_calibration_proposals
+            .iter()
+            .chain(&ladder_calibration_proposals),
     ));
     for run in &runs {
         omissions.extend(run.omissions.iter().cloned());
@@ -815,6 +860,8 @@ fn evaluate_inputs(
         promotion_proposals,
         role_definition_aggregates,
         role_refinement_proposals,
+        planner_calibration_proposals,
+        ladder_calibration_proposals,
         learning_submissions,
         omissions,
     })
@@ -823,13 +870,16 @@ fn evaluate_inputs(
 fn evaluate_run(input: &RetroRunInput) -> PerRunRetro {
     let archive = &input.archive;
     let mut run_omissions = Vec::new();
-    let template = archive.plan_graph.as_ref().and_then(|plan| match template_key(plan) {
-        Ok(key) => Some(key),
-        Err(error) => {
-            run_omissions.push(error.for_archive(&archive.archive_id));
-            None
-        }
-    });
+    let template = archive
+        .plan_graph
+        .as_ref()
+        .and_then(|plan| match template_key(plan) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                run_omissions.push(error.for_archive(&archive.archive_id));
+                None
+            }
+        });
     if archive.plan_graph.is_none() {
         run_omissions.push(
             RetroOmission::new(
@@ -842,6 +892,10 @@ fn evaluate_run(input: &RetroRunInput) -> PerRunRetro {
         );
     }
 
+    let nodes = node_metrics(archive);
+    let reviews = review_metrics(archive);
+    let task_tiers = task_tier_metrics(archive, &nodes, &reviews);
+
     PerRunRetro {
         repo_id: input.repo_id.clone(),
         archive_id: archive.archive_id.clone(),
@@ -849,10 +903,11 @@ fn evaluate_run(input: &RetroRunInput) -> PerRunRetro {
         archived_at: archive.archived_at,
         template,
         edit_distance: edit_distance(archive),
-        nodes: node_metrics(archive),
+        nodes,
         checkpoints: checkpoint_metrics(archive),
-        reviews: review_metrics(archive),
+        reviews,
         gotcha_edge_hit_rate: gotcha_hit_rate(archive),
+        task_tiers,
         role_definitions: Vec::new(),
         omissions: run_omissions,
     }
@@ -861,10 +916,7 @@ fn evaluate_run(input: &RetroRunInput) -> PerRunRetro {
 fn load_role_attributions_for_archive(
     archive_path: &Path,
     archive: &WorkGraphArchive,
-) -> (
-    Vec<AgentRoleDefinitionAttribution>,
-    Vec<RetroOmission>,
-) {
+) -> (Vec<AgentRoleDefinitionAttribution>, Vec<RetroOmission>) {
     let Some(session_dir) = archive_path
         .parent()
         .and_then(Path::parent)
@@ -1109,14 +1161,14 @@ fn role_definition_metrics(
         }
     }
 
-    let knowledge_available = !archive.runtime_graph.omissions.iter().any(|omission| {
-        omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
-    });
+    let knowledge_available =
+        !archive.runtime_graph.omissions.iter().any(|omission| {
+            omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+        });
     let event_available = source_available(archive, ArchiveSourceKind::EventLog);
     if knowledge_available && event_available {
         for edge in archive.runtime_graph.edges.iter().filter(|edge| {
-            edge.kind == EdgeKind::Informs
-                && edge.provenance == EdgeProvenance::Knowledge
+            edge.kind == EdgeKind::Informs && edge.provenance == EdgeProvenance::Knowledge
         }) {
             let Some(definitions) = by_node.get(&edge.target) else {
                 continue;
@@ -1130,10 +1182,9 @@ fn role_definition_metrics(
                 let accumulator = accumulators.entry(definition.clone()).or_default();
                 accumulator.gotcha_edges_eligible += 1;
                 accumulator.gotcha_targets_attempted += usize::from(attempted);
-                accumulator.evidence_refs.insert(format!(
-                    "knowledge-edge:{}->{}",
-                    edge.source, edge.target
-                ));
+                accumulator
+                    .evidence_refs
+                    .insert(format!("knowledge-edge:{}->{}", edge.source, edge.target));
             }
         }
     }
@@ -1151,10 +1202,8 @@ fn role_definition_metrics(
                 definition,
                 agent_ids: value.agent_ids.into_iter().collect(),
                 node_ids: value.node_ids.into_iter().collect(),
-                additional_attempts: node_evidence_available
-                    .then_some(value.additional_attempts),
-                remediation_detours: node_evidence_available
-                    .then_some(value.remediation_detours),
+                additional_attempts: node_evidence_available.then_some(value.additional_attempts),
+                remediation_detours: node_evidence_available.then_some(value.remediation_detours),
                 caught_defects: review_evidence_available.then_some(value.caught_defects),
                 escaped_defects: review_evidence_available.then_some(value.escaped_defects),
                 gotcha_edges_eligible: gotcha_evidence_available
@@ -1168,9 +1217,215 @@ fn role_definition_metrics(
         .collect()
 }
 
-fn edit_distance(
+struct TaskTierMetricAccumulator {
+    completion_count: usize,
+    node_ids: BTreeSet<String>,
+    additional_attempts: usize,
+    remediation_detours: usize,
+    caught_defects: usize,
+    escaped_defects: usize,
+    elapsed_millis: i64,
+    elapsed_complete: bool,
+    confirmed_scope_gaps: usize,
+    evidence_refs: BTreeSet<String>,
+}
+
+impl Default for TaskTierMetricAccumulator {
+    fn default() -> Self {
+        Self {
+            completion_count: 0,
+            node_ids: BTreeSet::new(),
+            additional_attempts: 0,
+            remediation_detours: 0,
+            caught_defects: 0,
+            escaped_defects: 0,
+            elapsed_millis: 0,
+            elapsed_complete: true,
+            confirmed_scope_gaps: 0,
+            evidence_refs: BTreeSet::new(),
+        }
+    }
+}
+
+fn completion_fact_backed(outcome: &RuntimeOutcome) -> bool {
+    outcome.executed_as.is_some()
+        || outcome
+            .source_refs
+            .iter()
+            .any(|source| source.starts_with("completion-fact:"))
+}
+
+fn task_tier_metrics(
     archive: &WorkGraphArchive,
-) -> EvidenceMetric<PlanActualEditDistance> {
+    nodes: &EvidenceMetric<Vec<NodeExecutionMetric>>,
+    reviews: &EvidenceMetric<Vec<ReviewEfficacyMetric>>,
+) -> EvidenceMetric<Vec<TaskTierRunMetric>> {
+    let completion_outcomes: Vec<_> = archive
+        .outcomes
+        .iter()
+        .filter(|outcome| completion_fact_backed(outcome))
+        .collect();
+    if completion_outcomes.is_empty() {
+        return EvidenceMetric::Unavailable {
+            omissions: vec![RetroOmission::new(
+                RetroOmissionReason::ExecutedAsUnavailable,
+                "task_tier",
+                "the archive has no completion fact with executed_as evidence",
+                Vec::new(),
+            )
+            .for_archive(&archive.archive_id)],
+        };
+    }
+
+    let additional_attempts_available = source_available(archive, ArchiveSourceKind::EventLog);
+    let remediation_detours_available = source_available(archive, ArchiveSourceKind::MutationLog);
+    let review_evidence_available = reviews.value().is_some();
+    let remediation = remediation_counts(archive);
+    let mut groups: BTreeMap<(TaskTier, String), TaskTierMetricAccumulator> = BTreeMap::new();
+    let mut missing_executed_as = BTreeSet::new();
+    let mut missing_timing = BTreeSet::new();
+
+    for outcome in completion_outcomes {
+        let Some(executed_as) = &outcome.executed_as else {
+            missing_executed_as.insert(outcome.subject_id.clone());
+            continue;
+        };
+        let accumulator = groups
+            .entry((executed_as.tier, executed_as.provider.clone()))
+            .or_default();
+        accumulator.completion_count += 1;
+
+        let mut node_ids = BTreeSet::from([outcome.subject_id.clone()]);
+        if let Some(task_id) = &outcome.task_id {
+            node_ids.insert(task_id.clone());
+        }
+        accumulator.node_ids.extend(node_ids.iter().cloned());
+        // Match `node_metrics`: only event-backed outcomes contribute attempts. An
+        // archive-level event log is necessary but not sufficient — a completion fact
+        // carrying no `event:` source ref would otherwise inflate this tier's count
+        // while leaving the per-node metric untouched.
+        if additional_attempts_available && event_backed(outcome) {
+            accumulator.additional_attempts += outcome.attempt_count.saturating_sub(1);
+        }
+        if remediation_detours_available {
+            accumulator.remediation_detours += node_ids
+                .iter()
+                .map(|node_id| remediation.get(node_id).copied().unwrap_or(0))
+                .sum::<usize>();
+        }
+        if let Some(review_values) = reviews.value() {
+            for review in review_values
+                .iter()
+                .filter(|review| node_ids.contains(&review.verdict_id))
+            {
+                accumulator.caught_defects += review.caught_defects;
+                accumulator.escaped_defects += review.escaped_defects;
+                accumulator
+                    .evidence_refs
+                    .extend(review.evidence_refs.iter().cloned());
+                accumulator.evidence_refs.extend(
+                    review
+                        .revisions
+                        .iter()
+                        .map(|revision| revision.source_ref.clone()),
+                );
+            }
+        }
+        accumulator.confirmed_scope_gaps += outcome
+            .effects
+            .iter()
+            .filter(|effect| effect.confirmed && effect.kind == ROLE_SCOPE_GAP_EFFECT_KIND)
+            .count();
+        accumulator
+            .evidence_refs
+            .extend(outcome.source_refs.iter().cloned());
+        accumulator.evidence_refs.extend(
+            outcome
+                .effects
+                .iter()
+                .filter(|effect| effect.confirmed)
+                .map(|effect| effect.source_ref.clone()),
+        );
+        match (outcome.started_at, outcome.finished_at) {
+            (Some(started), Some(finished)) if finished >= started => {
+                accumulator.elapsed_millis += (finished - started).num_milliseconds();
+            }
+            _ => {
+                accumulator.elapsed_complete = false;
+                missing_timing.insert(outcome.subject_id.clone());
+            }
+        }
+    }
+
+    let values = groups
+        .into_iter()
+        .map(|((tier, provider), mut value)| {
+            value
+                .evidence_refs
+                .insert(format!("archive:{}", archive.archive_id));
+            TaskTierRunMetric {
+                tier,
+                provider,
+                completion_count: value.completion_count,
+                node_ids: value.node_ids.into_iter().collect(),
+                additional_attempts: additional_attempts_available
+                    .then_some(value.additional_attempts),
+                remediation_detours: remediation_detours_available
+                    .then_some(value.remediation_detours),
+                caught_defects: review_evidence_available.then_some(value.caught_defects),
+                escaped_defects: review_evidence_available.then_some(value.escaped_defects),
+                elapsed_millis: value.elapsed_complete.then_some(value.elapsed_millis),
+                confirmed_scope_gaps: value.confirmed_scope_gaps,
+                evidence_refs: value.evidence_refs.into_iter().collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut omissions = nodes
+        .omissions()
+        .iter()
+        .chain(reviews.omissions())
+        .cloned()
+        .map(|mut omission| {
+            omission.metric = "task_tier".to_string();
+            omission
+        })
+        .collect::<Vec<_>>();
+    if !missing_executed_as.is_empty() {
+        omissions.push(
+            RetroOmission::new(
+                RetroOmissionReason::ExecutedAsUnavailable,
+                "task_tier",
+                "completion facts without executed_as were excluded from tier/provider buckets",
+                missing_executed_as.into_iter().collect(),
+            )
+            .for_archive(&archive.archive_id),
+        );
+    }
+    if !missing_timing.is_empty() {
+        omissions.push(
+            RetroOmission::new(
+                RetroOmissionReason::TimingEvidenceIncomplete,
+                "task_tier",
+                "elapsed time is unavailable for buckets containing a completion without both timestamps",
+                missing_timing.into_iter().collect(),
+            )
+            .for_archive(&archive.archive_id),
+        );
+    }
+    if values.is_empty() {
+        EvidenceMetric::Unavailable { omissions }
+    } else if omissions.is_empty() {
+        EvidenceMetric::Available { value: values }
+    } else {
+        EvidenceMetric::Partial {
+            value: values,
+            omissions,
+        }
+    }
+}
+
+fn edit_distance(archive: &WorkGraphArchive) -> EvidenceMetric<PlanActualEditDistance> {
     if archive.plan_graph.is_none() {
         return EvidenceMetric::Unavailable {
             omissions: vec![plan_omission(archive, "edit_distance")],
@@ -1190,11 +1445,8 @@ fn edit_distance(
             )],
         };
     }
-    let mutation_omissions = source_report_omissions(
-        archive,
-        ArchiveSourceKind::MutationLog,
-        "edit_distance",
-    );
+    let mutation_omissions =
+        source_report_omissions(archive, ArchiveSourceKind::MutationLog, "edit_distance");
     if mutation_omissions.is_empty() {
         EvidenceMetric::Available { value }
     } else {
@@ -1205,9 +1457,7 @@ fn edit_distance(
     }
 }
 
-fn node_metrics(
-    archive: &WorkGraphArchive,
-) -> EvidenceMetric<Vec<NodeExecutionMetric>> {
+fn node_metrics(archive: &WorkGraphArchive) -> EvidenceMetric<Vec<NodeExecutionMetric>> {
     let Some(plan) = &archive.plan_graph else {
         return EvidenceMetric::Unavailable {
             omissions: vec![plan_omission(archive, "node_execution")],
@@ -1290,8 +1540,7 @@ fn remediation_counts(archive: &WorkGraphArchive) -> BTreeMap<String, usize> {
         if delta.mutation_type != GraphMutationType::RemediationDetour {
             continue;
         }
-        let before_ids: BTreeSet<_> =
-            delta.before.nodes.iter().map(|node| &node.id).collect();
+        let before_ids: BTreeSet<_> = delta.before.nodes.iter().map(|node| &node.id).collect();
         let mut targets = BTreeSet::new();
         for node in &delta.after.nodes {
             if before_ids.contains(&node.id) {
@@ -1313,9 +1562,7 @@ fn remediation_counts(archive: &WorkGraphArchive) -> BTreeMap<String, usize> {
     counts
 }
 
-fn checkpoint_metrics(
-    archive: &WorkGraphArchive,
-) -> EvidenceMetric<Vec<CheckpointBarrierMetric>> {
+fn checkpoint_metrics(archive: &WorkGraphArchive) -> EvidenceMetric<Vec<CheckpointBarrierMetric>> {
     let Some(plan) = &archive.plan_graph else {
         return EvidenceMetric::Unavailable {
             omissions: vec![plan_omission(archive, "checkpoint_barrier")],
@@ -1323,13 +1570,15 @@ fn checkpoint_metrics(
     };
     let mut values = Vec::new();
     let mut omissions = Vec::new();
-    for checkpoint in plan.nodes.iter().filter(|node| node.kind == NodeKind::Checkpoint) {
+    for checkpoint in plan
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Checkpoint)
+    {
         let mut prerequisite_ids: Vec<_> = plan
             .edges
             .iter()
-            .filter(|edge| {
-                edge.kind == EdgeKind::DependsOn && edge.target == checkpoint.id
-            })
+            .filter(|edge| edge.kind == EdgeKind::DependsOn && edge.target == checkpoint.id)
             .map(|edge| edge.source.clone())
             .collect();
         prerequisite_ids.sort();
@@ -1418,9 +1667,7 @@ fn checkpoint_metrics(
     }
 }
 
-fn review_metrics(
-    archive: &WorkGraphArchive,
-) -> EvidenceMetric<Vec<ReviewEfficacyMetric>> {
+fn review_metrics(archive: &WorkGraphArchive) -> EvidenceMetric<Vec<ReviewEfficacyMetric>> {
     if !source_available(archive, ArchiveSourceKind::MutationLog) {
         return EvidenceMetric::Unavailable {
             omissions: vec![source_omission(
@@ -1437,8 +1684,7 @@ fn review_metrics(
     for delta in &archive.deltas {
         if !matches!(
             delta.mutation_type,
-            GraphMutationType::ReviewVerdictRecorded
-                | GraphMutationType::RemediationDetour
+            GraphMutationType::ReviewVerdictRecorded | GraphMutationType::RemediationDetour
         ) {
             continue;
         }
@@ -1478,27 +1724,28 @@ fn review_metrics(
             } else {
                 ReviewEvidenceState::PassedNoKnownEscape
             };
-            let review = reviews.entry(node.id.clone()).or_insert_with(|| {
-                ReviewEfficacyMetric {
+            let review = reviews
+                .entry(node.id.clone())
+                .or_insert_with(|| ReviewEfficacyMetric {
                     verdict_id: node.id.clone(),
                     target_id: target_id.clone(),
                     state,
                     caught_defects: usize::from(state == ReviewEvidenceState::Caught),
                     escaped_defects: 0,
-                    remediation_detours: remediation
-                        .get(target_id)
-                        .copied()
-                        .unwrap_or(0),
+                    remediation_detours: remediation.get(target_id).copied().unwrap_or(0),
                     evidence_refs: Vec::new(),
                     revisions: Vec::new(),
-                }
-            });
+                });
             if state == ReviewEvidenceState::Caught {
                 review.state = state;
                 review.caught_defects = 1;
             }
-            review.evidence_refs.extend(delta.source_refs.iter().cloned());
-            review.evidence_refs.push(format!("mutation:delta:{}", delta.sequence));
+            review
+                .evidence_refs
+                .extend(delta.source_refs.iter().cloned());
+            review
+                .evidence_refs
+                .push(format!("mutation:delta:{}", delta.sequence));
             review.evidence_refs.sort();
             review.evidence_refs.dedup();
         }
@@ -1516,12 +1763,11 @@ fn review_metrics(
     }
 }
 
-fn gotcha_hit_rate(
-    archive: &WorkGraphArchive,
-) -> EvidenceMetric<GotchaEdgeHitRate> {
-    let knowledge_missing = archive.runtime_graph.omissions.iter().any(|omission| {
-        omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
-    });
+fn gotcha_hit_rate(archive: &WorkGraphArchive) -> EvidenceMetric<GotchaEdgeHitRate> {
+    let knowledge_missing =
+        archive.runtime_graph.omissions.iter().any(|omission| {
+            omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+        });
     if knowledge_missing {
         return EvidenceMetric::Unavailable {
             omissions: vec![source_omission(
@@ -1537,8 +1783,7 @@ fn gotcha_hit_rate(
         .edges
         .iter()
         .filter(|edge| {
-            edge.kind == EdgeKind::Informs
-                && edge.provenance == EdgeProvenance::Knowledge
+            edge.kind == EdgeKind::Informs && edge.provenance == EdgeProvenance::Knowledge
         })
         .collect();
     if eligible.is_empty() {
@@ -1548,15 +1793,13 @@ fn gotcha_hit_rate(
                 targets_attempted: 0,
                 rate_defined: false,
             },
-            omissions: vec![
-                RetroOmission::new(
-                    RetroOmissionReason::NoEligibleEdges,
-                    "gotcha_edge_hit_rate",
-                    "the archived graph has no eligible knowledge edges, so a hit rate is undefined",
-                    Vec::new(),
-                )
-                .for_archive(&archive.archive_id),
-            ],
+            omissions: vec![RetroOmission::new(
+                RetroOmissionReason::NoEligibleEdges,
+                "gotcha_edge_hit_rate",
+                "the archived graph has no eligible knowledge edges, so a hit rate is undefined",
+                Vec::new(),
+            )
+            .for_archive(&archive.archive_id)],
         };
     }
     if !source_available(archive, ArchiveSourceKind::EventLog) {
@@ -1584,11 +1827,8 @@ fn gotcha_hit_rate(
         targets_attempted,
         rate_defined: true,
     };
-    let mut omissions = source_report_omissions(
-        archive,
-        ArchiveSourceKind::EventLog,
-        "gotcha_edge_hit_rate",
-    );
+    let mut omissions =
+        source_report_omissions(archive, ArchiveSourceKind::EventLog, "gotcha_edge_hit_rate");
     if graph_resolution_incomplete(archive) {
         omissions.push(source_omission(
             archive,
@@ -1598,10 +1838,7 @@ fn gotcha_hit_rate(
         ));
     }
     if !omissions.is_empty() {
-        EvidenceMetric::Partial {
-            value,
-            omissions,
-        }
+        EvidenceMetric::Partial { value, omissions }
     } else {
         EvidenceMetric::Available { value }
     }
@@ -1757,10 +1994,13 @@ fn systematic_divergence(
 ) {
     let templates: BTreeMap<_, _> = runs
         .iter()
-        .filter_map(|run| run.template.clone().map(|key| (run.archive_id.clone(), key)))
+        .filter_map(|run| {
+            run.template
+                .clone()
+                .map(|key| (run.archive_id.clone(), key))
+        })
         .collect();
-    let mut groups: BTreeMap<(TemplateKey, String), Vec<DeviationOccurrence>> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<(TemplateKey, String), Vec<DeviationOccurrence>> = BTreeMap::new();
     for input in inputs {
         let Some(template) = templates.get(&input.archive.archive_id) else {
             continue;
@@ -1802,8 +2042,10 @@ fn systematic_divergence(
                 .cmp(&right.archived_at)
                 .then(left.archive_id.cmp(&right.archive_id))
         });
-        let repo_ids: BTreeSet<_> =
-            occurrences.iter().map(|item| item.repo_id.clone()).collect();
+        let repo_ids: BTreeSet<_> = occurrences
+            .iter()
+            .map(|item| item.repo_id.clone())
+            .collect();
         if occurrences.len() < PROMOTION_RUN_THRESHOLD {
             continue;
         }
@@ -1938,12 +2180,12 @@ fn unique_edge_kind(graph: &TaskGraph, source: &str, target: &str) -> Option<Str
         .filter(|edge| edge.source == source && edge.target == target)
         .filter_map(|edge| serde_json::to_string(&edge.kind).ok())
         .collect();
-    (kinds.len() == 1).then(|| kinds.into_iter().next()).flatten()
+    (kinds.len() == 1)
+        .then(|| kinds.into_iter().next())
+        .flatten()
 }
 
-fn role_refinement_observations(
-    runs: &[PerRunRetro],
-) -> Vec<RoleDefinitionRefinementObservation> {
+fn role_refinement_observations(runs: &[PerRunRetro]) -> Vec<RoleDefinitionRefinementObservation> {
     let mut observations = Vec::new();
     for run in runs {
         for metric in &run.role_definitions {
@@ -2001,17 +2243,16 @@ pub fn propose_role_definition_refinements(
         groups
             .entry((observation.definition.clone(), observation.signal))
             .or_default()
-            .entry((
-                observation.repo_id.clone(),
-                observation.session_id.clone(),
-            ))
+            .entry((observation.repo_id.clone(), observation.session_id.clone()))
             .or_insert(observation);
     }
 
     let mut proposals = Vec::new();
     for ((definition, signal), instances) in groups {
-        let repo_ids: BTreeSet<_> =
-            instances.values().map(|item| item.repo_id.clone()).collect();
+        let repo_ids: BTreeSet<_> = instances
+            .values()
+            .map(|item| item.repo_id.clone())
+            .collect();
         if repo_ids.len() < 2 && instances.len() < PROMOTION_RUN_THRESHOLD {
             continue;
         }
@@ -2101,11 +2342,283 @@ fn role_refinement_learnings(
         .collect()
 }
 
-fn add_optional(
-    total: &mut Option<usize>,
-    contributing_runs: &mut usize,
-    value: Option<usize>,
-) {
+#[derive(Clone)]
+struct PlannerCalibrationSample {
+    repo_id: String,
+    session_id: String,
+    archive_id: String,
+    task_tier: TaskTier,
+    provider: String,
+    remediated: bool,
+    node_ids: BTreeSet<String>,
+    evidence_refs: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+struct LadderCalibrationSample {
+    repo_id: String,
+    session_id: String,
+    archive_id: String,
+    task_tier: TaskTier,
+    provider: String,
+    model: String,
+    flags: Vec<String>,
+    source: TierResolutionSource,
+    caught_defects: usize,
+    escaped_defects: usize,
+    node_ids: BTreeSet<String>,
+    evidence_refs: BTreeSet<String>,
+}
+
+fn next_task_tier(tier: TaskTier) -> Option<TaskTier> {
+    match tier {
+        TaskTier::Low => Some(TaskTier::Medium),
+        TaskTier::Medium => Some(TaskTier::High),
+        TaskTier::High => Some(TaskTier::Critical),
+        TaskTier::Critical => None,
+    }
+}
+
+fn outcome_node_ids(outcome: &RuntimeOutcome) -> BTreeSet<String> {
+    let mut node_ids = BTreeSet::from([outcome.subject_id.clone()]);
+    if let Some(task_id) = &outcome.task_id {
+        node_ids.insert(task_id.clone());
+    }
+    node_ids
+}
+
+fn task_tier_calibration_observations(
+    inputs: &[RetroRunInput],
+    runs: &[PerRunRetro],
+) -> Vec<TaskTierCalibrationObservation> {
+    let mut planner_samples = Vec::new();
+    let mut ladder_samples = Vec::new();
+    for (input, run) in inputs.iter().zip(runs) {
+        let remediation = remediation_counts(&input.archive);
+        let mut planner_by_key: BTreeMap<(TaskTier, String), PlannerCalibrationSample> =
+            BTreeMap::new();
+        let review_values = run.reviews.value();
+        for outcome in input
+            .archive
+            .outcomes
+            .iter()
+            .filter(|outcome| completion_fact_backed(outcome))
+        {
+            let Some(executed_as) = &outcome.executed_as else {
+                continue;
+            };
+            let node_ids = outcome_node_ids(outcome);
+            let mut evidence_refs: BTreeSet<_> = outcome.source_refs.iter().cloned().collect();
+            evidence_refs.insert(format!("archive:{}", input.archive.archive_id));
+
+            if executed_as.source == TierResolutionSource::Node
+                && matches!(executed_as.tier, TaskTier::Low | TaskTier::Medium)
+            {
+                let sample = planner_by_key
+                    .entry((executed_as.tier, executed_as.provider.clone()))
+                    .or_insert_with(|| PlannerCalibrationSample {
+                        repo_id: input.repo_id.clone(),
+                        session_id: input.archive.session_id.clone(),
+                        archive_id: input.archive.archive_id.clone(),
+                        task_tier: executed_as.tier,
+                        provider: executed_as.provider.clone(),
+                        remediated: false,
+                        node_ids: BTreeSet::new(),
+                        evidence_refs: BTreeSet::new(),
+                    });
+                sample.remediated |= node_ids
+                    .iter()
+                    .any(|node_id| remediation.get(node_id).copied().unwrap_or(0) > 0);
+                sample.node_ids.extend(node_ids.iter().cloned());
+                sample.evidence_refs.extend(evidence_refs.iter().cloned());
+            }
+
+            if matches!(
+                executed_as.source,
+                TierResolutionSource::Node | TierResolutionSource::Override
+            ) {
+                let Some(review_values) = review_values else {
+                    continue;
+                };
+                let mut caught_defects = 0;
+                let mut escaped_defects = 0;
+                for review in review_values
+                    .iter()
+                    .filter(|review| node_ids.contains(&review.verdict_id))
+                {
+                    caught_defects += review.caught_defects;
+                    escaped_defects += review.escaped_defects;
+                    evidence_refs.extend(review.evidence_refs.iter().cloned());
+                    evidence_refs.extend(
+                        review
+                            .revisions
+                            .iter()
+                            .map(|revision| revision.source_ref.clone()),
+                    );
+                }
+                ladder_samples.push(LadderCalibrationSample {
+                    repo_id: input.repo_id.clone(),
+                    session_id: input.archive.session_id.clone(),
+                    archive_id: input.archive.archive_id.clone(),
+                    task_tier: executed_as.tier,
+                    provider: executed_as.provider.clone(),
+                    model: executed_as.model.clone(),
+                    flags: executed_as.flags.clone(),
+                    source: executed_as.source,
+                    caught_defects,
+                    escaped_defects,
+                    node_ids,
+                    evidence_refs,
+                });
+            }
+        }
+        planner_samples.extend(planner_by_key.into_values());
+    }
+
+    let mut observations = Vec::new();
+    let mut planner_groups: BTreeMap<(TaskTier, String), Vec<PlannerCalibrationSample>> =
+        BTreeMap::new();
+    for sample in planner_samples {
+        planner_groups
+            .entry((sample.task_tier, sample.provider.clone()))
+            .or_default()
+            .push(sample);
+    }
+    for ((_task_tier, _provider), samples) in planner_groups {
+        let remediated = samples.iter().filter(|sample| sample.remediated).count();
+        if remediated * 2 <= samples.len() {
+            continue;
+        }
+        for sample in samples.into_iter().filter(|sample| sample.remediated) {
+            observations.push(TaskTierCalibrationObservation {
+                repo_id: sample.repo_id,
+                session_id: sample.session_id,
+                archive_id: sample.archive_id,
+                target: TaskTierCalibrationTarget::Planner,
+                task_tier: sample.task_tier,
+                provider: sample.provider,
+                candidate_tier: next_task_tier(sample.task_tier),
+                candidate_model: None,
+                candidate_flags: Vec::new(),
+                node_ids: sample.node_ids.into_iter().collect(),
+                evidence_refs: sample.evidence_refs.into_iter().collect(),
+            });
+        }
+    }
+
+    type LadderVariantKey = (TaskTier, String, String, Vec<String>);
+    let mut baseline_groups: BTreeMap<LadderVariantKey, Vec<LadderCalibrationSample>> =
+        BTreeMap::new();
+    let mut candidate_groups: BTreeMap<LadderVariantKey, Vec<LadderCalibrationSample>> =
+        BTreeMap::new();
+    for sample in ladder_samples {
+        let key = (
+            sample.task_tier,
+            sample.provider.clone(),
+            sample.model.clone(),
+            sample.flags.clone(),
+        );
+        match sample.source {
+            TierResolutionSource::Node => baseline_groups.entry(key).or_default().push(sample),
+            TierResolutionSource::Override => candidate_groups.entry(key).or_default().push(sample),
+            TierResolutionSource::Fallback => {}
+        }
+    }
+    for ((task_tier, provider, candidate_model, candidate_flags), candidates) in candidate_groups {
+        if candidates.len() < PROMOTION_RUN_THRESHOLD {
+            continue;
+        }
+        let candidate_caught: usize = candidates.iter().map(|sample| sample.caught_defects).sum();
+        let candidate_escaped: usize = candidates.iter().map(|sample| sample.escaped_defects).sum();
+        let candidate_total = candidate_caught + candidate_escaped;
+        if candidate_total == 0 {
+            continue;
+        }
+        for ((baseline_tier, baseline_provider, baseline_model, baseline_flags), baselines) in
+            &baseline_groups
+        {
+            if *baseline_tier != task_tier
+                || baseline_provider != &provider
+                || baselines.len() < PROMOTION_RUN_THRESHOLD
+                || (baseline_model == &candidate_model && baseline_flags == &candidate_flags)
+            {
+                continue;
+            }
+            let baseline_caught: usize = baselines.iter().map(|sample| sample.caught_defects).sum();
+            let baseline_escaped: usize =
+                baselines.iter().map(|sample| sample.escaped_defects).sum();
+            let baseline_total = baseline_caught + baseline_escaped;
+            if baseline_total == 0
+                || candidate_escaped * baseline_total != baseline_escaped * candidate_total
+            {
+                continue;
+            }
+            let baseline_node_ids: BTreeSet<_> = baselines
+                .iter()
+                .flat_map(|sample| sample.node_ids.iter().cloned())
+                .collect();
+            let baseline_evidence_refs: BTreeSet<_> = baselines
+                .iter()
+                .flat_map(|sample| sample.evidence_refs.iter().cloned())
+                .collect();
+            for candidate in &candidates {
+                let mut node_ids = candidate.node_ids.clone();
+                node_ids.extend(baseline_node_ids.iter().cloned());
+                let mut evidence_refs = candidate.evidence_refs.clone();
+                evidence_refs.extend(baseline_evidence_refs.iter().cloned());
+                observations.push(TaskTierCalibrationObservation {
+                    repo_id: candidate.repo_id.clone(),
+                    session_id: candidate.session_id.clone(),
+                    archive_id: candidate.archive_id.clone(),
+                    target: TaskTierCalibrationTarget::Ladder,
+                    task_tier,
+                    provider: provider.clone(),
+                    candidate_tier: None,
+                    candidate_model: Some(candidate_model.clone()),
+                    candidate_flags: candidate_flags.clone(),
+                    node_ids: node_ids.into_iter().collect(),
+                    evidence_refs: evidence_refs.into_iter().collect(),
+                });
+            }
+            break;
+        }
+    }
+    observations
+}
+
+fn task_tier_calibration_learnings<'a>(
+    proposals: impl IntoIterator<Item = &'a TaskTierCalibrationProposal>,
+) -> Vec<UnreviewedLearningSubmission> {
+    proposals
+        .into_iter()
+        .filter_map(|proposal| {
+            let session = proposal.session_ids.last()?.clone();
+            let target = match proposal.target {
+                TaskTierCalibrationTarget::Planner => "planner",
+                TaskTierCalibrationTarget::Ladder => "ladder",
+            };
+            Some(UnreviewedLearningSubmission {
+                session,
+                task: format!("post-run task-tier {target} calibration proposal"),
+                outcome: UNREVIEWED_OUTCOME.to_string(),
+                keywords: vec![
+                    "task-tier".to_string(),
+                    format!("{target}-calibration"),
+                    proposal.provider.clone(),
+                    format!("{:?}", proposal.task_tier).to_lowercase(),
+                ],
+                insight: format!(
+                    "Archived evidence produced an unreviewed {target} calibration proposal from {} independent run instance(s). No planner rubric or ladder cell was modified; evidence: {}.",
+                    proposal.observation_count,
+                    proposal.evidence_refs.join(", ")
+                ),
+                files_touched: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn add_optional(total: &mut Option<usize>, contributing_runs: &mut usize, value: Option<usize>) {
     if let Some(value) = value {
         *total.get_or_insert(0) += value;
         *contributing_runs += 1;
@@ -2116,9 +2629,8 @@ fn aggregate_role_definitions(runs: &[PerRunRetro]) -> Vec<RoleDefinitionAggrega
     let mut groups: BTreeMap<RoleDefinitionKey, RoleDefinitionAggregate> = BTreeMap::new();
     for run in runs {
         for metric in &run.role_definitions {
-            let aggregate = groups
-                .entry(metric.definition.clone())
-                .or_insert_with(|| RoleDefinitionAggregate {
+            let aggregate = groups.entry(metric.definition.clone()).or_insert_with(|| {
+                RoleDefinitionAggregate {
                     definition: metric.definition.clone(),
                     run_count: 0,
                     repo_ids: Vec::new(),
@@ -2137,7 +2649,8 @@ fn aggregate_role_definitions(runs: &[PerRunRetro]) -> Vec<RoleDefinitionAggrega
                     gotcha_targets_attempted: None,
                     gotcha_targets_attempted_contributing_runs: 0,
                     confirmed_scope_gaps: 0,
-                });
+                }
+            });
             aggregate.run_count += 1;
             aggregate.repo_ids.push(run.repo_id.clone());
             aggregate.session_ids.push(run.session_id.clone());
@@ -2255,8 +2768,7 @@ fn aggregate_templates(runs: &[PerRunRetro]) -> Vec<TemplateAggregate> {
             if gotcha.rate_defined {
                 *aggregate.gotcha_edges_eligible.get_or_insert(0) +=
                     gotcha.eligible_knowledge_edges;
-                *aggregate.gotcha_targets_attempted.get_or_insert(0) +=
-                    gotcha.targets_attempted;
+                *aggregate.gotcha_targets_attempted.get_or_insert(0) += gotcha.targets_attempted;
             }
         }
     }
@@ -2308,8 +2820,7 @@ fn source_omission(
     metric: &str,
     detail: &str,
 ) -> RetroOmission {
-    RetroOmission::new(reason, metric, detail, Vec::new())
-        .for_archive(&archive.archive_id)
+    RetroOmission::new(reason, metric, detail, Vec::new()).for_archive(&archive.archive_id)
 }
 
 fn plan_omission(archive: &WorkGraphArchive, metric: &str) -> RetroOmission {
@@ -2350,4 +2861,353 @@ fn outcome_for_node<'a>(
 
 fn find_node<'a>(graph: &'a TaskGraph, node_id: &str) -> Option<&'a WorkNode> {
     graph.nodes.iter().find(|node| node.id == node_id)
+}
+
+#[cfg(test)]
+mod task_tier_tests {
+    use super::*;
+    use std::fs;
+
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    use crate::domain::run_journal::Confidence;
+    use crate::http::handlers::workers::{ExecutedAs, ExecutionChannel};
+    use crate::orchestrator::work_graph::archive::{
+        ArchiveSourceReport, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+    };
+    use crate::orchestrator::work_graph::divergence::DivergenceSummary;
+    use crate::orchestrator::work_graph::runtime::{
+        GraphMutationDelta, RuntimeEffect, RuntimeOutcomeStatus,
+    };
+    use crate::orchestrator::work_graph::{BindingRef, CompositeExpansion, NodeContract};
+
+    fn instant(seconds: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_900_000_000 + seconds, 0)
+            .single()
+            .expect("fixture timestamp")
+    }
+
+    fn source(kind: ArchiveSourceKind) -> ArchiveSourceReport {
+        ArchiveSourceReport {
+            kind,
+            location: format!("fixture/{kind:?}"),
+            available: true,
+            record_count: 1,
+            omissions: Vec::new(),
+        }
+    }
+
+    fn sources() -> Vec<ArchiveSourceReport> {
+        vec![
+            source(ArchiveSourceKind::PlanGraph),
+            source(ArchiveSourceKind::EventLog),
+            source(ArchiveSourceKind::RunJournal),
+            source(ArchiveSourceKind::RunLedger),
+            source(ArchiveSourceKind::MutationLog),
+        ]
+    }
+
+    fn task_node(id: &str, tier: TaskTier) -> WorkNode {
+        let mut node = WorkNode::new(
+            id,
+            NodeKind::Task,
+            format!("Node {id}"),
+            NodeContract::default(),
+            BindingRef::Role("worker".to_string()),
+            NodeStatus::Pending,
+        );
+        node.tier = tier;
+        node
+    }
+
+    fn executed_as(
+        provider: &str,
+        tier: TaskTier,
+        model: &str,
+        source: TierResolutionSource,
+    ) -> ExecutedAs {
+        ExecutedAs {
+            provider: provider.to_string(),
+            tier,
+            model: model.to_string(),
+            flags: vec![format!("effort={tier:?}").to_lowercase()],
+            channel: ExecutionChannel::Hive,
+            source,
+        }
+    }
+
+    fn completion_outcome(
+        id: &str,
+        execution: Option<ExecutedAs>,
+        effects: Vec<RuntimeEffect>,
+    ) -> RuntimeOutcome {
+        RuntimeOutcome {
+            subject_id: id.to_string(),
+            task_id: Some(id.to_string()),
+            agent_ids: vec![format!("agent-{id}")],
+            executed_as: execution,
+            status: RuntimeOutcomeStatus::Completed,
+            started_at: Some(instant(1)),
+            finished_at: Some(instant(11)),
+            attempt_count: 1,
+            effects,
+            source_refs: vec![format!("completion-fact:{id}")],
+            completion_evidence: None,
+        }
+    }
+
+    fn archive(
+        archive_id: &str,
+        session_id: &str,
+        plan_graph: TaskGraph,
+        runtime_graph: TaskGraph,
+        deltas: Vec<GraphMutationDelta>,
+        outcomes: Vec<RuntimeOutcome>,
+    ) -> WorkGraphArchive {
+        WorkGraphArchive {
+            schema_version: WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+            archive_id: archive_id.to_string(),
+            session_id: session_id.to_string(),
+            archived_at: instant(20),
+            plan_graph: Some(plan_graph),
+            runtime_graph,
+            deltas,
+            outcomes,
+            divergence: DivergenceSummary::default(),
+            sources: sources(),
+        }
+    }
+
+    fn evaluator() -> IndependentEvaluator {
+        IndependentEvaluator::new(
+            "independent-tier-retro",
+            vec!["planner".to_string()],
+            vec!["supervisor".to_string()],
+        )
+        .expect("independent evaluator")
+    }
+
+    fn snapshot_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn visit(root: &Path, current: &Path, snapshot: &mut BTreeMap<String, Vec<u8>>) {
+            let mut entries = fs::read_dir(current)
+                .expect("read fixture tree")
+                .map(|entry| entry.expect("fixture entry").path())
+                .collect::<Vec<_>>();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    visit(root, &path, snapshot);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("fixture path below root")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    snapshot.insert(relative, fs::read(path).expect("read fixture file"));
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    #[test]
+    fn task_tier_metrics_are_keyed_by_tier_and_provider_and_report_partial_legacy_evidence() {
+        let specs = [
+            ("low-codex-a", TaskTier::Low, "codex", Some("terra")),
+            ("low-codex-b", TaskTier::Low, "codex", Some("terra")),
+            ("low-claude", TaskTier::Low, "claude", Some("haiku")),
+            ("high-codex", TaskTier::High, "codex", Some("sol")),
+            ("high-claude", TaskTier::High, "claude", Some("opus")),
+            ("legacy", TaskTier::Low, "codex", None),
+        ];
+        let nodes = specs
+            .iter()
+            .map(|(id, tier, _, _)| task_node(id, *tier))
+            .collect::<Vec<_>>();
+        let graph = TaskGraph::new(nodes, Vec::new());
+        let outcomes = specs
+            .iter()
+            .map(|(id, tier, provider, model)| {
+                completion_outcome(
+                    id,
+                    model.map(|model| {
+                        executed_as(provider, *tier, model, TierResolutionSource::Node)
+                    }),
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let report = evaluate_archives(
+            &evaluator(),
+            &[RetroRunInput {
+                repo_id: "repo-a".to_string(),
+                archive: archive(
+                    "tier-archive",
+                    "tier-session",
+                    graph.clone(),
+                    graph,
+                    Vec::new(),
+                    outcomes,
+                ),
+            }],
+        )
+        .expect("tier retro evaluates");
+
+        let EvidenceMetric::Partial { value, omissions } = &report.runs[0].task_tiers else {
+            panic!("one legacy completion must make the tier metric partial");
+        };
+        let keys: BTreeSet<_> = value
+            .iter()
+            .map(|metric| (metric.tier, metric.provider.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                (TaskTier::Low, "claude"),
+                (TaskTier::Low, "codex"),
+                (TaskTier::High, "claude"),
+                (TaskTier::High, "codex"),
+            ])
+        );
+        assert_eq!(value.len(), 4);
+        assert!(omissions.iter().any(|omission| {
+            omission.reason == RetroOmissionReason::ExecutedAsUnavailable
+                && omission.examples == vec!["legacy"]
+        }));
+        assert_eq!(
+            serde_json::to_string(&RetroOmissionReason::ExecutedAsUnavailable).unwrap(),
+            "\"executed_as_unavailable\""
+        );
+    }
+
+    fn planner_archive(index: usize, remediated: bool) -> WorkGraphArchive {
+        let task_id = format!("planner-task-{index}");
+        let plan = TaskGraph::new(vec![task_node(&task_id, TaskTier::Low)], Vec::new());
+        let mut runtime = plan.clone();
+        let deltas = if remediated {
+            let mut remediation = task_node(&format!("remediation-{index}"), TaskTier::Medium);
+            remediation.expansion = Some(CompositeExpansion {
+                template: JUDGE_PRINCE_REMEDIATION_TEMPLATE.to_string(),
+                parameters: BTreeMap::from([("target".to_string(), task_id.clone())]),
+            });
+            runtime.nodes.push(remediation);
+            vec![GraphMutationDelta {
+                sequence: 1,
+                observed_at: instant(12),
+                mutation_type: GraphMutationType::RemediationDetour,
+                before: plan.clone(),
+                after: runtime.clone(),
+                source_refs: vec![format!("mutation:planner-{index}")],
+            }]
+        } else {
+            Vec::new()
+        };
+        archive(
+            &format!("planner-archive-{index}"),
+            &format!("planner-session-{index}"),
+            plan,
+            runtime,
+            deltas,
+            vec![completion_outcome(
+                &task_id,
+                Some(executed_as(
+                    "codex",
+                    TaskTier::Low,
+                    "gpt-5.6-terra",
+                    TierResolutionSource::Node,
+                )),
+                Vec::new(),
+            )],
+        )
+    }
+
+    fn ladder_archive(index: usize, source: TierResolutionSource, model: &str) -> WorkGraphArchive {
+        let verdict_id = format!("review-{index}");
+        let mut planned_review = task_node(&verdict_id, TaskTier::High);
+        planned_review.kind = NodeKind::Join;
+        planned_review.expansion = Some(CompositeExpansion {
+            template: MULTI_LENS_REVIEW_TEMPLATE.to_string(),
+            parameters: BTreeMap::from([("target".to_string(), format!("target-{index}"))]),
+        });
+        let plan = TaskGraph::new(vec![planned_review], Vec::new());
+        let mut runtime = plan.clone();
+        runtime.nodes[0].status = NodeStatus::Failed;
+        let delta = GraphMutationDelta {
+            sequence: 1,
+            observed_at: instant(12),
+            mutation_type: GraphMutationType::ReviewVerdictRecorded,
+            before: plan.clone(),
+            after: runtime.clone(),
+            source_refs: vec![format!("mutation:review-{index}")],
+        };
+        archive(
+            &format!("ladder-archive-{index}"),
+            &format!("ladder-session-{index}"),
+            plan,
+            runtime,
+            vec![delta],
+            vec![completion_outcome(
+                &verdict_id,
+                Some(executed_as("codex", TaskTier::High, model, source)),
+                vec![RuntimeEffect {
+                    kind: "review_observed".to_string(),
+                    reference: None,
+                    confirmed: true,
+                    confidence: Confidence::High,
+                    source_ref: format!("effect:review-{index}"),
+                }],
+            )],
+        )
+    }
+
+    #[test]
+    fn retro_emits_propose_only_planner_and_ladder_calibrations() {
+        let fixture = TempDir::new().expect("temp tree");
+        let project = fixture.path().join("project");
+        let wiki = fixture.path().join("wiki");
+        fs::create_dir_all(project.join(".ai-docs")).unwrap();
+        fs::create_dir_all(wiki.join("tools")).unwrap();
+        fs::write(project.join(".ai-docs").join("sentinel"), b"project").unwrap();
+        fs::write(wiki.join("tools").join("sentinel"), b"wiki").unwrap();
+        let before_project = snapshot_tree(&project);
+        let before_wiki = snapshot_tree(&wiki);
+
+        let mut inputs = (0..5)
+            .map(|index| RetroRunInput {
+                repo_id: "repo-planner".to_string(),
+                archive: planner_archive(index, index < 3),
+            })
+            .collect::<Vec<_>>();
+        inputs.extend((0..2).map(|index| RetroRunInput {
+            repo_id: "repo-ladder".to_string(),
+            archive: ladder_archive(index, TierResolutionSource::Node, "gpt-5.6-sol"),
+        }));
+        inputs.extend((2..4).map(|index| RetroRunInput {
+            repo_id: "repo-ladder".to_string(),
+            archive: ladder_archive(index, TierResolutionSource::Override, "gpt-5.6-terra"),
+        }));
+
+        let report = evaluate_archives(&evaluator(), &inputs).expect("calibration retro evaluates");
+
+        assert!(report.planner_calibration_proposals.iter().any(|proposal| {
+            proposal.target == TaskTierCalibrationTarget::Planner
+                && proposal.task_tier == TaskTier::Low
+                && proposal.provider == "codex"
+                && proposal.candidate_tier == Some(TaskTier::Medium)
+                && proposal.observation_count == 3
+        }));
+        assert!(report.ladder_calibration_proposals.iter().any(|proposal| {
+            proposal.target == TaskTierCalibrationTarget::Ladder
+                && proposal.task_tier == TaskTier::High
+                && proposal.provider == "codex"
+                && proposal.candidate_model.as_deref() == Some("gpt-5.6-terra")
+                && proposal.observation_count == 2
+        }));
+        assert_eq!(snapshot_tree(&project), before_project);
+        assert_eq!(snapshot_tree(&wiki), before_wiki);
+    }
 }

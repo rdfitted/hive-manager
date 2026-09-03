@@ -6,6 +6,20 @@ import type {
   QaWorkerConfig,
   Session,
 } from '$lib/stores/sessions';
+import type { TaskTier } from '$lib/workgraph/types';
+
+export interface TierRoutingPolicy {
+  enabled: boolean;
+  ceiling_percent: number;
+  review_floor: TaskTier;
+  ladder: Record<string, unknown>;
+}
+
+export type TieredHiveLaunchConfig = Omit<HiveLaunchConfig, 'execution_policy'> & {
+  execution_policy: HiveLaunchConfig['execution_policy'] & {
+    tier_policy: TierRoutingPolicy;
+  };
+};
 
 export type CodingPrincipalFormConfig = AgentConfig & {
   selectedRole: string;
@@ -22,6 +36,7 @@ export interface DefaultHiveFormState {
   queenMaxDepth: number;
   principalMaxChildren: number;
   principalMaxDepth: number;
+  tierPolicy: TierRoutingPolicy;
   workGraphArchetype: string | null;
   workGraphParameters: Record<string, string>;
 }
@@ -111,6 +126,12 @@ export function createDefaultHiveFormState(): DefaultHiveFormState {
     queenMaxDepth: 1,
     principalMaxChildren: 2,
     principalMaxDepth: 1,
+    tierPolicy: {
+      enabled: false,
+      ceiling_percent: 34,
+      review_floor: 'high',
+      ladder: {},
+    },
     workGraphArchetype: null,
     workGraphParameters: {},
   };
@@ -142,6 +163,7 @@ export interface BuildHiveLaunchConfigInput {
   queenMaxDepth: number;
   principalMaxChildren: number;
   principalMaxDepth: number;
+  tierPolicy?: TierRoutingPolicy;
   workGraphArchetype: string | null;
   workGraphParameters: Record<string, string>;
   prompt?: string;
@@ -152,7 +174,7 @@ export interface BuildHiveLaunchConfigInput {
   qaWorkers?: QaWorkerConfig[];
 }
 
-export function buildHiveLaunchConfig(input: BuildHiveLaunchConfigInput): HiveLaunchConfig {
+export function buildHiveLaunchConfig(input: BuildHiveLaunchConfigInput): TieredHiveLaunchConfig {
   const workGraphArchetype = input.workGraphArchetype?.trim() || null;
   const workGraphParameters = workGraphArchetype
     ? Object.fromEntries(
@@ -181,6 +203,19 @@ export function buildHiveLaunchConfig(input: BuildHiveLaunchConfigInput): HiveLa
         input.principalMaxChildren,
         input.principalMaxDepth,
       ),
+      tier_policy: input.tierPolicy
+        ? {
+            enabled: input.tierPolicy.enabled,
+            ceiling_percent: input.tierPolicy.ceiling_percent,
+            review_floor: input.tierPolicy.review_floor,
+            ladder: {},
+          }
+        : {
+            enabled: false,
+            ceiling_percent: 34,
+            review_floor: 'high',
+            ladder: {},
+          },
     },
     work_graph_archetype: workGraphArchetype,
     work_graph_parameters: workGraphParameters,

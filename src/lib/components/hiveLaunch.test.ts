@@ -40,9 +40,49 @@ describe('default Hive launch contract', () => {
       workspace_strategy: 'shared_cell',
       queen_delegation: { mode: 'auto', max_children: 3, max_depth: 1 },
       principal_delegation: { mode: 'encouraged', max_children: 2, max_depth: 1 },
+      tier_policy: {
+        enabled: false,
+        ceiling_percent: 34,
+        review_floor: 'high',
+        ladder: {},
+      },
     });
     expect(config.work_graph_archetype).toBeNull();
     expect(config.work_graph_parameters).toEqual({});
+  });
+
+  it('transports an enabled tier-routing policy without a client-owned ladder snapshot', () => {
+    const defaults = createDefaultHiveFormState();
+    const config = buildHiveLaunchConfig({
+      projectPath: 'C:/code/project',
+      queenConfig: defaults.queenConfig,
+      principals: defaults.codingPrincipals,
+      workspaceStrategy: defaults.workspaceStrategy,
+      queenDelegationMode: defaults.queenDelegationMode,
+      principalDelegationMode: defaults.principalDelegationMode,
+      queenMaxChildren: defaults.queenMaxChildren,
+      queenMaxDepth: defaults.queenMaxDepth,
+      principalMaxChildren: defaults.principalMaxChildren,
+      principalMaxDepth: defaults.principalMaxDepth,
+      tierPolicy: {
+        enabled: true,
+        ceiling_percent: 72,
+        review_floor: 'critical',
+        ladder: { stale: 'preview-only' },
+      },
+      workGraphArchetype: null,
+      workGraphParameters: {},
+      withPlanning: true,
+      smokeTest: false,
+      withEvaluator: false,
+    });
+
+    expect(config.execution_policy.tier_policy).toEqual({
+      enabled: true,
+      ceiling_percent: 72,
+      review_floor: 'critical',
+      ladder: {},
+    });
   });
 
   it('transports a selected work-graph archetype and normalized overrides', () => {

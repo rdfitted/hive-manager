@@ -15,7 +15,7 @@ pub use cell::{Cell, CellStatus, CellType};
 pub use event::{Event, EventType, Severity};
 pub use execution::{
     CapabilityCard, CapabilitySupport, DelegationPolicy, HiveExecutionPolicy, HiveLaunchKind,
-    NativeDelegationMode,
+    NativeDelegationMode, TierPolicy,
 };
 pub use resolver::ResolverOutput;
 pub use session::{LaunchConfig, Session, SessionMode, SessionStatus};

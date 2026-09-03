@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { CompletionProvenance } from '$lib/workgraph/types';
+  import type { CompletionProvenance, ExecutedAs, TaskTier } from '$lib/workgraph/types';
 
   const PROVENANCE_PRESENTATION: Record<
     CompletionProvenance,
@@ -22,6 +22,7 @@
     readonly id: string;
     readonly title: string;
     readonly kind: string;
+    readonly tier: TaskTier;
     readonly lane: string;
     readonly status: string;
     readonly contract: NodeContract;
@@ -39,6 +40,7 @@
     readonly attempts: number;
     readonly agent_id: string | null;
     readonly last_heartbeat_at: string | null;
+    readonly executed_as?: ExecutedAs | null;
   }
 
   interface Props {
@@ -64,6 +66,12 @@
   let provenancePresentation = $derived(
     completionProvenance ? PROVENANCE_PRESENTATION[completionProvenance] : null
   );
+
+  function executedAsLabel(executedAs: ExecutedAs | null | undefined): string {
+    if (!executedAs) return 'Execution not recorded';
+    const flags = executedAs.flags.length > 0 ? executedAs.flags.join(' ') : 'none';
+    return `Provider: ${executedAs.provider} · Tier: ${executedAs.tier} · Model: ${executedAs.model} · Channel: ${executedAs.channel} · Source: ${executedAs.source} · Flags: ${flags}`;
+  }
 </script>
 
 <aside
@@ -83,6 +91,10 @@
     <div>
       <dt>Lane</dt>
       <dd>{node.lane}</dd>
+    </div>
+    <div>
+      <dt>Tier</dt>
+      <dd>{node.tier}</dd>
     </div>
     <div>
       <dt>Status</dt>
@@ -180,6 +192,10 @@
         <div>
           <dt>Last heartbeat</dt>
           <dd>{progress.last_heartbeat_at ?? 'Not recorded'}</dd>
+        </div>
+        <div>
+          <dt>Executed as</dt>
+          <dd>{executedAsLabel(progress.executed_as)}</dd>
         </div>
       </dl>
     {:else}

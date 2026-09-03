@@ -57,6 +57,7 @@ pub fn task_graph_from_plan(plan: &SessionPlan) -> TaskGraph {
                 ),
                 status,
             )
+            .with_tier(task.tier)
         })
         .collect();
 
@@ -104,6 +105,26 @@ pub fn task_graph_from_plan(plan: &SessionPlan) -> TaskGraph {
                         "task {} preserved unrecognized principal binding {}",
                         task.id,
                         task.assignee.as_deref().unwrap_or("unassigned")
+                    )
+                })
+                .collect(),
+        ));
+    }
+    let unrecognized_tiers = graph_tasks
+        .iter()
+        .filter(|task| !task.tier_recognized)
+        .collect::<Vec<_>>();
+    if !unrecognized_tiers.is_empty() {
+        graph.omissions.push(WorkGraphOmission::new(
+            WorkGraphOmissionReason::ResolutionIncomplete,
+            unrecognized_tiers.len(),
+            unrecognized_tiers
+                .iter()
+                .map(|task| {
+                    format!(
+                        "task {} preserved unrecognized tier {} as medium",
+                        task.id,
+                        task.tier_source.as_deref().unwrap_or("<missing>")
                     )
                 })
                 .collect(),

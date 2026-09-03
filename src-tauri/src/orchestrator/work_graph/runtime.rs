@@ -15,6 +15,7 @@ use std::path::Path;
 
 use crate::domain::event::{Event, EventType};
 use crate::domain::run_journal::{Confidence, LedgerEntry, RunJournalEntry, StepKind, StepStatus};
+use crate::http::handlers::workers::ExecutedAs;
 use crate::orchestrator::org_graph::adjudication::{
     adjudicate_contradiction, AdjudicationDeclaration, AdjudicationError, AdjudicationRecord,
     AdjudicationResolution, SourceVerdict, SourceVerdictValue,
@@ -771,6 +772,8 @@ pub struct RuntimeOutcome {
     pub task_id: Option<TaskId>,
     #[serde(default)]
     pub agent_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) executed_as: Option<ExecutedAs>,
     pub status: RuntimeOutcomeStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -1085,6 +1088,7 @@ pub fn derive_runtime_graph_with_completion_facts(
                 } else {
                     Vec::new()
                 },
+                executed_as: None,
                 status: journal_outcome_status(entry.status),
                 started_at: Some(entry.started_at),
                 finished_at: entry.finished_at,
@@ -1115,6 +1119,7 @@ pub fn derive_runtime_graph_with_completion_facts(
                 subject_id: effect_node_id,
                 task_id: None,
                 agent_ids: Vec::new(),
+                executed_as: None,
                 status: if effect.confirmed {
                     RuntimeOutcomeStatus::Completed
                 } else {
@@ -1339,6 +1344,7 @@ fn update_mutation_outcomes(
                 subject_id: node.id.clone(),
                 task_id,
                 agent_ids: Vec::new(),
+                executed_as: None,
                 status,
                 started_at: None,
                 finished_at: None,
@@ -1378,6 +1384,7 @@ fn update_event_outcome(
             subject_id,
             task_id: task_id.clone(),
             agent_ids: vec![agent_id.to_string()],
+            executed_as: None,
             status: RuntimeOutcomeStatus::Running,
             started_at: matches!(
                 kind,
@@ -1483,6 +1490,7 @@ fn update_lane_completion_outcomes(
                 subject_id: node.id.clone(),
                 task_id: Some(node.id.clone()),
                 agent_ids: Vec::new(),
+                executed_as: None,
                 status: RuntimeOutcomeStatus::Completed,
                 started_at: None,
                 finished_at: Some(event.timestamp),
@@ -1531,6 +1539,7 @@ fn update_declared_completion_outcome(
             subject_id: fact.task_id.clone(),
             task_id: Some(fact.task_id.clone()),
             agent_ids: Vec::new(),
+            executed_as: None,
             status: RuntimeOutcomeStatus::Completed,
             started_at: None,
             finished_at: Some(fact.completed_at),
@@ -1546,6 +1555,9 @@ fn update_declared_completion_outcome(
         .any(|agent| agent == &fact.agent_id)
     {
         outcome.agent_ids.push(fact.agent_id.clone());
+    }
+    if fact.executed_as.is_some() {
+        outcome.executed_as = fact.executed_as.clone();
     }
     outcome.status = RuntimeOutcomeStatus::Completed;
     outcome.finished_at = Some(fact.completed_at);

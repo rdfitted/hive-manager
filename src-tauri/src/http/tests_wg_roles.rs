@@ -20,24 +20,22 @@ use crate::events::EventBus;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::orchestrator::org_graph::composition::{
-    compose_context, lint_role_knowledge_hubs, render_composed_context, ContextBudget,
-    spawn_context_from_work_graph_task, ContextOrigin, SpawnContext,
+    compose_context, lint_role_knowledge_hubs, render_composed_context,
+    spawn_context_from_work_graph_task, ContextBudget, ContextOrigin, SpawnContext,
 };
 use crate::orchestrator::org_graph::definitions::{
-    resolve_role_definition, ResolvedRoleDefinition, RoleDefinitionSource,
-    RoleResolutionIssueKind,
+    resolve_role_definition, ResolvedRoleDefinition, RoleDefinitionSource, RoleResolutionIssueKind,
 };
 use crate::orchestrator::org_graph::{
     evaluator_role_definition, AuthorityScope, KnowledgeRef, KnowledgeSource, RoleDefinition,
 };
 use crate::orchestrator::work_graph::{
-    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
-    NodeStatus, TaskGraph, WorkEdge, WorkNode,
+    BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
+    TaskGraph, WorkEdge, WorkNode,
 };
 use crate::pty::{AgentConfig, PtyManager, WorkerRole};
 use crate::session::{
-    AuthStrategy, Session, SessionController, SessionState, SessionType,
-    DEFAULT_MAX_QA_ITERATIONS,
+    AuthStrategy, Session, SessionController, SessionState, SessionType, DEFAULT_MAX_QA_ITERATIONS,
 };
 use crate::storage::{ApplicationStateDb, QueueRepo, SessionStorage};
 use crate::templates::CellTemplate;
@@ -65,8 +63,7 @@ fn a11_cell_template_semantics_serde_round_trip() {
     };
 
     let encoded = serde_json::to_string(&template).expect("serialize CellTemplate");
-    let decoded: CellTemplate =
-        serde_json::from_str(&encoded).expect("deserialize CellTemplate");
+    let decoded: CellTemplate = serde_json::from_str(&encoded).expect("deserialize CellTemplate");
 
     assert_eq!(decoded, template);
     assert_eq!(decoded.knowledge_scope[0].priority, 100);
@@ -155,11 +152,7 @@ fn a13_empty_definition_preserves_spawn_prompt_bytes() {
                 "worker-1-task.md",
                 Some(&empty),
             ),
-            SessionController::polling_instructions_for_definition(
-                cli,
-                "worker-1-task.md",
-                None,
-            ),
+            SessionController::polling_instructions_for_definition(cli, "worker-1-task.md", None,),
             "an empty definition changed the emitted spawn prompt for {cli}"
         );
         let config = AgentConfig {
@@ -266,10 +259,7 @@ fn a14_reviewer_spawn_records_resolved_definition_and_version() {
     let project = tempfile::tempdir().expect("temp project");
     let session_id = "role-reviewer-spawn";
     let controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
-    controller.insert_test_session(role_test_session(
-        session_id,
-        project.path().to_path_buf(),
-    ));
+    controller.insert_test_session(role_test_session(session_id, project.path().to_path_buf()));
 
     let agent = controller
         .add_worker(
@@ -300,16 +290,24 @@ fn a14_reviewer_spawn_records_resolved_definition_and_version() {
         .find(|candidate| candidate.id == agent.id)
         .expect("stored reviewer agent");
     assert_eq!(stored.role_definition_id, agent.role_definition_id);
-    assert_eq!(stored.role_definition_version, agent.role_definition_version);
+    assert_eq!(
+        stored.role_definition_version,
+        agent.role_definition_version
+    );
     let persisted = SessionController::persisted_snapshot_for_test(
-        &controller.get_session(session_id).expect("session to archive"),
+        &controller
+            .get_session(session_id)
+            .expect("session to archive"),
     );
     let archived_agent = persisted
         .agents
         .iter()
         .find(|candidate| candidate.id == agent.id)
         .expect("persisted reviewer agent");
-    assert_eq!(archived_agent.role_definition_id.as_deref(), Some("reviewer"));
+    assert_eq!(
+        archived_agent.role_definition_id.as_deref(),
+        Some("reviewer")
+    );
     assert_eq!(archived_agent.role_definition_version, Some(1));
 }
 
@@ -348,14 +346,13 @@ fn a15_project_path_override_wins_without_mutating_institutional_definition() {
         project.path(),
         "fixture must fail if the resolver consults CWD"
     );
-    let resolved = resolve_role_definition(
-        project.path(),
-        Some(institutional.path()),
-        "reviewer",
-    );
+    let resolved = resolve_role_definition(project.path(), Some(institutional.path()), "reviewer");
     let definition = resolved.definition.expect("resolved reviewer");
 
-    assert_eq!(resolved.base_source, Some(RoleDefinitionSource::Institutional));
+    assert_eq!(
+        resolved.base_source,
+        Some(RoleDefinitionSource::Institutional)
+    );
     assert_eq!(
         resolved.applied_override.as_deref().map(PathBuf::from),
         Some(override_path.clone())
@@ -403,17 +400,16 @@ fn a33_semantically_invalid_project_override_retains_valid_base() {
     )
     .expect("write semantically invalid project override");
 
-    let resolved = resolve_role_definition(
-        project.path(),
-        Some(institutional.path()),
-        "reviewer",
-    );
+    let resolved = resolve_role_definition(project.path(), Some(institutional.path()), "reviewer");
     let definition = resolved
         .definition
         .as_ref()
         .expect("a rejected override must retain the valid base definition");
 
-    assert_eq!(resolved.base_source, Some(RoleDefinitionSource::Institutional));
+    assert_eq!(
+        resolved.base_source,
+        Some(RoleDefinitionSource::Institutional)
+    );
     assert_eq!(definition.id, "reviewer");
     assert_eq!(definition.version, 3);
     assert_eq!(definition.knowledge_scope[0].pointer, "review/base.md");
@@ -424,7 +420,9 @@ fn a33_semantically_invalid_project_override_retains_valid_base() {
     assert!(resolved.issues.iter().any(|issue| {
         issue.kind == RoleResolutionIssueKind::SourceUnreadable
             && PathBuf::from(&issue.source_ref) == override_path
-            && issue.detail.contains("declares role tester, expected reviewer")
+            && issue
+                .detail
+                .contains("declares role tester, expected reviewer")
     }));
     assert!(
         !resolved
@@ -587,7 +585,10 @@ fn a16_secondary_source_guards_reject_implicit_template_literals() {
     for (site, source) in [
         ("workers", include_str!("handlers/workers.rs")),
         ("planners", include_str!("handlers/planners.rs")),
-        ("coordination state", include_str!("../coordination/state.rs")),
+        (
+            "coordination state",
+            include_str!("../coordination/state.rs"),
+        ),
     ] {
         assert!(
             !source.contains("prompt_template: None"),
@@ -631,10 +632,7 @@ fn a17_overlapping_role_and_task_source_is_loaded_once_in_spawn_prompt() {
     context_node.expansion = Some(CompositeExpansion {
         template: "derived-project-context".to_string(),
         parameters: BTreeMap::from([
-            (
-                "source_ref".to_string(),
-                reference.pointer.clone(),
-            ),
+            ("source_ref".to_string(), reference.pointer.clone()),
             (
                 "summary".to_string(),
                 reference.summary.clone().expect("reference summary"),
