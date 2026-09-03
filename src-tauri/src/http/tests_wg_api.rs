@@ -14,6 +14,7 @@ use tower::ServiceExt;
 use crate::coordination::{HierarchyNode, InjectionManager, QueueManager, StateManager};
 use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
+use crate::http::handlers::workers::ExecutedAs;
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::archive::{
@@ -702,7 +703,10 @@ async fn live_view_preserves_unbacked_terminal_status_and_reports_provenance() {
         "the view projection must not feed persisted completion into readiness promotion"
     );
     assert_eq!(response["completion_provenance"]["plan-completed"], "plan");
-    assert_eq!(response["completion_provenance"]["queue-completed"], "queue");
+    assert_eq!(
+        response["completion_provenance"]["queue-completed"],
+        "queue"
+    );
     assert_eq!(
         response["lane_assignment"]["queue-completed"],
         json!({"kind":"role","value":"worker-queue-completed"})
@@ -717,9 +721,11 @@ async fn live_view_preserves_unbacked_terminal_status_and_reports_provenance() {
         .iter()
         .any(|omission| {
             omission["reason"] == "resolution_incomplete"
-                && omission["examples"]
-                    .as_array()
-                    .is_some_and(|examples| examples.iter().any(|example| example == "queue:plan-completed"))
+                && omission["examples"].as_array().is_some_and(|examples| {
+                    examples
+                        .iter()
+                        .any(|example| example == "queue:plan-completed")
+                })
         }));
 }
 
@@ -886,6 +892,7 @@ async fn archived_runtime_progress_uses_the_same_nullable_object_shape() {
             BTreeSet::from([
                 "agent_id",
                 "attempts",
+                "executed_as",
                 "finished_at",
                 "last_heartbeat_at",
                 "started_at",
@@ -895,6 +902,7 @@ async fn archived_runtime_progress_uses_the_same_nullable_object_shape() {
         assert!(progress["finished_at"].is_string());
         assert_eq!(progress["attempts"], 1);
         assert_eq!(progress["agent_id"], Value::Null);
+        assert_eq!(progress["executed_as"], Value::Null);
         assert_eq!(progress["last_heartbeat_at"], Value::Null);
     }
 }
@@ -929,10 +937,20 @@ async fn archived_progress_keeps_target_and_expansion_outcomes_distinct_in_any_o
     let review_finished = DateTime::<Utc>::from_timestamp(20, 0).expect("review finish");
     let task_started = DateTime::<Utc>::from_timestamp(30, 0).expect("task start");
     let task_finished = DateTime::<Utc>::from_timestamp(40, 0).expect("task finish");
+    let executed_as_json = json!({
+        "provider": "codex",
+        "tier": "high",
+        "model": "gpt-5.6-sol",
+        "flags": ["-c", "model_reasoning_effort=\"high\""],
+        "channel": "native",
+        "source": "node"
+    });
+    let executed_as: ExecutedAs = serde_json::from_value(executed_as_json.clone()).unwrap();
     let review_outcome = RuntimeOutcome {
         subject_id: "review-a".to_string(),
         task_id: Some("task-a".to_string()),
         agent_ids: vec!["agent-review".to_string()],
+        executed_as: None,
         status: RuntimeOutcomeStatus::Completed,
         started_at: Some(review_started),
         finished_at: Some(review_finished),
@@ -945,6 +963,7 @@ async fn archived_progress_keeps_target_and_expansion_outcomes_distinct_in_any_o
         subject_id: "task-a".to_string(),
         task_id: Some("task-a".to_string()),
         agent_ids: vec!["agent-task".to_string()],
+        executed_as: Some(executed_as),
         status: RuntimeOutcomeStatus::Completed,
         started_at: Some(task_started),
         finished_at: Some(task_finished),
@@ -1017,10 +1036,12 @@ async fn archived_progress_keeps_target_and_expansion_outcomes_distinct_in_any_o
             json!(["event:review-a"])
         );
         assert_eq!(task_progress["agent_id"], "agent-task", "{body}");
+        assert_eq!(task_progress["executed_as"], executed_as_json, "{body}");
         assert_eq!(task_progress["started_at"], json!(task_started), "{body}");
         assert_eq!(task_progress["finished_at"], json!(task_finished), "{body}");
         assert_eq!(review_progress["attempts"], 1, "{body}");
         assert_eq!(review_progress["agent_id"], "agent-review", "{body}");
+        assert_eq!(review_progress["executed_as"], Value::Null, "{body}");
         assert_eq!(
             review_progress["started_at"],
             json!(review_started),

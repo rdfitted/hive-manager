@@ -13,6 +13,7 @@ describe('NodeInspector', () => {
           id: 'T13',
           title: 'Build the node inspector',
           kind: 'task',
+          tier: 'medium',
           lane: 'wg-cards',
           status: 'running',
           contract: { inputs: [], outputs: [], acceptance: [] },
@@ -26,6 +27,28 @@ describe('NodeInspector', () => {
     expect(nodeInspectorSource).not.toMatch(/^\s*section \+ section \{/m);
   });
 
+  it('renders the planner-assigned tier as node metadata', () => {
+    render(NodeInspector, {
+      props: {
+        node: {
+          id: 'T14',
+          title: 'Expose task tier',
+          kind: 'task',
+          tier: 'critical',
+          lane: 'work-graph',
+          status: 'pending',
+          contract: { inputs: [], outputs: [], acceptance: [] },
+        },
+        dependencies: [],
+      },
+    });
+
+    const tierLabel = screen.getByText('Tier');
+    expect(tierLabel.tagName).toBe('DT');
+    expect(tierLabel.nextElementSibling?.tagName).toBe('DD');
+    expect(tierLabel.nextElementSibling?.textContent).toBe('critical');
+  });
+
   it('renders the full node contract and immediate dependencies', () => {
     render(NodeInspector, {
       props: {
@@ -33,6 +56,7 @@ describe('NodeInspector', () => {
           id: 'T13',
           title: 'Build the node inspector',
           kind: 'task',
+          tier: 'high',
           lane: 'wg-cards',
           status: 'running',
           contract: {
@@ -83,6 +107,7 @@ describe('NodeInspector', () => {
           id: 'T8',
           title: 'Expose runtime progress',
           kind: 'task',
+          tier: 'medium',
           lane: 'api',
           status: 'running',
           contract: { inputs: [], outputs: [], acceptance: [] },
@@ -114,6 +139,7 @@ describe('NodeInspector', () => {
           id: 'T4',
           title: 'Lane fan-out completion',
           kind: 'task',
+          tier: 'low',
           lane: 'role:P1',
           status: 'completed',
           contract: { inputs: [], outputs: [], acceptance: [] },
@@ -143,6 +169,7 @@ describe('NodeInspector', () => {
           id: 'context-1',
           title: 'Runtime context',
           kind: 'context',
+          tier: 'medium',
           lane: 'runtime',
           status: 'pending',
           contract: { inputs: [], outputs: [], acceptance: [] },
@@ -160,5 +187,45 @@ describe('NodeInspector', () => {
     expect(within(card).queryByRole('heading', { name: 'Acceptance' })).toBeNull();
     expect(within(card).getByText('No progress recorded')).toBeTruthy();
     expect(within(card).getByText('No immediate dependencies')).toBeTruthy();
+  });
+
+  it('renders the archived executed_as configuration as a read-only progress row', () => {
+    render(NodeInspector, {
+      props: {
+        node: {
+          id: 'T11',
+          title: 'Calibrate task tiers',
+          kind: 'task',
+          tier: 'high',
+          lane: 'retro',
+          status: 'completed',
+          contract: { inputs: [], outputs: [], acceptance: [] },
+        },
+        dependencies: [],
+        progress: {
+          started_at: '2026-09-02T14:00:00.000Z',
+          finished_at: '2026-09-02T14:03:00.000Z',
+          attempts: 1,
+          agent_id: 'worker-10',
+          last_heartbeat_at: '2026-09-02T14:02:30.000Z',
+          executed_as: {
+            provider: 'codex',
+            tier: 'high',
+            model: 'gpt-5.6-sol',
+            flags: ['-c', 'model_reasoning_effort="xhigh"'],
+            channel: 'native',
+            source: 'node',
+          },
+        },
+      },
+    });
+
+    const progressRegion = screen.getByRole('region', { name: 'Node progress' });
+    const label = within(progressRegion).getByText('Executed as');
+    expect(label.tagName).toBe('DT');
+    expect(label.nextElementSibling?.tagName).toBe('DD');
+    expect(label.nextElementSibling?.textContent).toBe(
+      'Provider: codex · Tier: high · Model: gpt-5.6-sol · Channel: native · Source: node · Flags: -c model_reasoning_effort="xhigh"'
+    );
   });
 });

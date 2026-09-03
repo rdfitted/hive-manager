@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::coordination::queue_manager::CompletionProvenance;
 use crate::coordination::{HierarchyNode, StateManager};
 use crate::http::error::ApiError;
+use crate::http::handlers::workers::ExecutedAs;
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::archive::{list_archives, read_archive, WorkGraphArchive};
 use crate::orchestrator::work_graph::completion_ledger::{
@@ -19,6 +20,7 @@ use crate::orchestrator::work_graph::divergence::{compute_divergence, Divergence
 use crate::orchestrator::work_graph::runtime::{
     mutation_log_snapshot, CompletionEvidenceClass, RuntimeOutcome,
 };
+use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::orchestrator::work_graph::{
     topological_sort, BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract,
     NodeKind, NodeStatus, TaskGraph, TaskId, WorkGraphOmission, WorkGraphOmissionReason,
@@ -72,6 +74,7 @@ pub struct WorkGraphNodeProgress {
     pub finished_at: Option<DateTime<Utc>>,
     pub attempts: usize,
     pub agent_id: Option<String>,
+    pub(crate) executed_as: Option<ExecutedAs>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
@@ -80,6 +83,7 @@ pub struct WorkGraphNodeResponse {
     pub id: TaskId,
     pub title: String,
     pub kind: NodeKind,
+    pub tier: TaskTier,
     pub status: NodeStatus,
     pub lane: BindingRef,
     pub contract: NodeContract,
@@ -411,6 +415,7 @@ fn node_progress_from_outcome(outcome: &RuntimeOutcome) -> WorkGraphNodeProgress
         finished_at: outcome.finished_at,
         attempts: outcome.attempt_count,
         agent_id: outcome.agent_ids.last().cloned(),
+        executed_as: outcome.executed_as.clone(),
         last_heartbeat_at: None,
     }
 }
@@ -487,6 +492,7 @@ fn graph_from_live_state(
                     finished_at: Some(fact.completed_at),
                     attempts: 1,
                     agent_id: Some(fact.agent_id),
+                    executed_as: fact.executed_as,
                     last_heartbeat_at: (fact.provenance == NodeCompletionProvenance::Heartbeat)
                         .then_some(fact.completed_at),
                 },
@@ -555,6 +561,7 @@ fn merge_declared_progress(
                 observed.started_at = observed.started_at.or(declared.started_at);
                 observed.finished_at = declared.finished_at.or(observed.finished_at);
                 observed.agent_id = declared.agent_id.or(observed.agent_id.take());
+                observed.executed_as = declared.executed_as.or(observed.executed_as.take());
                 observed.last_heartbeat_at =
                     observed.last_heartbeat_at.or(declared.last_heartbeat_at);
             }
@@ -622,6 +629,7 @@ fn live_progress_by_node(
                     finished_at: None,
                     attempts,
                     agent_id,
+                    executed_as: None,
                     last_heartbeat_at,
                 },
             ))
@@ -655,6 +663,7 @@ fn project_graph(
             id: node.id.clone(),
             title: node.title.clone(),
             kind: node.kind,
+            tier: node.tier,
             status: node.status,
             lane: node.binding.clone(),
             contract: node.contract.clone(),
@@ -864,6 +873,7 @@ mod tests {
                 finished_at: None,
                 attempts: 4,
                 agent_id: Some("queue-worker".to_string()),
+                executed_as: None,
                 last_heartbeat_at: Some(observed_heartbeat_at),
             },
         )]);
@@ -874,6 +884,7 @@ mod tests {
                 finished_at: Some(declared_finished_at),
                 attempts: 1,
                 agent_id: Some("completing-agent".to_string()),
+                executed_as: None,
                 last_heartbeat_at: None,
             },
         )]);

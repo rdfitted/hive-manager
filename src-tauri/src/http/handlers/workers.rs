@@ -16,14 +16,18 @@ use super::{validate_cli, validate_session_id};
 use crate::cli::CliRegistry;
 use crate::coordination::queue_manager::{ClaimOutcome, GuardedRelease};
 use crate::coordination::{ReleaseAfterFailure, ReleaseOutcome, StateManager, WorkerStateInfo};
-use crate::domain::WorkspaceStrategy;
+use crate::domain::{TierPolicy, WorkspaceStrategy};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
 use crate::orchestrator::org_graph::definitions::role_prompt_template;
+use crate::orchestrator::work_graph::review::MULTI_LENS_REVIEW_TEMPLATE;
+use crate::orchestrator::work_graph::schema::TaskTier;
+use crate::orchestrator::work_graph::{NodeKind, TaskGraph};
 use crate::pty::{AgentConfig, AgentRole, AgentStatus, WorkerRole};
-use crate::session::{AddWorkerError, AddWorkerRejectionReason, SessionController};
+use crate::session::{AddWorkerError, AddWorkerRejectionReason, Session, SessionController};
 use crate::storage::queue::{
-    QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate, QueueStatus,
+    QueueConflictAction, QueueConflictCoverage, QueueConflictRow, QueueResolutionUpdate,
+    QueueStatus,
 };
 
 #[cfg(test)]
@@ -119,6 +123,255 @@ struct QueueSchedulingFacts {
     reconcile_conflict_task_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecutionChannel {
+    Hive,
+    Native,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TierResolutionSource {
+    Node,
+    Fallback,
+    Override,
+}
+
+/// Structured record of the provider-native configuration selected for this spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct ExecutedAs {
+    pub(crate) provider: String,
+    pub(crate) tier: TaskTier,
+    pub(crate) model: String,
+    pub(crate) flags: Vec<String>,
+    pub(crate) channel: ExecutionChannel,
+    pub(crate) source: TierResolutionSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWorkerExecution {
+    executed_as: ExecutedAs,
+    parent_tier: TaskTier,
+}
+
+fn parent_tier(
+    parent_role: &AgentRole,
+    graph: Option<&TaskGraph>,
+    parent_task_id: Option<&str>,
+) -> (TaskTier, TierResolutionSource) {
+    if matches!(
+        parent_role,
+        AgentRole::Queen | AgentRole::Planner { .. } | AgentRole::Prince
+    ) {
+        return (TaskTier::Critical, TierResolutionSource::Node);
+    }
+
+    if let Some(tier) = parent_task_id.and_then(|task_id| {
+        graph?
+            .nodes
+            .iter()
+            .find(|node| node.id == task_id)
+            .map(|node| node.tier)
+    }) {
+        return (tier, TierResolutionSource::Node);
+    }
+
+    (TaskTier::Medium, TierResolutionSource::Fallback)
+}
+
+fn task_tier(
+    policy: &TierPolicy,
+    graph: Option<&TaskGraph>,
+    task_id: Option<&str>,
+) -> (TaskTier, TierResolutionSource) {
+    let Some(node) = task_id.and_then(|task_id| {
+        graph?
+            .nodes
+            .iter()
+            .find(|candidate| candidate.id == task_id)
+    }) else {
+        return (TaskTier::Medium, TierResolutionSource::Fallback);
+    };
+
+    let is_review_lens = node.kind == NodeKind::Review
+        && node
+            .expansion
+            .as_ref()
+            .is_some_and(|expansion| expansion.template == MULTI_LENS_REVIEW_TEMPLATE);
+    if !is_review_lens {
+        return (node.tier, TierResolutionSource::Node);
+    }
+
+    let target = node
+        .expansion
+        .as_ref()
+        .and_then(|expansion| expansion.parameters.get("target"))
+        .and_then(|target_id| {
+            graph?
+                .nodes
+                .iter()
+                .find(|candidate| candidate.id == target_id.as_str())
+        });
+    match target {
+        Some(target) => (
+            std::cmp::max(target.tier, policy.review_floor),
+            TierResolutionSource::Node,
+        ),
+        None => (policy.review_floor, TierResolutionSource::Fallback),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_worker_execution(
+    policy: &TierPolicy,
+    provider: &str,
+    parent_role: &AgentRole,
+    graph: Option<&TaskGraph>,
+    parent_task_id: Option<&str>,
+    task_id: Option<&str>,
+    requested_model: Option<&str>,
+    requested_flags: Option<&[String]>,
+) -> Option<ResolvedWorkerExecution> {
+    if !policy.enabled {
+        return None;
+    }
+
+    let (parent_tier, parent_source) = parent_tier(parent_role, graph, parent_task_id);
+    let (tier, tier_source) = task_tier(policy, graph, task_id);
+    let resolved = policy.ladder.get(provider)?.resolve_tier(provider, tier)?;
+    let source = if requested_model.is_some() || requested_flags.is_some() {
+        TierResolutionSource::Override
+    } else if parent_source == TierResolutionSource::Fallback
+        || tier_source == TierResolutionSource::Fallback
+    {
+        TierResolutionSource::Fallback
+    } else {
+        tier_source
+    };
+
+    Some(ResolvedWorkerExecution {
+        executed_as: ExecutedAs {
+            provider: provider.to_string(),
+            tier,
+            model: requested_model.unwrap_or(&resolved.model).to_string(),
+            flags: requested_flags
+                .map(<[String]>::to_vec)
+                .unwrap_or(resolved.flags),
+            channel: ExecutionChannel::Hive,
+            source,
+        },
+        parent_tier,
+    })
+}
+
+fn read_tier_graph(state: &AppState, session_id: &str) -> Option<TaskGraph> {
+    let state_manager = StateManager::new(state.storage.session_dir(session_id));
+    match state_manager.read_work_graph() {
+        Ok(Some(graph)) => Some(graph),
+        Ok(None) => match state_manager.read_graph_composition_state() {
+            Ok(Some(composition)) => Some(composition.graph),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    "Failed to read graph composition for tier routing: {error}"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                "Failed to read work graph for tier routing: {error}"
+            );
+            match state_manager.read_graph_composition_state() {
+                Ok(Some(composition)) => Some(composition.graph),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        "Failed to read graph composition fallback for tier routing: {error}"
+                    );
+                    None
+                }
+            }
+        }
+    }
+}
+
+fn parent_plan_task_id(state: &AppState, session_id: &str, parent_id: &str) -> Option<String> {
+    let queue_task_id = match state.queue_manager.queue_snapshot(session_id) {
+        Ok(snapshot) => snapshot
+            .rows
+            .iter()
+            .rev()
+            .filter(|row| row.worker_id == parent_id && row.task_id.is_some())
+            .next()
+            .and_then(|row| row.task_id.clone()),
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                parent_id,
+                "Failed to read parent queue binding for tier routing: {error}"
+            );
+            None
+        }
+    };
+    if queue_task_id.is_some() {
+        return queue_task_id;
+    }
+
+    let state_manager = StateManager::new(state.storage.session_dir(session_id));
+    match state_manager.get_worker_assignment(parent_id) {
+        Ok(Some(assignment)) => assignment.plan_task_id,
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                parent_id,
+                "Failed to read parent assignment binding for tier routing: {error}"
+            );
+            None
+        }
+    }
+}
+
+fn resolve_worker_execution_for_request(
+    state: &AppState,
+    session: &Session,
+    parent_id: Option<&str>,
+    task_id: Option<&str>,
+    requested_model: Option<&str>,
+    requested_flags: Option<&[String]>,
+) -> Option<ResolvedWorkerExecution> {
+    if !session.execution_policy.tier_policy.enabled {
+        return None;
+    }
+
+    let actual_parent_id = parent_id
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{}-queen", session.id));
+    let parent = session
+        .agents
+        .iter()
+        .find(|agent| agent.id == actual_parent_id)?;
+    let provider = parent.config.cli.as_str();
+    let parent_task_id = parent_plan_task_id(state, &session.id, &actual_parent_id);
+    let graph = read_tier_graph(state, &session.id);
+
+    resolve_worker_execution(
+        &session.execution_policy.tier_policy,
+        provider,
+        &parent.role,
+        graph.as_ref(),
+        parent_task_id.as_deref(),
+        task_id,
+        requested_model,
+        requested_flags,
+    )
+}
+
 fn plan_task_id_from_task_file(path: &FsPath) -> Option<String> {
     let task_file = std::fs::read_to_string(path).ok()?;
     let (_, after_heading) = task_file.split_once("## Plan Task ID")?;
@@ -209,7 +462,9 @@ fn queue_scheduling_facts(
         (Vec::new(), QueueResolutionUpdate::Preserve)
     };
 
-    let (conflicts, conflict_coverage, reconcile_conflict_task_id) = if let Some(composition) = composition.as_ref() {
+    let (conflicts, conflict_coverage, reconcile_conflict_task_id) = if let Some(composition) =
+        composition.as_ref()
+    {
         use crate::orchestrator::work_graph::codegraph::{
             conflicting_ready_tasks, ConflictDetectionState, ParallelConflictAction,
         };
@@ -226,11 +481,8 @@ fn queue_scheduling_facts(
         }
         let active_task_ids =
             crate::orchestrator::work_graph::review::checkpoint_aware_claimable_nodes(&projected);
-        let report = conflicting_ready_tasks(
-            &projected,
-            &composition.codegraph,
-            workspace_strategy,
-        );
+        let report =
+            conflicting_ready_tasks(&projected, &composition.codegraph, workspace_strategy);
         let globally_unresolved = &composition.codegraph.unresolved_task_ids;
         let coverage = QueueConflictCoverage {
             state: match (report.state, globally_unresolved.is_empty()) {
@@ -254,9 +506,7 @@ fn queue_scheduling_facts(
             .flat_map(|decision| {
                 let action = match decision.action {
                     ParallelConflictAction::Serialize => QueueConflictAction::Serialize,
-                    ParallelConflictAction::WorktreeIsolate => {
-                        QueueConflictAction::WorktreeIsolate
-                    }
+                    ParallelConflictAction::WorktreeIsolate => QueueConflictAction::WorktreeIsolate,
                 };
                 let forward = QueueConflictRow {
                     session_id: session_id.to_string(),
@@ -324,6 +574,11 @@ fn add_worker_error_to_api(err: AddWorkerError) -> ApiError {
                     "current_state".to_string(),
                     json!(rejection.current_state.clone()),
                 );
+                ApiError::conflict_with_details(rejection.error, details)
+            }
+            AddWorkerRejectionReason::TierExceedsDispatchCeiling => {
+                let mut details: HashMap<String, Value> = HashMap::new();
+                details.insert("reason".to_string(), json!("tier_exceeds_dispatch_ceiling"));
                 ApiError::conflict_with_details(rejection.error, details)
             }
             _ => ApiError::bad_request(rejection.error),
@@ -415,22 +670,43 @@ pub async fn add_worker(
         None => true,
         Some(requested) => requested == principal_defaults.cli.as_str(),
     };
-    let cli = requested_cli.unwrap_or_else(|| principal_defaults.cli.clone());
+    let mut cli = requested_cli.unwrap_or_else(|| principal_defaults.cli.clone());
     validate_cli(&cli)?;
-    let model = requested_model.or_else(|| {
+    let session = {
+        let controller = state.session_controller.read();
+        controller.get_session(&session_id)
+    }
+    .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
+    let tier_execution = resolve_worker_execution_for_request(
+        &state,
+        &session,
+        parent_id.as_deref(),
+        task_id.as_deref(),
+        requested_model.as_deref(),
+        requested_flags.as_deref(),
+    );
+    let mut model = requested_model.clone().or_else(|| {
         if inherits_principal_defaults {
             principal_defaults.model.clone()
         } else {
             CliRegistry::default_model(&cli).map(ToString::to_string)
         }
     });
-    let flags = requested_flags.unwrap_or_else(|| {
+    let mut flags = requested_flags.clone().unwrap_or_else(|| {
         if inherits_principal_defaults {
             principal_defaults.flags.clone()
         } else {
             Vec::new()
         }
     });
+    if let Some(execution) = tier_execution.as_ref() {
+        cli = execution.executed_as.provider.clone();
+        model = Some(execution.executed_as.model.clone());
+        flags = execution.executed_as.flags.clone();
+    }
+    let dispatch_tiers = tier_execution
+        .as_ref()
+        .map(|execution| (execution.parent_tier, execution.executed_as.tier));
 
     // Build role
     let role_label = label.unwrap_or_else(|| {
@@ -478,7 +754,7 @@ pub async fn add_worker(
             .execution_policy
             .workspace_strategy;
         let reservation = controller
-            .reserve_add_worker(&session_id, &role, parent_id.as_deref())
+            .reserve_add_worker(&session_id, &role, parent_id.as_deref(), dispatch_tiers)
             .map_err(add_worker_error_to_api)?;
         (reservation, workspace_strategy)
     };
@@ -507,7 +783,7 @@ pub async fn add_worker(
     } else {
         predicted_worker_id.clone()
     };
-    let payload = json!({
+    let mut payload = json!({
         "role_type": role_type,
         "cli": cli,
         "model": config.model,
@@ -516,16 +792,15 @@ pub async fn add_worker(
         "initial_task": initial_task,
         "task_id": task_id,
     });
+    if let Some(execution) = tier_execution.as_ref() {
+        payload["executed_as"] = json!(execution.executed_as);
+    }
 
     // Persisted graph state is the only dependency/conflict source. These facts are derived
     // before enqueue but never authorize a claim: the row and all materialized facts commit in
     // one transaction, then the single SQL UPDATE remains the sole decision boundary.
-    let scheduling = queue_scheduling_facts(
-        &state,
-        &session_id,
-        task_id.as_deref(),
-        workspace_strategy,
-    )?;
+    let scheduling =
+        queue_scheduling_facts(&state, &session_id, task_id.as_deref(), workspace_strategy)?;
 
     state
         .queue_manager
@@ -637,6 +912,7 @@ pub async fn add_worker(
             parent_id,
             Some(reservation.index),
             task_id.as_deref(),
+            dispatch_tiers,
         )
     };
 
@@ -646,11 +922,10 @@ pub async fn add_worker(
             // exact epoch/worker, then clear its in-process spawn reservation. A failed handoff
             // retains the marker (fail closed); returning the already-live worker is safer than
             // turning a diagnostic/storage race into an operator retry and double spawn.
-            match state.queue_manager.complete_spawn_handoff(
-                &queue_id,
-                epoch,
-                &predicted_worker_id,
-            ) {
+            match state
+                .queue_manager
+                .complete_spawn_handoff(&queue_id, epoch, &predicted_worker_id)
+            {
                 Ok(true) => {}
                 Ok(false) => tracing::error!(
                     queue_id = %queue_id,
@@ -740,8 +1015,8 @@ pub async fn add_worker(
         // output BEFORE killing: kill() drops the session, and with it the only record of
         // why the CLI died.
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let cli_output = { state.pty_manager.read().recent_output(&agent_info.id) }
-            .unwrap_or_default();
+        let cli_output =
+            { state.pty_manager.read().recent_output(&agent_info.id) }.unwrap_or_default();
         {
             let _ = state.pty_manager.read().kill(&agent_info.id);
         }
@@ -1112,9 +1387,9 @@ pub async fn list_workers(
         } else {
             None
         };
-        if let Some(task_id) = released_task_id.filter(|_| {
-            !state.pty_manager.read().is_alive(&agent.id)
-        }) {
+        if let Some(task_id) =
+            released_task_id.filter(|_| !state.pty_manager.read().is_alive(&agent.id))
+        {
             tracing::warn!(
                 session_id = %session_id,
                 worker_id = %agent.id,
@@ -1137,4 +1412,460 @@ pub async fn list_workers(
         "workers": workers,
         "count": workers.len()
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coordination::InjectionManager;
+    use crate::domain::HiveExecutionPolicy;
+    use crate::events::EventBus;
+    use crate::orchestrator::work_graph::{
+        BindingRef, CompositeExpansion, NodeContract, NodeStatus, WorkNode,
+    };
+    use crate::pty::{AgentStatus, PtyManager};
+    use crate::session::{AgentInfo, AuthStrategy, SessionState, SessionType};
+    use crate::storage::{ApplicationStateDb, QueueRepo, SessionStorage};
+    use chrono::Utc;
+    use parking_lot::RwLock;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn enabled_policy() -> TierPolicy {
+        let ladder = crate::cli::tier_ladder::embedded_resolved_tier_ladder();
+        let mut policy = TierPolicy {
+            enabled: true,
+            ..TierPolicy::default()
+        };
+        policy.ladder.insert("claude".to_string(), ladder.clone());
+        policy.ladder.insert("codex".to_string(), ladder);
+        policy
+    }
+
+    fn node(id: &str, kind: NodeKind, tier: TaskTier) -> WorkNode {
+        WorkNode::new(
+            id,
+            kind,
+            id,
+            NodeContract::default(),
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+        )
+        .with_tier(tier)
+    }
+
+    fn worker_parent() -> AgentRole {
+        AgentRole::Worker {
+            index: 1,
+            parent: Some("session-queen".to_string()),
+        }
+    }
+
+    fn test_app_state() -> (TempDir, Arc<AppState>) {
+        let directory = TempDir::new().unwrap();
+        let storage =
+            Arc::new(SessionStorage::new_with_base(directory.path().to_path_buf()).unwrap());
+        let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
+        let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+        let session_controller = Arc::new(RwLock::new(SessionController::new(Arc::clone(
+            &pty_manager,
+        ))));
+        session_controller.write().set_storage(Arc::clone(&storage));
+        let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
+            Arc::clone(&pty_manager),
+            SessionStorage::new_with_base(directory.path().to_path_buf()).unwrap(),
+        )));
+        let event_bus = EventBus::new(storage.base_dir().clone());
+        let app_state_db = Arc::new(ApplicationStateDb::open(storage.base_dir()).unwrap());
+        let queue_repo = Arc::new(QueueRepo::new(Arc::clone(&app_state_db)));
+        queue_repo.ensure_schema().unwrap();
+        let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+            queue_repo,
+            event_bus.clone(),
+        ));
+        let state = Arc::new(AppState::new(
+            config,
+            pty_manager,
+            session_controller,
+            injection_manager,
+            storage,
+            event_bus,
+            app_state_db,
+            queue_manager,
+            None,
+        ));
+        (directory, state)
+    }
+
+    #[tokio::test]
+    async fn parent_binding_prefers_queue_then_falls_back_to_assignment() {
+        let (_directory, state) = test_app_state();
+        let session_id = "tier-parent-binding";
+        let state_manager = StateManager::new(state.storage.session_dir(session_id));
+        state_manager
+            .record_assignment(
+                "queue-parent",
+                "assignment",
+                Some("assignment-task".to_string()),
+            )
+            .unwrap();
+        state_manager
+            .record_assignment(
+                "assignment-parent",
+                "assignment",
+                Some("fallback-task".to_string()),
+            )
+            .unwrap();
+        state
+            .queue_manager
+            .enqueue_worker(
+                "queue-row",
+                session_id,
+                "queue-parent",
+                "backend",
+                "codex",
+                json!({}),
+                Some("queue-task".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            parent_plan_task_id(&state, session_id, "queue-parent").as_deref(),
+            Some("queue-task")
+        );
+        assert_eq!(
+            parent_plan_task_id(&state, session_id, "assignment-parent").as_deref(),
+            Some("fallback-task")
+        );
+    }
+
+    #[test]
+    fn codex_low_node_resolves_terra_with_medium_effort() {
+        let graph = TaskGraph::new(
+            vec![
+                node("parent", NodeKind::Task, TaskTier::Medium),
+                node("target", NodeKind::Task, TaskTier::Low),
+            ],
+            Vec::new(),
+        );
+        let resolved = resolve_worker_execution(
+            &enabled_policy(),
+            "codex",
+            &worker_parent(),
+            Some(&graph),
+            Some("parent"),
+            Some("target"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.executed_as.tier, TaskTier::Low);
+        assert_eq!(resolved.executed_as.model, "gpt-5.6-terra");
+        assert_eq!(
+            resolved.executed_as.flags,
+            ["-c", "model_reasoning_effort=\"medium\""]
+        );
+        assert_eq!(resolved.executed_as.source, TierResolutionSource::Node);
+    }
+
+    #[test]
+    fn claude_low_node_resolves_haiku() {
+        let graph = TaskGraph::new(
+            vec![
+                node("parent", NodeKind::Task, TaskTier::Medium),
+                node("target", NodeKind::Task, TaskTier::Low),
+            ],
+            Vec::new(),
+        );
+        let resolved = resolve_worker_execution(
+            &enabled_policy(),
+            "claude",
+            &worker_parent(),
+            Some(&graph),
+            Some("parent"),
+            Some("target"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.executed_as.model, "claude-haiku-4-5");
+        assert!(resolved.executed_as.flags.is_empty());
+    }
+
+    #[test]
+    fn unsupported_provider_and_disabled_policy_are_no_ops() {
+        let graph = TaskGraph::new(
+            vec![node("target", NodeKind::Task, TaskTier::Low)],
+            Vec::new(),
+        );
+        let mut unsupported = enabled_policy();
+        unsupported.ladder.insert(
+            "droid".to_string(),
+            crate::cli::tier_ladder::embedded_resolved_tier_ladder(),
+        );
+        assert!(resolve_worker_execution(
+            &unsupported,
+            "droid",
+            &AgentRole::Queen,
+            Some(&graph),
+            None,
+            Some("target"),
+            None,
+            None,
+        )
+        .is_none());
+
+        let disabled = TierPolicy::default();
+        assert!(resolve_worker_execution(
+            &disabled,
+            "codex",
+            &AgentRole::Queen,
+            Some(&graph),
+            None,
+            Some("target"),
+            None,
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn orchestration_parent_is_critical_and_unbound_coding_parent_records_fallback() {
+        let graph = TaskGraph::new(
+            vec![
+                node("parent", NodeKind::Task, TaskTier::Low),
+                node("target", NodeKind::Task, TaskTier::Low),
+            ],
+            Vec::new(),
+        );
+        let orchestration = resolve_worker_execution(
+            &enabled_policy(),
+            "codex",
+            &AgentRole::Planner { index: 1 },
+            Some(&graph),
+            Some("parent"),
+            Some("target"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(orchestration.parent_tier, TaskTier::Critical);
+        assert_eq!(orchestration.executed_as.source, TierResolutionSource::Node);
+
+        let coding = resolve_worker_execution(
+            &enabled_policy(),
+            "codex",
+            &worker_parent(),
+            Some(&graph),
+            Some("missing-parent"),
+            Some("target"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(coding.parent_tier, TaskTier::Medium);
+        assert_eq!(coding.executed_as.source, TierResolutionSource::Fallback);
+    }
+
+    #[test]
+    fn review_lens_uses_target_tier_and_review_floor() {
+        let mut review = node("review", NodeKind::Review, TaskTier::Medium);
+        review.expansion = Some(CompositeExpansion {
+            template: MULTI_LENS_REVIEW_TEMPLATE.to_string(),
+            parameters: BTreeMap::from([("target".to_string(), "target".to_string())]),
+        });
+        let graph = TaskGraph::new(
+            vec![
+                node("parent", NodeKind::Task, TaskTier::Critical),
+                node("target", NodeKind::Task, TaskTier::Low),
+                review,
+            ],
+            Vec::new(),
+        );
+        let resolved = resolve_worker_execution(
+            &enabled_policy(),
+            "codex",
+            &worker_parent(),
+            Some(&graph),
+            Some("parent"),
+            Some("review"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.executed_as.tier, TaskTier::High);
+        assert_eq!(resolved.executed_as.model, "gpt-5.6-sol");
+        assert_eq!(
+            resolved.executed_as.flags,
+            ["-c", "model_reasoning_effort=\"xhigh\""]
+        );
+        assert_eq!(resolved.executed_as.source, TierResolutionSource::Node);
+    }
+
+    #[test]
+    fn dangling_review_target_uses_floor_and_records_fallback() {
+        let mut review = node("review", NodeKind::Review, TaskTier::Low);
+        review.expansion = Some(CompositeExpansion {
+            template: MULTI_LENS_REVIEW_TEMPLATE.to_string(),
+            parameters: BTreeMap::from([("target".to_string(), "missing".to_string())]),
+        });
+        let graph = TaskGraph::new(
+            vec![node("parent", NodeKind::Task, TaskTier::Critical), review],
+            Vec::new(),
+        );
+        let resolved = resolve_worker_execution(
+            &enabled_policy(),
+            "codex",
+            &worker_parent(),
+            Some(&graph),
+            Some("parent"),
+            Some("review"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.executed_as.tier, TaskTier::High);
+        assert_eq!(resolved.executed_as.source, TierResolutionSource::Fallback);
+    }
+
+    #[test]
+    fn explicit_model_and_flags_win_and_record_override() {
+        let graph = TaskGraph::new(
+            vec![
+                node("parent", NodeKind::Task, TaskTier::High),
+                node("target", NodeKind::Task, TaskTier::Low),
+            ],
+            Vec::new(),
+        );
+        let flags = vec!["--custom".to_string()];
+        let resolved = resolve_worker_execution(
+            &enabled_policy(),
+            "codex",
+            &worker_parent(),
+            Some(&graph),
+            Some("parent"),
+            Some("target"),
+            Some("requested-model"),
+            Some(&flags),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.executed_as.model, "requested-model");
+        assert_eq!(resolved.executed_as.flags, flags);
+        assert_eq!(resolved.executed_as.source, TierResolutionSource::Override);
+    }
+
+    fn ceiling_session(enabled: bool) -> Session {
+        let now = Utc::now();
+        let mut execution_policy = HiveExecutionPolicy::default();
+        execution_policy.tier_policy.enabled = enabled;
+        Session {
+            id: "session".to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Hive { worker_count: 1 },
+            project_path: PathBuf::from("."),
+            state: SessionState::Running,
+            created_at: now,
+            last_activity_at: now,
+            agents: vec![AgentInfo {
+                id: "parent".to_string(),
+                role: worker_parent(),
+                status: AgentStatus::Running,
+                config: AgentConfig {
+                    cli: "codex".to_string(),
+                    ..AgentConfig::default()
+                },
+                parent_id: Some("session-queen".to_string()),
+                role_definition_id: None,
+                role_definition_version: None,
+                commit_sha: None,
+                base_commit_sha: None,
+            }],
+            default_cli: "codex".to_string(),
+            default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy,
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
+            no_git: false,
+            resume_report: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_ceiling_rejection_maps_to_409() {
+        let rejection = SessionController::check_add_worker_preconditions(
+            &ceiling_session(true),
+            &WorkerRole::default(),
+            Some("parent"),
+            Some((TaskTier::Medium, TaskTier::High)),
+        )
+        .unwrap_err();
+        let error = add_worker_error_to_api(AddWorkerError::Rejected(rejection));
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(
+            error.details.as_ref().unwrap()["reason"],
+            "tier_exceeds_dispatch_ceiling"
+        );
+    }
+
+    #[test]
+    fn disabled_policy_ignores_dispatch_tier_tuple() {
+        let mut session = ceiling_session(false);
+        session.agents[0].role = AgentRole::Queen;
+        assert!(SessionController::check_add_worker_preconditions(
+            &session,
+            &WorkerRole::default(),
+            Some("parent"),
+            Some((TaskTier::Medium, TaskTier::High)),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn disabled_policy_preserves_legacy_worker_parent_rejection() {
+        let rejection = SessionController::check_add_worker_preconditions(
+            &ceiling_session(false),
+            &WorkerRole::default(),
+            Some("parent"),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            rejection.reason,
+            AddWorkerRejectionReason::ParentCannotParent
+        );
+    }
+
+    #[test]
+    fn worker_parent_requires_resolved_dispatch_context() {
+        let rejection = SessionController::check_add_worker_preconditions(
+            &ceiling_session(true),
+            &WorkerRole::default(),
+            Some("parent"),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            rejection.reason,
+            AddWorkerRejectionReason::ParentCannotParent
+        );
+    }
 }

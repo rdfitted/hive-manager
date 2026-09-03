@@ -1,10 +1,10 @@
+use crate::cli::health as cli_health;
 use crate::http::handlers::{
     actions, agents, application_state, artifacts, cells, conversations, evaluator, events, health,
     heartbeats, inject, knowledge, learnings, planners, pty_buffer, queue, resolver, session_files,
     sessions, templates, work_graph, workers,
 };
 use crate::http::state::AppState;
-use crate::cli::health as cli_health;
 use axum::{
     body::Body,
     http::{header::ORIGIN, HeaderValue, Request, StatusCode},
@@ -52,6 +52,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health::health_check))
         .route("/api/cli-health", get(cli_health::get_cli_health_http))
+        .route("/api/tier-ladder", get(cli_health::get_tier_ladder_http))
         // Unified action registry surface (the future agent/MCP entrypoint).
         // GET lists every action + schema; POST dispatches any action (caller=Http).
         .route("/api/actions", get(actions::list_actions))

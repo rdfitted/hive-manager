@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::event::{Event, EventType, Severity};
 use crate::events::EventBus;
+use crate::http::handlers::workers::ExecutedAs;
 use crate::orchestrator::work_graph::completion_ledger::{
     append_node_completion_facts, NodeCompletionFact, NodeCompletionProvenance,
 };
@@ -397,14 +398,8 @@ impl QueueManager {
         };
         self.repo
             .enqueue_with_dependencies(&row, prerequisite_task_ids)?;
-        self.emit(
-            session_id,
-            worker_id,
-            row.task_id.as_deref(),
-            EventType::WorkerQueued,
-            Severity::Info,
-        )
-        .await;
+        self.emit_queued(session_id, worker_id, row.task_id.as_deref(), &row.payload)
+            .await;
         Ok(())
     }
 
@@ -453,14 +448,8 @@ impl QueueManager {
             conflict_coverage,
             reconcile_conflict_task_id,
         )?;
-        self.emit(
-            session_id,
-            worker_id,
-            row.task_id.as_deref(),
-            EventType::WorkerQueued,
-            Severity::Info,
-        )
-        .await;
+        self.emit_queued(session_id, worker_id, row.task_id.as_deref(), &row.payload)
+            .await;
         Ok(())
     }
 
@@ -909,14 +898,31 @@ impl QueueManager {
         if status == "completed" {
             if let Some(row_id) = updated_row_id.as_deref() {
                 let completion = self.repo.get_row(row_id)?.and_then(|row| {
+                    let executed_as = row.payload.get("executed_as").and_then(|value| {
+                        match serde_json::from_value::<ExecutedAs>(value.clone()) {
+                            Ok(executed_as) => Some(executed_as),
+                            Err(error) => {
+                                tracing::warn!(
+                                    queue_row_id = %row.id,
+                                    session_id = %row.session_id,
+                                    "Omitting malformed executed_as from completion fact: {error}"
+                                );
+                                None
+                            }
+                        }
+                    });
                     row.task_id.map(|task_id| {
+                        let fact = NodeCompletionFact::new(
+                            task_id,
+                            row.worker_id,
+                            NodeCompletionProvenance::QueueFinalize,
+                        );
                         (
                             row.session_id,
-                            NodeCompletionFact::new(
-                                task_id,
-                                row.worker_id,
-                                NodeCompletionProvenance::QueueFinalize,
-                            ),
+                            match executed_as {
+                                Some(executed_as) => fact.with_executed_as(executed_as),
+                                None => fact,
+                            },
                         )
                     })
                 });
@@ -1192,6 +1198,24 @@ impl QueueManager {
     }
 
     /// Publish a queue lifecycle event AFTER the DB commit.
+    async fn emit_queued(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        task_id: Option<&str>,
+        queue_payload: &serde_json::Value,
+    ) {
+        self.emit_with_execution(
+            session_id,
+            worker_id,
+            task_id,
+            EventType::WorkerQueued,
+            Severity::Info,
+            queue_payload.get("executed_as"),
+        )
+        .await;
+    }
+
     async fn emit(
         &self,
         session_id: &str,
@@ -1200,6 +1224,23 @@ impl QueueManager {
         event_type: EventType,
         severity: Severity,
     ) {
+        self.emit_with_execution(session_id, worker_id, task_id, event_type, severity, None)
+            .await;
+    }
+
+    async fn emit_with_execution(
+        &self,
+        session_id: &str,
+        worker_id: &str,
+        task_id: Option<&str>,
+        event_type: EventType,
+        severity: Severity,
+        executed_as: Option<&serde_json::Value>,
+    ) {
+        let mut payload = serde_json::json!({ "worker_id": worker_id, "task_id": task_id });
+        if let Some(executed_as) = executed_as {
+            payload["executed_as"] = executed_as.clone();
+        }
         let event = Event {
             id: uuid::Uuid::new_v4().to_string(),
             session_id: session_id.to_string(),
@@ -1207,7 +1248,7 @@ impl QueueManager {
             agent_id: Some(worker_id.to_string()),
             event_type,
             timestamp: Utc::now(),
-            payload: serde_json::json!({ "worker_id": worker_id, "task_id": task_id }),
+            payload,
             severity,
         };
         if let Err(e) = self.event_bus.publish(event).await {
@@ -1311,6 +1352,8 @@ mod tests {
         assert_eq!(e1.event_type, EventType::WorkerQueued);
         assert_eq!(e1.session_id, "s1");
         assert_eq!(e1.agent_id.as_deref(), Some("s1-worker-1"));
+        assert_eq!(e1.payload["worker_id"], "s1-worker-1");
+        assert!(e1.payload.get("executed_as").is_none());
         let e2 = rx.recv().await.unwrap();
         assert_eq!(e2.event_type, EventType::WorkerClaimed);
 
@@ -1320,6 +1363,50 @@ mod tests {
             .unwrap();
         let e3 = rx.recv().await.unwrap();
         assert_eq!(e3.event_type, EventType::WorkerClaimFailed);
+    }
+
+    #[tokio::test]
+    async fn worker_queued_event_copies_executed_as_from_persisted_payload() {
+        let (_dir, mgr) = manager();
+        let mut rx = mgr.event_bus.subscribe();
+        let executed_as = json!({
+            "provider": "codex",
+            "tier": "low",
+            "model": "gpt-5.6-terra",
+            "flags": ["-c", "model_reasoning_effort=\"medium\""],
+            "channel": "hive",
+            "source": "node"
+        });
+        let payload = json!({
+            "model": "gpt-5.6-terra",
+            "executed_as": executed_as
+        });
+        let resolution = QueueResolutionUpdate::Preserve;
+
+        mgr.enqueue_worker_with_scheduling(
+            "r-tier",
+            "s-tier",
+            "s-tier-worker-1",
+            "backend",
+            "codex",
+            payload,
+            Some("T-low".to_string()),
+            &[],
+            &resolution,
+            &[],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = mgr.queue_snapshot("s-tier").unwrap();
+        assert_eq!(snapshot.rows[0].payload["executed_as"], executed_as);
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.event_type, EventType::WorkerQueued);
+        assert_eq!(event.payload["executed_as"], executed_as);
+        assert_eq!(event.payload["worker_id"], "s-tier-worker-1");
+        assert_eq!(event.payload["task_id"], "T-low");
     }
 
     /// #141 follow-up: the instructed cadence and the no-progress budget are coupled in

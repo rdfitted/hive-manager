@@ -1,7 +1,30 @@
 use crate::domain::{
-    CapabilityCard, CapabilitySupport, DelegationPolicy, NativeDelegationMode, WorkspaceStrategy,
+    CapabilityCard, CapabilitySupport, DelegationPolicy, NativeDelegationMode, TierPolicy,
+    WorkspaceStrategy,
 };
+use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::pty::AgentConfig;
+
+const TIER_ORDER: [TaskTier; 4] = [
+    TaskTier::Low,
+    TaskTier::Medium,
+    TaskTier::High,
+    TaskTier::Critical,
+];
+
+/// Provider-native vocabulary for native-child dispatch. The resolved model and
+/// flags still come from the launch-time ladder snapshot; this table determines
+/// how each `(provider, tier)` cell is described to that provider's harness.
+pub(crate) const TIER_LANGUAGE: [((&str, TaskTier), &str); 8] = [
+    (("claude", TaskTier::Low), "the Agent tool"),
+    (("claude", TaskTier::Medium), "the Agent tool"),
+    (("claude", TaskTier::High), "the Agent tool"),
+    (("claude", TaskTier::Critical), "the Agent tool"),
+    (("codex", TaskTier::Low), "`spawn_agent`"),
+    (("codex", TaskTier::Medium), "`spawn_agent`"),
+    (("codex", TaskTier::High), "`spawn_agent`"),
+    (("codex", TaskTier::Critical), "`spawn_agent`"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContractRole {
@@ -58,6 +81,8 @@ pub(crate) fn render_capability_card(
     policy: &DelegationPolicy,
     workspace_strategy: &WorkspaceStrategy,
     delegation_authorized: bool,
+    tier_policy: &TierPolicy,
+    actor_tier: Option<TaskTier>,
 ) -> String {
     let model = config.model.as_deref().unwrap_or("harness default");
     let flags = serde_json::to_string(&config.flags).unwrap_or_else(|_| "[]".to_string());
@@ -85,7 +110,7 @@ pub(crate) fn render_capability_card(
         WorkspaceStrategy::None => "current project checkout",
     };
 
-    format!(
+    let capability_card = format!(
         "## Capability Card\n\n\
 - Role: {role}\n\
 - Harness: `{cli}`\n\
@@ -107,7 +132,108 @@ pub(crate) fn render_capability_card(
         children = children,
         depth = depth,
         workspace = workspace,
-    )
+    );
+
+    match render_tier_section(config, role, tier_policy, actor_tier) {
+        Some(tier_section) => format!("{capability_card}\n\n{tier_section}"),
+        None => capability_card,
+    }
+}
+
+fn render_tier_section(
+    config: &AgentConfig,
+    role: ContractRole,
+    tier_policy: &TierPolicy,
+    actor_tier: Option<TaskTier>,
+) -> Option<String> {
+    if !tier_policy.enabled {
+        return None;
+    }
+
+    let provider = config.cli.as_str();
+    let Some((_, launcher)) = TIER_LANGUAGE
+        .iter()
+        .find(|((candidate, tier), _)| *candidate == provider && *tier == TaskTier::Low)
+    else {
+        return Some(format!(
+            "## Tier\n\nTier routing unavailable for harness `{provider}`."
+        ));
+    };
+    let Some(ladder) = tier_policy.ladder.get(provider) else {
+        return Some(format!(
+            "## Tier\n\nTier routing unavailable for harness `{provider}` because this session has no resolved ladder snapshot."
+        ));
+    };
+
+    let (effective_tier, tier_source) = match role {
+        ContractRole::MasterPlanner | ContractRole::Queen => (
+            TaskTier::Critical,
+            "orchestration role; this tier is not graph-derived".to_string(),
+        ),
+        _ => match actor_tier {
+            Some(tier) => (
+                tier,
+                "resolved from this spawn's dispatch context".to_string(),
+            ),
+            None => (
+                TaskTier::Medium,
+                "default because no resolved graph dispatch tier was available".to_string(),
+            ),
+        },
+    };
+
+    let mut ladder_lines = Vec::with_capacity(TIER_ORDER.len());
+    for tier in TIER_ORDER {
+        let Some(resolved) = ladder.resolve_tier(provider, tier) else {
+            return Some(format!(
+                "## Tier\n\nTier routing unavailable for harness `{provider}` because its resolved ladder is incomplete."
+            ));
+        };
+        let flags = if resolved.flags.is_empty() {
+            "no tier-specific flags".to_string()
+        } else {
+            format!("flags `{}`", resolved.flags.join(" "))
+        };
+        ladder_lines.push(format!(
+            "  - `{}`: model `{}`; {flags}",
+            tier_label(tier),
+            resolved.model
+        ));
+    }
+
+    Some(format!(
+        "## Tier\n\n\
+- Current tier: `{effective_tier}` ({tier_source}).\n\
+- Provider-native child routing via {launcher}:\n{ladder}\n\
+- Dispatch range: {dispatch_range}",
+        effective_tier = tier_label(effective_tier),
+        ladder = ladder_lines.join("\n"),
+        dispatch_range = dispatch_range(effective_tier),
+    ))
+}
+
+fn tier_label(tier: TaskTier) -> &'static str {
+    match tier {
+        TaskTier::Low => "low",
+        TaskTier::Medium => "medium",
+        TaskTier::High => "high",
+        TaskTier::Critical => "critical",
+    }
+}
+
+fn dispatch_range(tier: TaskTier) -> &'static str {
+    match tier {
+        TaskTier::Low => {
+            "you may spawn `low` work only; you may not delegate above your own tier."
+        }
+        TaskTier::Medium => {
+            "you may spawn `low` or `medium` work; you may not delegate above your own `medium` tier."
+        }
+        TaskTier::High => {
+            "you may spawn `low`, `medium`, or `high` work; you may not delegate above your own `high` tier."
+        }
+        TaskTier::Critical => "you may spawn work at any tier from `low` through `critical`.",
+    }
 }
 
 pub(crate) fn render_delegation_guidance(
@@ -234,6 +360,17 @@ mod tests {
         }
     }
 
+    fn enabled_tier_policy(provider: &str) -> TierPolicy {
+        TierPolicy {
+            enabled: true,
+            ladder: std::collections::BTreeMap::from([(
+                provider.to_string(),
+                crate::cli::tier_ladder::embedded_resolved_tier_ladder(),
+            )]),
+            ..TierPolicy::default()
+        }
+    }
+
     #[test]
     fn capability_card_distinguishes_native_children_from_managed_workers() {
         let card = render_capability_card(
@@ -249,6 +386,8 @@ mod tests {
             },
             &WorkspaceStrategy::SharedCell,
             true,
+            &TierPolicy::default(),
+            None,
         );
 
         assert!(card.contains("Harness: `codex`"));
@@ -258,6 +397,134 @@ mod tests {
         assert!(card.contains("Native delegation authorized: yes"));
         assert!(card.contains("max children 4; max depth 2"));
         assert!(card.contains("not Hive Manager Workers, Cells, queue rows"));
+    }
+
+    #[test]
+    fn disabled_tier_policy_preserves_v047_capability_card_bytes() {
+        let card = render_capability_card(
+            &codex_config(),
+            ContractRole::Principal,
+            &CapabilityCard {
+                native_delegation: CapabilitySupport::Supported,
+            },
+            &DelegationPolicy {
+                mode: NativeDelegationMode::Encouraged,
+                max_children: Some(4),
+                max_depth: Some(2),
+            },
+            &WorkspaceStrategy::SharedCell,
+            true,
+            &TierPolicy::default(),
+            None,
+        );
+
+        assert_eq!(
+            card,
+            "## Capability Card\n\n- Role: Coding Principal\n- Harness: `codex`\n- Model: `gpt-5.6-sol`\n- Flags: `[]`\n- Native delegation support (adapter profile, not a runtime probe): supported\n- Operator policy: encouraged\n- Native delegation authorized: yes\n- Native child guidance: max children 4; max depth 2\n- Workspace: shared Hive Cell worktree; native children inherit the parent workspace and assignment\n- Visibility: native children are harness-managed; they are not Hive Manager Workers, Cells, queue rows, or separate worktrees"
+        );
+        assert!(!card.contains("## Tier"));
+    }
+
+    #[test]
+    fn codex_high_tier_uses_ladder_values_and_states_dispatch_range() {
+        let section = render_tier_section(
+            &codex_config(),
+            ContractRole::Principal,
+            &enabled_tier_policy("codex"),
+            Some(TaskTier::High),
+        )
+        .expect("enabled tier section");
+
+        assert!(section.contains("Current tier: `high`"));
+        assert!(section.contains("resolved from this spawn's dispatch context"));
+        assert!(section.contains("routing via `spawn_agent`"));
+        assert!(section.contains("`low`: model `gpt-5.6-terra`"));
+        assert!(section.contains(r#"model_reasoning_effort="medium""#));
+        assert!(section
+            .contains(r#"`high`: model `gpt-5.6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
+        assert!(section.contains("you may spawn `low`, `medium`, or `high` work"));
+    }
+
+    #[test]
+    fn claude_low_tier_uses_agent_tool_vocabulary_and_low_guard() {
+        let config = AgentConfig {
+            cli: "claude".to_string(),
+            ..AgentConfig::default()
+        };
+        let section = render_tier_section(
+            &config,
+            ContractRole::Principal,
+            &enabled_tier_policy("claude"),
+            Some(TaskTier::Low),
+        )
+        .expect("enabled tier section");
+
+        assert!(section.contains("routing via the Agent tool"));
+        assert!(section.contains("`low`: model `claude-haiku-4-5`; no tier-specific flags"));
+        assert!(section.contains("you may spawn `low` work only"));
+        assert!(section.contains("may not delegate above your own tier"));
+        assert!(!section.contains("claude-haiku-4-5`; flags `--model"));
+
+        let high_section = render_tier_section(
+            &config,
+            ContractRole::Principal,
+            &enabled_tier_policy("claude"),
+            Some(TaskTier::High),
+        )
+        .expect("enabled tier section");
+        assert!(high_section
+            .contains(r#"`high`: model `opus`; flags `--settings {"effortLevel":"high"}`"#));
+        assert!(!high_section.contains("`high`: model `opus`; flags `--model"));
+    }
+
+    #[test]
+    fn orchestration_role_is_critical_even_when_no_graph_tier_exists() {
+        let section = render_tier_section(
+            &codex_config(),
+            ContractRole::Queen,
+            &enabled_tier_policy("codex"),
+            Some(TaskTier::Low),
+        )
+        .expect("enabled tier section");
+
+        assert!(section.contains("Current tier: `critical` (orchestration role"));
+        assert!(section.contains("this tier is not graph-derived"));
+        assert!(!section.contains("Current tier: `low`"));
+    }
+
+    #[test]
+    fn unsupported_provider_renders_only_the_unavailable_tier_line() {
+        let config = AgentConfig {
+            cli: "droid".to_string(),
+            ..AgentConfig::default()
+        };
+        let section = render_tier_section(
+            &config,
+            ContractRole::Principal,
+            &enabled_tier_policy("codex"),
+            Some(TaskTier::High),
+        )
+        .expect("enabled tier section");
+
+        assert_eq!(
+            section,
+            "## Tier\n\nTier routing unavailable for harness `droid`."
+        );
+    }
+
+    #[test]
+    fn unresolved_enabled_principal_tier_is_explicitly_worded_as_default() {
+        let section = render_tier_section(
+            &codex_config(),
+            ContractRole::Principal,
+            &enabled_tier_policy("codex"),
+            None,
+        )
+        .expect("enabled tier section");
+
+        assert!(section.contains("Current tier: `medium`"));
+        assert!(section.contains("default because no resolved graph dispatch tier was available"));
+        assert!(!section.contains("resolved from this spawn's dispatch context"));
     }
 
     #[test]

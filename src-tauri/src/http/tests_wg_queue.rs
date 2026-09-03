@@ -1442,13 +1442,22 @@ async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse
         .unwrap();
     let old_assignment = repo.get_row("old-run").unwrap().unwrap().assignment_id;
 
-    repo.enqueue(&queued_row(
+    let executed_as = json!({
+        "provider": "codex",
+        "tier": "low",
+        "model": "gpt-5.6-terra",
+        "flags": ["-c", "model_reasoning_effort=\"medium\""],
+        "channel": "hive",
+        "source": "node"
+    });
+    let mut current_row = queued_row(
         "current-run",
         "pending:current-run",
         Some("current-task"),
         2,
-    ))
-    .unwrap();
+    );
+    current_row.payload["executed_as"] = executed_as.clone();
+    repo.enqueue(&current_row).unwrap();
     repo.try_claim_for_worker("current-run", Some("worker-1"), -90_000, 30)
         .unwrap()
         .unwrap();
@@ -1475,11 +1484,16 @@ async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse
         .unwrap();
     assert_eq!(completion_event.event_type, EventType::WorkNodeCompleted);
     assert_eq!(completion_event.payload["task_id"], "current-task");
+    assert_eq!(completion_event.payload["executed_as"], executed_as);
     let completion_facts =
         read_node_completion_facts(&temp.path().join("sessions").join(SESSION_ID)).unwrap();
     assert_eq!(completion_facts.len(), 1);
     assert_eq!(completion_facts[0].task_id, "current-task");
     assert_eq!(completion_facts[0].agent_id, "worker-1");
+    assert_eq!(
+        serde_json::to_value(completion_facts[0].executed_as.as_ref().unwrap()).unwrap(),
+        executed_as
+    );
     assert_eq!(
         completion_facts[0].provenance,
         NodeCompletionProvenance::QueueFinalize
@@ -1921,6 +1935,16 @@ async fn post_heartbeat_with_completed_nodes(
     agent_id: &str,
     completed_nodes: &[&str],
 ) -> axum::response::Response {
+    post_heartbeat_with_completed_node_entries(app, session_id, agent_id, json!(completed_nodes))
+        .await
+}
+
+async fn post_heartbeat_with_completed_node_entries(
+    app: &axum::Router,
+    session_id: &str,
+    agent_id: &str,
+    completed_nodes: serde_json::Value,
+) -> axum::response::Response {
     app.clone()
         .oneshot(
             Request::builder()
@@ -1998,6 +2022,54 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
         .get_heartbeat_info(session_id)
         .contains_key(&worker_id));
 
+    let conflicting = post_heartbeat_with_completed_node_entries(
+        &app,
+        session_id,
+        "worker-1",
+        json!([
+            {
+                "node_id": "T2",
+                "executed_as": {
+                    "provider": "codex",
+                    "tier": "high",
+                    "model": "gpt-5.6-sol",
+                    "flags": ["-c", "model_reasoning_effort=\"high\""],
+                    "channel": "native",
+                    "source": "node"
+                }
+            },
+            {
+                "node_id": "T2",
+                "executed_as": {
+                    "provider": "codex",
+                    "tier": "high",
+                    "model": "gpt-5.6-terra",
+                    "flags": ["-c", "model_reasoning_effort=\"high\""],
+                    "channel": "native",
+                    "source": "node"
+                }
+            }
+        ]),
+    )
+    .await;
+    assert_eq!(conflicting.status(), StatusCode::BAD_REQUEST);
+    let conflicting_body = String::from_utf8(
+        to_bytes(conflicting.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(conflicting_body.contains("T2"));
+    assert!(StateManager::new(session_dir.clone())
+        .read_node_completion_facts()
+        .unwrap()
+        .is_empty());
+    assert!(!controller
+        .read()
+        .get_heartbeat_info(session_id)
+        .contains_key(&worker_id));
+
     let repo = QueueRepo::new(Arc::clone(&state.app_state_db));
     let mut observed = queue_row(
         "declared-observed-t2",
@@ -2011,8 +2083,24 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
     observed.heartbeat_at = Some(1_700_000_000_000);
     repo.enqueue(&observed).unwrap();
 
-    let accepted =
-        post_heartbeat_with_completed_nodes(&app, session_id, "worker-1", &["T2", "T3"]).await;
+    let native_executed_as = json!({
+        "provider": "codex",
+        "tier": "high",
+        "model": "gpt-5.6-sol",
+        "flags": ["-c", "model_reasoning_effort=\"high\""],
+        "channel": "native",
+        "source": "node"
+    });
+    let accepted = post_heartbeat_with_completed_node_entries(
+        &app,
+        session_id,
+        "worker-1",
+        json!([
+            "T2",
+            { "node_id": "T3", "executed_as": native_executed_as.clone() }
+        ]),
+    )
+    .await;
     assert_eq!(accepted.status(), StatusCode::OK);
     let facts = StateManager::new(session_dir)
         .read_node_completion_facts()
@@ -2021,6 +2109,14 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
     assert!(facts.iter().all(|fact| {
         fact.agent_id == worker_id && fact.provenance == NodeCompletionProvenance::Heartbeat
     }));
+    let legacy_fact = facts.iter().find(|fact| fact.task_id == "T2").unwrap();
+    assert!(legacy_fact.executed_as.is_none());
+    let native_fact = facts.iter().find(|fact| fact.task_id == "T3").unwrap();
+    assert_eq!(native_fact.agent_id, worker_id);
+    assert_eq!(
+        serde_json::to_value(native_fact.executed_as.as_ref().unwrap()).unwrap(),
+        native_executed_as
+    );
 
     let response = app
         .clone()
@@ -2047,6 +2143,11 @@ async fn completed_nodes_are_all_or_nothing_and_project_into_the_live_view() {
         assert_eq!(node["status"], "completed");
         assert_eq!(node["progress"]["agent_id"], worker_id);
         assert_eq!(body["completion_provenance"][task_id], "declared");
+        if task_id == "T3" {
+            assert_eq!(node["progress"]["executed_as"], native_executed_as);
+        } else {
+            assert_eq!(node["progress"]["executed_as"], serde_json::Value::Null);
+        }
         if task_id == "T2" {
             assert_eq!(node["progress"]["attempts"], 3);
             assert_ne!(

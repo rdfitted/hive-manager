@@ -33,6 +33,7 @@ function graphNode(
     id,
     title: `Task ${id}`,
     kind: 'task',
+    tier: 'medium',
     status,
     lane,
     contract: { inputs: [], outputs: [], acceptance: [] },
@@ -208,6 +209,7 @@ describe('WorkGraphView', () => {
     });
     const target = graphNode('T2', 'running', ROLE('frontend'), {
       title: 'Wire node inspector',
+      tier: 'critical',
       contract: {
         inputs: ['Canonical graph payload'],
         outputs: ['Accessible inspector'],
@@ -235,6 +237,8 @@ describe('WorkGraphView', () => {
     const hoverContent = hoverInspector.textContent?.replace(/\s+/g, ' ').trim();
     expect(hoverContent).toContain('Canonical graph payload');
     expect(hoverContent).toContain('Prepare API contract');
+    const tierLabel = within(hoverInspector).getByText('Tier');
+    expect(tierLabel.nextElementSibling?.textContent).toBe('critical');
 
     await fireEvent.mouseLeave(node);
     await tick();

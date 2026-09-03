@@ -1,14 +1,24 @@
-use axum::Json;
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use futures::future::join_all;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::adapters::VALID_CLIS;
+use crate::http::state::AppState;
+use crate::orchestrator::work_graph::schema::TaskTier;
+use crate::storage::AppConfig;
+
+use super::registry::CliRegistry;
+use super::tier_ladder::{TierLadderResolutionIssue, TierLadderResolutionIssueKind};
 
 const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CURSOR_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -43,6 +53,36 @@ pub struct CliHealth {
 #[derive(Debug, Clone, Serialize)]
 pub struct CliHealthResponse {
     pub clis: Vec<CliHealth>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TierLadderQuery {
+    #[serde(alias = "projectPath")]
+    pub project_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TierLadderPreviewCell {
+    pub provider: String,
+    pub tier: String,
+    pub model: String,
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TierLadderOmission {
+    pub reason: TierLadderResolutionIssueKind,
+    pub source_ref: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TierLadderPreviewResponse {
+    pub cells: Vec<TierLadderPreviewCell>,
+    pub omissions: Vec<TierLadderOmission>,
 }
 
 pub struct CliHealthRegistry;
@@ -95,9 +135,7 @@ fn unresolved_cli_health(cli: &str, binary_label: &str, stale_path: Option<PathB
             .map(|path| path.to_string_lossy().into_owned()),
         logged_in: LoginStatus::Unknown,
         detail: if stale_hint {
-            format!(
-                "{binary_label} is on the updated system PATH; restart Hive Manager to use it"
-            )
+            format!("{binary_label} is on the updated system PATH; restart Hive Manager to use it")
         } else {
             format!("{binary_label} was not found on the current PATH")
         },
@@ -128,6 +166,104 @@ pub async fn get_cli_health() -> CliHealthResponse {
 
 pub async fn get_cli_health_http() -> Json<CliHealthResponse> {
     Json(CliHealthRegistry::check_all().await)
+}
+
+/// Return the provider-native model and flags for every cell in the ladder
+/// that would be snapshotted for a new session rooted at `project_path`.
+pub async fn get_tier_ladder_http(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TierLadderQuery>,
+) -> Json<TierLadderPreviewResponse> {
+    let config = state.config.read().await.clone();
+    let institutional_wiki_root = configured_institutional_wiki_root(&config);
+    let registry = CliRegistry::new_with_tier_sources(
+        config,
+        &query.project_path,
+        institutional_wiki_root.as_deref(),
+    );
+
+    Json(tier_ladder_preview(&registry))
+}
+
+fn tier_ladder_preview(registry: &CliRegistry) -> TierLadderPreviewResponse {
+    let cells = ["claude", "codex"]
+        .into_iter()
+        .flat_map(|provider| {
+            [
+                (TaskTier::Low, "low"),
+                (TaskTier::Medium, "medium"),
+                (TaskTier::High, "high"),
+                (TaskTier::Critical, "critical"),
+            ]
+            .into_iter()
+            .filter_map(move |(tier, tier_label)| {
+                registry
+                    .resolve_tier(provider, tier)
+                    .map(|resolved| TierLadderPreviewCell {
+                        provider: provider.to_string(),
+                        tier: tier_label.to_string(),
+                        model: resolved.model,
+                        flags: resolved.flags,
+                    })
+            })
+        })
+        .collect();
+    let omissions = registry
+        .tier_ladder_resolution()
+        .issues
+        .iter()
+        .map(tier_ladder_omission)
+        .collect();
+
+    TierLadderPreviewResponse { cells, omissions }
+}
+
+fn tier_ladder_omission(issue: &TierLadderResolutionIssue) -> TierLadderOmission {
+    TierLadderOmission {
+        reason: issue.kind,
+        source_ref: issue.source_ref.clone(),
+        detail: issue.detail.clone(),
+    }
+}
+
+fn configured_institutional_wiki_root(config: &AppConfig) -> Option<PathBuf> {
+    config
+        .global_wiki_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .map(|path| expand_tilde_path(&path, user_home().as_deref()))
+}
+
+fn user_home() -> Option<PathBuf> {
+    let preferred = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let fallback = if cfg!(windows) { "HOME" } else { "USERPROFILE" };
+    std::env::var_os(preferred)
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os(fallback).filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+fn expand_tilde_path(path: &Path, home: Option<&Path>) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = raw.strip_prefix('~') else {
+        return path.to_path_buf();
+    };
+    if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('\\') {
+        return path.to_path_buf();
+    }
+    let Some(home) = home else {
+        return path.to_path_buf();
+    };
+    let rest = rest.trim_start_matches(['/', '\\']);
+    if rest.is_empty() {
+        home.to_path_buf()
+    } else {
+        home.join(rest)
+    }
 }
 
 fn executable_for_cli(cli: &str) -> &str {
@@ -180,9 +316,7 @@ fn cursor_health_from_probe(
                         "WSL is available, but Cursor agent {binary_path} is missing in {distro}"
                     )
                 } else {
-                    bounded_probe_detail(format!(
-                        "Cursor agent probe failed in {distro}: {output}"
-                    ))
+                    bounded_probe_detail(format!("Cursor agent probe failed in {distro}: {output}"))
                 },
             )
         }
@@ -218,13 +352,9 @@ fn classify_login_probe(probe: BoundedProcessResult, label: &str) -> (LoginStatu
             status,
             stdout,
             stderr,
-        } => classify_completed_login_probe(
-            status.success(),
-            status.code(),
-            &stdout,
-            &stderr,
-            label,
-        ),
+        } => {
+            classify_completed_login_probe(status.success(), status.code(), &stdout, &stderr, label)
+        }
         BoundedProcessResult::TimedOut => (
             LoginStatus::Unknown,
             format!("{label} login-status probe timed out"),
@@ -558,8 +688,7 @@ fn cmd_executable_extensions(pathext: Option<&OsStr>) -> Vec<String> {
         .and_then(OsStr::to_str)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(".COM;.EXE;.BAT;.CMD");
-    raw
-        .split(';')
+    raw.split(';')
         .map(|extension| extension.trim().to_ascii_uppercase())
         .filter(|extension| CMD_EXTENSIONS.contains(&extension.as_str()))
         .collect()
@@ -689,12 +818,141 @@ fn expand_windows_env_vars(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use parking_lot::RwLock as PLRwLock;
+    use std::fmt::Write as _;
+    use tower::ServiceExt;
 
     const PROCESS_FIXTURE_MODE: &str = "HIVE_CLI_HEALTH_PROCESS_FIXTURE";
     const PROCESS_FIXTURE_READY: &str = "HIVE_CLI_HEALTH_PROCESS_READY";
     #[cfg(windows)]
     const PROCESS_FIXTURE_LOCK: &str = "HIVE_CLI_HEALTH_PROCESS_LOCK";
     const PROCESS_FIXTURE_TEST: &str = "cli::health::tests::bounded_process_fixture";
+
+    async fn tier_ladder_test_app(
+        storage_root: &Path,
+        institutional_wiki_root: Option<&Path>,
+    ) -> axum::Router {
+        let storage = Arc::new(
+            crate::storage::SessionStorage::new_with_base(storage_root.join("storage")).unwrap(),
+        );
+        let mut app_config = storage.load_config().unwrap();
+        app_config.global_wiki_path =
+            institutional_wiki_root.map(|path| path.to_string_lossy().into_owned());
+        let config = Arc::new(tokio::sync::RwLock::new(app_config));
+        let pty_manager = Arc::new(PLRwLock::new(crate::pty::PtyManager::new()));
+        let session_controller = Arc::new(PLRwLock::new(crate::session::SessionController::new(
+            pty_manager.clone(),
+        )));
+        session_controller.write().set_storage(storage.clone());
+        let injection_storage =
+            crate::storage::SessionStorage::new_with_base(storage_root.join("injection-storage"))
+                .unwrap();
+        let injection_manager = Arc::new(PLRwLock::new(
+            crate::coordination::InjectionManager::new(pty_manager.clone(), injection_storage),
+        ));
+        let event_bus = crate::events::EventBus::new(storage.base_dir().clone());
+        let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
+        let queue_repo = Arc::new(crate::storage::QueueRepo::new(app_state_db.clone()));
+        queue_repo.ensure_schema().unwrap();
+        let queue_manager = Arc::new(crate::coordination::QueueManager::new(
+            queue_repo,
+            event_bus.clone(),
+        ));
+        let state = Arc::new(AppState::new(
+            config,
+            pty_manager,
+            session_controller,
+            injection_manager,
+            storage,
+            event_bus,
+            app_state_db,
+            queue_manager,
+            None,
+        ));
+        state.set_registry(Arc::new(crate::actions::build_registry()));
+
+        crate::http::routes::create_router(state)
+    }
+
+    fn percent_encoded_query_value(value: &Path) -> String {
+        let mut encoded = String::new();
+        for byte in value.to_string_lossy().as_bytes() {
+            write!(&mut encoded, "%{byte:02X}").unwrap();
+        }
+        encoded
+    }
+
+    #[tokio::test]
+    async fn tier_ladder_http_serves_the_project_resolved_cells_and_typed_omissions() {
+        let storage_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let override_path = project.path().join(".ai-docs/tiers/ladder.md");
+        std::fs::create_dir_all(override_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            override_path,
+            r#"---
+            {
+              "tier_ladder": {
+                "codex": {
+                  "low": "codex-gpt-5-6-sol-medium"
+                }
+              }
+            }
+            ---
+            "#,
+        )
+        .unwrap();
+        let uri = format!(
+            "/api/tier-ladder?project_path={}",
+            percent_encoded_query_value(project.path())
+        );
+
+        let response = tier_ladder_test_app(storage_root.path(), None)
+            .await
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let cells = json["cells"].as_array().expect("cells should be an array");
+        assert_eq!(cells.len(), 8);
+
+        let codex_low = cells
+            .iter()
+            .find(|cell| cell["provider"] == "codex" && cell["tier"] == "low")
+            .expect("codex low preview");
+        assert_eq!(codex_low["model"], "gpt-5.6-sol");
+        assert_eq!(
+            codex_low["flags"],
+            serde_json::json!(["-c", "model_reasoning_effort=\"medium\""])
+        );
+
+        let codex_high = cells
+            .iter()
+            .find(|cell| cell["provider"] == "codex" && cell["tier"] == "high")
+            .expect("codex high preview");
+        assert_eq!(
+            codex_high["flags"],
+            serde_json::json!(["-c", "model_reasoning_effort=\"xhigh\""])
+        );
+
+        let omissions = json["omissions"]
+            .as_array()
+            .expect("omissions should be an array");
+        assert!(omissions.iter().any(|omission| {
+            omission["reason"] == "institutional_unavailable"
+                && omission["sourceRef"].is_string()
+                && omission["detail"].is_string()
+        }));
+    }
 
     fn captured(bytes: &[u8]) -> CappedBytes {
         CappedBytes {
@@ -706,12 +964,7 @@ mod tests {
     fn fixture_command(mode: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().expect("test executable path"));
         command
-            .args([
-                "--ignored",
-                "--exact",
-                PROCESS_FIXTURE_TEST,
-                "--nocapture",
-            ])
+            .args(["--ignored", "--exact", PROCESS_FIXTURE_TEST, "--nocapture"])
             .env(PROCESS_FIXTURE_MODE, mode);
         command
     }
@@ -751,8 +1004,8 @@ mod tests {
                 let _lock = {
                     use std::os::windows::fs::OpenOptionsExt;
 
-                    let lock_path = std::env::var_os(PROCESS_FIXTURE_LOCK)
-                        .expect("stall fixture lock path");
+                    let lock_path =
+                        std::env::var_os(PROCESS_FIXTURE_LOCK).expect("stall fixture lock path");
                     std::fs::OpenOptions::new()
                         .create(true)
                         .truncate(true)
@@ -819,13 +1072,8 @@ mod tests {
         assert_eq!(detail, "Not logged in");
 
         let configuration_error = captured(b"Error loading config");
-        let (status, detail) = classify_completed_login_probe(
-            false,
-            Some(1),
-            &empty,
-            &configuration_error,
-            "Codex",
-        );
+        let (status, detail) =
+            classify_completed_login_probe(false, Some(1), &empty, &configuration_error, "Codex");
         assert_eq!(status, LoginStatus::Unknown);
         assert!(detail.contains("code 1"));
         assert!(detail.contains("Error loading config"));
@@ -834,13 +1082,8 @@ mod tests {
             bytes: b"Not logged in".to_vec(),
             truncated: true,
         };
-        let (status, _) = classify_completed_login_probe(
-            false,
-            Some(1),
-            &empty,
-            &truncated_logged_out,
-            "Codex",
-        );
+        let (status, _) =
+            classify_completed_login_probe(false, Some(1), &empty, &truncated_logged_out, "Codex");
         assert_eq!(status, LoginStatus::Unknown);
 
         let (status, _) = classify_login_probe(BoundedProcessResult::TimedOut, "Codex");
@@ -967,7 +1210,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(ready_path.is_file(), "the stalled child fixture never started");
+        assert!(
+            ready_path.is_file(),
+            "the stalled child fixture never started"
+        );
 
         let timer_start = Instant::now();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1039,10 +1285,7 @@ mod tests {
 
         let raw_base = [b'C' as u16, b':' as u16, b'\\' as u16, 0xd800, b'x' as u16];
         let base = PathBuf::from(OsString::from_wide(&raw_base));
-        let candidates = executable_candidates(
-            &base,
-            Some(OsStr::new(".PS1;.cmd;.BAT;.exe")),
-        );
+        let candidates = executable_candidates(&base, Some(OsStr::new(".PS1;.cmd;.BAT;.exe")));
         let expected_suffixes = [".CMD", ".BAT", ".EXE"];
         assert_eq!(candidates.len(), expected_suffixes.len());
         for (candidate, suffix) in candidates.iter().zip(expected_suffixes) {

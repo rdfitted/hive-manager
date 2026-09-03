@@ -1,7 +1,12 @@
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::WorkspaceStrategy;
+use crate::cli::ResolvedTierLadder;
+use crate::orchestrator::work_graph::schema::TaskTier;
+use crate::orchestrator::work_graph::validate::DEFAULT_TIER_CEILING_PERCENT;
 
 /// Caller intent for a Hive launch.
 ///
@@ -47,6 +52,55 @@ impl Default for DelegationPolicy {
     }
 }
 
+fn default_tier_ceiling_percent() -> u8 {
+    DEFAULT_TIER_CEILING_PERCENT
+}
+
+fn default_review_floor() -> TaskTier {
+    TaskTier::High
+}
+
+/// Durable tier-routing policy for a Hive launch.
+///
+/// Disabled by default so existing sessions behave exactly as they did before
+/// task tiers existed.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TierPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_tier_ceiling_percent")]
+    pub ceiling_percent: u8,
+    #[serde(default = "default_review_floor")]
+    pub review_floor: TaskTier,
+    /// Launch-time ladder resolution keyed by every distinct provider in the
+    /// Queen/principal roster. Running sessions never re-resolve these entries.
+    #[serde(default)]
+    pub ladder: BTreeMap<String, ResolvedTierLadder>,
+}
+
+impl Default for TierPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ceiling_percent: default_tier_ceiling_percent(),
+            review_floor: default_review_floor(),
+            ladder: BTreeMap::new(),
+        }
+    }
+}
+
+impl TierPolicy {
+    /// Preserve the legacy PlanReady ceiling whenever tier routing is disabled,
+    /// so a disabled policy behaves exactly as it did before task tiers existed.
+    pub fn plan_ready_ceiling_percent(&self) -> u8 {
+        if self.enabled {
+            self.ceiling_percent
+        } else {
+            DEFAULT_TIER_CEILING_PERCENT
+        }
+    }
+}
+
 /// Durable execution policy for a Hive launch.
 ///
 /// The default deliberately matches legacy sessions so adding this field is
@@ -61,6 +115,8 @@ pub struct HiveExecutionPolicy {
     pub queen_delegation: DelegationPolicy,
     #[serde(default)]
     pub principal_delegation: DelegationPolicy,
+    #[serde(default)]
+    pub tier_policy: TierPolicy,
 }
 
 impl Default for HiveExecutionPolicy {
@@ -70,6 +126,7 @@ impl Default for HiveExecutionPolicy {
             workspace_strategy: legacy_workspace_strategy(),
             queen_delegation: DelegationPolicy::default(),
             principal_delegation: DelegationPolicy::default(),
+            tier_policy: TierPolicy::default(),
         }
     }
 }
@@ -128,6 +185,7 @@ mod tests {
                 mode: NativeDelegationMode::Encouraged,
                 ..DelegationPolicy::default()
             },
+            tier_policy: TierPolicy::default(),
         };
 
         let value = serde_json::to_value(policy).unwrap();
@@ -135,5 +193,39 @@ mod tests {
         assert_eq!(value["workspace_strategy"], "shared_cell");
         assert_eq!(value["queen_delegation"]["mode"], "auto");
         assert_eq!(value["principal_delegation"]["mode"], "encouraged");
+        assert_eq!(value["tier_policy"]["enabled"], false);
+        assert_eq!(
+            value["tier_policy"]["ceiling_percent"],
+            DEFAULT_TIER_CEILING_PERCENT
+        );
+        assert_eq!(value["tier_policy"]["review_floor"], "high");
+    }
+
+    #[test]
+    fn disabled_tier_policy_uses_legacy_plan_ready_ceiling() {
+        let mut policy = TierPolicy {
+            ceiling_percent: 90,
+            ..TierPolicy::default()
+        };
+        assert!(!policy.enabled);
+        assert_eq!(
+            policy.plan_ready_ceiling_percent(),
+            DEFAULT_TIER_CEILING_PERCENT
+        );
+
+        policy.enabled = true;
+        assert_eq!(policy.plan_ready_ceiling_percent(), 90);
+    }
+
+    #[test]
+    fn tier_policy_default_is_disabled_with_empty_ladder() {
+        let policy = HiveExecutionPolicy::default();
+        assert!(!policy.tier_policy.enabled);
+        assert_eq!(
+            policy.tier_policy.ceiling_percent,
+            DEFAULT_TIER_CEILING_PERCENT
+        );
+        assert_eq!(policy.tier_policy.review_floor, TaskTier::High);
+        assert!(policy.tier_policy.ladder.is_empty());
     }
 }

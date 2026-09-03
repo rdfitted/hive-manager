@@ -5,8 +5,8 @@ use tempfile::TempDir;
 
 use crate::coordination::StateManager;
 use crate::orchestrator::org_graph::adjudication::{
-    adjudicate_contradiction, AdjudicationDeclaration, AdjudicationPolicy,
-    AdjudicationResolution, DeclaredAdjudicator, SourceVerdict, SourceVerdictValue,
+    adjudicate_contradiction, AdjudicationDeclaration, AdjudicationPolicy, AdjudicationResolution,
+    DeclaredAdjudicator, SourceVerdict, SourceVerdictValue,
 };
 use crate::orchestrator::org_graph::ownership::{
     orchestrator_nodes_for_plan, CollisionDisposition, LivePrincipal, OrchestratorOperation,
@@ -19,8 +19,7 @@ use crate::orchestrator::work_graph::review::{
     instantiate_review_templates, ReviewTemplate, JUDGE_PRINCE_REMEDIATION_TEMPLATE,
 };
 use crate::orchestrator::work_graph::runtime::{
-    route_contradictory_verdicts_and_record, route_failed_verdict_and_record,
-    GraphMutationType,
+    route_contradictory_verdicts_and_record, route_failed_verdict_and_record, GraphMutationType,
 };
 use crate::orchestrator::work_graph::schema::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
@@ -154,7 +153,10 @@ fn orchestrator_nodes_serialize_footprint_separately_from_authority() {
             .find(|node| node["role"] == role)
             .unwrap_or_else(|| panic!("missing serialized {role} node"));
         assert!(
-            !node["footprint"].as_array().expect("footprint array").is_empty(),
+            !node["footprint"]
+                .as_array()
+                .expect("footprint array")
+                .is_empty(),
             "{role} footprint was erased"
         );
         assert!(node.get("authority").is_some(), "{role} authority missing");
@@ -168,9 +170,11 @@ fn orchestrator_nodes_serialize_footprint_separately_from_authority() {
         .iter()
         .find(|node| node["role"] == "queen")
         .expect("queen node");
-    assert!(queen["footprint"].as_array().expect("Queen footprint").iter().any(
-        |entry| entry["path"] == INCIDENT_PATH && entry["operation"] == "restore"
-    ));
+    assert!(queen["footprint"]
+        .as_array()
+        .expect("Queen footprint")
+        .iter()
+        .any(|entry| entry["path"] == INCIDENT_PATH && entry["operation"] == "restore"));
     assert_eq!(queen["authority"]["may_commit"], true);
     assert_eq!(queen["ownership_authority"]["may_mutate_mid_flight"], true);
 }
@@ -269,7 +273,10 @@ fn ownership_sidecar_round_trips_and_prewrite_collision_is_durable() {
             },
         )
         .expect("pre-write check persists its result");
-    assert!(matches!(outcome, OrchestratorWriteOutcome::Collision { .. }));
+    assert!(matches!(
+        outcome,
+        OrchestratorWriteOutcome::Collision { .. }
+    ));
     let persisted = manager
         .read_ownership_session_state()
         .expect("read surfaced collision")
@@ -348,14 +355,20 @@ fn ownership_sidecar_persists_an_undeclared_actor_collision() {
             },
         )
         .expect("pre-write check persists its result");
-    assert!(matches!(outcome, OrchestratorWriteOutcome::Collision { .. }));
+    assert!(matches!(
+        outcome,
+        OrchestratorWriteOutcome::Collision { .. }
+    ));
 
     let persisted = manager
         .read_ownership_session_state()
         .expect("read surfaced collision")
         .expect("ownership sidecar exists");
     assert_eq!(persisted.collisions.len(), 1);
-    assert_eq!(persisted.collisions[0].actor_id, "unregistered-orchestrator");
+    assert_eq!(
+        persisted.collisions[0].actor_id,
+        "unregistered-orchestrator"
+    );
     assert_eq!(
         persisted.collisions[0].disposition,
         CollisionDisposition::RequiresSerialization
@@ -365,12 +378,9 @@ fn ownership_sidecar_persists_an_undeclared_actor_collision() {
 
 #[test]
 fn undeclared_actor_without_a_live_owner_proceeds_without_collision_evidence() {
-    let mut state = OwnershipSessionState::from_plan(
-        &incident_graph(),
-        declared_orchestrators(),
-        &[],
-    )
-    .expect("ownership state without live principals");
+    let mut state =
+        OwnershipSessionState::from_plan(&incident_graph(), declared_orchestrators(), &[])
+            .expect("ownership state without live principals");
     assert_eq!(
         state.record_write_attempt(OrchestratorWriteAttempt {
             actor_id: "unregistered-orchestrator".to_string(),
@@ -489,13 +499,14 @@ fn unassigned_task_class_verification_duty_is_reported_at_plan_ready() {
         NodeStatus::Pending,
     );
     let mut graph = TaskGraph::new(vec![task], Vec::new());
-    let validation = validate_plan_ready(&graph).expect("gap is a plan-time report");
-    assert!(validation.warnings.contains(
-        &PlanReadyWarning::UnassignedVerificationDuty {
+    let validation =
+        validate_plan_ready(&graph, Default::default()).expect("gap is a plan-time report");
+    assert!(validation
+        .warnings
+        .contains(&PlanReadyWarning::UnassignedVerificationDuty {
             task_class: "output:security_critical_code".to_string(),
             task_ids: vec!["implement-auth".to_string()],
-        }
-    ));
+        }));
 
     graph.nodes.push(WorkNode::new(
         "review-auth",
@@ -511,7 +522,8 @@ fn unassigned_task_class_verification_duty_is_reported_at_plan_ready() {
         EdgeKind::Reviews,
         EdgeProvenance::Planner,
     ));
-    let assigned = validate_plan_ready(&graph).expect("assigned duty remains plan-ready");
+    let assigned =
+        validate_plan_ready(&graph, Default::default()).expect("assigned duty remains plan-ready");
     assert!(
         !assigned
             .warnings
@@ -527,7 +539,7 @@ fn plan_ready_enforces_named_signal_class_and_judgmental_isolation_separately() 
     missing_signal.verification_duty.signal_name = Some("   ".to_string());
     let (graph, _) = review_fixture(&missing_signal);
     assert!(matches!(
-        validate_plan_ready(&graph),
+        validate_plan_ready(&graph, Default::default()),
         Err(PlanReadyError::MissingVerificationSignal { .. })
     ));
 
@@ -535,7 +547,7 @@ fn plan_ready_enforces_named_signal_class_and_judgmental_isolation_separately() 
     missing_class.verification_duty.signal_class = None;
     let (graph, _) = review_fixture(&missing_class);
     assert!(matches!(
-        validate_plan_ready(&graph),
+        validate_plan_ready(&graph, Default::default()),
         Err(PlanReadyError::MissingVerificationSignalClass { .. })
     ));
 
@@ -543,7 +555,7 @@ fn plan_ready_enforces_named_signal_class_and_judgmental_isolation_separately() 
     contaminated_judgment.verification_duty.context_boundary = ContextBoundary::Full;
     let (graph, _) = review_fixture(&contaminated_judgment);
     assert!(matches!(
-        validate_plan_ready(&graph),
+        validate_plan_ready(&graph, Default::default()),
         Err(PlanReadyError::InsufficientVerificationIsolation {
             signal_class: SignalClass::Judgmental,
             actual: ContextBoundary::Full,
@@ -556,7 +568,8 @@ fn plan_ready_enforces_named_signal_class_and_judgmental_isolation_separately() 
     contaminated_mechanism.verification_duty.signal_class = Some(SignalClass::Mechanical);
     contaminated_mechanism.verification_duty.context_boundary = ContextBoundary::Full;
     let (graph, _) = review_fixture(&contaminated_mechanism);
-    validate_plan_ready(&graph).expect("mechanical signal may receive full spawner context");
+    validate_plan_ready(&graph, Default::default())
+        .expect("mechanical signal may receive full spawner context");
 }
 
 #[test]
@@ -565,7 +578,7 @@ fn plan_ready_rejects_missing_or_unauthorized_adjudicator_without_queen_fallback
     missing.adjudication = None;
     let (graph, _) = review_fixture(&missing);
     assert!(matches!(
-        validate_plan_ready(&graph),
+        validate_plan_ready(&graph, Default::default()),
         Err(PlanReadyError::MissingAdjudicator { .. })
     ));
 
@@ -581,7 +594,7 @@ fn plan_ready_rejects_missing_or_unauthorized_adjudicator_without_queen_fallback
         .may_adjudicate = false;
     let (graph, _) = review_fixture(&unauthorized);
     assert!(matches!(
-        validate_plan_ready(&graph),
+        validate_plan_ready(&graph, Default::default()),
         Err(PlanReadyError::AdjudicatorLacksAuthority { ref role_id, .. })
             if role_id == "prince"
     ));
@@ -693,9 +706,9 @@ fn ordinary_failure_and_contradiction_take_distinct_graph_paths() {
         GraphMutationType::RemediationDetour
     );
     assert!(failure_graph.nodes.iter().any(|node| {
-        node.expansion.as_ref().is_some_and(|expansion| {
-            expansion.template == JUDGE_PRINCE_REMEDIATION_TEMPLATE
-        })
+        node.expansion
+            .as_ref()
+            .is_some_and(|expansion| expansion.template == JUDGE_PRINCE_REMEDIATION_TEMPLATE)
     }));
 
     let (mut contradiction_graph, contradiction_expansion) = review_fixture(&template);
@@ -723,9 +736,9 @@ fn ordinary_failure_and_contradiction_take_distinct_graph_paths() {
             .is_some_and(|expansion| expansion.template == "review-adjudication")
     }));
     assert!(!contradiction_graph.nodes.iter().any(|node| {
-        node.expansion.as_ref().is_some_and(|expansion| {
-            expansion.template == JUDGE_PRINCE_REMEDIATION_TEMPLATE
-        })
+        node.expansion
+            .as_ref()
+            .is_some_and(|expansion| expansion.template == JUDGE_PRINCE_REMEDIATION_TEMPLATE)
     }));
     assert_eq!(
         contradiction_graph
@@ -779,8 +792,12 @@ fn source_verdicts_and_separate_adjudication_survive_real_archive_round_trip() {
         })
         .collect::<Vec<_>>();
     assert_eq!(source_nodes.len(), 2, "archive collapsed a source verdict");
-    assert!(source_nodes.iter().any(|node| node.status == NodeStatus::Completed));
-    assert!(source_nodes.iter().any(|node| node.status == NodeStatus::Failed));
+    assert!(source_nodes
+        .iter()
+        .any(|node| node.status == NodeStatus::Completed));
+    assert!(source_nodes
+        .iter()
+        .any(|node| node.status == NodeStatus::Failed));
     let adjudication_node = reread
         .runtime_graph
         .nodes

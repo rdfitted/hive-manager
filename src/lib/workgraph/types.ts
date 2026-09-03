@@ -4,6 +4,19 @@ export type WorkGraphSourceSelector = 'auto' | WorkGraphSource;
 
 export type NodeKind = 'task' | 'review' | 'join' | 'checkpoint' | 'context';
 
+export type TaskTier = 'low' | 'medium' | 'high' | 'critical';
+export type ExecutionChannel = 'hive' | 'native';
+export type TierResolutionSource = 'node' | 'fallback' | 'override';
+
+export interface ExecutedAs {
+  provider: string;
+  tier: TaskTier;
+  model: string;
+  flags: string[];
+  channel: ExecutionChannel;
+  source: TierResolutionSource;
+}
+
 export type NodeStatus =
   | 'pending'
   | 'ready'
@@ -48,12 +61,15 @@ export interface WorkGraphNodeProgress {
   attempts: number;
   agent_id: string | null;
   last_heartbeat_at: string | null;
+  /** Optional for cached responses produced before executed_as was archived. */
+  executed_as?: ExecutedAs | null;
 }
 
 export interface WorkGraphNode {
   id: string;
   title: string;
   kind: NodeKind;
+  tier: TaskTier;
   status: NodeStatus;
   lane: BindingRef;
   contract: NodeContract;

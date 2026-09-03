@@ -108,9 +108,7 @@ fn learning_submission_lock() -> &'static Mutex<()> {
     LEARNING_SUBMISSION_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-pub fn validate_learning_submission(
-    submission: &LearningSubmission,
-) -> Result<(), StorageError> {
+pub fn validate_learning_submission(submission: &LearningSubmission) -> Result<(), StorageError> {
     if submission.session.trim().is_empty() {
         return Err(StorageError::InvalidLearning(
             "Session cannot be empty".to_string(),
@@ -135,10 +133,7 @@ pub fn validate_learning_submission(
         ));
     }
     for file_path in &submission.files_touched {
-        if file_path.contains("..")
-            || file_path.starts_with('/')
-            || file_path.contains('\\')
-        {
+        if file_path.contains("..") || file_path.starts_with('/') || file_path.contains('\\') {
             return Err(StorageError::InvalidLearning(format!(
                 "Invalid file path: {file_path}"
             )));
@@ -1111,9 +1106,7 @@ impl SessionStorage {
                 "session id cannot be empty or contain path separators".to_string(),
             ));
         }
-        if learning_id.trim().is_empty()
-            || learning_id.contains('\n')
-            || learning_id.contains('\r')
+        if learning_id.trim().is_empty() || learning_id.contains('\n') || learning_id.contains('\r')
         {
             return Err(StorageError::InvalidLearning(
                 "learning id cannot be empty or contain a newline".to_string(),
@@ -1160,8 +1153,7 @@ impl SessionStorage {
         content.push_str(&serde_json::to_string(&learning)?);
         content.push('\n');
 
-        let mut temp =
-            tempfile::NamedTempFile::new_in(&lessons_dir).map_err(StorageError::Io)?;
+        let mut temp = tempfile::NamedTempFile::new_in(&lessons_dir).map_err(StorageError::Io)?;
         temp.write_all(content.as_bytes())?;
         temp.persist(&learnings_file)
             .map_err(|error| StorageError::Io(error.error))?;
@@ -1699,7 +1691,10 @@ mod tests {
         let (storage, _temp) = create_test_storage();
         let session_id = "never-persisted-session";
         assert!(
-            !storage.session_dir(session_id).join("coordination").exists(),
+            !storage
+                .session_dir(session_id)
+                .join("coordination")
+                .exists(),
             "precondition: the session directory must not exist yet"
         );
 
@@ -1863,6 +1858,7 @@ mod tests {
                 mode: crate::domain::NativeDelegationMode::Encouraged,
                 ..crate::domain::DelegationPolicy::default()
             },
+            tier_policy: crate::domain::TierPolicy::default(),
         };
 
         let restored: PersistedSession =

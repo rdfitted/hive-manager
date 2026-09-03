@@ -23,6 +23,7 @@ use crate::orchestrator::org_graph::definitions::{
 };
 use crate::orchestrator::org_graph::RoleDefinition;
 use crate::orchestrator::session_orchestrator::SessionOrchestrator;
+use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager, RoleDefinitionRef, WorkerRole};
 use crate::session::cell_status::{
     agent_in_cell, derive_cell_status_name, derive_cell_status_name_for_state, session_cell_ids,
@@ -781,6 +782,7 @@ pub enum AddWorkerRejectionReason {
     ResearchSessionReadOnly,
     ParentNotInSession,
     ParentCannotParent,
+    TierExceedsDispatchCeiling,
     StateNotAcceptingWorkers,
 }
 
@@ -5257,6 +5259,8 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
             policy,
             &execution_policy.workspace_strategy,
             delegation_authorized,
+            &execution_policy.tier_policy,
+            Some(TaskTier::Critical),
         );
         let delegation = render_delegation_guidance(role, policy, delegation_authorized);
         let workspace = render_workspace_contract(role, &execution_policy.workspace_strategy);
@@ -5379,10 +5383,17 @@ This roster is available implementation capacity, not a required task count. Des
 - Evidence and repository findings
 - Coherent workstreams with owned paths and authoritative inputs
 - A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
-  `- [ ] T1: Stable root task (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
-  `- [ ] T2: Stable dependent task (deps: T1) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  `- [ ] T1: Stable root task (tier: medium) (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
+  `- [ ] T2: Stable dependent task (deps: T1) (tier: medium) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
   Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
   Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
+  Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.
+  - `low`: single-file mechanical work with an existing test.
+  - `medium`: multi-file work within one module.
+  - `high`: work crossing a module or trust boundary, or with judgmental acceptance.
+  - `critical`: ambiguous requirements or architecture work.
+  Missing tier metadata defaults to `medium`. PlanReady enforces a ceiling on nodes rated above `medium`.
+  Priority brackets express scheduling urgency; tier controls effort/model routing. `[CRITICAL]` priority collapses to `high` and cannot express the four-level tier scale.
 - Ownership matrix and serialized hotspots
 - Integration order and wave narrative consistent with the task graph
 - Validation gates with commands/evidence
@@ -5412,6 +5423,15 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     ) -> String {
         let workers_per = workers_per_planner.len();
         let total_workers = planner_count as usize * workers_per;
+        let tier_ladder = crate::cli::tier_ladder::embedded_resolved_tier_ladder();
+        let codex_low = tier_ladder
+            .resolve_tier("codex", TaskTier::Low)
+            .expect("embedded Codex low tier must resolve");
+        let codex_medium = tier_ladder
+            .resolve_tier("codex", TaskTier::Medium)
+            .expect("embedded Codex medium tier must resolve");
+        let codex_low_flags = codex_low.flags.join(" ");
+        let codex_medium_flags = codex_medium.flags.join(" ");
 
         // Build planner table
         let mut planner_table = String::new();
@@ -5568,17 +5588,17 @@ Spawn 3 scout agents to investigate the codebase in parallel:
 
 Spawn each scout via the Task tool calling Codex through Bash. Launch all 3 in PARALLEL via a single message with three Task calls.
 
-### Scout 1 - Codex GPT-5.5 Low (Code Structure)
+### Scout 1 - Codex {codex_low_model} / low (Code Structure)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Analyze the codebase structure for: [TASK]. List relevant files by priority.' Return file paths with priority notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m {codex_low_model} {codex_low_flags} 'Analyze the codebase structure for: [TASK]. List relevant files by priority.' Return file paths with priority notes.")
 
-### Scout 2 - Codex GPT-5.5 Low (Implementation Patterns)
+### Scout 2 - Codex {codex_low_model} / low (Implementation Patterns)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\" 'Identify implementation patterns relevant to: [TASK]. Focus on existing conventions, helpers, and shared abstractions.' Return file paths with pattern notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m {codex_low_model} {codex_low_flags} 'Identify implementation patterns relevant to: [TASK]. Focus on existing conventions, helpers, and shared abstractions.' Return file paths with pattern notes.")
 
-### Scout 3 - Codex GPT-5.5 Medium (Related Code)
+### Scout 3 - Codex {codex_medium_model} / medium (Related Code)
 
-Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"medium\" 'Find code related to: [TASK]. Identify entry points, test files, dependencies.' Return file paths with notes.")
+Task(subagent_type="general-purpose", prompt="You are a codebase investigation agent. IMMEDIATELY run: codex exec --dangerously-bypass-approvals-and-sandbox -m {codex_medium_model} {codex_medium_flags} 'Find code related to: [TASK]. Identify entry points, test files, dependencies.' Return file paths with notes.")
 
 ---
 
@@ -5609,12 +5629,12 @@ Write to `.hive-manager/{session_id}/plan.md`:
 ## Domain Tasks (for Planners)
 
 ### Domain 1: [Domain Name]
-- [ ] T1: Task description (inputs: required context) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 1
+- [ ] T1: Task description (tier: medium) (inputs: required context) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 1
 Files: [list of files in this domain]
 Workers: {workers_per} available
 
 ### Domain 2: [Domain Name]
-- [ ] T2: Task description (deps: T1) (inputs: T1 output) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 2
+- [ ] T2: Task description (deps: T1) (tier: medium) (inputs: T1 output) (outputs: domain result) (acceptance: observable completion criterion) -> Planner 2
 Files: [list of files in this domain]
 Workers: {workers_per} available
 
@@ -5636,6 +5656,13 @@ ids in `(deps: ...)`, and same-line `(inputs: ...)`, `(outputs: ...)`, and `(acc
 Omit `deps:` for roots. The graph metadata, not PHASE prose, controls execution order.
 Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`,
 `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
+Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.
+- `low`: single-file mechanical work with an existing test.
+- `medium`: multi-file work within one module.
+- `high`: work crossing a module or trust boundary, or with judgmental acceptance.
+- `critical`: ambiguous requirements or architecture work.
+Missing tier metadata defaults to `medium`. PlanReady enforces a ceiling on nodes rated above `medium`.
+Priority brackets express scheduling urgency; tier controls effort/model routing. `[CRITICAL]` priority collapses to `high` and cannot express the four-level tier scale.
 
 ---
 
@@ -5652,7 +5679,11 @@ Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[
             workers_per = workers_per,
             total_workers = total_workers,
             planner_table = planner_table.trim_end(),
-            worker_info = worker_info.trim_end()
+            worker_info = worker_info.trim_end(),
+            codex_low_model = codex_low.model,
+            codex_low_flags = codex_low_flags,
+            codex_medium_model = codex_medium.model,
+            codex_medium_flags = codex_medium_flags,
         )
     }
 
@@ -5866,6 +5897,13 @@ Keep every task's `(inputs: ...)`, `(outputs: ...)`, and `(acceptance: ...)` met
 checkbox line; prose in the Dependencies section is explanatory only.
 Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`,
 `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
+Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.
+- `low`: single-file mechanical work with an existing test.
+- `medium`: multi-file work within one module.
+- `high`: work crossing a module or trust boundary, or with judgmental acceptance.
+- `critical`: ambiguous requirements or architecture work.
+Missing tier metadata defaults to `medium`. PlanReady enforces a ceiling on nodes rated above `medium`.
+Priority brackets express scheduling urgency; tier controls effort/model routing. `[CRITICAL]` priority collapses to `high` and cannot express the four-level tier scale.
 
 ## Task Details
 
@@ -6265,6 +6303,8 @@ This tests that:
             policy,
             &execution_policy.workspace_strategy,
             delegation_authorized,
+            &execution_policy.tier_policy,
+            Some(TaskTier::Critical),
         );
         let delegation = render_delegation_guidance(role, policy, delegation_authorized);
         let workspace_contract =
@@ -6548,6 +6588,33 @@ When the objective and every configured gate are complete, send this `completed`
         workspace_path: &Path,
         execution_policy: &HiveExecutionPolicy,
     ) -> String {
+        Self::build_worker_prompt_with_tier(
+            index,
+            config,
+            resolved_role,
+            spawn_context,
+            None,
+            queen_id,
+            session_id,
+            project_path,
+            workspace_path,
+            execution_policy,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_worker_prompt_with_tier(
+        index: u8,
+        config: &AgentConfig,
+        resolved_role: &ResolvedRoleDefinition,
+        spawn_context: &SpawnContext,
+        actor_tier: Option<TaskTier>,
+        queen_id: &str,
+        session_id: &str,
+        project_path: &Path,
+        workspace_path: &Path,
+        execution_policy: &HiveExecutionPolicy,
+    ) -> String {
         let role_name = config
             .role
             .as_ref()
@@ -6575,6 +6642,8 @@ When the objective and every configured gate are complete, send this `completed`
             policy,
             &execution_policy.workspace_strategy,
             delegation_authorized,
+            &execution_policy.tier_policy,
+            actor_tier,
         );
         let delegation = render_delegation_guidance(contract_role, policy, delegation_authorized);
         let workspace_contract =
@@ -6716,7 +6785,17 @@ When the objective and every configured gate are complete, send this `completed`
             &agent_id,
             "completed",
             "Completed assigned workstream",
-            &["<exact-work-graph-node-id>"],
+            &[serde_json::json!({
+                "node_id": "<exact-work-graph-node-id>",
+                "executed_as": {
+                    "provider": "<provider>",
+                    "tier": "<low|medium|high|critical>",
+                    "model": "<model>",
+                    "flags": ["<provider-native-flag>"],
+                    "channel": "native",
+                    "source": "<node|fallback|override>"
+                }
+            })],
         );
 
         let role_section = if is_research {
@@ -6747,7 +6826,7 @@ When the objective and every configured gate are complete, send this `completed`
 
 1. {validation_and_handoff_rule}
 2. Update the authoritative task file at {task_file} to `Status: COMPLETED` and add the evidence summary.
-3. In the completed heartbeat below, replace `<exact-work-graph-node-id>` with every exact node ID completed by this assignment (never a title, label, or agent ID); if no work-graph node was assigned, remove the optional `completed_nodes` field. Then send it:
+3. In the completed heartbeat below, use a detailed object for every node executed through a native child: replace `<exact-work-graph-node-id>` and every `executed_as` placeholder with the exact provider, tier, model, flags, channel, and resolution source used. Keep the top-level `agent_id` as this reporting orchestrator; do not add a per-entry agent ID. A bare string node ID remains valid for legacy agents and work completed directly by this orchestrator. Never use a title, label, or agent ID as the node ID. If no work-graph node was assigned, remove the optional `completed_nodes` field. Then send it:
    ```bash
    {completed_heartbeat}
    ```
@@ -6764,7 +6843,7 @@ When the objective and every configured gate are complete, send this `completed`
 1. {validation_and_handoff_rule}
 2. Complete the Learnings Protocol below before changing the task status.
 3. Update the authoritative task file at {task_file} to `Status: COMPLETED` and add the result summary.
-4. In the completed heartbeat below, replace `<exact-work-graph-node-id>` with every exact node ID completed by this assignment (never a title, label, or agent ID); if no work-graph node was assigned, remove the optional `completed_nodes` field. Then send it:
+4. In the completed heartbeat below, use a detailed object for every node executed through a native child: replace `<exact-work-graph-node-id>` and every `executed_as` placeholder with the exact provider, tier, model, flags, channel, and resolution source used. Keep the top-level `agent_id` as this reporting orchestrator; do not add a per-entry agent ID. A bare string node ID remains valid for legacy agents and work completed directly by this orchestrator. Never use a title, label, or agent ID as the node ID. If no work-graph node was assigned, remove the optional `completed_nodes` field. Then send it:
    ```bash
    {completed_heartbeat}
    ```
@@ -7607,7 +7686,7 @@ Content-Type: application/json
 | agent_id | string | Yes | Exact full agent ID from the roster or worker API, such as `{session_id}-worker-2` or `{session_id}-fusion-1` |
 | status | string | Yes | `working` = doing work or holding the session open; `idle` = alive and blocked on another actor; `completed` = this actor is finished |
 | summary | string | No | Concise evidence-backed status summary |
-| completed_nodes | string[] | No | Exact work-graph node IDs completed by this agent; valid only with `status: completed`. Omit when no node binding is known. |
+| completed_nodes | (string \| object)[] | No | Exact work-graph completions; valid only with `status: completed`. Bare node-ID strings remain valid for legacy agents and reporting-parent execution. Native-child work should use `{{"node_id":"<exact-work-graph-node-id>","executed_as":{{"provider":"codex","tier":"low","model":"gpt-5.6-terra","flags":["-c","model_reasoning_effort=\"medium\""],"channel":"native","source":"node"}}}}`. `source` is `node`, `fallback`, or `override` and must reflect the actual selection. Keep `agent_id` at the top level; do not add it per entry. Omit when no node binding is known. |
 
 ## Mark a Verified Completion
 
@@ -13342,7 +13421,7 @@ The backend composed and persisted the following authoritative skeleton before l
             TaskGraph, WorkGraphOmission, WorkGraphOmissionReason,
         };
 
-        let project_path = {
+        let (project_path, ceiling_percent) = {
             let sessions = self.sessions.read();
             let session = sessions
                 .get(session_id)
@@ -13353,7 +13432,13 @@ The backend composed and persisted the following authoritative skeleton before l
                     session.state
                 ));
             }
-            session.project_path.clone()
+            (
+                session.project_path.clone(),
+                session
+                    .execution_policy
+                    .tier_policy
+                    .plan_ready_ceiling_percent(),
+            )
         };
 
         let project_plan_path = project_path
@@ -13468,8 +13553,11 @@ The backend composed and persisted the following authoritative skeleton before l
             ));
         }
 
-        use crate::orchestrator::work_graph::validate::PlanReadyError;
-        match crate::orchestrator::work_graph::validate::validate_plan_ready(&graph) {
+        use crate::orchestrator::work_graph::validate::{PlanReadyError, PlanReadyPolicy};
+        match crate::orchestrator::work_graph::validate::validate_plan_ready(
+            &graph,
+            PlanReadyPolicy { ceiling_percent },
+        ) {
             Ok(validation) => {
                 for warning in validation.warnings {
                     tracing::warn!(session_id, warning = %warning, "PlanReady validation warning");
@@ -13493,6 +13581,7 @@ The backend composed and persisted the following authoritative skeleton before l
             }
             Err(
                 error @ (PlanReadyError::Cycle { .. }
+                | PlanReadyError::TierCeilingExceeded { .. }
                 | PlanReadyError::MissingVerificationSignal { .. }
                 | PlanReadyError::MissingVerificationSignalClass { .. }
                 | PlanReadyError::InsufficientVerificationIsolation { .. }
@@ -14265,6 +14354,7 @@ The backend composed and persisted the following authoritative skeleton before l
         session: &Session,
         role: &WorkerRole,
         parent_id: Option<&str>,
+        dispatch_tiers: Option<(TaskTier, TaskTier)>,
     ) -> Result<(), AddWorkerRejection> {
         if !Self::session_allows_dynamic_principal(session, role, parent_id) {
             return Err(AddWorkerRejection {
@@ -14296,10 +14386,13 @@ The backend composed and persisted the following authoritative skeleton before l
                     reason: AddWorkerRejectionReason::ParentNotInSession,
                     current_state: format!("{:?}", session.state),
                 })?;
-            if !matches!(
+            let can_parent = matches!(
                 parent.role,
                 AgentRole::Queen | AgentRole::Planner { .. } | AgentRole::Prince
-            ) {
+            ) || (session.execution_policy.tier_policy.enabled
+                && dispatch_tiers.is_some()
+                && matches!(parent.role, AgentRole::Worker { .. }));
+            if !can_parent {
                 return Err(AddWorkerRejection {
                     error: format!(
                         "Agent {} cannot parent a managed principal",
@@ -14310,6 +14403,16 @@ The backend composed and persisted the following authoritative skeleton before l
                 });
             }
         }
+
+        Self::check_dispatch_ceiling(
+            &session.state,
+            session
+                .execution_policy
+                .tier_policy
+                .enabled
+                .then_some(dispatch_tiers)
+                .flatten(),
+        )?;
 
         let can_add_worker = matches!(
             session.state,
@@ -14338,6 +14441,30 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         Ok(())
+    }
+
+    /// Keep the tier ceiling in the shared reservation/recheck path. `None` is the
+    /// byte-identical legacy path used when tier routing is disabled or unavailable.
+    pub(crate) fn check_dispatch_ceiling(
+        state: &SessionState,
+        dispatch_tiers: Option<(TaskTier, TaskTier)>,
+    ) -> Result<(), AddWorkerRejection> {
+        let Some(dispatch_tiers) = dispatch_tiers else {
+            return Ok(());
+        };
+        let (parent_tier, task_tier) = dispatch_tiers;
+        if task_tier <= parent_tier {
+            return Ok(());
+        }
+
+        Err(AddWorkerRejection {
+            error: format!(
+                "Task tier {:?} exceeds parent dispatch ceiling {:?}",
+                task_tier, parent_tier
+            ),
+            reason: AddWorkerRejectionReason::TierExceedsDispatchCeiling,
+            current_state: format!("{:?}", state),
+        })
     }
 
     /// The worker index the next spawn will take. One definition, used by both
@@ -14521,13 +14648,14 @@ The backend composed and persisted the following authoritative skeleton before l
         session_id: &str,
         role: &WorkerRole,
         parent_id: Option<&str>,
+        dispatch_tiers: Option<(TaskTier, TaskTier)>,
     ) -> Result<AddWorkerReservation, AddWorkerError> {
         let sessions = self.sessions.read();
         let session = sessions
             .get(session_id)
             .ok_or_else(|| AddWorkerError::SessionNotFound(session_id.to_string()))?;
 
-        Self::check_add_worker_preconditions(session, role, parent_id)
+        Self::check_add_worker_preconditions(session, role, parent_id, dispatch_tiers)
             .map_err(AddWorkerError::Rejected)?;
 
         let index = Self::next_worker_index(session);
@@ -14546,7 +14674,15 @@ The backend composed and persisted the following authoritative skeleton before l
         parent_id: Option<String>,
         expected_index: Option<u8>,
     ) -> Result<AgentInfo, String> {
-        self.add_worker_for_plan_task(session_id, config, role, parent_id, expected_index, None)
+        self.add_worker_for_plan_task(
+            session_id,
+            config,
+            role,
+            parent_id,
+            expected_index,
+            None,
+            None,
+        )
     }
 
     /// Add a worker with an explicit work-graph binding. The ID is transported verbatim;
@@ -14559,6 +14695,7 @@ The backend composed and persisted the following authoritative skeleton before l
         parent_id: Option<String>,
         expected_index: Option<u8>,
         plan_task_id: Option<&str>,
+        dispatch_tiers: Option<(TaskTier, TaskTier)>,
     ) -> Result<AgentInfo, String> {
         // Get session and validate
         let session = {
@@ -14569,7 +14706,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
         let principal_binding = self.principal_binding_for_plan_task(session_id, plan_task_id);
 
-        Self::check_add_worker_preconditions(&session, &role, parent_id.as_deref())
+        Self::check_add_worker_preconditions(&session, &role, parent_id.as_deref(), dispatch_tiers)
             .map_err(|rejection| rejection.error)?;
 
         // Determine worker index
@@ -14683,11 +14820,12 @@ The backend composed and persisted the following authoritative skeleton before l
 
         // Write worker prompt to file and add to args
         let spawn_context = self.spawn_context_for_plan_task(session_id, plan_task_id);
-        let worker_prompt = Self::build_worker_prompt(
+        let worker_prompt = Self::build_worker_prompt_with_tier(
             worker_index,
             &config_with_role,
             &resolved_role,
             &spawn_context,
+            dispatch_tiers.map(|(_, child_tier)| child_tier),
             &actual_parent_id,
             session_id,
             &session.project_path,
@@ -15966,6 +16104,7 @@ mod tests {
     use crate::coordination::StateManager;
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::orchestrator::org_graph::composition::SpawnContext;
+    use crate::orchestrator::work_graph::schema::TaskTier;
     use crate::orchestrator::work_graph::{
         BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkGraphOmission,
         WorkGraphOmissionReason, WorkNode,
@@ -16146,6 +16285,7 @@ mod tests {
                 None,
                 Some(3),
                 Some("T1"),
+                None,
             )
             .expect("plan-task-aware worker spawn");
         assert_eq!(spawned.id, format!("{SESSION_ID}-worker-3"));
@@ -17049,8 +17189,11 @@ mod tests {
         assert!(status_content.contains("`working` = doing work or holding the session open"));
         assert!(status_content.contains("`idle` = alive and blocked on another actor"));
         assert!(status_content.contains("`completed` = this actor is finished"));
-        assert!(status_content.contains("| completed_nodes | string[] | No |"));
-        assert!(status_content.contains("Exact work-graph node IDs"));
+        assert!(status_content.contains("| completed_nodes | (string \\| object)[] | No |"));
+        assert!(status_content.contains("Bare node-ID strings remain valid"));
+        assert!(status_content.contains(r#""node_id":"<exact-work-graph-node-id>""#));
+        assert!(status_content.contains(r#""channel":"native""#));
+        assert!(status_content.contains("do not add it per entry"));
         assert!(status_content.contains(
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
@@ -17081,7 +17224,145 @@ mod tests {
                 max_children: Some(4),
                 max_depth: Some(2),
             },
+            tier_policy: crate::domain::TierPolicy::default(),
         }
+    }
+
+    fn tiered_meta_harness_policy() -> HiveExecutionPolicy {
+        let mut policy = shared_meta_harness_policy();
+        policy.tier_policy.enabled = true;
+        let ladder = crate::cli::tier_ladder::embedded_resolved_tier_ladder();
+        policy
+            .tier_policy
+            .ladder
+            .insert("claude".to_string(), ladder.clone());
+        policy
+            .tier_policy
+            .ladder
+            .insert("codex".to_string(), ladder);
+        policy
+    }
+
+    #[test]
+    fn disabled_policy_preserves_v047_full_planner_prompt_bytes() {
+        let planner = AgentConfig {
+            cli: "codex".to_string(),
+            model: Some("gpt-5.6-sol".to_string()),
+            ..AgentConfig::default()
+        };
+        let prompt = SessionController::build_master_planner_prompt(
+            "golden-session",
+            "Golden objective",
+            &planner,
+            &[],
+            &shared_meta_harness_policy(),
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/golden-session/primary"),
+        );
+
+        const EXPECTED_V047_PROMPT: &str = r#"# Master Planner - Hive Execution Contract
+
+## Role Kernel
+
+**Master Planner:** Turn the operator's objective into one build-ready execution contract. Investigate and plan; do not implement production code.
+
+## Capability Card
+
+- Role: Master Planner
+- Harness: `codex`
+- Model: `gpt-5.6-sol`
+- Flags: `[]`
+- Native delegation support (adapter profile, not a runtime probe): supported
+- Operator policy: auto
+- Native delegation authorized: yes
+- Native child guidance: max children 3; max depth 2
+- Workspace: shared Hive Cell worktree; native children inherit the parent workspace and assignment
+- Visibility: native children are harness-managed; they are not Hive Manager Workers, Cells, queue rows, or separate worktrees
+
+## Native Delegation
+
+Delegate when independent, bounded lanes would materially improve speed or confidence; otherwise work directly.
+
+Native children are read-only planning, scouting, or review lanes. Visible coding principals own implementation.
+
+For every child, state its objective, authoritative inputs, allowed paths, read/write mode, required evidence, and stop conditions. Give writing children non-overlapping ownership. Serialize shared files, migrations, lockfiles, generated artifacts, and git operations. Wait for all children, review their work, and synthesize one result. Children must not branch, commit, push, stash, reset, widen scope, or create managed Hive Workers unless their assignment explicitly authorizes it.
+
+## Workspace Contract
+
+This worktree is shared by the Queen and visible coding principals. Use explicit, non-overlapping file ownership. Do not switch branches, stash, reset, clean, or run repository-wide rewrites.
+
+Do not commit, branch, push, stash, reset, or clean.
+
+## Assignment Contract
+
+- Objective: Golden objective
+- Access: Read-only repository investigation; write only the session plan artifact
+- Owned scope: Planning artifacts under the current session; no production-code edits or git mutations
+- Authoritative input: The operator objective, repository state, project DNA, learnings, and referenced issue/spec material
+- Deliverables:
+  - /repo/.hive-manager/golden-session/plan.md
+  - One build-ready execution contract organized by coherent workstreams
+  - Evidence-backed ownership, dependency, validation, and stop-condition decisions
+- Validation:
+  - Every acceptance criterion maps to at least one validation gate
+  - Overlapping files and serialized hotspots have one explicit owner/order
+  - The plan is implementable without inventing missing authority
+- Stop and escalate when:
+  - The objective or acceptance criteria remain materially ambiguous
+  - Required repository or issue context is unavailable
+  - A safe ownership boundary cannot be defined without operator input
+
+## Session
+
+- Session ID: `golden-session`
+- Plan output: `/repo/.hive-manager/golden-session/plan.md`
+- Runtime CWD: `/repo/.hive-manager/worktrees/golden-session/primary`
+- Queen delegation policy: auto
+
+Before planning, inspect `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, the current repository state, and any referenced issue or specification. If the objective is missing, ask once and stop. If it is an issue reference, resolve its requirements before partitioning work.
+
+## Configured Managed Principals
+
+This roster is available implementation capacity, not a required task count. Design workstreams from the objective and coupling boundaries; do not manufacture one task per roster slot.
+
+| Slot | Role | CLI | Model | Flags | Native delegation |
+|------|------|-----|-------|-------|-------------------|
+| (none configured) | - | - | - | - | - |
+## Planning Method
+
+1. Establish the objective, non-goals, acceptance criteria, and authoritative evidence.
+2. Investigate the repository directly. Use native read-only scouts only when the Capability Card says delegation is authorized; choose the number from genuinely independent questions and wait for every scout before synthesis. Never launch unmanaged CLI subprocesses.
+3. Partition by coherent workstream and file ownership, not by agent count. Identify shared files, migrations, schemas, generated artifacts, lockfiles, and git operations that must be serialized.
+4. Define dependency order as task-line `deps:` declarations, plus integration gates, validation commands, observable evidence, risks, and explicit stop/escalation conditions. Prose phases are context only and must never be the sole statement of ordering.
+5. Write exactly one plan to `/repo/.hive-manager/golden-session/plan.md` and stop. Do not implement, edit production files, create branches, commit, push, or launch managed principals.
+
+## Required Plan Shape
+
+- Objective, constraints, non-goals, and acceptance criteria
+- Evidence and repository findings
+- Coherent workstreams with owned paths and authoritative inputs
+- A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
+  `- [ ] T1: Stable root task (tier: medium) (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
+  `- [ ] T2: Stable dependent task (deps: T1) (tier: medium) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
+  Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
+  Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.
+  - `low`: single-file mechanical work with an existing test.
+  - `medium`: multi-file work within one module.
+  - `high`: work crossing a module or trust boundary, or with judgmental acceptance.
+  - `critical`: ambiguous requirements or architecture work.
+  Missing tier metadata defaults to `medium`. PlanReady enforces a ceiling on nodes rated above `medium`.
+  Priority brackets express scheduling urgency; tier controls effort/model routing. `[CRITICAL]` priority collapses to `high` and cannot express the four-level tier scale.
+- Ownership matrix and serialized hotspots
+- Integration order and wave narrative consistent with the task graph
+- Validation gates with commands/evidence
+- Risks, unresolved decisions, and stop conditions
+- Recommended principal assignment as a suggestion, not a roster-count invariant
+
+End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation changes."#;
+
+        assert_eq!(prompt, EXPECTED_V047_PROMPT);
+        assert!(!prompt.contains("## Tier"));
     }
 
     fn codex_principal() -> AgentConfig {
@@ -17099,7 +17380,7 @@ mod tests {
 
     #[test]
     fn live_master_planner_uses_capability_policy_and_coherent_workstreams() {
-        let policy = shared_meta_harness_policy();
+        let policy = tiered_meta_harness_policy();
         let planner = AgentConfig {
             cli: "claude".to_string(),
             model: Some("fable".to_string()),
@@ -17117,6 +17398,11 @@ mod tests {
 
         assert!(prompt.contains("Harness: `claude`"));
         assert!(prompt.contains("Model: `fable`"));
+        assert!(prompt.contains("## Tier"));
+        assert!(prompt.contains("Current tier: `critical` (orchestration role"));
+        assert!(prompt.contains("routing via the Agent tool"));
+        assert!(prompt.contains("`low`: model `claude-haiku-4-5`"));
+        assert!(prompt.contains("any tier from `low` through `critical`"));
         assert!(
             prompt.contains("Runtime CWD: `/repo/.hive-manager/worktrees/session-modern/primary`")
         );
@@ -17134,7 +17420,7 @@ mod tests {
 
     #[test]
     fn live_shared_queen_prompt_reports_actual_roster_workspace_and_authority() {
-        let policy = shared_meta_harness_policy();
+        let policy = tiered_meta_harness_policy();
         let queen = AgentConfig {
             cli: "claude".to_string(),
             model: Some("opus".to_string()),
@@ -17154,6 +17440,8 @@ mod tests {
 
         assert!(prompt.contains("Harness: `claude`"));
         assert!(prompt.contains("Model: `opus`"));
+        assert!(prompt.contains("## Tier"));
+        assert!(prompt.contains("Current tier: `critical` (orchestration role"));
         assert!(
             prompt.contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary")
         );
@@ -17214,18 +17502,19 @@ mod tests {
 
     #[test]
     fn live_worker_prompt_uses_actual_codex_capabilities_and_topology_git_contract() {
-        let shared_policy = shared_meta_harness_policy();
+        let shared_policy = tiered_meta_harness_policy();
         let principal = codex_principal();
         let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
             Path::new("/repo"),
             None,
             "backend",
         );
-        let shared_prompt = SessionController::build_worker_prompt(
+        let shared_prompt = SessionController::build_worker_prompt_with_tier(
             1,
             &principal,
             &resolved,
             &SpawnContext::default(),
+            Some(TaskTier::High),
             "session-modern-queen",
             "session-modern",
             Path::new("/repo"),
@@ -17239,6 +17528,12 @@ mod tests {
             shared_prompt.contains(r#"Flags: `["--config","model_reasoning_effort=\"high\""]`"#)
         );
         assert!(shared_prompt.contains("Native delegation authorized: yes"));
+        assert!(shared_prompt.contains("## Tier"));
+        assert!(shared_prompt.contains("Current tier: `high`"));
+        assert!(shared_prompt.contains("`low`: model `gpt-5.6-terra`"));
+        assert!(shared_prompt
+            .contains(r#"`high`: model `gpt-5.6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
+        assert!(shared_prompt.contains("you may spawn `low`, `medium`, or `high` work"));
         assert!(shared_prompt
             .contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary"));
         assert!(shared_prompt.contains("leave the reviewed changes uncommitted for the Queen"));
@@ -17248,10 +17543,12 @@ mod tests {
         assert!(shared_prompt.contains(r#""status":"completed""#));
         let completion_protocol =
             extract_markdown_section(&shared_prompt, "## Completion Protocol (MANDATORY)");
-        assert!(completion_protocol.contains(r#""completed_nodes":["<exact-work-graph-node-id>"]"#));
-        assert!(completion_protocol.contains(
-            "every exact node ID completed by this assignment (never a title, label, or agent ID)"
-        ));
+        assert!(completion_protocol.contains(r#""node_id":"<exact-work-graph-node-id>""#));
+        assert!(completion_protocol.contains(r#""channel":"native""#));
+        assert!(completion_protocol.contains(r#""provider":"<provider>""#));
+        assert!(completion_protocol.contains(r#""source":"<node|fallback|override>""#));
+        assert!(completion_protocol.contains("Keep the top-level `agent_id`"));
+        assert!(completion_protocol.contains("A bare string node ID remains valid"));
         assert!(shared_prompt.contains("Begin only when Status is ACTIVE"));
         assert!(shared_prompt.contains("Queue Activation"));
         assert!(shared_prompt.contains("human-readable mirror"));
@@ -17301,6 +17598,76 @@ mod tests {
         assert!(no_workspace_prompt.contains("Do not mutate git without explicit operator"));
         assert!(no_workspace_prompt.contains("Completion Protocol (MANDATORY)"));
         assert!(no_workspace_prompt.contains(r#""status":"completed""#));
+    }
+
+    #[test]
+    fn enabled_legacy_worker_prompt_calls_out_default_medium_tier() {
+        let policy = tiered_meta_harness_policy();
+        let principal = codex_principal();
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            Path::new("/repo"),
+            None,
+            "backend",
+        );
+        let prompt = SessionController::build_worker_prompt(
+            1,
+            &principal,
+            &resolved,
+            &SpawnContext::default(),
+            "session-modern-queen",
+            "session-modern",
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-modern/primary"),
+            &policy,
+        );
+
+        assert!(prompt.contains("Current tier: `medium`"));
+        assert!(prompt.contains("default because no resolved graph dispatch tier was available"));
+        assert!(!prompt.contains("Current tier: `medium` (resolved from"));
+    }
+
+    #[test]
+    fn low_worker_prompt_forbids_dispatch_above_its_tier() {
+        let policy = tiered_meta_harness_policy();
+        let principal = codex_principal();
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            Path::new("/repo"),
+            None,
+            "backend",
+        );
+        let prompt = SessionController::build_worker_prompt_with_tier(
+            1,
+            &principal,
+            &resolved,
+            &SpawnContext::default(),
+            Some(TaskTier::Low),
+            "session-modern-queen",
+            "session-modern",
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-modern/primary"),
+            &policy,
+        );
+
+        assert!(prompt.contains("Current tier: `low`"));
+        assert!(prompt.contains("you may spawn `low` work only"));
+        assert!(prompt.contains("may not delegate above your own tier"));
+    }
+
+    #[test]
+    fn swarm_codex_exec_examples_follow_the_embedded_tier_ladder() {
+        let prompt = SessionController::build_swarm_master_planner_prompt(
+            "session-swarm",
+            "Investigate tiers",
+            1,
+            &[],
+        );
+
+        assert!(prompt.contains("Codex gpt-5.6-terra / low"));
+        assert!(prompt.contains(r#"-m gpt-5.6-terra -c model_reasoning_effort="medium""#));
+        assert!(prompt.contains("Codex gpt-5.6-sol / medium"));
+        assert!(prompt.contains(r#"-m gpt-5.6-sol -c model_reasoning_effort="medium""#));
+        assert!(!prompt.contains("gpt-5.5"));
+        assert!(!prompt.contains(r#"model_reasoning_effort="low""#));
     }
 
     #[test]
