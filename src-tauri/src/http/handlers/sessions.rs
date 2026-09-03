@@ -469,13 +469,19 @@ pub async fn create_session(
             let with_evaluator = req.with_evaluator.unwrap_or(false) || evaluator_config.is_some();
 
             let execution_policy = {
+                // Resolve against the same institutional wiki root the /api/tier-ladder
+                // preview uses, so what the operator previewed is what gets frozen.
+                let institutional_wiki_root = {
+                    let config = state.config.read().await;
+                    crate::cli::health::configured_institutional_wiki_root(&config)
+                };
                 let mut providers: Vec<&str> = vec![queen_config.cli.as_str()];
                 providers.extend(workers.iter().map(|worker| worker.cli.as_str()));
                 prepare_hive_execution_policy(
                     req.execution_policy.unwrap_or_default(),
                     providers,
                     FsPath::new(&req.project_path),
-                    None,
+                    institutional_wiki_root.as_deref(),
                 )?
             };
 

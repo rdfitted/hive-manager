@@ -613,6 +613,13 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     return Number.isInteger(value) && value >= 1 && value <= 100;
   }
 
+  // The form is `novalidate` so the popup owns its own error reporting. That also
+  // disables the browser's min/max enforcement on the delegation inputs, so those
+  // bounds have to be checked here or they stop being enforced at all.
+  function isValidDelegationLimit(value: number, max: number): boolean {
+    return Number.isInteger(value) && value >= 1 && value <= max;
+  }
+
   function handleTierRoutingToggle(event: Event) {
     const enabled = (event.currentTarget as HTMLInputElement).checked;
     if (!enabled && !isValidTierRoutingCeiling(tierPolicy.ceiling_percent)) {
@@ -636,6 +643,21 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
     ) {
       error = 'Tier-routing ceiling must be a whole number from 1 to 100.';
       return;
+    }
+
+    if (mode === 'hive') {
+      const delegationLimits: Array<[string, number, number]> = [
+        ['Queen target max children', queenMaxChildren, 8],
+        ['Queen target max depth', queenMaxDepth, 4],
+        ['Principal target max children', principalMaxChildren, 8],
+        ['Principal target max depth', principalMaxDepth, 4],
+      ];
+      for (const [label, value, max] of delegationLimits) {
+        if (!isValidDelegationLimit(value, max)) {
+          error = `${label} must be a whole number from 1 to ${max}.`;
+          return;
+        }
+      }
     }
 
     try {

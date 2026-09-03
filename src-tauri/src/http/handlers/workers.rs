@@ -267,35 +267,30 @@ fn resolve_worker_execution(
 
 fn read_tier_graph(state: &AppState, session_id: &str) -> Option<TaskGraph> {
     let state_manager = StateManager::new(state.storage.session_dir(session_id));
-    match state_manager.read_work_graph() {
-        Ok(Some(graph)) => Some(graph),
-        Ok(None) => match state_manager.read_graph_composition_state() {
-            Ok(Some(composition)) => Some(composition.graph),
-            Ok(None) => None,
-            Err(error) => {
-                tracing::warn!(
-                    session_id,
-                    "Failed to read graph composition for tier routing: {error}"
-                );
-                None
-            }
-        },
+
+    // The graph composition state is the authoritative artifact: `queue_scheduling_facts`
+    // reads it first and only falls back to the legacy work graph when it is absent.
+    // Tier routing must agree, or routing and scheduling can resolve against different
+    // graphs and disagree about a node's tier.
+    match state_manager.read_graph_composition_state() {
+        Ok(Some(composition)) => return Some(composition.graph),
+        Ok(None) => {}
         Err(error) => {
             tracing::warn!(
                 session_id,
-                "Failed to read work graph for tier routing: {error}"
+                "Failed to read graph composition for tier routing: {error}"
             );
-            match state_manager.read_graph_composition_state() {
-                Ok(Some(composition)) => Some(composition.graph),
-                Ok(None) => None,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id,
-                        "Failed to read graph composition fallback for tier routing: {error}"
-                    );
-                    None
-                }
-            }
+        }
+    }
+
+    match state_manager.read_work_graph() {
+        Ok(graph) => graph,
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                "Failed to read legacy work graph for tier routing: {error}"
+            );
+            None
         }
     }
 }
@@ -670,6 +665,7 @@ pub async fn add_worker(
         None => true,
         Some(requested) => requested == principal_defaults.cli.as_str(),
     };
+    let requested_cli_for_conflict = requested_cli.clone();
     let mut cli = requested_cli.unwrap_or_else(|| principal_defaults.cli.clone());
     validate_cli(&cli)?;
     let session = {
@@ -700,6 +696,31 @@ pub async fn add_worker(
         }
     });
     if let Some(execution) = tier_execution.as_ref() {
+        // A sub-worker inherits its parent's provider, so tier routing overrides the
+        // resolved CLI. Silently discarding an *explicitly requested* CLI would hand the
+        // caller a worker on a different harness than it asked for, so surface the
+        // conflict instead of resolving it quietly.
+        if let Some(requested) = requested_cli_for_conflict.as_deref() {
+            if requested != execution.executed_as.provider.as_str() {
+                let mut details = HashMap::new();
+                details.insert(
+                    "reason".to_string(),
+                    json!("cli_conflicts_with_inherited_provider"),
+                );
+                details.insert("requested_cli".to_string(), json!(requested));
+                details.insert(
+                    "inherited_cli".to_string(),
+                    json!(execution.executed_as.provider),
+                );
+                return Err(ApiError::conflict_with_details(
+                    format!(
+                        "Tier routing is enabled and a sub-worker inherits its parent's provider `{}`,                          but `{requested}` was requested. Omit `cli` to inherit, or disable tier routing.",
+                        execution.executed_as.provider
+                    ),
+                    details,
+                ));
+            }
+        }
         cli = execution.executed_as.provider.clone();
         model = Some(execution.executed_as.model.clone());
         flags = execution.executed_as.flags.clone();

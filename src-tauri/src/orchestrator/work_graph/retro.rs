@@ -1300,7 +1300,11 @@ fn task_tier_metrics(
             node_ids.insert(task_id.clone());
         }
         accumulator.node_ids.extend(node_ids.iter().cloned());
-        if additional_attempts_available {
+        // Match `node_metrics`: only event-backed outcomes contribute attempts. An
+        // archive-level event log is necessary but not sufficient — a completion fact
+        // carrying no `event:` source ref would otherwise inflate this tier's count
+        // while leaving the per-node metric untouched.
+        if additional_attempts_available && event_backed(outcome) {
             accumulator.additional_attempts += outcome.attempt_count.saturating_sub(1);
         }
         if remediation_detours_available {

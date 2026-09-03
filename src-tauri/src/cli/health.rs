@@ -226,7 +226,7 @@ fn tier_ladder_omission(issue: &TierLadderResolutionIssue) -> TierLadderOmission
     }
 }
 
-fn configured_institutional_wiki_root(config: &AppConfig) -> Option<PathBuf> {
+pub(crate) fn configured_institutional_wiki_root(config: &AppConfig) -> Option<PathBuf> {
     config
         .global_wiki_path
         .as_deref()
