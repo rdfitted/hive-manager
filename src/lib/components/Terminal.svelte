@@ -71,6 +71,7 @@
   let webglPermanentlyDisabled = false;
   let rendererGrantId: string | null = null;
   let registeredRendererFallback: TerminalRendererFallback | null = null;
+  let terminalFocusTarget: HTMLTextAreaElement | null = null;
   let searchAddon: SearchAddon | null = null;
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
@@ -700,6 +701,11 @@
     // Open terminal in container
     term.open(terminalContainer);
 
+    // xterm 6 does not expose an onFocus event, so listen on its public textarea.
+    // This lets panes with an unchanged isFocused prop re-enter the capped grant path.
+    terminalFocusTarget = term.textarea ?? null;
+    terminalFocusTarget?.addEventListener('focus', promoteFocusedTerminal);
+
     // Capture-phase paste listener: suppresses paste events that the browser
     // fires after our Ctrl+V handler already sent clipboard content via Tauri API.
     // Must be capture phase to fire before xterm's own paste listener.
@@ -874,6 +880,8 @@
     if (layoutRefitFrame !== null) cancelAnimationFrame(layoutRefitFrame);
     document.removeEventListener('click', handleGlobalClick);
     document.removeEventListener('paste', handleGlobalPaste);
+    terminalFocusTarget?.removeEventListener('focus', promoteFocusedTerminal);
+    terminalFocusTarget = null;
     if (unlistenOutput) unlistenOutput();
     if (unlistenStatus) unlistenStatus();
     if (unlistenDragDrop) unlistenDragDrop();

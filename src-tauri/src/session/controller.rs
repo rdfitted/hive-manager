@@ -7167,7 +7167,8 @@ Awaiting task assignment from the Queen."#,
 
     /// Build the Queen's master prompt for Swarm mode with sequential planner spawning
     fn build_swarm_queen_prompt(
-        cli: &str,
+        queen_cli: &str,
+        planner_spawn_cli: &str,
         project_path: &Path,
         session_id: &str,
         planners: &[PlannerConfig],
@@ -7177,7 +7178,7 @@ Awaiting task assignment from the Queen."#,
         let planner_count = planners.len();
         let session_root = Self::session_root_path(project_path, session_id);
         let (project_root, project_dna_path, project_learnings_path) =
-            Self::project_knowledge_prompt_paths(cli, project_path);
+            Self::project_knowledge_prompt_paths(queen_cli, project_path);
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
         let post_workers_protocol =
             Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
@@ -7193,7 +7194,7 @@ Awaiting task assignment from the Queen."#,
             ));
         }
 
-        let hardening = if CliRegistry::needs_role_hardening(cli) {
+        let hardening = if CliRegistry::needs_role_hardening(queen_cli) {
             r#"
 WARNING: CRITICAL ROLE CONSTRAINTS
 
@@ -7391,7 +7392,7 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             hardening = hardening,
             required_protocol = required_protocol,
             session_id = session_id,
-            cli = cli,
+            cli = planner_spawn_cli,
             planner_info = planner_info,
             planner_count = planner_count,
             project_root = project_root,
@@ -14092,6 +14093,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             // Write Queen prompt with sequential planner spawning protocol
             let master_prompt = Self::build_swarm_queen_prompt(
+                &config.queen_config.cli,
                 &default_cli,
                 &session.project_path,
                 session_id,
@@ -14233,6 +14235,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             // Write Queen prompt to file and pass to CLI
             let master_prompt = Self::build_swarm_queen_prompt(
+                &config.queen_config.cli,
                 &default_cli,
                 &project_path,
                 &session_id,
@@ -17836,6 +17839,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
         let swarm_queen = SessionController::build_swarm_queen_prompt(
             "claude",
+            "claude",
             Path::new("/repo"),
             "session-swarm",
             &[],
@@ -17942,6 +17946,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
                     "swarm queen",
                     SessionController::build_swarm_queen_prompt(
                         cli,
+                        cli,
                         project_path,
                         "session-swarm",
                         &[],
@@ -18013,6 +18018,68 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             "/mnt/d/Code Projects/hive-manager",
             project_path,
         );
+    }
+
+    #[test]
+    fn swarm_queen_cli_and_planner_spawn_cli_are_independent() {
+        let project_path = Path::new(r"D:\Code Projects\hive-manager");
+        let cursor_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "cursor",
+            "codex",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+
+        assert!(cursor_queen_prompt
+            .contains("`/mnt/d/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(!cursor_queen_prompt
+            .contains("`D:/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(cursor_queen_prompt
+            .contains(r#"-d '{"domain": "DOMAIN", "cli": "codex", "worker_count": N}'"#));
+        assert!(!cursor_queen_prompt.contains(r#""cli": "cursor""#));
+
+        let codex_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "codex",
+            "cursor",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+
+        assert!(codex_queen_prompt
+            .contains("`D:/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(!codex_queen_prompt
+            .contains("`/mnt/d/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(codex_queen_prompt
+            .contains(r#"-d '{"domain": "DOMAIN", "cli": "cursor", "worker_count": N}'"#));
+        assert!(!codex_queen_prompt.contains(r#""cli": "codex""#));
+
+        let hardened_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            "qwen",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+        let unhardened_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "qwen",
+            "claude",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+
+        assert!(hardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
+        assert!(!unhardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
     }
 
     #[test]
@@ -18236,6 +18303,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             true,
         );
         let swarm_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
             "claude",
             Path::new("/repo"),
             "session-123",
