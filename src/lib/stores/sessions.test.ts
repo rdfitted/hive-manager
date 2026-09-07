@@ -57,6 +57,12 @@ describe('sessions store', () => {
             workspace_strategy: 'shared_cell',
             queen_delegation: { mode: 'disabled' },
             principal_delegation: { mode: 'disabled' },
+            tier_policy: {
+              enabled: false,
+              ceiling_percent: 34,
+              review_floor: 'high',
+              ladder: {},
+            },
           },
         })
       }));
@@ -119,6 +125,12 @@ describe('sessions store', () => {
           workspace_strategy: 'isolated_cell' as const,
           queen_delegation: { mode: 'encouraged' as const, max_children: 3, max_depth: 1 },
           principal_delegation: { mode: 'auto' as const, max_children: 2, max_depth: 1 },
+          tier_policy: {
+            enabled: false,
+            ceiling_percent: 34,
+            review_floor: 'high' as const,
+            ladder: {},
+          },
         },
       };
 

@@ -1406,6 +1406,12 @@ fn update_event_outcome(
     if outcome.task_id.is_none() {
         outcome.task_id = task_id;
     }
+    if event.event_type == EventType::WorkNodeCompleted && outcome.executed_as.is_none() {
+        outcome.executed_as = event
+            .payload
+            .get("executed_as")
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
+    }
     outcome.source_refs.push(format!("event:{}", event.id));
     if matches!(
         kind,

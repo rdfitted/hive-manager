@@ -52,6 +52,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health::health_check))
         .route("/api/cli-health", get(cli_health::get_cli_health_http))
+        .route(
+            "/api/preset-catalogue",
+            get(cli_health::get_preset_catalogue_http),
+        )
         .route("/api/tier-ladder", get(cli_health::get_tier_ladder_http))
         // Unified action registry surface (the future agent/MCP entrypoint).
         // GET lists every action + schema; POST dispatches any action (caller=Http).

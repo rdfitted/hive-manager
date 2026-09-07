@@ -17,18 +17,30 @@ use crate::coordination::queue_manager::{
     STUCK_CUTOFF_MS,
 };
 use crate::coordination::{InjectionManager, StateManager};
-use crate::domain::event::{EventType, Severity};
+use crate::domain::event::{Event, EventType, Severity};
 use crate::domain::HiveExecutionPolicy;
 use crate::events::EventBus;
 use crate::http::handlers::heartbeats::PostHeartbeatRequest;
-use crate::http::handlers::workers::AddWorkerRequest;
+use crate::http::handlers::workers::{AddWorkerRequest, ExecutedAs};
 use crate::http::routes::create_router;
 use crate::http::state::AppState;
-use crate::orchestrator::work_graph::completion_ledger::{
-    read_node_completion_facts, NodeCompletionProvenance,
+use crate::orchestrator::work_graph::archive::{
+    ArchiveSourceKind, ArchiveSourceReport, WorkGraphArchive, WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
 };
+use crate::orchestrator::work_graph::completion_ledger::{
+    read_node_completion_facts, NodeCompletionFact, NodeCompletionProvenance,
+    NODE_COMPLETION_LEDGER,
+};
+use crate::orchestrator::work_graph::divergence::compute_divergence;
 use crate::orchestrator::work_graph::plan_parse::promote_initial_ready_nodes;
+use crate::orchestrator::work_graph::retro::{
+    evaluate_archives, IndependentEvaluator, RetroRunInput,
+};
 use crate::orchestrator::work_graph::review::checkpoint_aware_claimable_nodes;
+use crate::orchestrator::work_graph::runtime::{
+    derive_runtime_graph, derive_runtime_graph_with_completion_facts,
+};
+use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::orchestrator::work_graph::{
     BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkEdge,
     WorkNode,
@@ -1509,37 +1521,45 @@ async fn worker_finalized_event_uses_the_current_assignment_row_under_slot_reuse
 }
 
 #[tokio::test]
-async fn completion_ledger_failure_preserves_committed_finalization_and_events() {
+async fn failed_completion_ledger_append_preserves_executed_as_and_retro_bucket() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(queue_repo());
-    repo.enqueue(&queued_row(
-        "current-run",
-        "pending:current-run",
-        Some("current-task"),
-        1,
-    ))
-    .unwrap();
-    repo.try_claim_for_worker("current-run", Some("worker-1"), -90_000, 10)
+    let task_id = "ledger-failure-task";
+    let worker_id = "worker-ledger-failure";
+    let executed_as_json = json!({
+        "provider": "codex",
+        "tier": "high",
+        "model": "gpt-5.6-sol",
+        "flags": ["-c", "model_reasoning_effort=\"high\""],
+        "channel": "native",
+        "source": "node"
+    });
+    let mut row = queued_row("ledger-failure-run", worker_id, Some(task_id), 1);
+    row.payload["executed_as"] = executed_as_json.clone();
+    repo.enqueue(&row).unwrap();
+    repo.try_claim_for_worker("ledger-failure-run", Some(worker_id), -90_000, 10)
         .unwrap()
         .unwrap();
 
-    // A file where the ledger expects the session directory deterministically forces the
-    // append to fail without preventing EventBus from persisting either lifecycle event.
-    let sessions_dir = temp.path().join("sessions");
-    std::fs::create_dir(&sessions_dir).unwrap();
-    std::fs::write(sessions_dir.join(SESSION_ID), b"not a directory").unwrap();
+    let session_dir = temp.path().join("sessions").join(SESSION_ID);
+    let ledger_path = session_dir.join(NODE_COMPLETION_LEDGER);
+    std::fs::create_dir_all(&ledger_path).unwrap();
 
     let event_bus = EventBus::new(temp.path().to_path_buf());
     let mut events = event_bus.subscribe();
     let manager = QueueManager::new(Arc::clone(&repo), event_bus);
 
     assert!(manager
-        .record_heartbeat(SESSION_ID, "worker-1", "completed")
+        .record_heartbeat(SESSION_ID, worker_id, "completed")
         .await
         .expect("a failed ledger append must not reject an already committed finalization"));
     assert_eq!(
-        repo.get_row("current-run").unwrap().unwrap().status,
+        repo.get_row("ledger-failure-run").unwrap().unwrap().status,
         QueueStatus::Finalized
+    );
+    assert!(
+        read_node_completion_facts(&session_dir).is_err(),
+        "the directory at the ledger path must force the append failure"
     );
 
     let finalized = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
@@ -1547,14 +1567,154 @@ async fn completion_ledger_failure_preserves_committed_finalization_and_events()
         .expect("completion heartbeat must emit WorkerFinalized despite ledger failure")
         .unwrap();
     assert_eq!(finalized.event_type, EventType::WorkerFinalized);
-    assert_eq!(finalized.payload["task_id"], "current-task");
+    assert_eq!(finalized.payload["task_id"], task_id);
 
     let completed = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
         .await
         .expect("ledger failure must not suppress WorkNodeCompleted")
         .unwrap();
     assert_eq!(completed.event_type, EventType::WorkNodeCompleted);
-    assert_eq!(completed.payload["task_id"], "current-task");
+    assert_eq!(completed.payload["task_id"], task_id);
+    assert_eq!(completed.payload["executed_as"], executed_as_json);
+
+    let plan = TaskGraph::new(
+        vec![queue_test_node(task_id, NodeStatus::Ready).with_tier(TaskTier::High)],
+        Vec::new(),
+    );
+    let derived = derive_runtime_graph(Some(&plan), &[completed], &[], &[], &[]);
+    let outcome = derived
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.subject_id == task_id)
+        .expect("event-derived task outcome");
+    assert_eq!(
+        serde_json::to_value(outcome.executed_as.as_ref().unwrap()).unwrap(),
+        executed_as_json
+    );
+
+    let archive = WorkGraphArchive {
+        schema_version: WORK_GRAPH_ARCHIVE_SCHEMA_VERSION,
+        archive_id: "ledger-failure-archive".to_string(),
+        session_id: SESSION_ID.to_string(),
+        archived_at: Utc::now(),
+        plan_graph: Some(plan.clone()),
+        divergence: compute_divergence(Some(&plan), &derived.runtime_graph, &[]),
+        runtime_graph: derived.runtime_graph,
+        deltas: Vec::new(),
+        outcomes: derived.outcomes,
+        sources: vec![
+            ArchiveSourceReport {
+                kind: ArchiveSourceKind::EventLog,
+                location: "events.jsonl".to_string(),
+                available: true,
+                record_count: 1,
+                omissions: Vec::new(),
+            },
+            ArchiveSourceReport {
+                kind: ArchiveSourceKind::MutationLog,
+                location: "memory/session-mutation-log".to_string(),
+                available: true,
+                record_count: 0,
+                omissions: Vec::new(),
+            },
+        ],
+    };
+    let evaluator = IndependentEvaluator::new(
+        "ledger-failure-evaluator",
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let report = evaluate_archives(
+        &evaluator,
+        &[RetroRunInput {
+            repo_id: "ledger-failure-repo".to_string(),
+            archive,
+        }],
+    )
+    .unwrap();
+    let tier_metric = report.runs[0]
+        .task_tiers
+        .value()
+        .expect("executed_as keeps task-tier evidence available")
+        .iter()
+        .find(|metric| metric.provider == "codex" && metric.tier == TaskTier::High)
+        .expect("failed-ledger completion must remain in its retro tier bucket");
+    assert_eq!(tier_metric.completion_count, 1);
+    assert_eq!(tier_metric.node_ids, vec![task_id.to_string()]);
+}
+
+#[test]
+fn completion_fact_executed_as_wins_over_differing_event_value() {
+    let task_id = "fact-wins-task";
+    let event_executed_as = json!({
+        "provider": "event-provider",
+        "tier": "high",
+        "model": "event-model",
+        "flags": [],
+        "channel": "native",
+        "source": "fallback"
+    });
+    let fact_executed_as_json = json!({
+        "provider": "fact-provider",
+        "tier": "high",
+        "model": "fact-model",
+        "flags": ["--fact"],
+        "channel": "hive",
+        "source": "node"
+    });
+    let completion_event = Event {
+        id: "event-completion".to_string(),
+        session_id: SESSION_ID.to_string(),
+        cell_id: None,
+        agent_id: Some("worker-fact-wins".to_string()),
+        event_type: EventType::WorkNodeCompleted,
+        timestamp: Utc::now(),
+        payload: json!({
+            "task_id": task_id,
+            "executed_as": event_executed_as
+        }),
+        severity: Severity::Info,
+    };
+    let fact_executed_as: ExecutedAs =
+        serde_json::from_value(fact_executed_as_json.clone()).unwrap();
+    let fact = NodeCompletionFact::new(
+        task_id,
+        "worker-fact-wins",
+        NodeCompletionProvenance::Heartbeat,
+    )
+    .with_executed_as(fact_executed_as);
+    let plan = TaskGraph::new(
+        vec![queue_test_node(task_id, NodeStatus::Ready).with_tier(TaskTier::High)],
+        Vec::new(),
+    );
+
+    let derived = derive_runtime_graph_with_completion_facts(
+        Some(&plan),
+        &[completion_event],
+        &[],
+        &[],
+        &[],
+        &[fact],
+        &Default::default(),
+    );
+    let outcome = derived
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.subject_id == task_id)
+        .expect("declared completion outcome");
+    assert_eq!(
+        serde_json::to_value(outcome.executed_as.as_ref().unwrap()).unwrap(),
+        fact_executed_as_json
+    );
+    assert!(outcome
+        .source_refs
+        .iter()
+        .any(|source| source == "event:event-completion"));
+    assert!(outcome
+        .source_refs
+        .iter()
+        .any(|source| source.starts_with("completion-fact:")));
 }
 
 #[tokio::test]

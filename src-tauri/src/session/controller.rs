@@ -4106,6 +4106,23 @@ Last updated: {timestamp}
         path.to_string_lossy().replace('\\', "/")
     }
 
+    fn project_knowledge_prompt_paths(cli: &str, project_path: &Path) -> (String, String, String) {
+        let project_knowledge_dir = project_path.join(".ai-docs");
+        let prompt_path_for_cli = |path: &Path| {
+            let prompt_path = Self::prompt_path(path);
+            if Self::cli_runs_under_wsl(cli) {
+                Self::to_wsl_path(&prompt_path)
+            } else {
+                prompt_path
+            }
+        };
+        (
+            prompt_path_for_cli(project_path),
+            prompt_path_for_cli(&project_knowledge_dir.join("project-dna.md")),
+            prompt_path_for_cli(&project_knowledge_dir.join("learnings.jsonl")),
+        )
+    }
+
     /// Does `cli` execute its prompt inside WSL rather than on the Windows host?
     ///
     /// `build_command` maps `cli == "cursor"` to the `wsl` executable, and call sites
@@ -4765,7 +4782,11 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
         session_id: &str,
         task_description: &str,
         variants: &[FusionVariantConfig],
+        cli: &str,
+        project_path: &Path,
     ) -> String {
+        let (project_root, project_dna_path, project_learnings_path) =
+            Self::project_knowledge_prompt_paths(cli, project_path);
         let variant_count = variants.len();
         let mut variant_table = String::new();
         for (i, v) in variants.iter().enumerate() {
@@ -4854,12 +4875,14 @@ You are the **Master Planner** for a Fusion session. Your job is to analyze the 
 - **Session ID**: {session_id}
 - **Mode**: Fusion (competing variants)
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
+- **Runtime CWD**: `{project_root}`
+- **Worktree topology**: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 
 ## Project Knowledge Intake
 
 Before investigating, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+- `{project_dna_path}`
+- `{project_learnings_path}`
 
 ## Variants
 
@@ -4922,6 +4945,9 @@ Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[
             variant_count = variant_count,
             variant_table = variant_table,
             phase0 = phase0,
+            project_root = project_root,
+            project_dna_path = project_dna_path,
+            project_learnings_path = project_learnings_path,
         )
     }
 
@@ -5272,6 +5298,8 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
         let plan_path =
             Self::prompt_path(&Self::session_root_path(project_path, session_id).join("plan.md"));
         let planner_workspace_path = Self::prompt_path(planner_workspace_path);
+        let (project_root, project_dna_path, project_learnings_path) =
+            Self::project_knowledge_prompt_paths(&planner_config.cli, project_path);
         let deliverables = [
             plan_path.as_str(),
             "One build-ready execution contract organized by coherent workstreams",
@@ -5358,9 +5386,10 @@ When ALL {completion_scope} have completed, you MUST signal the existing Evaluat
 - Session ID: `{session_id}`
 - Plan output: `{plan_path}`
 - Runtime CWD: `{planner_workspace_path}`
+- Worktree topology: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 - Queen delegation policy: {policy_label}
 
-Before planning, inspect `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, the current repository state, and any referenced issue or specification. If the objective is missing, ask once and stop. If it is an issue reference, resolve its requirements before partitioning work.
+Before planning, inspect `{project_dna_path}`, `{project_learnings_path}`, the current repository state, and any referenced issue or specification. If the objective is missing, ask once and stop. If it is an issue reference, resolve its requirements before partitioning work.
 
 ## Configured Managed Principals
 
@@ -5409,6 +5438,9 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             session_id = session_id,
             plan_path = plan_path,
             planner_workspace_path = planner_workspace_path,
+            project_root = project_root,
+            project_dna_path = project_dna_path,
+            project_learnings_path = project_learnings_path,
             policy_label = policy_label,
             principal_roster = principal_roster.trim_end(),
         )
@@ -5420,7 +5452,11 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         user_prompt: &str,
         planner_count: u8,
         workers_per_planner: &[AgentConfig],
+        cli: &str,
+        project_path: &Path,
     ) -> String {
+        let (project_root, project_dna_path, project_learnings_path) =
+            Self::project_knowledge_prompt_paths(cli, project_path);
         let workers_per = workers_per_planner.len();
         let total_workers = planner_count as usize * workers_per;
         let tier_ladder = crate::cli::tier_ladder::embedded_resolved_tier_ladder();
@@ -5544,12 +5580,14 @@ You are the **Master Planner** orchestrating a Swarm investigation to create a d
 - **Session ID**: {session_id}
 - **Mode**: Swarm (hierarchical)
 - **Plan Output**: `.hive-manager/{session_id}/plan.md`
+- **Runtime CWD**: `{project_root}`
+- **Worktree topology**: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 
 ## Project Knowledge Intake
 
 Before investigating, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+- `{project_dna_path}`
+- `{project_learnings_path}`
 
 ## Swarm Configuration
 
@@ -5684,6 +5722,9 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
             codex_low_flags = codex_low_flags,
             codex_medium_model = codex_medium.model,
             codex_medium_flags = codex_medium_flags,
+            project_root = project_root,
+            project_dna_path = project_dna_path,
+            project_learnings_path = project_learnings_path,
         )
     }
 
@@ -5694,7 +5735,13 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
         let smoke_workers = vec![AgentConfig::default(); 4];
 
         [
-            Self::build_fusion_master_planner_prompt("test-fusion", "test objective", &[]),
+            Self::build_fusion_master_planner_prompt(
+                "test-fusion",
+                "test objective",
+                &[],
+                "claude",
+                Path::new("/repo"),
+            ),
             Self::build_debate_master_planner_prompt("test-debate", "test topic", &[], 2),
             Self::build_master_planner_prompt(
                 "test-hive",
@@ -5705,7 +5752,14 @@ Priority brackets express scheduling urgency; tier controls effort/model routing
                 Path::new("/repo"),
                 Path::new("/repo/.hive-manager/worktrees/test-hive/primary"),
             ),
-            Self::build_swarm_master_planner_prompt("test-swarm", "test objective", 2, &[]),
+            Self::build_swarm_master_planner_prompt(
+                "test-swarm",
+                "test objective",
+                2,
+                &[],
+                "claude",
+                Path::new("/repo"),
+            ),
             Self::build_smoke_test_prompt("test-hive-smoke", &smoke_workers, false, None),
             Self::build_swarm_smoke_test_prompt("test-swarm-smoke", 4, &[], false, None),
         ]
@@ -6650,6 +6704,8 @@ When the objective and every configured gate are complete, send this `completed`
             render_workspace_contract(contract_role, &execution_policy.workspace_strategy);
 
         let session_root = Self::session_root_path(project_path, session_id);
+        let (project_root, project_dna_path, _) =
+            Self::project_knowledge_prompt_paths(&config.cli, project_path);
         let workspace_path = Self::prompt_path(workspace_path);
         let task_file_path = if execution_policy.workspace_strategy == WorkspaceStrategy::None {
             Self::session_task_file_path(project_path, session_id, index as usize)
@@ -6869,7 +6925,9 @@ Before marking the task COMPLETED, POST one durable learning record to /api/sess
         let project_context = if is_research {
             String::new()
         } else {
-            "## Project Context\n\nRead .ai-docs/project-dna.md before implementation and follow its current conventions.\n\n".to_string()
+            format!(
+                "## Project Context\n\nRead `{project_dna_path}` before implementation and follow its current conventions.\n\n"
+            )
         };
 
         format!(
@@ -6895,6 +6953,7 @@ Before marking the task COMPLETED, POST one durable learning record to /api/sess
 - Harness: {cli}
 - Model: {model}
 - Runtime CWD: {workspace_path}
+- Worktree topology: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 - Authoritative task file: {task_file}
 
 Use only the native tools exposed by the configured harness. The Capability Card is authoritative for native delegation. Native children inherit this principal's assignment and workspace; they are not managed Hive Workers and must not widen ownership or perform git operations.
@@ -6943,6 +7002,7 @@ treated as stuck and requeued.
             cli = config.cli,
             model = config.model.as_deref().unwrap_or("harness default"),
             workspace_path = workspace_path,
+            project_root = project_root,
             task_file = task_file,
             scope_block = scope_block,
             polling_instructions = polling_instructions,
@@ -7107,7 +7167,8 @@ Awaiting task assignment from the Queen."#,
 
     /// Build the Queen's master prompt for Swarm mode with sequential planner spawning
     fn build_swarm_queen_prompt(
-        cli: &str,
+        queen_cli: &str,
+        planner_spawn_cli: &str,
         project_path: &Path,
         session_id: &str,
         planners: &[PlannerConfig],
@@ -7116,6 +7177,8 @@ Awaiting task assignment from the Queen."#,
     ) -> String {
         let planner_count = planners.len();
         let session_root = Self::session_root_path(project_path, session_id);
+        let (project_root, project_dna_path, project_learnings_path) =
+            Self::project_knowledge_prompt_paths(queen_cli, project_path);
         let required_protocol = Self::queen_required_protocol(&session_root, has_evaluator);
         let post_workers_protocol =
             Self::queen_post_workers_protocol(session_id, &session_root, has_evaluator);
@@ -7131,7 +7194,7 @@ Awaiting task assignment from the Queen."#,
             ));
         }
 
-        let hardening = if CliRegistry::needs_role_hardening(cli) {
+        let hardening = if CliRegistry::needs_role_hardening(queen_cli) {
             r#"
 WARNING: CRITICAL ROLE CONSTRAINTS
 
@@ -7174,12 +7237,14 @@ You are the **Queen** orchestrating a multi-agent Swarm session. You spawn and c
 - **Mode**: Swarm (hierarchical with sequential spawning)
 - **Prompts Directory**: `.hive-manager/{session_id}/prompts/`
 - **Tools Directory**: `.hive-manager/{session_id}/tools/`
+- **Runtime CWD**: `{project_root}`
+- **Worktree topology**: Runtime CWD may be an isolated git worktree; the main checkout is `{project_root}`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 
 ## Project Knowledge Intake
 
 Before assigning work, read:
-- `.ai-docs/project-dna.md`
-- `.ai-docs/learnings.jsonl`
+- `{project_dna_path}`
+- `{project_learnings_path}`
 
 ## Planners to Spawn
 
@@ -7327,9 +7392,12 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
             hardening = hardening,
             required_protocol = required_protocol,
             session_id = session_id,
-            cli = cli,
+            cli = planner_spawn_cli,
             planner_info = planner_info,
             planner_count = planner_count,
+            project_root = project_root,
+            project_dna_path = project_dna_path,
+            project_learnings_path = project_learnings_path,
             qa_milestone_handoff = qa_milestone_handoff,
             post_workers_protocol = post_workers_protocol,
             queen_quality_log = Self::queen_quality_reconciliation_log_lines(has_evaluator),
@@ -10365,6 +10433,12 @@ The backend composed and persisted the following authoritative skeleton before l
             &session_id,
             &config.task_description,
             &config.variants,
+            &config
+                .queen_config
+                .as_ref()
+                .unwrap_or(&config.judge_config)
+                .cli,
+            &project_path,
         );
 
         {
@@ -11096,6 +11170,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 prompt,
                 planner_count,
                 &config.workers_per_planner,
+                &config.queen_config.cli,
+                &project_path,
             )
         };
 
@@ -14017,6 +14093,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             // Write Queen prompt with sequential planner spawning protocol
             let master_prompt = Self::build_swarm_queen_prompt(
+                &config.queen_config.cli,
                 &default_cli,
                 &session.project_path,
                 session_id,
@@ -14158,6 +14235,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
             // Write Queen prompt to file and pass to CLI
             let master_prompt = Self::build_swarm_queen_prompt(
+                &config.queen_config.cli,
                 &default_cli,
                 &project_path,
                 &session_id,
@@ -17317,9 +17395,10 @@ Do not commit, branch, push, stash, reset, or clean.
 - Session ID: `golden-session`
 - Plan output: `/repo/.hive-manager/golden-session/plan.md`
 - Runtime CWD: `/repo/.hive-manager/worktrees/golden-session/primary`
+- Worktree topology: Runtime CWD may be an isolated git worktree; the main checkout is `/repo`. Read project knowledge from the absolute main-checkout paths below, even when they are outside Runtime CWD. Write code only inside Runtime CWD.
 - Queen delegation policy: auto
 
-Before planning, inspect `.ai-docs/project-dna.md`, `.ai-docs/learnings.jsonl`, the current repository state, and any referenced issue or specification. If the objective is missing, ask once and stop. If it is an issue reference, resolve its requirements before partitioning work.
+Before planning, inspect `/repo/.ai-docs/project-dna.md`, `/repo/.ai-docs/learnings.jsonl`, the current repository state, and any referenced issue or specification. If the objective is missing, ask once and stop. If it is an issue reference, resolve its requirements before partitioning work.
 
 ## Configured Managed Principals
 
@@ -17660,6 +17739,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             "Investigate tiers",
             1,
             &[],
+            "claude",
+            Path::new("/repo"),
         );
 
         assert!(prompt.contains("Codex gpt-5.6-terra / low"));
@@ -17668,6 +17749,337 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(prompt.contains(r#"-m gpt-5.6-sol -c model_reasoning_effort="medium""#));
         assert!(!prompt.contains("gpt-5.5"));
         assert!(!prompt.contains(r#"model_reasoning_effort="low""#));
+    }
+
+    #[test]
+    fn live_project_knowledge_prompts_use_absolute_paths_and_disclose_worktree_topology() {
+        fn assert_knowledge_contract(name: &str, prompt: &str, reads_learnings: bool) {
+            assert!(
+                prompt.contains("`/repo/.ai-docs/project-dna.md`"),
+                "{name} must name the absolute project DNA path"
+            );
+            if reads_learnings {
+                assert!(
+                    prompt.contains("`/repo/.ai-docs/learnings.jsonl`"),
+                    "{name} must name the absolute project learnings path"
+                );
+            }
+            assert!(
+                prompt.contains("Worktree topology"),
+                "{name} must disclose the worktree topology"
+            );
+            assert!(
+                prompt.contains("the main checkout is `/repo`"),
+                "{name} must identify the main checkout"
+            );
+            assert!(
+                prompt.contains("even when they are outside Runtime CWD"),
+                "{name} must permit project-knowledge reads outside Runtime CWD"
+            );
+            assert!(
+                prompt.contains("Write code only inside Runtime CWD."),
+                "{name} must preserve the write-inside boundary"
+            );
+
+            let unexpected_relative_paths = prompt
+                .lines()
+                .filter(|line| {
+                    line.contains(".ai-docs/")
+                        && !line.contains("/repo/.ai-docs/")
+                        && !line.contains("Do not write .ai-docs/learnings.jsonl directly.")
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                unexpected_relative_paths.is_empty(),
+                "{name} emitted bare relative .ai-docs paths: {unexpected_relative_paths:?}"
+            );
+        }
+
+        let policy = HiveExecutionPolicy::default();
+        let planner = AgentConfig::default();
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            Path::new("/repo"),
+            None,
+            "backend",
+        );
+        let fusion = SessionController::build_fusion_master_planner_prompt(
+            "session-fusion",
+            "Plan the objective",
+            &[],
+            "claude",
+            Path::new("/repo"),
+        );
+        let master = SessionController::build_master_planner_prompt(
+            "session-hive",
+            "Plan the objective",
+            &planner,
+            &[],
+            &policy,
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-hive/primary"),
+        );
+        let swarm_planner = SessionController::build_swarm_master_planner_prompt(
+            "session-swarm",
+            "Plan the objective",
+            1,
+            &[],
+            "claude",
+            Path::new("/repo"),
+        );
+        let worker = SessionController::build_worker_prompt(
+            1,
+            &AgentConfig::default(),
+            &resolved,
+            &SpawnContext::default(),
+            "session-hive-queen",
+            "session-hive",
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-hive/primary"),
+            &policy,
+        );
+        let swarm_queen = SessionController::build_swarm_queen_prompt(
+            "claude",
+            "claude",
+            Path::new("/repo"),
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+
+        assert_knowledge_contract("fusion planner", &fusion, true);
+        assert_knowledge_contract("master planner", &master, true);
+        assert_knowledge_contract("swarm planner", &swarm_planner, true);
+        assert_knowledge_contract("managed principal", &worker, false);
+        assert_knowledge_contract("swarm queen", &swarm_queen, true);
+
+        assert!(worker.contains("Do not write .ai-docs/learnings.jsonl directly."));
+        assert!(master.contains(
+            "Authoritative input: The operator objective, repository state, project DNA, learnings, and referenced issue/spec material"
+        ));
+
+        let queen = SessionController::build_queen_master_prompt(
+            &AgentConfig::default(),
+            Path::new("/repo"),
+            Path::new("/repo/.hive-manager/worktrees/session-hive/primary"),
+            "session-hive",
+            &[],
+            None,
+            false,
+            false,
+            &policy,
+        );
+        assert!(
+            queen.contains("Read the plan, project DNA, learnings, and current repository state.")
+        );
+    }
+
+    #[test]
+    fn project_knowledge_prompts_translate_windows_paths_for_wsl_backed_clis_only() {
+        fn build_prompts(cli: &str, project_path: &Path) -> Vec<(&'static str, String, bool)> {
+            let policy = HiveExecutionPolicy::default();
+            let config = AgentConfig {
+                cli: cli.to_string(),
+                ..AgentConfig::default()
+            };
+            let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+                Path::new("/repo"),
+                None,
+                "backend",
+            );
+            let workspace_path =
+                Path::new(r"D:\Code Projects\hive-manager\.hive-manager\worktrees\session\primary");
+
+            vec![
+                (
+                    "fusion planner",
+                    SessionController::build_fusion_master_planner_prompt(
+                        "session-fusion",
+                        "Plan the objective",
+                        &[],
+                        cli,
+                        project_path,
+                    ),
+                    true,
+                ),
+                (
+                    "master planner",
+                    SessionController::build_master_planner_prompt(
+                        "session-hive",
+                        "Plan the objective",
+                        &config,
+                        &[],
+                        &policy,
+                        project_path,
+                        workspace_path,
+                    ),
+                    true,
+                ),
+                (
+                    "swarm planner",
+                    SessionController::build_swarm_master_planner_prompt(
+                        "session-swarm",
+                        "Plan the objective",
+                        1,
+                        &[],
+                        cli,
+                        project_path,
+                    ),
+                    true,
+                ),
+                (
+                    "managed principal",
+                    SessionController::build_worker_prompt(
+                        1,
+                        &config,
+                        &resolved,
+                        &SpawnContext::default(),
+                        "session-hive-queen",
+                        "session-hive",
+                        project_path,
+                        workspace_path,
+                        &policy,
+                    ),
+                    false,
+                ),
+                (
+                    "swarm queen",
+                    SessionController::build_swarm_queen_prompt(
+                        cli,
+                        cli,
+                        project_path,
+                        "session-swarm",
+                        &[],
+                        None,
+                        false,
+                    ),
+                    true,
+                ),
+            ]
+        }
+
+        fn assert_paths_for_cli(
+            cli: &str,
+            expected_root: &str,
+            unexpected_root: &str,
+            project_path: &Path,
+        ) {
+            let expected_dna = format!("`{expected_root}/.ai-docs/project-dna.md`");
+            let expected_learnings = format!("`{expected_root}/.ai-docs/learnings.jsonl`");
+            let unexpected_dna = format!("`{unexpected_root}/.ai-docs/project-dna.md`");
+            let unexpected_learnings = format!("`{unexpected_root}/.ai-docs/learnings.jsonl`");
+            let expected_knowledge_prefix = format!("{expected_root}/.ai-docs/");
+
+            for (name, prompt, reads_learnings) in build_prompts(cli, project_path) {
+                assert!(
+                    prompt.contains(&expected_dna),
+                    "{name} must emit the {cli} project DNA path as {expected_dna}"
+                );
+                assert!(
+                    !prompt.contains(&unexpected_dna),
+                    "{name} must not emit the project DNA path as {unexpected_dna} for {cli}"
+                );
+                if reads_learnings {
+                    assert!(
+                        prompt.contains(&expected_learnings),
+                        "{name} must emit the {cli} learnings path as {expected_learnings}"
+                    );
+                    assert!(
+                        !prompt.contains(&unexpected_learnings),
+                        "{name} must not emit the learnings path as {unexpected_learnings} for {cli}"
+                    );
+                }
+
+                let unexpected_relative_paths = prompt
+                    .lines()
+                    .filter(|line| {
+                        line.contains(".ai-docs/")
+                            && !line.contains(&expected_knowledge_prefix)
+                            && !line.contains("Do not write .ai-docs/learnings.jsonl directly.")
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    unexpected_relative_paths.is_empty(),
+                    "{name} emitted bare or mismatched .ai-docs paths for {cli}: {unexpected_relative_paths:?}"
+                );
+            }
+        }
+
+        let project_path = Path::new(r"D:\Code Projects\hive-manager");
+        assert_paths_for_cli(
+            "cursor",
+            "/mnt/d/Code Projects/hive-manager",
+            "D:/Code Projects/hive-manager",
+            project_path,
+        );
+        assert_paths_for_cli(
+            "claude",
+            "D:/Code Projects/hive-manager",
+            "/mnt/d/Code Projects/hive-manager",
+            project_path,
+        );
+    }
+
+    #[test]
+    fn swarm_queen_cli_and_planner_spawn_cli_are_independent() {
+        let project_path = Path::new(r"D:\Code Projects\hive-manager");
+        let cursor_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "cursor",
+            "codex",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+
+        assert!(cursor_queen_prompt
+            .contains("`/mnt/d/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(!cursor_queen_prompt
+            .contains("`D:/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(cursor_queen_prompt
+            .contains(r#"-d '{"domain": "DOMAIN", "cli": "codex", "worker_count": N}'"#));
+        assert!(!cursor_queen_prompt.contains(r#""cli": "cursor""#));
+
+        let codex_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "codex",
+            "cursor",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+
+        assert!(codex_queen_prompt
+            .contains("`D:/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(!codex_queen_prompt
+            .contains("`/mnt/d/Code Projects/hive-manager/.ai-docs/project-dna.md`"));
+        assert!(codex_queen_prompt
+            .contains(r#"-d '{"domain": "DOMAIN", "cli": "cursor", "worker_count": N}'"#));
+        assert!(!codex_queen_prompt.contains(r#""cli": "codex""#));
+
+        let hardened_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
+            "qwen",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+        let unhardened_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "qwen",
+            "claude",
+            project_path,
+            "session-swarm",
+            &[],
+            None,
+            false,
+        );
+
+        assert!(hardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
+        assert!(!unhardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
     }
 
     #[test]
@@ -17891,6 +18303,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             true,
         );
         let swarm_queen_prompt = SessionController::build_swarm_queen_prompt(
+            "claude",
             "claude",
             Path::new("/repo"),
             "session-123",

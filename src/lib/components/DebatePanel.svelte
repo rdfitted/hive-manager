@@ -195,7 +195,9 @@
             <span class="cli-badge">{queenAgent.config?.cli || 'unknown'}</span>
           </div>
           <div class="orchestrator-terminal">
-            <Terminal agentId={queenAgent.id} isFocused={true} />
+            {#key queenAgent.id}
+              <Terminal agentId={queenAgent.id} isFocused={true} />
+            {/key}
           </div>
         </div>
       {/if}
@@ -222,7 +224,9 @@
             <span class="cli-badge">{judgeAgent.config?.cli || 'unknown'}</span>
           </div>
           <div class="orchestrator-terminal">
-            <Terminal agentId={judgeAgent.id} isFocused={true} />
+            {#key judgeAgent.id}
+              <Terminal agentId={judgeAgent.id} isFocused={true} />
+            {/key}
           </div>
         </div>
       {/if}
