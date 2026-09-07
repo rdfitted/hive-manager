@@ -1,7 +1,9 @@
 <script lang="ts" module>
   type TerminalSelectionReader = () => string | null;
+  type TerminalRendererFallback = () => void;
 
   const terminalSelectionReaders = new Map<string, TerminalSelectionReader>();
+  const terminalRendererFallbacks = new Map<string, TerminalRendererFallback>();
 
   export function readTerminalSelection(agentId?: string | null): string | null {
     if (agentId) {
@@ -28,6 +30,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
+  import { acquire, promote, release } from '$lib/terminal/rendererBudget';
   import { activeAgents } from '$lib/stores/sessions';
   import { settings } from '$lib/stores/settings';
   import {
@@ -62,6 +65,12 @@
   let term: XTerm | null = null;
   let fitAddon: FitAddon | null = null;
   let webglAddon: WebglAddon | null = null;
+  let webglContextLossSubscription: { dispose(): void } | null = null;
+  let warnedAboutWebglContextLoss = false;
+  let hasRendererGrant = false;
+  let webglPermanentlyDisabled = false;
+  let rendererGrantId: string | null = null;
+  let registeredRendererFallback: TerminalRendererFallback | null = null;
   let searchAddon: SearchAddon | null = null;
   let unlistenOutput: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
@@ -92,6 +101,8 @@
   const FONT_SIZE_MIN = 8;
   const FONT_SIZE_MAX = 28;
   const FONT_SIZE_DEFAULT = 14;
+  const FULL_SCROLLBACK = 10000;
+  const REDUCED_SCROLLBACK = 2500;
 
   // Track agent status from store
   let agent = $derived(isAgent ? $activeAgents.find(a => a.id === agentId) : undefined);
@@ -118,6 +129,7 @@
     }
 
     if (isFocused) {
+      promoteFocusedTerminal();
       term?.focus();
     }
 
@@ -213,15 +225,120 @@
   // collapses to only xterm's fallback glyph. On first failure, dispose the
   // WebGL addon and retry once; subsequent writes use the default DOM renderer.
   // All write paths (PTY listener, exported write()) must route through here.
+  interface RendererFallbackOptions {
+    permanentlyDisable?: boolean;
+    warning?: string;
+  }
+
+  interface WebglAddonInternals {
+    _renderer?: {
+      _gl?: WebGL2RenderingContext;
+    };
+  }
+
+  function mountedRendererId(): string {
+    return rendererGrantId ?? agentId;
+  }
+
+  function releaseUnderlyingWebglContext(addon: WebglAddon) {
+    // @xterm/addon-webgl@0.19.0 removes its canvas on dispose but leaves the
+    // context alive until GC (xterm.js #6068). The dependency is pinned because
+    // this shim reaches private _renderer._gl internals. Remove the shim and the
+    // exact pin together when upstream PR #6069 ships in a released version.
+    const gl = (addon as unknown as WebglAddonInternals)._renderer?._gl;
+    try {
+      if (gl && !gl.isContextLost()) {
+        gl.getExtension('WEBGL_lose_context')?.loseContext();
+      }
+    } catch {
+      // A missing/tearing-down extension degrades to xterm's normal disposal.
+    }
+  }
+
+  function disposeWebglRenderer(): boolean {
+    const addon = webglAddon;
+    if (!addon) return false;
+
+    webglAddon = null;
+    webglContextLossSubscription?.dispose();
+    webglContextLossSubscription = null;
+    try { addon.dispose(); } catch { /* ignore */ }
+    releaseUnderlyingWebglContext(addon);
+
+    return true;
+  }
+
+  function fallBackToDomRenderer({
+    permanentlyDisable = false,
+    warning,
+  }: RendererFallbackOptions = {}): boolean {
+    if (permanentlyDisable) webglPermanentlyDisabled = true;
+    const disposed = disposeWebglRenderer();
+    hasRendererGrant = false;
+    release(mountedRendererId());
+
+    if (warning && !warnedAboutWebglContextLoss) {
+      warnedAboutWebglContextLoss = true;
+      console.warn(warning);
+    }
+    return disposed;
+  }
+
+  function claimRendererGrant(promoteToFront: boolean): boolean {
+    if (webglPermanentlyDisabled) return false;
+    const rendererId = mountedRendererId();
+
+    if (!promoteToFront) {
+      hasRendererGrant = acquire(rendererId);
+      return hasRendererGrant;
+    }
+
+    const evictedId = promote(rendererId);
+    hasRendererGrant = true;
+    if (evictedId) terminalRendererFallbacks.get(evictedId)?.();
+    return true;
+  }
+
+  function loadWebglRenderer() {
+    if (!term || webglAddon || !hasRendererGrant || webglPermanentlyDisabled) return;
+
+    try {
+      const addon = new WebglAddon();
+      const contextLossSubscription = addon.onContextLoss(() => {
+        if (webglAddon !== addon) return;
+        fallBackToDomRenderer({
+          permanentlyDisable: true,
+          warning: `[Terminal ${mountedRendererId()}] WebGL context lost, falling back to DOM renderer`,
+        });
+      });
+      webglAddon = addon;
+      webglContextLossSubscription = contextLossSubscription;
+      term.loadAddon(addon);
+    } catch (e) {
+      fallBackToDomRenderer({ permanentlyDisable: true });
+      console.warn(`[Terminal ${agentId}] WebGL addon not supported, using DOM renderer:`, e);
+    }
+  }
+
+  function promoteFocusedTerminal() {
+    if (!term) return;
+
+    // Promote-only scrollback policy: once a pane receives the full history
+    // bound it is never lowered again, because lowering truncates its buffer.
+    if (term.options.scrollback !== FULL_SCROLLBACK) {
+      term.options.scrollback = FULL_SCROLLBACK;
+    }
+
+    if (claimRendererGrant(true)) loadWebglRenderer();
+  }
+
   function writeSafely(data: string) {
     if (!term) return;
     try {
       term.write(data);
     } catch (e) {
-      if (webglAddon) {
+      if (fallBackToDomRenderer({ permanentlyDisable: true })) {
         console.error('xterm write failed, disposing WebGL addon and falling back to DOM renderer:', e);
-        try { webglAddon.dispose(); } catch { /* ignore */ }
-        webglAddon = null;
         try { term.write(data); } catch (e2) {
           console.error('xterm write failed after WebGL fallback:', e2);
         }
@@ -516,6 +633,10 @@
   }
 
   onMount(async () => {
+    rendererGrantId = agentId;
+    registeredRendererFallback = () => fallBackToDomRenderer();
+    terminalRendererFallbacks.set(rendererGrantId, registeredRendererFallback);
+
     const latticePalette = buildLatticeTerminalPalette();
     searchDecorations = latticePalette.searchDecorations;
     isWindows = navigator.platform.toLowerCase().startsWith('win');
@@ -550,7 +671,10 @@
     }
     unlistenDragDrop = dragDropUnlisten;
 
-    // Create terminal instance
+    const initialRendererGrant = claimRendererGrant(isFocused);
+
+    // Panes admitted to the renderer budget retain full history. Panes beyond
+    // the budget start smaller, then permanently promote to 10k on first focus.
     term = new XTerm({
       theme: latticePalette.theme,
       fontFamily: $settings.fontFamily,
@@ -558,7 +682,7 @@
       lineHeight: 1.2,
       cursorBlink: true,
       cursorStyle: 'block',
-      scrollback: 10000,
+      scrollback: initialRendererGrant || isFocused ? FULL_SCROLLBACK : REDUCED_SCROLLBACK,
       allowProposedApi: true,
     });
 
@@ -587,16 +711,9 @@
       }
     }, true);
 
-    // Try to load WebGL addon for better performance. Retain the reference so
-    // a write-time rendering failure (see pty-output listener) can dispose it
-    // and fall back to the default DOM renderer without losing the terminal.
-    try {
-      webglAddon = new WebglAddon();
-      term.loadAddon(webglAddon);
-    } catch (e) {
-      webglAddon = null;
-      console.warn('WebGL addon not supported, using canvas renderer');
-    }
+    // The shared registry enforces the cap across every Terminal mount site.
+    // Context-loss recovery is subscribed inside loadWebglRenderer before loadAddon.
+    if (initialRendererGrant) loadWebglRenderer();
 
     // Fit to container
     fitAddon.fit();
@@ -747,6 +864,11 @@
   onDestroy(() => {
     destroyed = true;
     terminalSelectionReaders.delete(agentId);
+    const mountedId = mountedRendererId();
+    if (terminalRendererFallbacks.get(mountedId) === registeredRendererFallback) {
+      terminalRendererFallbacks.delete(mountedId);
+    }
+    registeredRendererFallback = null;
     if (resizeTimeout) clearTimeout(resizeTimeout);
     if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
     if (layoutRefitFrame !== null) cancelAnimationFrame(layoutRefitFrame);
@@ -756,6 +878,10 @@
     if (unlistenStatus) unlistenStatus();
     if (unlistenDragDrop) unlistenDragDrop();
     if (resizeObserver) resizeObserver.disconnect();
+    disposeWebglRenderer();
+    hasRendererGrant = false;
+    release(mountedId);
+    rendererGrantId = null;
     if (term) term.dispose();
   });
 

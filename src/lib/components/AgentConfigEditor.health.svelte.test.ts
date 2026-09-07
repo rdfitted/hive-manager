@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { fetchCliHealth } from './AgentConfigEditor.svelte';
+import { fetchCliHealth, fetchPresetCatalogue } from './AgentConfigEditor.svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -168,5 +168,76 @@ describe('fetchCliHealth', () => {
 
     fetchMock.mockResolvedValueOnce(jsonResponse({ clis: [] }));
     await expect(fetchCliHealth(true)).rejects.toThrow('CLI health response was empty');
+  });
+});
+
+describe('fetchPresetCatalogue', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+    isTauriMock.mockReset();
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses HTTP only and deduplicates and caches the static catalogue', async () => {
+    const firstRequest = deferred<Response>();
+    const firstPayload = {
+      presets: [{
+        provider: 'claude',
+        id: 'claude-sonnet-4-5',
+        label: 'Sonnet 4.5',
+        model: 'claude-sonnet-4-5-20250929',
+        flags: [],
+      }],
+    };
+    fetchMock
+      .mockReturnValueOnce(firstRequest.promise)
+      .mockResolvedValueOnce(jsonResponse({
+        presets: [{
+          provider: 'qwen',
+          id: 'qwen3-coder',
+          label: 'Qwen3 Coder',
+          model: 'qwen3-coder',
+          flags: [],
+        }],
+      }));
+
+    const first = fetchPresetCatalogue(true);
+    const concurrent = fetchPresetCatalogue(true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/api\/preset-catalogue$/));
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    firstRequest.resolve(jsonResponse(firstPayload));
+    const [firstCatalogue, concurrentCatalogue] = await Promise.all([first, concurrent]);
+    expect(firstCatalogue).toEqual(concurrentCatalogue);
+    expect(firstCatalogue).toEqual(firstPayload.presets);
+
+    expect(await fetchPresetCatalogue()).toBe(firstCatalogue);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const refreshed = await fetchPresetCatalogue(true);
+    expect(refreshed[0]?.provider).toBe('qwen');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects failed or empty catalogue responses', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'unavailable' }, 503));
+    await expect(fetchPresetCatalogue(true)).rejects.toThrow(
+      'Preset catalogue request failed (503)',
+    );
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ presets: [] }));
+    await expect(fetchPresetCatalogue(true)).rejects.toThrow(
+      'Preset catalogue response was empty',
+    );
   });
 });

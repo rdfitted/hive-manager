@@ -18,7 +18,9 @@ use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::storage::AppConfig;
 
 use super::registry::CliRegistry;
-use super::tier_ladder::{TierLadderResolutionIssue, TierLadderResolutionIssueKind};
+use super::tier_ladder::{
+    preset_catalogue, PresetDefinition, TierLadderResolutionIssue, TierLadderResolutionIssueKind,
+};
 
 const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const CURSOR_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -83,6 +85,11 @@ pub struct TierLadderOmission {
 pub struct TierLadderPreviewResponse {
     pub cells: Vec<TierLadderPreviewCell>,
     pub omissions: Vec<TierLadderOmission>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct PresetCatalogueResponse {
+    pub presets: &'static [PresetDefinition],
 }
 
 pub struct CliHealthRegistry;
@@ -166,6 +173,12 @@ pub async fn get_cli_health() -> CliHealthResponse {
 
 pub async fn get_cli_health_http() -> Json<CliHealthResponse> {
     Json(CliHealthRegistry::check_all().await)
+}
+
+pub(crate) async fn get_preset_catalogue_http() -> Json<PresetCatalogueResponse> {
+    Json(PresetCatalogueResponse {
+        presets: preset_catalogue(),
+    })
 }
 
 /// Return the provider-native model and flags for every cell in the ladder

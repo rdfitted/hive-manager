@@ -141,6 +141,389 @@ pub(crate) struct PresetExpansion {
     pub(crate) cost_rank: u8,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub(crate) struct PresetDefinition {
+    pub(crate) provider: &'static str,
+    pub(crate) id: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) model: &'static str,
+    pub(crate) flags: &'static [&'static str],
+    #[serde(skip)]
+    cost_rank: u8,
+}
+
+macro_rules! preset {
+    ($provider:literal, $id:literal, $label:literal, $model:literal, $cost_rank:literal $(, $flag:literal)*) => {
+        PresetDefinition {
+            provider: $provider,
+            id: $id,
+            label: $label,
+            model: $model,
+            flags: &[$($flag),*],
+            cost_rank: $cost_rank,
+        }
+    };
+}
+
+// This is the single operator-visible preset catalogue. `cost_rank` remains
+// server-only metadata for tier-ladder monotonicity checks; it is deliberately
+// explicit rather than inferred from the UI display order.
+const PRESET_CATALOGUE: &[PresetDefinition] = &[
+    preset!(
+        "claude",
+        "fable-high",
+        "Fable 5 (High effort)",
+        "fable",
+        3,
+        "--settings",
+        "{\"effortLevel\":\"high\"}"
+    ),
+    preset!(
+        "claude",
+        "fable-max",
+        "Fable 5 (Max effort)",
+        "fable",
+        3,
+        "--settings",
+        "{\"effortLevel\":\"max\"}"
+    ),
+    preset!("claude", "fable", "Fable 5", "fable", 3),
+    preset!(
+        "claude",
+        "opus-high",
+        "Opus (High effort)",
+        "opus",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"high\"}"
+    ),
+    preset!(
+        "claude",
+        "opus-low",
+        "Opus (Low effort)",
+        "opus",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"low\"}"
+    ),
+    preset!("claude", "opus", "Opus", "opus", 2),
+    preset!(
+        "claude",
+        "claude-opus-4-6-high",
+        "Opus 4.6 (High effort)",
+        "claude-opus-4-6",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"high\"}"
+    ),
+    preset!(
+        "claude",
+        "claude-opus-4-6-low",
+        "Opus 4.6 (Low effort)",
+        "claude-opus-4-6",
+        2,
+        "--settings",
+        "{\"effortLevel\":\"low\"}"
+    ),
+    preset!(
+        "claude",
+        "claude-opus-4-5",
+        "Opus 4.5",
+        "claude-opus-4-5",
+        2
+    ),
+    preset!(
+        "claude",
+        "claude-sonnet-4-6",
+        "Sonnet 4.6",
+        "claude-sonnet-4-6",
+        1
+    ),
+    preset!(
+        "claude",
+        "claude-sonnet-4-5",
+        "Sonnet 4.5",
+        "claude-sonnet-4-5-20250929",
+        1
+    ),
+    preset!(
+        "claude",
+        "claude-haiku-4-5",
+        "Haiku 4.5",
+        "claude-haiku-4-5",
+        0
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-sol",
+        "GPT-5.6 Sol",
+        "gpt-5.6-sol",
+        1
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-sol-low",
+        "GPT-5.6 Sol (Low effort)",
+        "gpt-5.6-sol",
+        1,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-sol-medium",
+        "GPT-5.6 Sol (Medium effort)",
+        "gpt-5.6-sol",
+        1,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-sol-high",
+        "GPT-5.6 Sol (High effort)",
+        "gpt-5.6-sol",
+        2,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-sol-xhigh",
+        "GPT-5.6 Sol (Extra high effort)",
+        "gpt-5.6-sol",
+        2,
+        "-c",
+        "model_reasoning_effort=\"xhigh\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-sol-max",
+        "GPT-5.6 Sol (Max effort)",
+        "gpt-5.6-sol",
+        3,
+        "-c",
+        "model_reasoning_effort=\"max\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-sol-ultra",
+        "GPT-5.6 Sol (Ultra effort)",
+        "gpt-5.6-sol",
+        3,
+        "-c",
+        "model_reasoning_effort=\"ultra\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-terra",
+        "GPT-5.6 Terra",
+        "gpt-5.6-terra",
+        0
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-terra-low",
+        "GPT-5.6 Terra (Low effort)",
+        "gpt-5.6-terra",
+        0,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-terra-medium",
+        "GPT-5.6 Terra (Medium effort)",
+        "gpt-5.6-terra",
+        0,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-terra-high",
+        "GPT-5.6 Terra (High effort)",
+        "gpt-5.6-terra",
+        0,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-luna",
+        "GPT-5.6 Luna",
+        "gpt-5.6-luna",
+        0
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-luna-low",
+        "GPT-5.6 Luna (Low effort)",
+        "gpt-5.6-luna",
+        0,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-luna-medium",
+        "GPT-5.6 Luna (Medium effort)",
+        "gpt-5.6-luna",
+        0,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-6-luna-high",
+        "GPT-5.6 Luna (High effort)",
+        "gpt-5.6-luna",
+        0,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-5-low",
+        "GPT-5.5 (Low effort)",
+        "gpt-5.5",
+        0,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-5-medium",
+        "GPT-5.5 (Medium effort)",
+        "gpt-5.5",
+        1,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-5-high",
+        "GPT-5.5 (High effort)",
+        "gpt-5.5",
+        2,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-5-xhigh",
+        "GPT-5.5 (Extra high effort)",
+        "gpt-5.5",
+        2,
+        "-c",
+        "model_reasoning_effort=\"xhigh\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-4-low",
+        "GPT-5.4 (Low effort)",
+        "gpt-5.4",
+        0,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-4-medium",
+        "GPT-5.4 (Medium effort)",
+        "gpt-5.4",
+        1,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-4-high",
+        "GPT-5.4 (High effort)",
+        "gpt-5.4",
+        2,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-4-xhigh",
+        "GPT-5.4 (Extra high effort)",
+        "gpt-5.4",
+        2,
+        "-c",
+        "model_reasoning_effort=\"xhigh\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-3-low",
+        "GPT-5.3 Codex (Low effort)",
+        "gpt-5.3-codex",
+        0,
+        "-c",
+        "model_reasoning_effort=\"low\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-3-medium",
+        "GPT-5.3 Codex (Medium effort)",
+        "gpt-5.3-codex",
+        1,
+        "-c",
+        "model_reasoning_effort=\"medium\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-3-high",
+        "GPT-5.3 Codex (High effort)",
+        "gpt-5.3-codex",
+        2,
+        "-c",
+        "model_reasoning_effort=\"high\""
+    ),
+    preset!(
+        "codex",
+        "codex-gpt-5-3-xhigh",
+        "GPT-5.3 Codex (Extra high effort)",
+        "gpt-5.3-codex",
+        2,
+        "-c",
+        "model_reasoning_effort=\"xhigh\""
+    ),
+    preset!(
+        "cursor",
+        "composer-2.5",
+        "Composer 2.5 (latest)",
+        "composer-2.5",
+        0
+    ),
+    preset!("cursor", "composer-2", "Composer 2.0", "composer-2", 0),
+    preset!(
+        "cursor",
+        "composer-2-fast",
+        "Composer 2.0 Fast",
+        "composer-2-fast",
+        0
+    ),
+    preset!("cursor", "composer-1", "Composer 1", "composer-1", 0),
+    preset!("droid", "glm-5.1", "GLM 5.1", "glm-5.1", 0),
+    preset!("droid", "glm-4.7", "GLM 4.7", "glm-4.7", 0),
+    preset!(
+        "opencode",
+        "opencode/big-pickle",
+        "BigPickle",
+        "opencode/big-pickle",
+        0
+    ),
+    preset!("opencode", "opencode/grok", "Grok", "opencode/grok", 0),
+    preset!("qwen", "qwen3-coder", "Qwen3 Coder", "qwen3-coder", 0),
+    preset!("qwen", "qwen2.5-coder", "Qwen2.5 Coder", "qwen2.5-coder", 0),
+];
+
+pub(crate) fn preset_catalogue() -> &'static [PresetDefinition] {
+    PRESET_CATALOGUE
+}
+
 #[derive(Debug)]
 struct LadderLoadError {
     kind: TierLadderResolutionIssueKind,
@@ -462,38 +845,20 @@ fn source_unreadable(path: &Path, detail: String) -> TierLadderResolutionIssue {
 }
 
 pub(crate) fn expand_preset(provider: &str, preset_id: &str) -> Option<PresetExpansion> {
-    let (model, flags, cost_rank): (&str, &[&str], u8) = match (provider, preset_id) {
-        ("claude", "claude-haiku-4-5") => ("claude-haiku-4-5", &[], 0),
-        ("claude", "claude-sonnet-4-6") => ("claude-sonnet-4-6", &[], 1),
-        ("claude", "opus-high") => ("opus", &["--settings", "{\"effortLevel\":\"high\"}"], 2),
-        ("claude", "fable-high") => ("fable", &["--settings", "{\"effortLevel\":\"high\"}"], 3),
-        ("codex", "codex-gpt-5-6-terra-medium") => (
-            "gpt-5.6-terra",
-            &["-c", "model_reasoning_effort=\"medium\""],
-            0,
-        ),
-        ("codex", "codex-gpt-5-6-sol-medium") => (
-            "gpt-5.6-sol",
-            &["-c", "model_reasoning_effort=\"medium\""],
-            1,
-        ),
-        ("codex", "codex-gpt-5-6-sol-xhigh") => (
-            "gpt-5.6-sol",
-            &["-c", "model_reasoning_effort=\"xhigh\""],
-            2,
-        ),
-        ("codex", "codex-gpt-5-6-sol-max") => {
-            ("gpt-5.6-sol", &["-c", "model_reasoning_effort=\"max\""], 3)
-        }
-        _ => return None,
-    };
+    let preset = PRESET_CATALOGUE
+        .iter()
+        .find(|preset| preset.provider == provider && preset.id == preset_id)?;
 
     Some(PresetExpansion {
         resolved: ResolvedTier {
-            model: model.to_string(),
-            flags: flags.iter().map(|flag| (*flag).to_string()).collect(),
+            model: preset.model.to_string(),
+            flags: preset
+                .flags
+                .iter()
+                .map(|flag| (*flag).to_string())
+                .collect(),
         },
-        cost_rank,
+        cost_rank: preset.cost_rank,
     })
 }
 
@@ -657,76 +1022,101 @@ mod tests {
     }
 
     #[test]
-    fn rust_expansions_match_the_eight_frontend_apply_preset_cases() {
-        let source = include_str!("../../../src/lib/components/AgentConfigEditor.svelte")
-            .replace("\r\n", "\n");
-        let parity_cases = [
-            (
-                "claude",
-                "claude-haiku-4-5",
-                "claude-haiku-4-5",
-                Vec::<&str>::new(),
-                "      case 'claude-haiku-4-5':\n        model = 'claude-haiku-4-5';\n        break;",
-            ),
+    fn catalogue_covers_all_49_unique_presets_and_every_entry_expands() {
+        let mut ids = std::collections::HashSet::new();
+        let mut provider_counts = std::collections::BTreeMap::new();
+
+        for preset in preset_catalogue() {
+            assert!(
+                ids.insert(preset.id),
+                "duplicate preset id in catalogue: {}",
+                preset.id
+            );
+            *provider_counts.entry(preset.provider).or_insert(0usize) += 1;
+
+            let expansion = expand_preset(preset.provider, preset.id)
+                .unwrap_or_else(|| panic!("catalogue entry did not expand: {}", preset.id));
+            assert_eq!(expansion.resolved.model, preset.model);
+            assert_eq!(expansion.resolved.flags, preset.flags.to_vec());
+        }
+
+        assert_eq!(preset_catalogue().len(), 49);
+        assert_eq!(
+            provider_counts,
+            std::collections::BTreeMap::from([
+                ("claude", 12),
+                ("codex", 27),
+                ("cursor", 4),
+                ("droid", 2),
+                ("opencode", 2),
+                ("qwen", 2),
+            ])
+        );
+        assert!(ids.contains("codex-gpt-5-5-xhigh"));
+        assert!(ids.contains("codex-gpt-5-4-xhigh"));
+        assert!(ids.contains("codex-gpt-5-3-xhigh"));
+    }
+
+    #[test]
+    fn original_eight_expansions_remain_byte_identical() {
+        let expected = [
+            ("claude", "claude-haiku-4-5", "claude-haiku-4-5", vec![], 0),
             (
                 "claude",
                 "claude-sonnet-4-6",
                 "claude-sonnet-4-6",
                 vec![],
-                "      case 'claude-sonnet-4-6':\n        model = 'claude-sonnet-4-6';\n        break;",
+                1,
             ),
             (
                 "claude",
                 "opus-high",
                 "opus",
                 vec!["--settings", "{\"effortLevel\":\"high\"}"],
-                "      case 'opus-high':\n        model = 'opus';\n        flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));\n        break;",
+                2,
             ),
             (
                 "claude",
                 "fable-high",
                 "fable",
                 vec!["--settings", "{\"effortLevel\":\"high\"}"],
-                "      case 'fable-high':\n        model = 'fable';\n        flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));\n        break;",
+                3,
             ),
             (
                 "codex",
                 "codex-gpt-5-6-terra-medium",
                 "gpt-5.6-terra",
                 vec!["-c", "model_reasoning_effort=\"medium\""],
-                "      case 'codex-gpt-5-6-terra-medium':\n        model = 'gpt-5.6-terra';\n        flags.push('-c', 'model_reasoning_effort=\"medium\"');\n        break;",
+                0,
             ),
             (
                 "codex",
                 "codex-gpt-5-6-sol-medium",
                 "gpt-5.6-sol",
                 vec!["-c", "model_reasoning_effort=\"medium\""],
-                "      case 'codex-gpt-5-6-sol-medium':\n        model = 'gpt-5.6-sol';\n        flags.push('-c', 'model_reasoning_effort=\"medium\"');\n        break;",
+                1,
             ),
             (
                 "codex",
                 "codex-gpt-5-6-sol-xhigh",
                 "gpt-5.6-sol",
                 vec!["-c", "model_reasoning_effort=\"xhigh\""],
-                "      case 'codex-gpt-5-6-sol-xhigh':\n        model = 'gpt-5.6-sol';\n        flags.push('-c', 'model_reasoning_effort=\"xhigh\"');\n        break;",
+                2,
             ),
             (
                 "codex",
                 "codex-gpt-5-6-sol-max",
                 "gpt-5.6-sol",
                 vec!["-c", "model_reasoning_effort=\"max\""],
-                "      case 'codex-gpt-5-6-sol-max':\n        model = 'gpt-5.6-sol';\n        flags.push('-c', 'model_reasoning_effort=\"max\"');\n        break;",
+                3,
             ),
         ];
 
-        for (provider, preset_id, model, flags, frontend_case) in parity_cases {
-            let rust = expand_preset(provider, preset_id).unwrap().resolved;
-            assert_eq!(rust.model, model, "model drift for {preset_id}");
-            assert_eq!(rust.flags, flags, "flag drift for {preset_id}");
-            assert!(
-                source.contains(frontend_case),
-                "AgentConfigEditor applyPreset drifted for {preset_id}"
-            );
+        for (provider, id, model, flags, cost_rank) in expected {
+            let expansion = expand_preset(provider, id).unwrap();
+            assert_eq!(expansion.resolved.model, model, "model drift for {id}");
+            assert_eq!(expansion.resolved.flags, flags, "flag drift for {id}");
+            assert_eq!(expansion.cost_rank, cost_rank, "rank drift for {id}");
         }
     }
 }

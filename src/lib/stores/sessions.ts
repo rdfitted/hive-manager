@@ -2,6 +2,7 @@ import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { CellStatus, WorkspaceStrategy } from '$lib/types/domain';
+import type { TaskTier } from '$lib/workgraph/types';
 import { applicationState } from './applicationState';
 import { ui } from './ui';
 
@@ -56,11 +57,53 @@ export interface DelegationPolicy {
   max_depth?: number;
 }
 
+export interface ProviderTierLadder {
+  low: string;
+  medium: string;
+  high: string;
+  critical: string;
+}
+
+export interface TierLadder {
+  claude: ProviderTierLadder;
+  codex: ProviderTierLadder;
+}
+
+export type TierLadderSource = 'institutional' | 'embedded_default';
+
+export type TierLadderResolutionIssueKind =
+  | 'institutional_unavailable'
+  | 'project_knowledge_unavailable'
+  | 'source_unreadable'
+  | 'unknown_preset'
+  | 'non_monotone';
+
+export interface TierLadderResolutionIssue {
+  kind: TierLadderResolutionIssueKind;
+  source_ref: string;
+  detail: string;
+}
+
+export interface ResolvedTierLadder {
+  ladder: TierLadder | null;
+  base_source: TierLadderSource | null;
+  applied_override?: string;
+  issues?: TierLadderResolutionIssue[];
+}
+
+export interface TierPolicy {
+  enabled: boolean;
+  ceiling_percent: number;
+  review_floor: TaskTier;
+  ladder: Record<string, ResolvedTierLadder>;
+}
+
 export interface HiveExecutionPolicy {
   launch_kind: 'auto' | 'hive' | 'solo';
   workspace_strategy: WorkspaceStrategy;
   queen_delegation: DelegationPolicy;
   principal_delegation: DelegationPolicy;
+  tier_policy: TierPolicy;
 }
 
 export interface HiveLaunchPolicy extends Omit<HiveExecutionPolicy, 'workspace_strategy'> {
@@ -496,6 +539,12 @@ function createSessionsStore() {
             workspace_strategy: 'shared_cell',
             queen_delegation: { mode: 'disabled' },
             principal_delegation: { mode: 'disabled' },
+            tier_policy: {
+              enabled: false,
+              ceiling_percent: 34,
+              review_floor: 'high',
+              ladder: {},
+            },
           },
           prompt: config.taskDescription,
           with_planning: false,

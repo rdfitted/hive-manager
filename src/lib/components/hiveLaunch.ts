@@ -5,21 +5,14 @@ import type {
   HiveLaunchConfig,
   QaWorkerConfig,
   Session,
+  TierPolicy,
 } from '$lib/stores/sessions';
-import type { TaskTier } from '$lib/workgraph/types';
 
-export interface TierRoutingPolicy {
-  enabled: boolean;
-  ceiling_percent: number;
-  review_floor: TaskTier;
-  ladder: Record<string, unknown>;
-}
-
-export type TieredHiveLaunchConfig = Omit<HiveLaunchConfig, 'execution_policy'> & {
-  execution_policy: HiveLaunchConfig['execution_policy'] & {
-    tier_policy: TierRoutingPolicy;
-  };
-};
+export type TierRoutingPolicy = TierPolicy;
+type LaunchTierPolicyFields = Pick<
+  TierPolicy,
+  'enabled' | 'ceiling_percent' | 'review_floor'
+>;
 
 export type CodingPrincipalFormConfig = AgentConfig & {
   selectedRole: string;
@@ -150,7 +143,9 @@ function buildDelegationPolicy(
   };
 }
 
-export interface BuildHiveLaunchConfigInput {
+export interface BuildHiveLaunchConfigInput<
+  TTierPolicy extends LaunchTierPolicyFields = TierPolicy,
+> {
   name?: string;
   color?: string;
   projectPath: string;
@@ -163,7 +158,10 @@ export interface BuildHiveLaunchConfigInput {
   queenMaxDepth: number;
   principalMaxChildren: number;
   principalMaxDepth: number;
-  tierPolicy?: TierRoutingPolicy;
+  // The server resolves its own ladder snapshot; this builder only consumes
+  // the scalar policy fields and deliberately accepts callers carrying a
+  // preview-only ladder representation.
+  tierPolicy?: TTierPolicy;
   workGraphArchetype: string | null;
   workGraphParameters: Record<string, string>;
   prompt?: string;
@@ -174,7 +172,9 @@ export interface BuildHiveLaunchConfigInput {
   qaWorkers?: QaWorkerConfig[];
 }
 
-export function buildHiveLaunchConfig(input: BuildHiveLaunchConfigInput): TieredHiveLaunchConfig {
+export function buildHiveLaunchConfig<
+  TTierPolicy extends LaunchTierPolicyFields = TierPolicy,
+>(input: BuildHiveLaunchConfigInput<TTierPolicy>): HiveLaunchConfig {
   const workGraphArchetype = input.workGraphArchetype?.trim() || null;
   const workGraphParameters = workGraphArchetype
     ? Object.fromEntries(

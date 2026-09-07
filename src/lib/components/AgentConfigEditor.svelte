@@ -16,10 +16,69 @@
   export type CliHealthMap = Record<string, CliHealthEntry>;
   export type CliHealthTone = 'healthy' | 'warning' | 'error' | 'pending';
 
+  export interface PresetCatalogueEntry {
+    provider: string;
+    id: string;
+    label: string;
+    model: string;
+    flags: string[];
+  }
+
   const CLI_HEALTH_CACHE_MS = 30_000;
   let cachedCliHealth: CliHealthMap | null = null;
   let cachedCliHealthAt = 0;
   let cliHealthRequest: Promise<CliHealthMap> | null = null;
+  let cachedPresetCatalogue: PresetCatalogueEntry[] | null = null;
+  let presetCatalogueRequest: Promise<PresetCatalogueEntry[]> | null = null;
+
+  export function normalizePresetCatalogue(payload: unknown): PresetCatalogueEntry[] {
+    if (typeof payload !== 'object' || payload === null) return [];
+    const rawPresets = (payload as { presets?: unknown }).presets;
+    if (!Array.isArray(rawPresets)) return [];
+
+    return rawPresets.flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return [];
+      const preset = entry as Record<string, unknown>;
+      if (
+        typeof preset.provider !== 'string' ||
+        typeof preset.id !== 'string' ||
+        typeof preset.label !== 'string' ||
+        typeof preset.model !== 'string' ||
+        !Array.isArray(preset.flags) ||
+        !preset.flags.every((flag) => typeof flag === 'string')
+      ) {
+        return [];
+      }
+
+      return [{
+        provider: preset.provider,
+        id: preset.id,
+        label: preset.label,
+        model: preset.model,
+        flags: preset.flags as string[],
+      }];
+    });
+  }
+
+  export async function fetchPresetCatalogue(force = false): Promise<PresetCatalogueEntry[]> {
+    if (!force && cachedPresetCatalogue) return cachedPresetCatalogue;
+    if (presetCatalogueRequest) return presetCatalogueRequest;
+
+    presetCatalogueRequest = (async () => {
+      const response = await fetch(apiUrl('/api/preset-catalogue'));
+      if (!response.ok) throw new Error(`Preset catalogue request failed (${response.status})`);
+      const presets = normalizePresetCatalogue(await response.json());
+      if (presets.length === 0) throw new Error('Preset catalogue response was empty');
+      cachedPresetCatalogue = presets;
+      return presets;
+    })();
+
+    try {
+      return await presetCatalogueRequest;
+    } finally {
+      presetCatalogueRequest = null;
+    }
+  }
 
   export function normalizeCliHealth(payload: unknown): CliHealthMap {
     if (typeof payload !== 'object' || payload === null) return {};
@@ -151,7 +210,7 @@
 </script>
 
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   import type { AgentConfig } from '$lib/stores/sessions';
   import { cliOptions, getDefaultModel, normalizeModelId } from '$lib/config/clis';
 
@@ -163,147 +222,75 @@
   export let cliHealthError: string | null = null;
 
   const dispatch = createEventDispatcher<{ change: AgentConfig }>();
+  let presetCatalogue: PresetCatalogueEntry[] = [];
+  let presetCatalogueLoading = true;
+  let presetCatalogueError: string | null = null;
 
-  interface PresetOption {
-    value: string;
-    label: string;
+  onMount(() => {
+    let mounted = true;
+    fetchPresetCatalogue()
+      .then((presets) => {
+        if (mounted) presetCatalogue = presets;
+      })
+      .catch((error: unknown) => {
+        if (mounted) {
+          presetCatalogueError = error instanceof Error
+            ? error.message
+            : 'Preset catalogue is unavailable';
+        }
+      })
+      .finally(() => {
+        if (mounted) presetCatalogueLoading = false;
+      });
+
+    return () => {
+      mounted = false;
+    };
+  });
+
+  $: presetOptions = presetCatalogue.filter((preset) => preset.provider === config.cli);
+
+  function sameFlags(left: string[], right: string[]): boolean {
+    return left.length === right.length && left.every((flag, index) => flag === right[index]);
   }
 
-  const claudePresets: PresetOption[] = [
-    { value: 'fable-high', label: 'Fable 5 (High effort)' },
-    { value: 'fable-max', label: 'Fable 5 (Max effort)' },
-    { value: 'fable', label: 'Fable 5' },
-    { value: 'opus-high', label: 'Opus (High effort)' },
-    { value: 'opus-low', label: 'Opus (Low effort)' },
-    { value: 'opus', label: 'Opus' },
-    { value: 'claude-opus-4-6-high', label: 'Opus 4.6 (High effort)' },
-    { value: 'claude-opus-4-6-low', label: 'Opus 4.6 (Low effort)' },
-    { value: 'claude-opus-4-5', label: 'Opus 4.5' },
-    { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-    { value: 'claude-sonnet-4-5', label: 'Sonnet 4.5' },
-    { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
-  ];
-
-  const codexPresets: PresetOption[] = [
-    { value: 'codex-gpt-5-6-sol', label: 'GPT-5.6 Sol' },
-    { value: 'codex-gpt-5-6-sol-low', label: 'GPT-5.6 Sol (Low effort)' },
-    { value: 'codex-gpt-5-6-sol-medium', label: 'GPT-5.6 Sol (Medium effort)' },
-    { value: 'codex-gpt-5-6-sol-high', label: 'GPT-5.6 Sol (High effort)' },
-    { value: 'codex-gpt-5-6-sol-xhigh', label: 'GPT-5.6 Sol (Extra high effort)' },
-    { value: 'codex-gpt-5-6-sol-max', label: 'GPT-5.6 Sol (Max effort)' },
-    { value: 'codex-gpt-5-6-sol-ultra', label: 'GPT-5.6 Sol (Ultra effort)' },
-    { value: 'codex-gpt-5-6-terra', label: 'GPT-5.6 Terra' },
-    { value: 'codex-gpt-5-6-terra-low', label: 'GPT-5.6 Terra (Low effort)' },
-    { value: 'codex-gpt-5-6-terra-medium', label: 'GPT-5.6 Terra (Medium effort)' },
-    { value: 'codex-gpt-5-6-terra-high', label: 'GPT-5.6 Terra (High effort)' },
-    { value: 'codex-gpt-5-6-luna', label: 'GPT-5.6 Luna' },
-    { value: 'codex-gpt-5-6-luna-low', label: 'GPT-5.6 Luna (Low effort)' },
-    { value: 'codex-gpt-5-6-luna-medium', label: 'GPT-5.6 Luna (Medium effort)' },
-    { value: 'codex-gpt-5-6-luna-high', label: 'GPT-5.6 Luna (High effort)' },
-    { value: 'codex-gpt-5-5-low', label: 'GPT-5.5 (Low effort)' },
-    { value: 'codex-gpt-5-5-medium', label: 'GPT-5.5 (Medium effort)' },
-    { value: 'codex-gpt-5-5-high', label: 'GPT-5.5 (High effort)' },
-    { value: 'codex-gpt-5-5-xhigh', label: 'GPT-5.5 (Extra high effort)' },
-    { value: 'codex-gpt-5-4-low', label: 'GPT-5.4 (Low effort)' },
-    { value: 'codex-gpt-5-4-medium', label: 'GPT-5.4 (Medium effort)' },
-    { value: 'codex-gpt-5-4-high', label: 'GPT-5.4 (High effort)' },
-    { value: 'codex-gpt-5-4-xhigh', label: 'GPT-5.4 (Extra high effort)' },
-    { value: 'codex-gpt-5-3-low', label: 'GPT-5.3 Codex (Low effort)' },
-    { value: 'codex-gpt-5-3-medium', label: 'GPT-5.3 Codex (Medium effort)' },
-    { value: 'codex-gpt-5-3-high', label: 'GPT-5.3 Codex (High effort)' },
-    { value: 'codex-gpt-5-3-xhigh', label: 'GPT-5.3 Codex (Extra high effort)' },
-  ];
-
-  const cursorPresets: PresetOption[] = [
-    { value: 'composer-2.5', label: 'Composer 2.5 (latest)' },
-    { value: 'composer-2', label: 'Composer 2.0' },
-    { value: 'composer-2-fast', label: 'Composer 2.0 Fast' },
-    { value: 'composer-1', label: 'Composer 1' },
-  ];
-
-  const droidPresets: PresetOption[] = [
-    { value: 'glm-5.1', label: 'GLM 5.1' },
-    { value: 'glm-4.7', label: 'GLM 4.7' },
-  ];
-
-  const opencodePresets: PresetOption[] = [
-    { value: 'opencode/big-pickle', label: 'BigPickle' },
-    { value: 'opencode/grok', label: 'Grok' },
-  ];
-
-  const qwenPresets: PresetOption[] = [
-    { value: 'qwen3-coder', label: 'Qwen3 Coder' },
-    { value: 'qwen2.5-coder', label: 'Qwen2.5 Coder' },
-  ];
-
-  const presetsByCliType: Record<string, PresetOption[]> = {
-    claude: claudePresets,
-    codex: codexPresets,
-    cursor: cursorPresets,
-    droid: droidPresets,
-    opencode: opencodePresets,
-    qwen: qwenPresets,
-  };
-
-  $: presetOptions = presetsByCliType[config.cli] ?? [];
-
-  function configuredEffort(value: AgentConfig): string | undefined {
+  function inferSelectedPreset(
+    value: AgentConfig,
+    options: PresetCatalogueEntry[],
+  ): string {
+    if (!value.model) return 'custom';
+    const model = normalizeModelId(value.cli, value.model);
     const flags = value.flags || [];
-    if (value.cli === 'codex') {
-      for (let i = 0; i < flags.length - 1; i += 1) {
-        if (flags[i] === '-c' || flags[i] === '--config') {
-          const match = flags[i + 1].match(/^model_reasoning_effort=["']?([^"']+)["']?$/);
-          if (match) return match[1];
-        }
-      }
-    }
+    return options.find((preset) => (
+      preset.model === model && sameFlags(preset.flags, flags)
+    ))?.id ?? 'custom';
+  }
 
-    if (value.cli === 'claude') {
-      for (let i = 0; i < flags.length - 1; i += 1) {
-        if (flags[i] !== '--settings') continue;
+  function presetEffort(preset: PresetCatalogueEntry | undefined): string | undefined {
+    if (!preset) return undefined;
+    if (preset.provider === 'codex') {
+      const effort = preset.flags.find((flag) => flag.startsWith('model_reasoning_effort='));
+      return effort?.match(/^model_reasoning_effort=["']?([^"']+)["']?$/)?.[1];
+    }
+    if (preset.provider === 'claude') {
+      const settingsIndex = preset.flags.indexOf('--settings');
+      if (settingsIndex >= 0 && settingsIndex + 1 < preset.flags.length) {
         try {
-          const settings = JSON.parse(flags[i + 1]) as { effortLevel?: string };
-          if (settings.effortLevel) return settings.effortLevel;
+          return (JSON.parse(preset.flags[settingsIndex + 1]) as { effortLevel?: string }).effortLevel;
         } catch {
-          // Preserve custom settings; they simply cannot map to a preset.
+          return undefined;
         }
       }
     }
-
     return undefined;
   }
 
-  function inferSelectedPreset(value: AgentConfig): string {
-    const effort = configuredEffort(value);
-    if (value.cli === 'codex' && value.model && effort) {
-      const model = normalizeModelId(value.cli, value.model);
-      const candidate = `codex-${model.replaceAll('.', '-')}-${effort}`;
-      if (codexPresets.some((preset) => preset.value === candidate)) return candidate;
-    }
-    if (value.cli === 'codex' && value.model && !effort) {
-      const model = normalizeModelId(value.cli, value.model);
-      const candidate = `codex-${model.replaceAll('.', '-')}`;
-      if (codexPresets.some((preset) => preset.value === candidate)) return candidate;
-    }
-    if (value.cli === 'claude' && value.model === 'opus') {
-      if (effort === 'high' || effort === 'low') return `opus-${effort}`;
-      return 'opus';
-    }
-    if (value.cli === 'claude' && value.model === 'fable') {
-      if (effort === 'high' || effort === 'max') return `fable-${effort}`;
-      return 'fable';
-    }
-    if (value.model && presetOptions.some((preset) => preset.value === value.model)) {
-      return value.model;
-    }
-    return 'custom';
-  }
-
-  $: selectedPreset = inferSelectedPreset(config);
+  $: selectedPreset = inferSelectedPreset(config, presetOptions);
+  $: selectedPresetEntry = presetOptions.find((preset) => preset.id === selectedPreset);
   $: effectiveModel = config.model
     ? normalizeModelId(config.cli, config.model)
     : getDefaultModel(config.cli) || 'CLI default';
-  $: effectiveEffort = configuredEffort(config);
+  $: effectiveEffort = presetEffort(selectedPresetEntry);
   $: selectedCliHealth = cliHealth[config.cli];
 
   $: presetDescription = config.cli === 'claude'
@@ -399,189 +386,24 @@
     return cleaned;
   }
 
-  function applyPreset(preset: string): void {
-    if (preset === 'custom') {
+  function applyPreset(presetId: string): void {
+    if (presetId === 'custom') {
       return;
     }
 
-    const cleanedFlags = stripManagedEffortFlags('codex', stripManagedEffortFlags('claude', config.flags || []));
-    let model = config.model;
-    let flags = [...cleanedFlags];
-
-    switch (preset) {
-      case 'opus-high':
-        model = 'opus';
-        flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
-        break;
-      case 'opus-low':
-        model = 'opus';
-        flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
-        break;
-      case 'opus':
-        model = 'opus';
-        break;
-      case 'claude-opus-4-6-high':
-        model = 'claude-opus-4-6';
-        flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
-        break;
-      case 'claude-opus-4-6-low':
-        model = 'claude-opus-4-6';
-        flags.push('--settings', JSON.stringify({ effortLevel: 'low' }));
-        break;
-      case 'claude-opus-4-5':
-        model = 'claude-opus-4-5';
-        break;
-      case 'claude-sonnet-4-6':
-        model = 'claude-sonnet-4-6';
-        break;
-      case 'claude-sonnet-4-5':
-        model = 'claude-sonnet-4-5-20250929';
-        break;
-      case 'claude-haiku-4-5':
-        model = 'claude-haiku-4-5';
-        break;
-      case 'fable-high':
-        model = 'fable';
-        flags.push('--settings', JSON.stringify({ effortLevel: 'high' }));
-        break;
-      case 'fable-max':
-        model = 'fable';
-        flags.push('--settings', JSON.stringify({ effortLevel: 'max' }));
-        break;
-      case 'fable':
-        model = 'fable';
-        break;
-      case 'codex-gpt-5-6-sol-low':
-        model = 'gpt-5.6-sol';
-        flags.push('-c', 'model_reasoning_effort="low"');
-        break;
-      case 'codex-gpt-5-6-sol-medium':
-        model = 'gpt-5.6-sol';
-        flags.push('-c', 'model_reasoning_effort="medium"');
-        break;
-      case 'codex-gpt-5-6-sol-high':
-        model = 'gpt-5.6-sol';
-        flags.push('-c', 'model_reasoning_effort="high"');
-        break;
-      case 'codex-gpt-5-6-sol-xhigh':
-        model = 'gpt-5.6-sol';
-        flags.push('-c', 'model_reasoning_effort="xhigh"');
-        break;
-      case 'codex-gpt-5-6-sol-max':
-        model = 'gpt-5.6-sol';
-        flags.push('-c', 'model_reasoning_effort="max"');
-        break;
-      case 'codex-gpt-5-6-sol-ultra':
-        model = 'gpt-5.6-sol';
-        flags.push('-c', 'model_reasoning_effort="ultra"');
-        break;
-      case 'codex-gpt-5-6-sol':
-        model = 'gpt-5.6-sol';
-        break;
-      case 'codex-gpt-5-6-terra-low':
-        model = 'gpt-5.6-terra';
-        flags.push('-c', 'model_reasoning_effort="low"');
-        break;
-      case 'codex-gpt-5-6-terra-medium':
-        model = 'gpt-5.6-terra';
-        flags.push('-c', 'model_reasoning_effort="medium"');
-        break;
-      case 'codex-gpt-5-6-terra-high':
-        model = 'gpt-5.6-terra';
-        flags.push('-c', 'model_reasoning_effort="high"');
-        break;
-      case 'codex-gpt-5-6-terra':
-        model = 'gpt-5.6-terra';
-        break;
-      case 'codex-gpt-5-6-luna-low':
-        model = 'gpt-5.6-luna';
-        flags.push('-c', 'model_reasoning_effort="low"');
-        break;
-      case 'codex-gpt-5-6-luna-medium':
-        model = 'gpt-5.6-luna';
-        flags.push('-c', 'model_reasoning_effort="medium"');
-        break;
-      case 'codex-gpt-5-6-luna-high':
-        model = 'gpt-5.6-luna';
-        flags.push('-c', 'model_reasoning_effort="high"');
-        break;
-      case 'codex-gpt-5-6-luna':
-        model = 'gpt-5.6-luna';
-        break;
-      case 'codex-gpt-5-5-low':
-        model = 'gpt-5.5';
-        flags.push('-c', 'model_reasoning_effort="low"');
-        break;
-      case 'codex-gpt-5-5-medium':
-        model = 'gpt-5.5';
-        flags.push('-c', 'model_reasoning_effort="medium"');
-        break;
-      case 'codex-gpt-5-5-high':
-        model = 'gpt-5.5';
-        flags.push('-c', 'model_reasoning_effort="high"');
-        break;
-      case 'codex-gpt-5-5-xhigh':
-        model = 'gpt-5.5';
-        flags.push('-c', 'model_reasoning_effort="xhigh"');
-        break;
-      case 'codex-gpt-5-4-low':
-        model = 'gpt-5.4';
-        flags.push('-c', 'model_reasoning_effort="low"');
-        break;
-      case 'codex-gpt-5-4-medium':
-        model = 'gpt-5.4';
-        flags.push('-c', 'model_reasoning_effort="medium"');
-        break;
-      case 'codex-gpt-5-4-high':
-        model = 'gpt-5.4';
-        flags.push('-c', 'model_reasoning_effort="high"');
-        break;
-      case 'codex-gpt-5-4-xhigh':
-        model = 'gpt-5.4';
-        flags.push('-c', 'model_reasoning_effort="xhigh"');
-        break;
-      case 'codex-gpt-5-3-low':
-        model = 'gpt-5.3-codex';
-        flags.push('-c', 'model_reasoning_effort="low"');
-        break;
-      case 'codex-gpt-5-3-medium':
-        model = 'gpt-5.3-codex';
-        flags.push('-c', 'model_reasoning_effort="medium"');
-        break;
-      case 'codex-gpt-5-3-high':
-        model = 'gpt-5.3-codex';
-        flags.push('-c', 'model_reasoning_effort="high"');
-        break;
-      case 'codex-gpt-5-3-xhigh':
-        model = 'gpt-5.3-codex';
-        flags.push('-c', 'model_reasoning_effort="xhigh"');
-        break;
-      case 'composer-2.5':
-      case 'composer-2':
-      case 'composer-2-fast':
-      case 'composer-1':
-        model = preset;
-        break;
-      case 'glm-5.1':
-      case 'glm-4.7':
-        model = preset;
-        break;
-      case 'opencode/big-pickle':
-      case 'opencode/grok':
-        model = preset;
-        break;
-      case 'qwen3-coder':
-      case 'qwen2.5-coder':
-        model = preset;
-        break;
-      default:
-        return;
+    const preset = presetOptions.find((option) => option.id === presetId);
+    if (!preset) {
+      return;
     }
 
+    const cleanedFlags = stripManagedEffortFlags(
+      'codex',
+      stripManagedEffortFlags('claude', config.flags || []),
+    );
     config = {
       ...config,
-      model,
-      flags,
+      model: preset.model,
+      flags: [...cleanedFlags, ...preset.flags],
     };
     dispatch('change', config);
   }
@@ -653,8 +475,13 @@
         aria-describedby={`${idPrefix}-preset-description ${idPrefix}-effective-model`}
       >
         <option value="custom">Custom (keep current model)</option>
+        {#if presetCatalogueLoading}
+          <option disabled>Loading presets…</option>
+        {:else if presetCatalogueError}
+          <option disabled>Presets unavailable</option>
+        {/if}
         {#each presetOptions as preset}
-          <option value={preset.value}>
+          <option value={preset.id}>
             {preset.label}
           </option>
         {/each}
@@ -662,7 +489,9 @@
       <span class="effective-model" id={`${idPrefix}-effective-model`}>
         Effective: {effectiveModel}{effectiveEffort ? ` · ${effectiveEffort} effort` : ''}
       </span>
-      <span class="cli-description" id={`${idPrefix}-preset-description`}>{presetDescription}</span>
+      <span class="cli-description" id={`${idPrefix}-preset-description`}>
+        {presetCatalogueError || presetDescription}
+      </span>
     </div>
   {/if}
 </div>

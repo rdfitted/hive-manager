@@ -76,9 +76,10 @@ pub struct QueueRow {
     pub role_type: String,
     pub cli: String,
     pub status: QueueStatus,
-    /// Full spawn context (worktree_path, prompt_file, wsl-converted path, model,
-    /// parent_id) so a claim at a later time has everything it needs — addresses the
-    /// stale-path risk.
+    /// Enqueue-time spawn inputs: `role_type`, `cli`, `model`, `flags`, `parent_id`,
+    /// `initial_task`, and `task_id`, plus optional `executed_as` provenance.
+    /// Worktree and prompt paths are materialized after the queue claim, so they are
+    /// not part of this payload.
     pub payload: serde_json::Value,
     pub attempts: i64,
     pub continuation_count: i64,
@@ -1707,7 +1708,15 @@ mod tests {
             role_type: "backend".to_string(),
             cli: "codex".to_string(),
             status: QueueStatus::Queued,
-            payload: json!({ "worktree_path": "D:/wt", "model": "gpt-5.5" }),
+            payload: json!({
+                "role_type": "backend",
+                "cli": "codex",
+                "model": "gpt-5.5",
+                "flags": ["--reasoning-effort", "high"],
+                "parent_id": "s1-queen",
+                "initial_task": "Implement the queue fix",
+                "task_id": "T1"
+            }),
             attempts: 0,
             continuation_count: 0,
             no_progress_count: 0,
@@ -1863,7 +1872,18 @@ mod tests {
         assert_eq!(snap.queued, 1);
         assert_eq!(snap.rows.len(), 1);
         // payload is parsed JSON, not double-encoded.
-        assert_eq!(snap.rows[0].payload, json!({ "worktree_path": "D:/wt", "model": "gpt-5.5" }));
+        assert_eq!(
+            snap.rows[0].payload,
+            json!({
+                "role_type": "backend",
+                "cli": "codex",
+                "model": "gpt-5.5",
+                "flags": ["--reasoning-effort", "high"],
+                "parent_id": "s1-queen",
+                "initial_task": "Implement the queue fix",
+                "task_id": "T1"
+            })
+        );
 
         // Re-enqueue is a no-op (ON CONFLICT DO NOTHING).
         repo.enqueue(&sample_row("r1", "s1", "s1-worker-1")).unwrap();

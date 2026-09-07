@@ -599,6 +599,46 @@ async fn test_cli_health_lists_every_supported_cli_with_stable_schema() {
     }
 }
 
+#[tokio::test]
+async fn test_preset_catalogue_returns_all_entries_with_matching_expansions() {
+    let response = setup_test_app()
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/api/preset-catalogue")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let presets = json["presets"]
+        .as_array()
+        .expect("presets should be an array");
+    assert_eq!(presets.len(), 49);
+
+    for preset in presets {
+        let provider = preset["provider"]
+            .as_str()
+            .expect("provider should be a string");
+        let id = preset["id"].as_str().expect("id should be a string");
+        let expansion = crate::cli::tier_ladder::expand_preset(provider, id)
+            .unwrap_or_else(|| panic!("endpoint returned unknown preset {provider}/{id}"));
+        assert_eq!(preset["model"], expansion.resolved.model);
+        assert_eq!(preset["flags"], serde_json::json!(expansion.resolved.flags));
+        assert!(preset["label"]
+            .as_str()
+            .is_some_and(|label| !label.is_empty()));
+        assert!(preset.get("cost_rank").is_none());
+        assert!(preset.get("costRank").is_none());
+    }
+}
+
 async fn setup_session_files_fixture(
     session_id: &str,
 ) -> (
