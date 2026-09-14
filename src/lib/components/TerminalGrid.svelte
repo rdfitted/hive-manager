@@ -18,11 +18,14 @@
     type ScratchShell,
     type ScratchTerminalPane,
   } from '$lib/stores/scratchTerminals';
-  import { activeSession, serdeEnumVariantName, type AgentInfo } from '$lib/stores/sessions';
+  import { serdeEnumVariantName, type AgentInfo, type Session } from '$lib/stores/sessions';
+  import { TERMINAL_SESSION_STATES } from '$lib/stores/terminalPool';
   import Terminal from './Terminal.svelte';
 
   interface Props {
-    agents: AgentInfo[];
+    session: Session;
+    /** False while this grid is pooled behind another session or a non-terminal tab (#286). */
+    visible?: boolean;
     focusedAgentId: string | null;
     onSelect: (id: string) => void;
   }
@@ -42,18 +45,13 @@
     timeout: ReturnType<typeof setTimeout>;
   }
 
-  const TERMINAL_SESSION_STATES = new Set([
-    'Completed',
-    'Closed',
-    'Closing',
-    'Failed',
-    'QaMaxRetriesExceeded',
-  ]);
   const TERMINAL_READY_TIMEOUT_MS = 10_000;
   const readyTerminalIds = new Set<string>();
   const terminalReadyWaiters = new Map<string, TerminalReadyWaiter>();
 
-  let { agents, focusedAgentId, onSelect }: Props = $props();
+  let { session, visible = true, focusedAgentId, onSelect }: Props = $props();
+
+  let agents = $derived(session.agents);
 
   let selectedShell = $state<ScratchShell>('powershell');
   let openingScratch = $state(false);
@@ -61,11 +59,9 @@
   let scratchError = $state<string | null>(null);
   let previousFocusedAgentId = $state<string | null>(null);
 
-  let sessionId = $derived($activeSession?.id ?? null);
-  let sessionState = $derived(serdeEnumVariantName($activeSession?.state));
-  let scratchSessionAvailable = $derived(
-    sessionId !== null && !TERMINAL_SESSION_STATES.has(sessionState ?? '')
-  );
+  let sessionId = $derived(session.id);
+  let sessionState = $derived(serdeEnumVariantName(session.state));
+  let scratchSessionAvailable = $derived(!TERMINAL_SESSION_STATES.has(sessionState ?? ''));
   let scratchPanes = $derived(sessionId ? ($scratchTerminals.panesBySession[sessionId] ?? []) : []);
   let focusedScratchId = $derived(sessionId ? ($scratchTerminals.focusedBySession[sessionId] ?? null) : null);
   let panes = $derived.by<TerminalPane[]>(() => [
@@ -78,6 +74,13 @@
     ...scratchPanes,
   ]);
   let maximizedTerminalId = $derived($layout.maximizedTerminalId);
+  // The maximize id is global; only honour it when it names one of this grid's panes,
+  // so a pooled grid never collapses because another session maximized something.
+  let localMaximizedId = $derived(
+    maximizedTerminalId !== null && panes.some((pane) => pane.id === maximizedTerminalId)
+      ? maximizedTerminalId
+      : null
+  );
 
   let cols = $derived(
     panes.length <= 1 ? 1 :
@@ -97,6 +100,7 @@
   );
 
   $effect(() => {
+    if (!visible) return;
     const maximizedId = maximizedTerminalId;
     if (maximizedId && !panes.some((pane) => pane.id === maximizedId)) {
       layout.setMaximizedTerminalId(null);
@@ -170,8 +174,9 @@
 
   function handleWindowKeydown(event: KeyboardEvent) {
     if (
+      !visible ||
       event.key !== 'Escape' ||
-      !maximizedTerminalId ||
+      !localMaximizedId ||
       event.defaultPrevented ||
       document.querySelector('[aria-modal="true"]') !== null
     ) return;
@@ -237,8 +242,7 @@
   }
 
   async function openScratchTerminal() {
-    const session = $activeSession;
-    if (!session || !scratchSessionAvailable || openingScratch) return;
+    if (!scratchSessionAvailable || openingScratch) return;
 
     const cwd = session.worktree_path?.trim() || session.project_path;
     const pane = scratchTerminals.add(session.id, cwd, selectedShell);
@@ -328,7 +332,7 @@
     class="terminal-grid lattice-scroll-content"
     style="--cols: {cols}; --rows: {rows}"
     class:scrollable={panes.length > 9}
-    class:has-maximized={maximizedTerminalId !== null}
+    class:has-maximized={localMaximizedId !== null}
     class:empty={panes.length === 0}
   >
     {#each panes as pane (pane.id)}
@@ -338,13 +342,13 @@
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
       <div
         class={`terminal-item lattice-panel${focused ? ' lattice-panel--active' : ''}`}
-        class:maximized={pane.id === maximizedTerminalId}
-        class:hidden-by-maximize={maximizedTerminalId !== null && pane.id !== maximizedTerminalId}
+        class:maximized={pane.id === localMaximizedId}
+        class:hidden-by-maximize={localMaximizedId !== null && pane.id !== localMaximizedId}
         onclick={() => focusPane(pane)}
       >
         <div
           class="terminal-header"
-          style:--session-color={$activeSession?.color || 'transparent'}
+          style:--session-color={session.color || 'transparent'}
         >
           <button
             type="button"
@@ -395,11 +399,11 @@
             <button
               type="button"
               class="pane-control lattice-btn lattice-btn--ghost lattice-btn--icon"
-              aria-label={pane.id === maximizedTerminalId ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
-              title={pane.id === maximizedTerminalId ? 'Restore terminal (Esc)' : 'Maximize terminal'}
+              aria-label={pane.id === localMaximizedId ? `Restore ${pane.title}` : `Maximize ${pane.title}`}
+              title={pane.id === localMaximizedId ? 'Restore terminal (Esc)' : 'Maximize terminal'}
               onclick={(event) => toggleMaximized(event, pane)}
             >
-              {#if pane.id === maximizedTerminalId}
+              {#if pane.id === localMaximizedId}
                 <ArrowsIn size={13} weight="light" />
               {:else}
                 <ArrowsOut size={13} weight="light" />
@@ -411,9 +415,9 @@
           <Terminal
             agentId={pane.id}
             isAgent={pane.kind === 'agent'}
-            isFocused={focused}
-            isVisible={maximizedTerminalId === null || pane.id === maximizedTerminalId}
-            layoutRevision={maximizedTerminalId}
+            isFocused={visible && focused}
+            isVisible={visible && (localMaximizedId === null || pane.id === localMaximizedId)}
+            layoutRevision={localMaximizedId}
             onReady={pane.kind === 'scratch' ? () => markTerminalReady(pane.id) : undefined}
             onStatusChange={pane.kind === 'scratch' ? (status) => handlePaneStatus(pane, status) : undefined}
           />

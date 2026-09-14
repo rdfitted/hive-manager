@@ -112,6 +112,21 @@ Sessions are stored in `%APPDATA%/hive-manager/sessions/`.
 
 App configuration is in `%APPDATA%/hive-manager/config.json`.
 
+- `pty_replay_buffer_bytes` (optional): bytes of terminal output retained per agent so a
+  freshly mounted pane can replay the agent's current screen. Defaults to 512 KiB; values
+  are clamped to 8 KiB..=1 MiB and apply to agents spawned after the app starts.
+
+Local test runs before v0.50.0 leaked fixture sessions into the real session store. To
+list them, and then remove them, run against the running app:
+
+```bash
+curl -X POST http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions
+curl -X POST "http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions?apply=true"
+```
+
+Only sessions whose project path no longer exists and whose id is not a UUID (or whose
+project pointed into the OS temp directory) are removed; everything else is reported and kept.
+
 ## Development
 
 ```bash

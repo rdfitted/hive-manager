@@ -9,6 +9,7 @@ commands.allow = [
     "resize_pty",
     "kill_pty",
     "get_pty_status",
+    "get_pty_snapshot",
     "list_ptys",
     "launch_hive",
     "launch_hive_v2",

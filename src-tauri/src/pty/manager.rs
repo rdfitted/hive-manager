@@ -1,25 +1,265 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use base64::Engine;
 use parking_lot::{Mutex, RwLock};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use super::output_ring::{clamp_replay_capacity, OutputSnapshot, DEFAULT_REPLAY_CAPACITY};
 use super::session::{AgentRole, AgentStatus, PtyError, PtySession, read_from_reader};
 use crate::adapters::{pty_submit_policy, PtySubmitResult};
 use crate::cli::agent_store;
 use crate::tauri_shim::{AppHandle, Emitter};
 
-#[derive(Clone, Serialize)]
+/// One coalesced run of child output, delivered on the agent's own event name (#289).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PtyOutput {
     pub id: String,
-    pub data: Vec<u8>,
+    /// Absolute byte offset of the first byte in `data` (#287). A pane that replayed a
+    /// snapshot applies only chunks whose offset is at or past the snapshot's end.
+    pub offset: u64,
+    /// Standard base64 with padding. About 1.33× the raw bytes; the previous
+    /// `Vec<u8>` serialized as a JSON number array at roughly 4×.
+    pub data: String,
+}
+
+impl PtyOutput {
+    pub fn new(id: impl Into<String>, offset: u64, bytes: &[u8]) -> Self {
+        Self {
+            id: id.into(),
+            offset,
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+}
+
+/// The retained history of one agent's PTY, ready to write into a fresh terminal (#287).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PtySnapshot {
+    pub id: String,
+    pub offset_start: u64,
+    pub offset_end: u64,
+    /// Standard base64 with padding, aligned so it starts at a parseable boundary.
+    pub data: String,
+}
+
+impl PtySnapshot {
+    pub fn from_snapshot(id: impl Into<String>, snapshot: OutputSnapshot) -> Self {
+        Self {
+            id: id.into(),
+            offset_start: snapshot.offset_start,
+            offset_end: snapshot.offset_end,
+            data: base64::engine::general_purpose::STANDARD.encode(&snapshot.data),
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
 pub struct PtyStatusChange {
     pub id: String,
     pub status: AgentStatus,
+}
+
+/// Event carrying agent lifecycle transitions. Low volume, so it stays a single name.
+pub const PTY_STATUS_EVENT: &str = "pty-status";
+
+/// The event name a pane subscribes to for one agent's output.
+///
+/// Tauri evaluates an emit only in webviews that hold a JS listener for that exact name,
+/// so output for agents nobody has mounted never crosses the IPC bridge, and a pane no
+/// longer filters every other agent's bytes in JavaScript. Tauri permits alphanumerics,
+/// `-`, `/`, `:` and `_` in event names; anything else is mapped to `_` here and by the
+/// frontend's `ptyOutputEventName`, which must stay in lockstep.
+pub fn pty_output_event_name(id: &str) -> String {
+    let mut name = String::with_capacity("pty-output:".len() + id.len());
+    name.push_str("pty-output:");
+    name.extend(id.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '/' | ':' | '_') {
+            c
+        } else {
+            '_'
+        }
+    }));
+    name
+}
+
+/// How long the emitter waits for more reader chunks before flushing a batch. Bounds
+/// added latency; TUIs write many tiny chunks per frame, so one event per frame is the
+/// common outcome.
+const COALESCE_WINDOW: Duration = Duration::from_millis(8);
+/// Flush early once this many bytes are buffered, so a firehose cannot grow one event
+/// without bound.
+const COALESCE_MAX_BYTES: usize = 256 * 1024;
+/// How often the emitter logs its throughput counters.
+const EMITTER_STATS_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Reader-thread → emitter-thread messages. Data and exit travel the same channel so an
+/// agent's final bytes are always emitted before its `Completed` status.
+enum EmitterMessage {
+    Output { id: String, offset: u64, bytes: Vec<u8> },
+    Exited { id: String },
+}
+
+impl EmitterMessage {
+    fn len(&self) -> usize {
+        match self {
+            EmitterMessage::Output { bytes, .. } => bytes.len(),
+            EmitterMessage::Exited { .. } => 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CoalescedEvent {
+    Output { id: String, offset: u64, bytes: Vec<u8> },
+    Exited { id: String },
+}
+
+/// Merge a batch of reader messages into at most one output event per contiguous run
+/// per agent, preserving per-agent order and keeping data ahead of its exit marker.
+fn coalesce(messages: Vec<EmitterMessage>) -> Vec<CoalescedEvent> {
+    let mut events: Vec<CoalescedEvent> = Vec::new();
+    let mut open: HashMap<String, usize> = HashMap::new();
+
+    for message in messages {
+        match message {
+            EmitterMessage::Output { id, offset, bytes } => {
+                if let Some(&index) = open.get(&id) {
+                    if let CoalescedEvent::Output {
+                        offset: start,
+                        bytes: buffer,
+                        ..
+                    } = &mut events[index]
+                    {
+                        if *start + buffer.len() as u64 == offset {
+                            buffer.extend_from_slice(&bytes);
+                            continue;
+                        }
+                    }
+                }
+                open.insert(id.clone(), events.len());
+                events.push(CoalescedEvent::Output { id, offset, bytes });
+            }
+            EmitterMessage::Exited { id } => {
+                open.remove(&id);
+                events.push(CoalescedEvent::Exited { id });
+            }
+        }
+    }
+
+    events
+}
+
+/// Throughput counters for the UI transport (#289 "measure first").
+#[derive(Debug, Default)]
+pub struct EmitterStats {
+    /// Chunks read from PTYs, before coalescing.
+    pub raw_chunks: AtomicU64,
+    /// Events actually emitted to the webview.
+    pub events: AtomicU64,
+    /// Raw bytes carried by those events (before base64 expansion).
+    pub bytes: AtomicU64,
+}
+
+impl EmitterStats {
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.raw_chunks.load(Ordering::Relaxed),
+            self.events.load(Ordering::Relaxed),
+            self.bytes.load(Ordering::Relaxed),
+        )
+    }
+}
+
+fn spawn_emitter(
+    app_handle: AppHandle,
+    receiver: mpsc::Receiver<EmitterMessage>,
+    stats: Arc<EmitterStats>,
+) {
+    let spawned = thread::Builder::new()
+        .name("pty-emitter".to_string())
+        .spawn(move || {
+            let mut pending: Vec<EmitterMessage> = Vec::new();
+            let mut window_events = 0u64;
+            let mut window_bytes = 0u64;
+            let mut window_started = Instant::now();
+
+            loop {
+                let first = match receiver.recv() {
+                    Ok(message) => message,
+                    Err(_) => break,
+                };
+                let mut buffered = first.len();
+                pending.push(first);
+
+                let deadline = Instant::now() + COALESCE_WINDOW;
+                let mut disconnected = false;
+                while buffered < COALESCE_MAX_BYTES {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    match receiver.recv_timeout(deadline - now) {
+                        Ok(message) => {
+                            buffered += message.len();
+                            pending.push(message);
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
+
+                for event in coalesce(std::mem::take(&mut pending)) {
+                    match event {
+                        CoalescedEvent::Output { id, offset, bytes } => {
+                            stats.events.fetch_add(1, Ordering::Relaxed);
+                            stats.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                            window_events += 1;
+                            window_bytes += bytes.len() as u64;
+                            let payload = PtyOutput::new(&id, offset, &bytes);
+                            if let Err(e) = app_handle.emit(&pty_output_event_name(&id), payload) {
+                                tracing::error!("Failed to emit pty output for {id}: {e}");
+                            }
+                        }
+                        CoalescedEvent::Exited { id } => {
+                            let _ = app_handle.emit(
+                                PTY_STATUS_EVENT,
+                                PtyStatusChange {
+                                    id,
+                                    status: AgentStatus::Completed,
+                                },
+                            );
+                        }
+                    }
+                }
+
+                let elapsed = window_started.elapsed();
+                if elapsed >= EMITTER_STATS_INTERVAL {
+                    tracing::debug!(
+                        events = window_events,
+                        bytes = window_bytes,
+                        secs = elapsed.as_secs_f32(),
+                        "pty emitter throughput"
+                    );
+                    window_events = 0;
+                    window_bytes = 0;
+                    window_started = Instant::now();
+                }
+
+                if disconnected {
+                    break;
+                }
+            }
+        });
+
+    if let Err(e) = spawned {
+        tracing::error!("Failed to spawn the pty emitter thread: {e}");
+    }
 }
 
 /// Minimum spacing between consecutive codex spawns (#207 fix 3).
@@ -42,6 +282,12 @@ pub struct PtyManager {
     /// waiting out the stagger gap does not block kill/status/list.
     last_codex_spawn: Mutex<Option<std::time::Instant>>,
     app_handle: Option<AppHandle>,
+    /// Reader threads hand their chunks to the single emitter thread through this.
+    /// `None` until a UI attaches, so headless mode records output without emitting.
+    emit_tx: Option<mpsc::Sender<EmitterMessage>>,
+    emitter_stats: Arc<EmitterStats>,
+    /// Bytes of history each new session's ring retains (#287). Clamped on set.
+    replay_capacity: usize,
 }
 
 // Explicitly implement Send + Sync
@@ -55,11 +301,33 @@ impl PtyManager {
             lifecycle: Mutex::new(()),
             last_codex_spawn: Mutex::new(None),
             app_handle: None,
+            emit_tx: None,
+            emitter_stats: Arc::new(EmitterStats::default()),
+            replay_capacity: DEFAULT_REPLAY_CAPACITY,
         }
     }
 
     pub fn set_app_handle(&mut self, handle: AppHandle) {
+        if self.emit_tx.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            spawn_emitter(handle.clone(), receiver, Arc::clone(&self.emitter_stats));
+            self.emit_tx = Some(sender);
+        }
         self.app_handle = Some(handle);
+    }
+
+    /// Set how much history each *subsequently created* session retains. Existing
+    /// sessions keep the ring they were created with.
+    pub fn set_replay_capacity(&mut self, bytes: usize) {
+        self.replay_capacity = clamp_replay_capacity(bytes);
+    }
+
+    pub fn replay_capacity(&self) -> usize {
+        self.replay_capacity
+    }
+
+    pub fn emitter_stats(&self) -> Arc<EmitterStats> {
+        Arc::clone(&self.emitter_stats)
     }
 
     pub fn create_session(
@@ -151,6 +419,7 @@ impl PtyManager {
             cwd,
             cols,
             rows,
+            self.replay_capacity,
         )?);
 
         // Insert session BEFORE spawning reader thread (fixes race condition)
@@ -164,70 +433,76 @@ impl PtyManager {
         // #207: this runs whether or not a UI is attached. It used to be gated on
         // `app_handle`, so in headless HTTP mode — and in every test — nothing ever read
         // the PTY and a CLI that died during startup had its error text discarded by the
-        // OS, leaving no way to explain the failure. The bytes now always feed the
-        // session's rolling diagnostic buffer; emitting to the UI is the optional part.
+        // OS, leaving no way to explain the failure. The bytes always feed the session's
+        // output ring; handing them to the emitter thread is the optional part (#289).
         {
             let session_clone = Arc::clone(&session);
-            let app_handle_clone = self.app_handle.clone();
+            let emit_tx = self.emit_tx.clone();
+            let stats = Arc::clone(&self.emitter_stats);
             let id_clone = id.clone();
             let sessions_ref = Arc::clone(&self.sessions);
 
-            thread::spawn(move || {
-                let reader = session_clone.get_reader();
-                let mut buf = [0u8; 4096];
+            let spawned = thread::Builder::new()
+                .name(format!("pty-reader-{id}"))
+                .spawn(move || {
+                    let reader = session_clone.get_reader();
+                    let mut buf = [0u8; 4096];
 
-                loop {
-                    // Check if session still exists
-                    {
-                        let sessions_read = sessions_ref.read();
-                        if !sessions_read.contains_key(&id_clone) {
-                            break;
+                    loop {
+                        // Check if session still exists
+                        {
+                            let sessions_read = sessions_ref.read();
+                            if !sessions_read.contains_key(&id_clone) {
+                                break;
+                            }
                         }
-                    }
 
-                    let bytes_read = match read_from_reader(&reader, &mut buf) {
-                        Ok(0) => {
-                            // EOF - process exited
-                            break;
-                        }
-                        Ok(n) => n,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                            continue;
-                        }
-                        Err(_) => break,
-                    };
+                        let bytes_read = match read_from_reader(&reader, &mut buf) {
+                            Ok(0) => {
+                                // EOF - process exited
+                                break;
+                            }
+                            Ok(n) => n,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(10));
+                                continue;
+                            }
+                            Err(_) => break,
+                        };
 
-                    if bytes_read > 0 {
-                        tracing::debug!("PTY {} read {} bytes", id_clone, bytes_read);
-                        session_clone.record_output(&buf[..bytes_read]);
+                        if bytes_read > 0 {
+                            tracing::debug!("PTY {} read {} bytes", id_clone, bytes_read);
+                            // Record first: the offset returned here is what sequences the
+                            // emitted chunk against snapshots taken by fresh panes (#287).
+                            let offset = session_clone.record_output(&buf[..bytes_read]);
+                            stats.raw_chunks.fetch_add(1, Ordering::Relaxed);
 
-                        if let Some(ref app_handle) = app_handle_clone {
-                            let output = PtyOutput {
-                                id: id_clone.clone(),
-                                data: buf[..bytes_read].to_vec(),
-                            };
-                            if let Err(e) = app_handle.emit("pty-output", output) {
-                                tracing::error!("Failed to emit pty-output: {}", e);
+                            if let Some(tx) = &emit_tx {
+                                let _ = tx.send(EmitterMessage::Output {
+                                    id: id_clone.clone(),
+                                    offset,
+                                    bytes: buf[..bytes_read].to_vec(),
+                                });
                             }
                         }
                     }
-                }
 
-                // Session ended - emit status change
-                if let Some(ref app_handle) = app_handle_clone {
-                    let _ = app_handle.emit("pty-status", PtyStatusChange {
-                        id: id_clone,
-                        status: AgentStatus::Completed,
-                    });
-                }
-            });
+                    // Session ended. The exit marker rides the same channel as the data so
+                    // the emitter reports Completed only after the final bytes went out.
+                    if let Some(tx) = &emit_tx {
+                        let _ = tx.send(EmitterMessage::Exited { id: id_clone });
+                    }
+                });
+
+            if let Err(e) = spawned {
+                tracing::error!("Failed to spawn the pty reader thread for {id}: {e}");
+            }
         }
 
         // Session already inserted before thread spawn (see above)
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit("pty-status", PtyStatusChange {
+            let _ = app_handle.emit(PTY_STATUS_EVENT, PtyStatusChange {
                 id: id.clone(),
                 status: AgentStatus::Running,
             });
@@ -320,6 +595,15 @@ impl PtyManager {
     pub fn recent_output(&self, id: &str) -> Option<String> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|session| session.recent_output())
+    }
+
+    /// The whole retained history of an agent's PTY, for a freshly mounted pane (#287).
+    /// `None` when no PTY exists for `id` (never spawned, or already reaped).
+    pub fn snapshot(&self, id: &str) -> Option<PtySnapshot> {
+        let sessions = self.sessions.read();
+        sessions
+            .get(id)
+            .map(|session| PtySnapshot::from_snapshot(id, session.snapshot()))
     }
 
     /// Test hook: the argv a session was actually spawned with, so store isolation can be
@@ -843,5 +1127,149 @@ mod tests {
 
         manager.kill("doa-agent").unwrap();
         assert!(manager.recent_output("doa-agent").is_none());
+    }
+
+    /// #287: the snapshot exposes the same bytes the diagnostic tail sees, with offsets
+    /// that sequence it against the live stream.
+    #[test]
+    fn snapshot_reports_offsets_that_match_the_recorded_stream() {
+        let manager = PtyManager::new();
+        manager
+            .create_session(
+                "snapshot-agent".to_string(),
+                worker_role(),
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        manager.record_output_for_test("snapshot-agent", b"\x1b[Hfirst frame");
+        manager.record_output_for_test("snapshot-agent", b" second");
+
+        let snapshot = manager.snapshot("snapshot-agent").unwrap();
+        assert_eq!(snapshot.id, "snapshot-agent");
+        assert_eq!(snapshot.offset_start, 0);
+        assert_eq!(snapshot.offset_end, 21);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&snapshot.data)
+                .unwrap(),
+            b"\x1b[Hfirst frame second"
+        );
+        assert!(manager.snapshot("never-spawned").is_none());
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    fn output(id: &str, offset: u64, bytes: &[u8]) -> EmitterMessage {
+        EmitterMessage::Output {
+            id: id.to_string(),
+            offset,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn coalesce_merges_contiguous_chunks_per_agent_and_keeps_exit_after_data() {
+        let events = coalesce(vec![
+            output("a", 0, b"hel"),
+            output("b", 100, b"other"),
+            output("a", 3, b"lo"),
+            EmitterMessage::Exited {
+                id: "a".to_string(),
+            },
+            output("b", 105, b" agent"),
+        ]);
+
+        assert_eq!(
+            events,
+            vec![
+                CoalescedEvent::Output {
+                    id: "a".to_string(),
+                    offset: 0,
+                    bytes: b"hello".to_vec(),
+                },
+                CoalescedEvent::Output {
+                    id: "b".to_string(),
+                    offset: 100,
+                    bytes: b"other agent".to_vec(),
+                },
+                CoalescedEvent::Exited {
+                    id: "a".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesce_starts_a_new_batch_when_offsets_are_not_contiguous() {
+        let events = coalesce(vec![output("a", 0, b"abc"), output("a", 10, b"xyz")]);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[1], CoalescedEvent::Output { offset: 10, .. }));
+    }
+
+    #[test]
+    fn coalesce_never_merges_data_across_an_exit_marker() {
+        let events = coalesce(vec![
+            output("a", 0, b"abc"),
+            EmitterMessage::Exited {
+                id: "a".to_string(),
+            },
+            output("a", 3, b"def"),
+        ]);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[2], CoalescedEvent::Output { offset: 3, .. }));
+    }
+
+    #[test]
+    fn event_name_is_stable_for_agent_and_scratch_ids_and_sanitizes_others() {
+        assert_eq!(
+            pty_output_event_name("7c4790a1-370c-4d98-8690-a5fbe4b35e5b-worker-1"),
+            "pty-output:7c4790a1-370c-4d98-8690-a5fbe4b35e5b-worker-1"
+        );
+        assert_eq!(
+            pty_output_event_name("scratch:7c4790a1:9f1e"),
+            "pty-output:scratch:7c4790a1:9f1e"
+        );
+        assert_eq!(pty_output_event_name("odd id.1"), "pty-output:odd_id_1");
+        assert_eq!(pty_output_event_name("Ω"), "pty-output:_");
+    }
+
+    /// #289 payload-shape gate: a 4 KB read must not balloon to the ~16 KB a JSON number
+    /// array produced.
+    #[test]
+    fn a_4kb_chunk_crosses_ipc_in_well_under_1_4x_its_size() {
+        let bytes: Vec<u8> = (0..4096u32).map(|i| (i % 256) as u8).collect();
+        let payload = PtyOutput::new("7c4790a1-370c-4d98-8690-a5fbe4b35e5b-worker-12", 123, &bytes);
+        let json = serde_json::to_string(&payload).unwrap();
+
+        assert_eq!(payload.data.len(), 4096_usize.div_ceil(3) * 4);
+        assert!(
+            json.len() <= (4096.0 * 1.4) as usize,
+            "payload is {} bytes for a 4096-byte chunk",
+            json.len()
+        );
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&payload.data)
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn replay_capacity_is_clamped_when_set() {
+        let mut manager = PtyManager::new();
+        assert_eq!(manager.replay_capacity(), DEFAULT_REPLAY_CAPACITY);
+        manager.set_replay_capacity(1);
+        assert_eq!(manager.replay_capacity(), super::super::output_ring::MIN_REPLAY_CAPACITY);
+        manager.set_replay_capacity(usize::MAX);
+        assert_eq!(manager.replay_capacity(), super::super::output_ring::MAX_REPLAY_CAPACITY);
     }
 }

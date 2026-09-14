@@ -460,6 +460,30 @@ impl Action for ListPtys {
     }
 }
 
+/// `pty.snapshot`: the retained output history of one PTY, for a freshly mounted pane
+/// (#287). Resolves to `null` when no PTY exists for the id so the pane goes live
+/// without a replay instead of treating a not-yet-spawned agent as an error.
+struct PtySnapshotAction;
+
+#[async_trait]
+impl Action for PtySnapshotAction {
+    fn name(&self) -> &'static str {
+        "pty.snapshot"
+    }
+
+    fn input_schema(&self) -> RootSchema {
+        schemars::schema_for!(PtyIdInput)
+    }
+
+    async fn run(&self, ctx: &ActionContext, input: Value) -> Result<Value, ActionError> {
+        require_frontend(ctx)?;
+        let parsed: PtyIdInput = deserialize_input(input)?;
+        let snapshot = { ctx.state.pty_manager.read().snapshot(&parsed.id) };
+        serde_json::to_value(snapshot)
+            .map_err(|e| ActionError::internal(format!("Failed to serialize PTY snapshot: {}", e)))
+    }
+}
+
 pub fn register(registry: &mut ActionRegistry) {
     registry.register(Box::new(CreatePty));
     registry.register(Box::new(WritePty));
@@ -469,6 +493,7 @@ pub fn register(registry: &mut ActionRegistry) {
     registry.register(Box::new(KillPty));
     registry.register(Box::new(PtyStatus));
     registry.register(Box::new(ListPtys));
+    registry.register(Box::new(PtySnapshotAction));
 }
 
 #[cfg(all(test, windows))]

@@ -5,6 +5,8 @@ pub mod state;
 #[cfg(test)]
 pub mod tests;
 #[cfg(test)]
+mod tests_terminal_continuity;
+#[cfg(test)]
 mod tests_wg_codegraph;
 #[cfg(test)]
 mod tests_wg_context;

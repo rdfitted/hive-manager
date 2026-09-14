@@ -329,11 +329,73 @@ pub struct SessionStorage {
     session_sync: Mutex<HashMap<String, SessionSyncState>>,
 }
 
+/// One session the fixture purge (#288) decided about.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FixtureSessionCandidate {
+    pub id: String,
+    pub project_path: Option<String>,
+    pub reason: String,
+}
+
+/// Outcome of a fixture purge scan (#288). `candidates` are removed only when `applied`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FixturePurgeReport {
+    pub applied: bool,
+    /// Session directories examined.
+    pub scanned: usize,
+    /// Sessions judged to be leaked fixtures (deleted when `applied`).
+    pub candidates: Vec<FixtureSessionCandidate>,
+    /// Suspicious sessions deliberately kept, with the reason.
+    pub skipped: Vec<FixtureSessionCandidate>,
+    pub removed: usize,
+    pub errors: Vec<String>,
+}
+
+/// Every session the app creates gets a v4 UUID id; anything else was written by a test.
+pub fn is_real_session_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok()
+}
+
+/// Whether a project path lives under the OS temp directory, where `TempDir` fixtures
+/// are created. Compared case-insensitively on Windows.
+pub fn is_temp_dir_project_path(project_path: &str) -> bool {
+    let temp_root = std::env::temp_dir();
+    let candidate = std::path::Path::new(project_path);
+    if cfg!(windows) {
+        let normalize = |path: &std::path::Path| {
+            path.to_string_lossy()
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_ascii_lowercase()
+        };
+        let root = normalize(&temp_root);
+        let value = normalize(candidate);
+        value == root || value.starts_with(&format!("{root}\\"))
+    } else {
+        candidate.starts_with(&temp_root)
+    }
+}
+
 impl SessionStorage {
-    /// Create a new SessionStorage, initializing the base directory if needed
+    /// Create a new SessionStorage, initializing the base directory if needed.
+    ///
+    /// Disabled under `cfg(test)`: this resolves to the operator's real app-data directory,
+    /// and before #288 the HTTP test suite wrote thousands of fixture sessions into it.
+    /// Tests build storage with [`SessionStorage::new_with_base`] on a `TempDir`.
     pub fn new() -> Result<Self, StorageError> {
-        let base_dir = Self::get_app_data_dir()?;
-        Self::new_with_base(base_dir)
+        #[cfg(test)]
+        {
+            Err(StorageError::InvalidPath(
+                "SessionStorage::new() resolves to the operator's real app-data directory and is \
+                 disabled under cfg(test); use SessionStorage::new_with_base(TempDir) (#288)"
+                    .to_string(),
+            ))
+        }
+        #[cfg(not(test))]
+        {
+            let base_dir = Self::get_app_data_dir()?;
+            Self::new_with_base(base_dir)
+        }
     }
 
     /// Create a SessionStorage with a custom base directory (for testing)
@@ -357,6 +419,7 @@ impl SessionStorage {
     }
 
     /// Get the app data directory path
+    #[cfg_attr(test, allow(dead_code))]
     fn get_app_data_dir() -> Result<PathBuf, StorageError> {
         #[cfg(windows)]
         {
@@ -620,6 +683,99 @@ impl SessionStorage {
         Ok(())
     }
 
+    /// Find (and with `apply`, delete) sessions that local test runs leaked into this
+    /// store (#288).
+    ///
+    /// A session is a candidate only when it is provably not operator work: its project
+    /// path no longer exists on disk AND either its id is not a UUID or the project path
+    /// pointed into the OS temp directory. `is_protected` lets the caller shield sessions
+    /// the controller still holds. Everything else suspicious is reported under `skipped`
+    /// so the operator can see what was left alone and why.
+    pub fn purge_fixture_sessions(
+        &self,
+        apply: bool,
+        is_protected: &dyn Fn(&str) -> bool,
+    ) -> Result<FixturePurgeReport, StorageError> {
+        let mut report = FixturePurgeReport {
+            applied: apply,
+            ..FixturePurgeReport::default()
+        };
+        let sessions_dir = self.sessions_dir();
+        if !sessions_dir.exists() {
+            return Ok(report);
+        }
+
+        let mut ids: Vec<String> = fs::read_dir(&sessions_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        ids.sort();
+
+        for id in ids {
+            report.scanned += 1;
+            let real_id = is_real_session_id(&id);
+
+            let (project_path, reason) = match self.load_session(&id) {
+                Ok(session) => {
+                    let path = session.project_path;
+                    let exists = !path.trim().is_empty() && std::path::Path::new(&path).exists();
+                    if exists {
+                        if !real_id {
+                            report.skipped.push(FixtureSessionCandidate {
+                                id,
+                                project_path: Some(path),
+                                reason: "non-UUID id but its project path exists on disk".to_string(),
+                            });
+                        }
+                        continue;
+                    }
+                    if real_id && !is_temp_dir_project_path(&path) {
+                        report.skipped.push(FixtureSessionCandidate {
+                            id,
+                            project_path: Some(path),
+                            reason: "project path is missing but the id is a real UUID and the path \
+                                     is outside the OS temp directory; not a test fixture"
+                                .to_string(),
+                        });
+                        continue;
+                    }
+                    let reason = if real_id {
+                        "project path pointed into the OS temp directory and no longer exists"
+                    } else {
+                        "non-UUID id and the project path no longer exists"
+                    };
+                    (Some(path), reason)
+                }
+                Err(_) if real_id => continue,
+                Err(_) => (None, "non-UUID id and session.json is unreadable"),
+            };
+
+            if is_protected(&id) {
+                report.skipped.push(FixtureSessionCandidate {
+                    id,
+                    project_path,
+                    reason: "session is still live in the controller".to_string(),
+                });
+                continue;
+            }
+
+            if apply {
+                match self.delete_session(&id) {
+                    Ok(()) => report.removed += 1,
+                    Err(error) => report.errors.push(format!("{id}: {error}")),
+                }
+            }
+            report.candidates.push(FixtureSessionCandidate {
+                id,
+                project_path,
+                reason: reason.to_string(),
+            });
+        }
+
+        Ok(report)
+    }
+
     /// Get the config file path
     pub fn config_path(&self) -> PathBuf {
         self.base_dir.join("config.json")
@@ -829,6 +985,7 @@ impl SessionStorage {
             },
             global_wiki_path: default_global_wiki_path(),
             knowledge_wiki_folders: None,
+            pty_replay_buffer_bytes: None,
         }
     }
 
@@ -1628,6 +1785,11 @@ pub struct AppConfig {
     /// believed was excluded is neither.
     #[serde(default)]
     pub knowledge_wiki_folders: Option<Vec<String>>,
+    /// Bytes of PTY output retained per agent for terminal replay (#287). `None` uses the
+    /// built-in default of 512 KiB; any value is clamped to 8 KiB..=1 MiB. Applies to
+    /// agents spawned after the app starts.
+    #[serde(default)]
+    pub pty_replay_buffer_bytes: Option<usize>,
 }
 
 /// Default location of the global LLM wiki used by Research mode.
