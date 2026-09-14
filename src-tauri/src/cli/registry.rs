@@ -416,6 +416,7 @@ mod tests {
             },
             global_wiki_path: None,
             knowledge_wiki_folders: None,
+            pty_replay_buffer_bytes: None,
         }
     }
 
