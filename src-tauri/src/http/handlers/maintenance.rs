@@ -6,9 +6,8 @@
 //! only when it is provably not operator work: its project path no longer exists AND
 //! either its id is not a UUID (every real session id is) or its project path pointed
 //! into the OS temp directory (where `TempDir` fixtures live). Sessions the controller
-//! still holds are never touched. Dry-run is the default.
+//! holds are never touched. Dry-run is the default.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -29,17 +28,24 @@ pub async fn purge_fixture_sessions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PurgeFixtureSessionsQuery>,
 ) -> Result<Json<FixturePurgeReport>, ApiError> {
-    let live: HashSet<String> = state
-        .session_controller
-        .read()
-        .list_sessions()
-        .into_iter()
-        .map(|session| session.id)
-        .collect();
+    let controller = Arc::clone(&state.session_controller);
+    let storage = Arc::clone(&state.storage);
+    let apply = query.apply;
 
-    let report = state
-        .storage
-        .purge_fixture_sessions(query.apply, &|id| live.contains(id))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    // The scan reads every session directory and, when applying, deletes trees, so it
+    // runs on the blocking pool rather than a Tokio worker. Liveness is checked per
+    // candidate immediately before its delete instead of from a snapshot taken up front.
+    // A session could still be activated between that check and the delete, but doing so
+    // requires resuming it against a project path that no longer exists, which is what
+    // made it a candidate; that window is accepted.
+    let report = tokio::task::spawn_blocking(move || {
+        storage.purge_fixture_sessions(apply, &|id| {
+            controller.read().get_session(id).is_some()
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("purge task failed: {e}")))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
     Ok(Json(report))
 }

@@ -29,6 +29,12 @@ export interface PooledSession {
   sessionId: string;
   /** When this session last stopped being (or became) the active one. */
   lastActiveAt: number;
+  /**
+   * When a sweep first saw this session in a terminal state while it was not active.
+   * The grace period runs from here, so a session that finishes long after the operator
+   * left it still gets its full grace. Cleared while the session is active or running.
+   */
+  terminalSince?: number;
 }
 
 export interface SweepOptions {
@@ -54,7 +60,9 @@ export function touchPooled(
 
 /**
  * Drop entries whose session no longer exists, and finished sessions that have been
- * inactive longer than the grace period. The active session is always kept.
+ * both inactive and terminal for longer than the grace period. The active session is
+ * always kept. The grace clock starts at the first sweep that observes the session as
+ * terminal while it is not active, not when the operator last left it.
  */
 export function sweepPooled(
   entries: readonly PooledSession[],
@@ -62,11 +70,17 @@ export function sweepPooled(
   now: number,
   options: SweepOptions,
 ): PooledSession[] {
-  return entries.filter((entry) => {
-    if (entry.sessionId === activeSessionId) return true;
-    if (!options.exists(entry.sessionId)) return false;
-    if (!options.isTerminal(entry.sessionId)) return true;
-    return now - entry.lastActiveAt < TERMINAL_STATE_GRACE_MS;
+  const withoutClock = (entry: PooledSession): PooledSession =>
+    entry.terminalSince === undefined ? entry : { ...entry, terminalSince: undefined };
+
+  return entries.flatMap((entry) => {
+    if (entry.sessionId === activeSessionId) return [withoutClock(entry)];
+    if (!options.exists(entry.sessionId)) return [];
+    if (!options.isTerminal(entry.sessionId)) return [withoutClock(entry)];
+
+    const terminalSince = entry.terminalSince ?? now;
+    if (now - terminalSince >= TERMINAL_STATE_GRACE_MS) return [];
+    return [entry.terminalSince === terminalSince ? entry : { ...entry, terminalSince }];
   });
 }
 

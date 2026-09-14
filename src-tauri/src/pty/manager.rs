@@ -94,6 +94,12 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(8);
 const COALESCE_MAX_BYTES: usize = 256 * 1024;
 /// How often the emitter logs its throughput counters.
 const EMITTER_STATS_INTERVAL: Duration = Duration::from_secs(5);
+/// Upper bound on reader chunks queued for the emitter, shared by every PTY. `send`
+/// blocks when the queue is full, so a webview that stops draining events applies
+/// backpressure to the PTY children exactly as the previous synchronous emit did,
+/// instead of buffering their output without limit. At 4 KB reads this caps the
+/// in-flight backlog near 4 MB.
+const EMITTER_QUEUE_CAPACITY: usize = 1024;
 
 /// Reader-thread → emitter-thread messages. Data and exit travel the same channel so an
 /// agent's final bytes are always emitted before its `Completed` status.
@@ -282,9 +288,10 @@ pub struct PtyManager {
     /// waiting out the stagger gap does not block kill/status/list.
     last_codex_spawn: Mutex<Option<std::time::Instant>>,
     app_handle: Option<AppHandle>,
-    /// Reader threads hand their chunks to the single emitter thread through this.
-    /// `None` until a UI attaches, so headless mode records output without emitting.
-    emit_tx: Option<mpsc::Sender<EmitterMessage>>,
+    /// Reader threads hand their chunks to the single emitter thread through this
+    /// bounded queue. `None` until a UI attaches, so headless mode records output
+    /// without emitting.
+    emit_tx: Option<mpsc::SyncSender<EmitterMessage>>,
     emitter_stats: Arc<EmitterStats>,
     /// Bytes of history each new session's ring retains (#287). Clamped on set.
     replay_capacity: usize,
@@ -309,7 +316,7 @@ impl PtyManager {
 
     pub fn set_app_handle(&mut self, handle: AppHandle) {
         if self.emit_tx.is_none() {
-            let (sender, receiver) = mpsc::channel();
+            let (sender, receiver) = mpsc::sync_channel(EMITTER_QUEUE_CAPACITY);
             spawn_emitter(handle.clone(), receiver, Arc::clone(&self.emitter_stats));
             self.emit_tx = Some(sender);
         }
@@ -477,6 +484,8 @@ impl PtyManager {
                             let offset = session_clone.record_output(&buf[..bytes_read]);
                             stats.raw_chunks.fetch_add(1, Ordering::Relaxed);
 
+                            // Blocks while the bounded queue is full: backpressure reaches
+                            // the child through the PTY pipe rather than growing memory.
                             if let Some(tx) = &emit_tx {
                                 let _ = tx.send(EmitterMessage::Output {
                                     id: id_clone.clone(),

@@ -124,8 +124,11 @@ curl -X POST http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions
 curl -X POST "http://127.0.0.1:18800/api/maintenance/purge-fixture-sessions?apply=true"
 ```
 
-Only sessions whose project path no longer exists and whose id is not a UUID (or whose
-project pointed into the OS temp directory) are removed; everything else is reported and kept.
+Removed: sessions whose project path no longer exists and whose id is not a UUID (or whose
+project pointed into the OS temp directory), plus non-UUID session directories whose
+`session.json` cannot be read. Everything else is kept, and anything suspicious that was
+kept (a live session, a UUID session whose project moved or whose `session.json` is
+unreadable) is listed under `skipped` with the reason.
 
 ## Development
 

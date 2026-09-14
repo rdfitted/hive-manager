@@ -48,18 +48,47 @@ describe('sweepPooled', () => {
     expect(sweepPooled(entries, 'active', 10 * TERMINAL_STATE_GRACE_MS, options([]))).toEqual(entries);
   });
 
-  it('drops a finished session only after the grace period', () => {
+  it('drops a finished session only after a full grace period measured from the first terminal sweep', () => {
     const entries = [pooled('active', 0), pooled('done', 1000)];
-    const before = sweepPooled(entries, 'active', 1000 + TERMINAL_STATE_GRACE_MS - 1, options(['done']));
-    const after = sweepPooled(entries, 'active', 1000 + TERMINAL_STATE_GRACE_MS, options(['done']));
+    const seen = sweepPooled(entries, 'active', 2000, options(['done']));
+    expect(seen.map((entry) => entry.sessionId)).toEqual(['active', 'done']);
+    expect(seen[1].terminalSince).toBe(2000);
+
+    const before = sweepPooled(seen, 'active', 2000 + TERMINAL_STATE_GRACE_MS - 1, options(['done']));
+    const after = sweepPooled(seen, 'active', 2000 + TERMINAL_STATE_GRACE_MS, options(['done']));
 
     expect(before.map((entry) => entry.sessionId)).toEqual(['active', 'done']);
     expect(after.map((entry) => entry.sessionId)).toEqual(['active']);
   });
 
-  it('keeps the active session even when it is finished and stale', () => {
+  it('starts the grace when the session finishes, not when the operator left it', () => {
+    // Operator left a running session at t=0; it completes ten minutes later.
+    let entries = [pooled('active', 0), pooled('late', 0)];
+    const completedAt = 10 * TERMINAL_STATE_GRACE_MS;
+    entries = sweepPooled(entries, 'active', completedAt - 1, options([]));
+    expect(entries[1].terminalSince).toBeUndefined();
+
+    entries = sweepPooled(entries, 'active', completedAt, options(['late']));
+    expect(entries.map((entry) => entry.sessionId)).toEqual(['active', 'late']);
+    expect(entries[1].terminalSince).toBe(completedAt);
+
+    const kept = sweepPooled(entries, 'active', completedAt + TERMINAL_STATE_GRACE_MS - 1, options(['late']));
+    const dropped = sweepPooled(entries, 'active', completedAt + TERMINAL_STATE_GRACE_MS, options(['late']));
+    expect(kept.map((entry) => entry.sessionId)).toEqual(['active', 'late']);
+    expect(dropped.map((entry) => entry.sessionId)).toEqual(['active']);
+  });
+
+  it('keeps the active session even when it is finished and stale, without running its clock', () => {
     const entries = [pooled('done-active', 0)];
-    expect(sweepPooled(entries, 'done-active', 10 * TERMINAL_STATE_GRACE_MS, options(['done-active']))).toEqual(entries);
+    const swept = sweepPooled(entries, 'done-active', 10 * TERMINAL_STATE_GRACE_MS, options(['done-active']));
+    expect(swept).toEqual(entries);
+    expect(swept[0].terminalSince).toBeUndefined();
+  });
+
+  it('clears the clock if a finished session is resumed', () => {
+    const entries = [{ ...pooled('resumed', 0), terminalSince: 500 }];
+    const swept = sweepPooled(entries, 'active', 1000, options([]));
+    expect(swept[0].terminalSince).toBeUndefined();
   });
 
   it('drops sessions that no longer exist', () => {

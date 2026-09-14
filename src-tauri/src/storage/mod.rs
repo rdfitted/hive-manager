@@ -747,7 +747,16 @@ impl SessionStorage {
                     };
                     (Some(path), reason)
                 }
-                Err(_) if real_id => continue,
+                Err(error) if real_id => {
+                    report.skipped.push(FixtureSessionCandidate {
+                        id,
+                        project_path: None,
+                        reason: format!(
+                            "session.json is unreadable ({error}); kept because the id is a real UUID"
+                        ),
+                    });
+                    continue;
+                }
                 Err(_) => (None, "non-UUID id and session.json is unreadable"),
             };
 

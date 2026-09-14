@@ -178,6 +178,15 @@ async fn purge_fixture_sessions_dry_run_then_apply_removes_only_leaked_fixtures(
     controller
         .write()
         .insert_test_session(make_test_session(&live_id, &live_project));
+    // Unreadable session.json: a UUID id is kept and reported, a fixture-shaped id is
+    // a candidate (no real session can have a non-UUID id).
+    let unreadable_real_id = uuid::Uuid::new_v4().to_string();
+    let unreadable_fixture_id = format!("queen-working-{}", uuid::Uuid::new_v4());
+    for id in [&unreadable_real_id, &unreadable_fixture_id] {
+        let dir = storage.session_dir(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("session.json"), b"{ not json").unwrap();
+    }
 
     let dry_run = app
         .clone()
@@ -195,17 +204,33 @@ async fn purge_fixture_sessions_dry_run_then_apply_removes_only_leaked_fixtures(
 
     assert_eq!(report["applied"], false);
     assert_eq!(report["removed"], 0);
-    assert_eq!(report["scanned"], 5);
+    assert_eq!(report["scanned"], 7);
     let mut candidates = ids(&report, "candidates");
     candidates.sort();
-    let mut expected = vec![fixture_id.clone(), temp_uuid_fixture.clone()];
+    let mut expected = vec![
+        fixture_id.clone(),
+        temp_uuid_fixture.clone(),
+        unreadable_fixture_id.clone(),
+    ];
     expected.sort();
     assert_eq!(candidates, expected);
     let skipped = ids(&report, "skipped");
     assert!(skipped.contains(&moved_id), "moved project must be kept: {report}");
     assert!(skipped.contains(&live_id), "live session must be kept: {report}");
+    assert!(
+        skipped.contains(&unreadable_real_id),
+        "unreadable UUID session must be kept and reported: {report}"
+    );
     assert!(!skipped.contains(&real_id), "healthy sessions are not even reported");
-    for id in [&fixture_id, &temp_uuid_fixture, &real_id, &moved_id, &live_id] {
+    for id in [
+        &fixture_id,
+        &temp_uuid_fixture,
+        &unreadable_fixture_id,
+        &real_id,
+        &moved_id,
+        &live_id,
+        &unreadable_real_id,
+    ] {
         assert!(storage.session_dir(id).exists(), "dry run must not delete {id}");
     }
 
@@ -223,11 +248,12 @@ async fn purge_fixture_sessions_dry_run_then_apply_removes_only_leaked_fixtures(
     let report = json_body(applied).await;
 
     assert_eq!(report["applied"], true);
-    assert_eq!(report["removed"], 2);
+    assert_eq!(report["removed"], 3);
     assert_eq!(report["errors"].as_array().unwrap().len(), 0);
     assert!(!storage.session_dir(&fixture_id).exists());
     assert!(!storage.session_dir(&temp_uuid_fixture).exists());
-    for id in [&real_id, &moved_id, &live_id] {
+    assert!(!storage.session_dir(&unreadable_fixture_id).exists());
+    for id in [&real_id, &moved_id, &live_id, &unreadable_real_id] {
         assert!(storage.session_dir(id).exists(), "apply must keep {id}");
     }
 }
