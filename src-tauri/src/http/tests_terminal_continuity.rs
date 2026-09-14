@@ -141,6 +141,55 @@ async fn pty_snapshot_route_returns_aligned_history_with_offsets() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+/// #288 review follow-up: purge and resume share the per-session lifecycle lock, so a
+/// fixture cannot be loaded into the controller while its directory is being deleted.
+#[tokio::test]
+async fn purge_delete_waits_for_the_session_lifecycle_lock_and_keeps_live_sessions() {
+    let (_app, controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
+    let id = format!("working-active-{}", uuid::Uuid::new_v4());
+    storage
+        .save_session(&persisted(&id, &missing_temp_project()))
+        .unwrap();
+
+    // Hold the lock the way an in-flight resume would.
+    let lock = controller.read().session_lifecycle_lock(&id);
+    let held = lock.lock();
+
+    let worker = {
+        let controller = controller.clone();
+        let storage = storage.clone();
+        let id = id.clone();
+        std::thread::spawn(move || {
+            controller
+                .read()
+                .purge_persisted_session_unless_live(&storage, &id)
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!worker.is_finished(), "purge must wait for the lifecycle lock");
+    assert!(storage.session_dir(&id).exists(), "nothing is deleted while the lock is held");
+
+    drop(held);
+    assert!(worker.join().unwrap().unwrap(), "released lock lets the purge proceed");
+    assert!(!storage.session_dir(&id).exists());
+
+    // A session that is live in the controller is kept, and the caller learns that.
+    let live = format!("session-live-{}", uuid::Uuid::new_v4());
+    let live_project = missing_temp_project();
+    storage
+        .save_session(&persisted(&live, &live_project))
+        .unwrap();
+    controller
+        .write()
+        .insert_test_session(make_test_session(&live, &live_project));
+    assert!(!controller
+        .read()
+        .purge_persisted_session_unless_live(&storage, &live)
+        .unwrap());
+    assert!(storage.session_dir(&live).exists());
+}
+
 /// #288: the purge is a dry run by default, deletes only provable fixtures when applied,
 /// and reports every suspicious session it deliberately kept.
 #[tokio::test]

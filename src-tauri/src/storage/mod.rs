@@ -689,12 +689,16 @@ impl SessionStorage {
     /// A session is a candidate only when it is provably not operator work: its project
     /// path no longer exists on disk AND either its id is not a UUID or the project path
     /// pointed into the OS temp directory. `is_protected` lets the caller shield sessions
-    /// the controller still holds. Everything else suspicious is reported under `skipped`
-    /// so the operator can see what was left alone and why.
+    /// the controller still holds when reporting; `delete` performs the actual removal
+    /// when applying and returns `Ok(false)` if the session turned out to be live at that
+    /// moment (the controller implements it under the session's lifecycle lock). Everything
+    /// else suspicious is reported under `skipped` so the operator can see what was left
+    /// alone and why.
     pub fn purge_fixture_sessions(
         &self,
         apply: bool,
         is_protected: &dyn Fn(&str) -> bool,
+        delete: &dyn Fn(&str) -> Result<bool, StorageError>,
     ) -> Result<FixturePurgeReport, StorageError> {
         let mut report = FixturePurgeReport {
             applied: apply,
@@ -770,8 +774,16 @@ impl SessionStorage {
             }
 
             if apply {
-                match self.delete_session(&id) {
-                    Ok(()) => report.removed += 1,
+                match delete(&id) {
+                    Ok(true) => report.removed += 1,
+                    Ok(false) => {
+                        report.skipped.push(FixtureSessionCandidate {
+                            id,
+                            project_path,
+                            reason: "session became live before deletion; kept".to_string(),
+                        });
+                        continue;
+                    }
                     Err(error) => report.errors.push(format!("{id}: {error}")),
                 }
             }

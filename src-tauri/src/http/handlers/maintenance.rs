@@ -6,7 +6,8 @@
 //! only when it is provably not operator work: its project path no longer exists AND
 //! either its id is not a UUID (every real session id is) or its project path pointed
 //! into the OS temp directory (where `TempDir` fixtures live). Sessions the controller
-//! holds are never touched. Dry-run is the default.
+//! holds are never touched: each delete runs under the session's lifecycle lock, which
+//! `resume_session` also takes. Dry-run is the default.
 
 use std::sync::Arc;
 
@@ -33,15 +34,20 @@ pub async fn purge_fixture_sessions(
     let apply = query.apply;
 
     // The scan reads every session directory and, when applying, deletes trees, so it
-    // runs on the blocking pool rather than a Tokio worker. Liveness is checked per
-    // candidate immediately before its delete instead of from a snapshot taken up front.
-    // A session could still be activated between that check and the delete, but doing so
-    // requires resuming it against a project path that no longer exists, which is what
-    // made it a candidate; that window is accepted.
+    // runs on the blocking pool rather than a Tokio worker. Reporting checks liveness per
+    // candidate; the delete itself goes through the controller, which holds the session's
+    // lifecycle lock across its own liveness check and the removal. `resume_session`
+    // takes the same lock, so a fixture cannot be activated in between.
     let report = tokio::task::spawn_blocking(move || {
-        storage.purge_fixture_sessions(apply, &|id| {
-            controller.read().get_session(id).is_some()
-        })
+        storage.purge_fixture_sessions(
+            apply,
+            &|id| controller.read().get_session(id).is_some(),
+            &|id| {
+                controller
+                    .read()
+                    .purge_persisted_session_unless_live(&storage, id)
+            },
+        )
     })
     .await
     .map_err(|e| ApiError::internal(format!("purge task failed: {e}")))?

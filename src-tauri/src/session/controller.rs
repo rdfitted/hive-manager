@@ -2550,6 +2550,27 @@ impl SessionController {
             .clone()
     }
 
+    /// Delete a persisted session's storage unless the session is live (#288).
+    ///
+    /// Holds the session's lifecycle lock across the liveness check and the delete, the
+    /// same lock `resume_session`, `stop_session` and `close_session` take, so a fixture
+    /// cannot be loaded into the controller between the check and the removal of its
+    /// directory. Returns `Ok(false)` when the session was live and was kept.
+    pub fn purge_persisted_session_unless_live(
+        &self,
+        storage: &SessionStorage,
+        session_id: &str,
+    ) -> Result<bool, crate::storage::StorageError> {
+        let lifecycle_lock = self.session_lifecycle_lock(session_id);
+        let _lifecycle_guard = lifecycle_lock.lock();
+
+        if self.sessions.read().contains_key(session_id) {
+            return Ok(false);
+        }
+        storage.delete_session(session_id)?;
+        Ok(true)
+    }
+
     pub fn stop_session(&self, id: &str) -> Result<(), String> {
         let lifecycle_lock = self.session_lifecycle_lock(id);
         let _lifecycle_guard = lifecycle_lock.lock();
@@ -13757,6 +13778,12 @@ The backend composed and persisted the following authoritative skeleton before l
         if session_id.contains("..") || session_id.contains("/") || session_id.contains("\\") {
             return Err("Invalid session ID format".to_string());
         }
+
+        // Serialize with stop/close and with the fixture purge (#288): a session cannot be
+        // loaded from disk and inserted while `purge_persisted_session_unless_live` is
+        // deciding whether its storage directory may be deleted.
+        let lifecycle_lock = self.session_lifecycle_lock(session_id);
+        let _lifecycle_guard = lifecycle_lock.lock();
 
         // Check if session is already loaded in memory
         {
