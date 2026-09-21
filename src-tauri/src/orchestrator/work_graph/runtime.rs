@@ -28,9 +28,9 @@ use super::archetypes::{
 use super::codegraph::{derive_codegraph_touches, CodegraphDerivationReport};
 use super::completion_ledger::NodeCompletionFact;
 use super::context::{
-    build_knowledge_touch_coverage, derive_project_context_from_coverage,
-    ContextDerivationReport, KnowledgeAttachmentConfig, TouchCoverageReport,
-    TouchesResolver,
+    build_knowledge_touch_coverage, derive_project_context_from_knowledge,
+    load_tracked_file_inventory, ContextDerivationReport, KnowledgeAttachmentConfig,
+    TouchCoverageReport, TouchesResolver,
 };
 use super::plan_parse::promote_initial_ready_nodes;
 use super::review::{
@@ -124,6 +124,8 @@ where
     let context = derive_knowledge_attachments(
         &mut graph,
         project_path,
+        institutional_wiki_root,
+        project_path,
         resolver,
         &codegraph.coverage(),
         None,
@@ -145,21 +147,79 @@ where
 pub(crate) fn derive_knowledge_attachments<R: TouchesResolver>(
     graph: &mut TaskGraph,
     project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    inventory_root: &Path,
     resolver: &R,
     declared_coverage: &TouchCoverageReport,
     file_inventory: Option<&BTreeSet<String>>,
 ) -> ContextDerivationReport {
+    let config = KnowledgeAttachmentConfig::production();
+    derive_knowledge_attachments_with_config(
+        graph,
+        project_path,
+        institutional_wiki_root,
+        inventory_root,
+        resolver,
+        declared_coverage,
+        file_inventory,
+        config,
+    )
+}
+
+fn derive_knowledge_attachments_with_config<R: TouchesResolver>(
+    graph: &mut TaskGraph,
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    inventory_root: &Path,
+    resolver: &R,
+    declared_coverage: &TouchCoverageReport,
+    file_inventory: Option<&BTreeSet<String>>,
+    config: KnowledgeAttachmentConfig,
+) -> ContextDerivationReport {
+    let artifact_candidates = resolver.knowledge_candidates();
+    let mut loaded_inventory = None;
+    if artifact_candidates.is_none()
+        && file_inventory.is_none()
+        && config.file_inventory_fallback
+    {
+        match load_tracked_file_inventory(inventory_root) {
+            Ok(inventory) => loaded_inventory = Some(inventory),
+            Err(detail) => {
+                let mut omission = WorkGraphOmission::new(
+                    WorkGraphOmissionReason::ResolutionIncomplete,
+                    1,
+                    vec!["git ls-files".to_string()],
+                );
+                omission.detail = detail.to_string();
+                graph.omissions.push(omission);
+            }
+        }
+    }
+    let effective_inventory = file_inventory.or(loaded_inventory.as_ref());
     let knowledge = build_knowledge_touch_coverage(
         graph,
         resolver,
         declared_coverage,
-        file_inventory,
-        KnowledgeAttachmentConfig::production(),
+        effective_inventory,
+        config,
     );
-    graph.omissions.extend(knowledge.resolution_omissions);
-    let mut attachment_coverage = declared_coverage.clone();
-    attachment_coverage.touches = knowledge.knowledge_attachment_touches;
-    derive_project_context_from_coverage(graph, project_path, &attachment_coverage)
+    graph
+        .omissions
+        .extend(knowledge.resolution_omissions.clone());
+    let fallback_candidates = config
+        .file_inventory_fallback
+        .then_some(effective_inventory)
+        .flatten();
+    let scope_candidates = artifact_candidates.as_ref().or(fallback_candidates);
+    derive_project_context_from_knowledge(
+        graph,
+        project_path,
+        institutional_wiki_root,
+        declared_coverage,
+        &knowledge,
+        scope_candidates,
+        config,
+    )
 }
 
 /// Idempotently overlay planner output onto the persisted skeleton while
@@ -1652,5 +1712,152 @@ fn project_outcome_statuses(
             }
             RuntimeOutcomeStatus::Unknown => continue,
         };
+    }
+}
+
+#[cfg(test)]
+mod knowledge_attachment_tests {
+    use super::derive_knowledge_attachments_with_config;
+    use crate::actions::git::run_git_in_dir;
+    use crate::orchestrator::work_graph::codegraph::CODEGRAPH_MODULE_TEMPLATE;
+    use crate::orchestrator::work_graph::context::{
+        KnowledgeAttachmentConfig, NoTouchesResolver, TouchCoverageReport,
+    };
+    use crate::orchestrator::work_graph::{
+        BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
+        WorkGraphOmissionReason, WorkNode,
+    };
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn production_file_inventory_fallback_attaches_and_fails_open() {
+        let root = knowledge_project();
+        fs::create_dir_all(root.path().join("src")).expect("source dir");
+        fs::write(root.path().join("src/main.rs"), "fn main() {}\n").expect("source");
+        let root_text = root.path().to_string_lossy().into_owned();
+        run_git_in_dir(&["init"], &root_text).expect("git init");
+        run_git_in_dir(&["add", "--", "src/main.rs"], &root_text).expect("git add");
+
+        let mut graph = graph_with_declared_file();
+        let report = derive_knowledge_attachments_with_config(
+            &mut graph,
+            root.path(),
+            None,
+            root.path(),
+            &NoTouchesResolver,
+            &TouchCoverageReport::unavailable(),
+            None,
+            enabled_config(),
+        );
+        assert!(report.touches_available);
+        assert_eq!(report.knowledge_edge_count, 1);
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Informs)
+                .count(),
+            1
+        );
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Touches)
+                .count(),
+            0
+        );
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.expansion.as_ref().is_some_and(|expansion| {
+                        expansion.template == CODEGRAPH_MODULE_TEMPLATE
+                    })
+                })
+                .count(),
+            0
+        );
+        assert!(graph.edges.iter().any(|edge| edge
+            .rationale
+            .as_deref()
+            .is_some_and(|value| value.contains("fallback"))));
+
+        let outside_repo = knowledge_project();
+        let mut fail_open_graph = graph_with_declared_file();
+        let fail_open = derive_knowledge_attachments_with_config(
+            &mut fail_open_graph,
+            outside_repo.path(),
+            None,
+            outside_repo.path(),
+            &NoTouchesResolver,
+            &TouchCoverageReport::unavailable(),
+            None,
+            enabled_config(),
+        );
+        assert_eq!(fail_open.knowledge_edge_count, 0);
+        let inventory_omission = fail_open_graph
+            .omissions
+            .iter()
+            .find(|omission| {
+                omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+                    && omission.detail == "tracked file inventory was unavailable"
+            })
+            .expect("stable inventory omission");
+        assert_eq!(inventory_omission.examples, vec!["git ls-files"]);
+    }
+
+    fn enabled_config() -> KnowledgeAttachmentConfig {
+        KnowledgeAttachmentConfig {
+            per_intent: true,
+            contract_harvest: true,
+            exact: true,
+            unique_basename: true,
+            path_suffix: true,
+            parent_directory: true,
+            ambiguous: false,
+            resolution_omissions: true,
+            inferred_scope: true,
+            file_inventory_fallback: true,
+        }
+    }
+
+    fn graph_with_declared_file() -> TaskGraph {
+        TaskGraph::new(
+            vec![WorkNode::new(
+                "T1",
+                NodeKind::Task,
+                "Task T1",
+                NodeContract {
+                    inputs: vec!["file:src/main.rs".to_string()],
+                    outputs: Vec::new(),
+                    acceptance: Vec::new(),
+                },
+                BindingRef::Role("backend".to_string()),
+                NodeStatus::Ready,
+            )],
+            Vec::new(),
+        )
+    }
+
+    fn knowledge_project() -> TempDir {
+        let root = TempDir::new().expect("project tempdir");
+        let ai_docs = root.path().join(".ai-docs");
+        fs::create_dir_all(&ai_docs).expect("knowledge dir");
+        fs::write(
+            ai_docs.join("project-dna.md"),
+            "## Main rule\n**Scope**: `src/main.rs`\nKeep the entry point stable.\n",
+        )
+        .expect("project DNA");
+        fs::write(ai_docs.join("bug-patterns.md"), "").expect("bug patterns");
+        fs::write(ai_docs.join("learnings.jsonl"), "").expect("learnings");
+        fs::write(
+            ai_docs.join("curation-state.json"),
+            "{\"last_curated_line\":0}",
+        )
+        .expect("curation state");
+        root
     }
 }

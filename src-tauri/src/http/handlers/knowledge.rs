@@ -1483,7 +1483,7 @@ fn strip_markdown_extension(value: &str) -> &str {
     }
 }
 
-fn split_frontmatter(text: &str) -> (&str, &str) {
+pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let Some(after_opening) = text
         .strip_prefix("---\r\n")
         .or_else(|| text.strip_prefix("---\n"))
@@ -1505,7 +1505,7 @@ fn split_frontmatter(text: &str) -> (&str, &str) {
     ("", text)
 }
 
-fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
+pub(crate) fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
     frontmatter.lines().find_map(|line| {
         if line.starts_with(char::is_whitespace) {
             return None;
@@ -1589,7 +1589,7 @@ fn trim_matching_quotes(value: &str) -> &str {
     }
 }
 
-fn first_h1(body: &str) -> Option<String> {
+pub(crate) fn first_h1(body: &str) -> Option<String> {
     body.lines().find_map(|line| {
         line.strip_prefix("# ")
             .map(str::trim)
