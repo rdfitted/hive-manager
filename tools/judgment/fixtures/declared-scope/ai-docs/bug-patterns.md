@@ -1,0 +1,4 @@
+# Bug Patterns
+
+## Bugs
+

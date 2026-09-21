@@ -1,0 +1,88 @@
+{
+  "schema": "hive-retrieval-golden/v1",
+  "fixtures": {
+    "codegraph-unavailable": {
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "declared-scope": {
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "task touches a module in this gotcha's scope"
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "codegraph artifact was available but did not cover or resolve declared language(s): rust",
+          "examples": [
+            "T2"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "one or more graph references could not be resolved",
+          "examples": [
+            "T2"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "star-hub": {
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/first.rs"
+        ],
+        "T2": [
+          "src/second.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/first.rs"
+        ],
+        "T2": [
+          "src/second.rs"
+        ]
+      },
+      "knowledge_edges": [],
+      "omissions": [],
+      "hub_lints": [
+        {
+          "context_node_id": "context::knowledge::279bb9facc4fa69f",
+          "reason": "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope"
+        }
+      ]
+    }
+  }
+}

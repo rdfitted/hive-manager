@@ -1,0 +1,8 @@
+{
+  "root": "<ROOT>",
+  "language": "rust",
+  "nodes": {
+    "first": {"path": "src/first.rs"},
+    "second": {"path": "src/second.rs"}
+  }
+}

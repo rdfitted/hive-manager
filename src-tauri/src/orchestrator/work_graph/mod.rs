@@ -13,6 +13,7 @@ pub mod runtime;
 pub mod schema;
 pub mod toposort;
 pub mod validate;
+#[cfg(test)] mod retrieval_golden;
 
 pub use schema::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus,
