@@ -6,7 +6,7 @@ use tauri::State;
 
 use crate::actions::{ActionContext, ActionRegistry, Caller};
 use crate::http::state::AppState;
-use crate::pty::{AgentRole, AgentStatus, PtyManager};
+use crate::pty::{AgentRole, AgentStatus, PtyManager, PtySnapshot};
 
 #[allow(dead_code)]
 pub struct PtyManagerState(pub Arc<RwLock<PtyManager>>);
@@ -154,6 +154,23 @@ pub async fn get_pty_status(
         &registry,
         Arc::clone(&app_state),
         "pty.status",
+        json!({ "id": id }),
+    )
+    .await
+}
+
+/// The retained output of one PTY so a freshly mounted pane can show the agent's current
+/// screen (#287). `None` when no PTY exists for `id`.
+#[tauri::command]
+pub async fn get_pty_snapshot(
+    registry: State<'_, Arc<ActionRegistry>>,
+    app_state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Option<PtySnapshot>, String> {
+    dispatch_pty(
+        &registry,
+        Arc::clone(&app_state),
+        "pty.snapshot",
         json!({ "id": id }),
     )
     .await

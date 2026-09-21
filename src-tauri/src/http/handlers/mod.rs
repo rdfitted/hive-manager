@@ -11,6 +11,7 @@ pub mod heartbeats;
 pub mod inject;
 pub mod knowledge;
 pub mod learnings;
+pub mod maintenance;
 pub mod planners;
 pub mod pty_buffer;
 pub mod queue;

@@ -46,7 +46,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use commands::{
     add_worker_to_session, assign_task, close_session, continue_after_planning, create_pty,
     get_app_config, get_coordination_log, get_current_branch, get_current_directory,
-    get_pty_status, get_run_journal, get_session, get_session_plan, get_session_storage_path,
+    get_pty_snapshot, get_pty_status, get_run_journal, get_session, get_session_plan,
+    get_session_storage_path,
     get_workers_state, git_fetch, git_pull, git_push, git_worktree_add, git_worktree_list,
     git_worktree_prune, git_worktree_remove, inject_to_pty, kill_pty, launch_debate, launch_fusion,
     launch_hive, launch_hive_v2, launch_research, launch_solo, launch_swarm, list_branches,
@@ -87,6 +88,7 @@ pub fn run() {
     );
 
     let config = storage.load_config().expect("Failed to load config");
+    let pty_replay_buffer_bytes = config.pty_replay_buffer_bytes;
     let shared_config = Arc::new(tokio::sync::RwLock::new(config));
     let event_bus = EventBus::new(storage.base_dir().clone());
 
@@ -96,6 +98,10 @@ pub fn run() {
 
     // Create shared state
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
+    // #287: operator-tunable replay history; clamped inside the manager.
+    if let Some(bytes) = pty_replay_buffer_bytes {
+        pty_manager.write().set_replay_capacity(bytes);
+    }
     let session_controller = Arc::new(RwLock::new(SessionController::new(Arc::clone(
         &pty_manager,
     ))));
@@ -607,6 +613,7 @@ pub fn run() {
             resize_pty,
             kill_pty,
             get_pty_status,
+            get_pty_snapshot,
             list_ptys,
             // Session commands
             launch_hive,

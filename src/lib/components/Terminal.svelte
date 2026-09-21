@@ -31,6 +31,12 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
   import { acquire, promote, release } from '$lib/terminal/rendererBudget';
+  import {
+    ReplayGate,
+    ptyOutputEventName,
+    type PtyOutputEvent,
+    type PtySnapshot,
+  } from '$lib/terminal/ptyStream';
   import { activeAgents } from '$lib/stores/sessions';
   import { settings } from '$lib/stores/settings';
   import {
@@ -126,12 +132,17 @@
 
     if (!visible) {
       wasHidden = true;
+      // A hidden pane (pooled session, or eclipsed by a maximized sibling) must not hold
+      // one of the WebGL grants; it re-acquires on reveal if the budget allows (#286).
+      releaseRendererWhileHidden();
       return;
     }
 
     if (isFocused) {
       promoteFocusedTerminal();
       term?.focus();
+    } else if (wasHidden) {
+      reclaimRendererAfterReveal();
     }
 
     if (!term || !fitAddon) return;
@@ -220,6 +231,10 @@
   // Single shared decoder with stream mode so multi-byte UTF-8 sequences
   // split across 4KB PTY chunks don't decode to replacement characters.
   const ptyDecoder = new TextDecoder('utf-8');
+
+  // Splices the backend's retained history with the live stream on mount (#287).
+  // Constructed in onMount, where reading the id is a one-time snapshot by design.
+  let replayGate: ReplayGate | null = null;
 
   // Centralised guard for term.write(). @xterm/addon-webgl@0.19.0 can throw
   // from write() on long-running buffers, corrupting the renderer so the pane
@@ -319,6 +334,16 @@
       fallBackToDomRenderer({ permanentlyDisable: true });
       console.warn(`[Terminal ${agentId}] WebGL addon not supported, using DOM renderer:`, e);
     }
+  }
+
+  function releaseRendererWhileHidden() {
+    if (!term) return;
+    if (webglAddon || hasRendererGrant) fallBackToDomRenderer();
+  }
+
+  function reclaimRendererAfterReveal() {
+    if (!term || webglAddon || webglPermanentlyDisabled) return;
+    if (claimRendererGrant(false)) loadWebglRenderer();
   }
 
   function promoteFocusedTerminal() {
@@ -672,7 +697,9 @@
     }
     unlistenDragDrop = dragDropUnlisten;
 
-    const initialRendererGrant = claimRendererGrant(isFocused);
+    // A pane mounted hidden (a pooled session restored behind the active one, #286) takes
+    // no grant now; it acquires one on reveal if the budget still has room.
+    const initialRendererGrant = isVisible ? claimRendererGrant(isFocused) : false;
 
     // Panes admitted to the renderer budget retain full history. Panes beyond
     // the budget start smaller, then permanently promote to 10k on first focus.
@@ -823,13 +850,20 @@
       await sendToPty(data);
     });
 
-    // Listen for PTY output. Uses writeSafely() so a WebGL renderer failure
-    // doesn't blank the pane. Uses a shared streaming decoder so multi-byte
-    // UTF-8 sequences split across chunks decode correctly.
-    const outputUnlisten = await listen<{ id: string; data: number[] }>('pty-output', (event) => {
+    // Listen for PTY output on this agent's own event name (#289): Tauri only evaluates
+    // an emit in webviews holding a listener for that exact name, so agents nobody has
+    // mounted never reach the webview. Chunks go through the replay gate so the snapshot
+    // fetched below splices in without gaps or duplicates (#287). writeSafely() keeps a
+    // WebGL renderer failure from blanking the pane, and the shared streaming decoder
+    // keeps multi-byte UTF-8 sequences split across chunks intact.
+    const writeBytes = (bytes: Uint8Array) => {
+      writeSafely(ptyDecoder.decode(bytes, { stream: true }));
+    };
+    const gate = new ReplayGate(agentId);
+    replayGate = gate;
+    const outputUnlisten = await listen<PtyOutputEvent>(ptyOutputEventName(agentId), (event) => {
       if (event.payload.id === agentId && term) {
-        const text = ptyDecoder.decode(new Uint8Array(event.payload.data), { stream: true });
-        writeSafely(text);
+        gate.push(event.payload, writeBytes);
       }
     });
     if (destroyed) {
@@ -849,6 +883,19 @@
       return;
     }
     unlistenStatus = statusUnlisten;
+
+    // Replay whatever the backend retained for this agent (#287), so a pane mounted after
+    // the agent went idle shows its current screen instead of waiting for the next write.
+    // A pane mounted before its PTY exists (scratch shells, agents still spawning) gets
+    // null and simply goes live.
+    let snapshot: PtySnapshot | null = null;
+    try {
+      snapshot = await invoke<PtySnapshot | null>('get_pty_snapshot', { id: agentId });
+    } catch (err) {
+      console.warn(`[Terminal ${agentId}] snapshot unavailable, going live without replay:`, err);
+    }
+    if (destroyed) return;
+    gate.complete(snapshot, writeBytes);
 
     // Scratch shells are created only after this signal so their initial prompt cannot
     // race the output/status listeners above.

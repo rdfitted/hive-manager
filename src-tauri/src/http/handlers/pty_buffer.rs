@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::pty::PtySnapshot;
 
 use super::{validate_agent_id, validate_session_id};
 
@@ -50,4 +51,35 @@ pub async fn get_pty_buffer(
         output,
         byte_count,
     }))
+}
+
+/// GET /api/sessions/{id}/agents/{agent_id}/pty-snapshot
+///
+/// The whole retained output ring, base64-encoded and aligned to a parseable boundary,
+/// with the absolute byte offsets a pane needs to splice it against live output (#287).
+/// Read-only, like `pty-buffer`.
+pub async fn get_pty_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path((session_id, agent_id)): Path<(String, String)>,
+) -> Result<Json<PtySnapshot>, ApiError> {
+    validate_session_id(&session_id)?;
+    validate_agent_id(&agent_id)?;
+
+    let session = state
+        .session_controller
+        .read()
+        .get_session(&session_id)
+        .ok_or_else(|| ApiError::not_found(format!("Session not found: {session_id}")))?;
+    if !session.agents.iter().any(|agent| agent.id == agent_id) {
+        return Err(ApiError::not_found(format!(
+            "Agent {agent_id} not found in session {session_id}"
+        )));
+    }
+
+    let snapshot = state
+        .pty_manager
+        .read()
+        .snapshot(&agent_id)
+        .ok_or_else(|| ApiError::not_found(format!("PTY not found for agent: {agent_id}")))?;
+    Ok(Json(snapshot))
 }

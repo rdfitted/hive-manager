@@ -3,13 +3,14 @@
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::adapters::{PtySubmitPolicy, PtySubmitResult};
+
+use super::output_ring::{OutputRing, OutputSnapshot, RECENT_OUTPUT_VIEW_BYTES};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
@@ -231,7 +232,7 @@ const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 struct RecordingWriter {
     writes: Arc<Mutex<Vec<Vec<u8>>>>,
-    recent_output: Arc<Mutex<VecDeque<u8>>>,
+    output_ring: Arc<Mutex<OutputRing>>,
 }
 
 #[derive(Default)]
@@ -244,13 +245,8 @@ struct SubmitGapControl {
 impl Write for RecordingWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.writes.lock().push(buf.to_vec());
-        let mut recent_output = self.recent_output.lock();
-        for byte in buf {
-            if recent_output.len() == RECENT_OUTPUT_CAPACITY {
-                recent_output.pop_front();
-            }
-            recent_output.push_back(*byte);
-        }
+        // The stub echoes writes into the ring so inject's before/after observer sees them.
+        self.output_ring.lock().record(buf);
         Ok(buf.len())
     }
 
@@ -293,8 +289,6 @@ fn sanitize_bracketed_paste(data: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(sanitized)
 }
 
-const RECENT_OUTPUT_CAPACITY: usize = 8 * 1024;
-
 pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
@@ -308,7 +302,7 @@ pub struct PtySession {
     /// isolation (#207) actually reached the spawn rather than just the helper that
     /// computes it.
     args: Vec<String>,
-    recent_output: Arc<Mutex<VecDeque<u8>>>,
+    output_ring: Arc<Mutex<OutputRing>>,
 }
 
 unsafe impl Send for PtySession {}
@@ -333,18 +327,17 @@ impl PtySession {
         _cwd: Option<&str>,
         _cols: u16,
         _rows: u16,
+        replay_capacity: usize,
     ) -> Result<Self, PtyError> {
         let write_records = Arc::new(Mutex::new(Vec::new()));
-        let recent_output = Arc::new(Mutex::new(VecDeque::with_capacity(
-            RECENT_OUTPUT_CAPACITY,
-        )));
+        let output_ring = Arc::new(Mutex::new(OutputRing::new(replay_capacity)));
         let session = Self {
             role,
             status: Arc::new(parking_lot::RwLock::new(AgentStatus::Starting)),
             submit_policy,
             writer: Arc::new(Mutex::new(SendWriter(Box::new(RecordingWriter {
                 writes: Arc::clone(&write_records),
-                recent_output: Arc::clone(&recent_output),
+                output_ring: Arc::clone(&output_ring),
             })))),
             write_records,
             submit_gap_control: Arc::new((Mutex::new(SubmitGapControl::default()), Condvar::new())),
@@ -352,7 +345,7 @@ impl PtySession {
                 Vec::new(),
             ))))),
             args: args.iter().map(|arg| arg.to_string()).collect(),
-            recent_output,
+            output_ring,
         };
 
         // #207 test fixture: a flag-borne sentinel is the only way an integration test
@@ -375,20 +368,16 @@ impl PtySession {
         &self.args
     }
 
-    pub fn record_output(&self, bytes: &[u8]) {
-        let mut buffer = self.recent_output.lock();
-        for byte in bytes {
-            if buffer.len() == RECENT_OUTPUT_CAPACITY {
-                buffer.pop_front();
-            }
-            buffer.push_back(*byte);
-        }
+    pub fn record_output(&self, bytes: &[u8]) -> u64 {
+        self.output_ring.lock().record(bytes)
     }
 
     pub fn recent_output(&self) -> String {
-        let buffer = self.recent_output.lock();
-        let bytes: Vec<u8> = buffer.iter().copied().collect();
-        String::from_utf8_lossy(&bytes).into_owned()
+        self.output_ring.lock().tail_lossy(RECENT_OUTPUT_VIEW_BYTES)
+    }
+
+    pub fn snapshot(&self) -> OutputSnapshot {
+        self.output_ring.lock().snapshot()
     }
 
     pub fn pause_submit_after_payload_for_test(&self) {

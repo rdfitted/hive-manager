@@ -52,19 +52,81 @@ impl Drop for ScopedEnvironmentVariable {
 }
 
 /// Helper to get the default max_qa_iterations for test fixtures
-fn test_default_max_qa_iterations() -> u8 {
+pub(super) fn test_default_max_qa_iterations() -> u8 {
     DEFAULT_MAX_QA_ITERATIONS
 }
 
+/// Prefix of the per-process temp root every isolated test store lives under (#288).
+const TEST_STORAGE_PREFIX: &str = "hive-manager-tests-";
+
+static TEST_STORAGE_ROOT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+
+/// Remove roots left behind by earlier test processes. A `TempDir` held in a static is
+/// never dropped, so each run leaks one root; sweeping stale ones on the next run keeps
+/// the operator's temp directory bounded.
+fn sweep_stale_test_storage_roots() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60);
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(TEST_STORAGE_PREFIX) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map(|modified| modified < cutoff)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+fn test_storage_root() -> &'static std::path::Path {
+    TEST_STORAGE_ROOT
+        .get_or_init(|| {
+            sweep_stale_test_storage_roots();
+            tempfile::Builder::new()
+                .prefix(TEST_STORAGE_PREFIX)
+                .tempdir()
+                .expect("temp root for isolated test storage")
+        })
+        .path()
+}
+
+/// A fresh storage base directory for one test app (#288).
+///
+/// Before this existed every helper below called the production constructor, which
+/// resolves to the operator's real `%APPDATA%\hive-manager`, so every local `cargo test`
+/// left thousands of fixture sessions in the running app. The production constructor now
+/// refuses to construct under `cfg(test)`; this is the only sanctioned base for test
+/// storage.
+pub(super) fn isolated_storage_base() -> std::path::PathBuf {
+    let base = test_storage_root().join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&base).expect("create isolated storage base");
+    base
+}
+
+/// #288 guard: the production constructor must be unreachable from the test binary.
+#[test]
+fn session_storage_new_is_disabled_under_cfg_test() {
+    let error = SessionStorage::new().err().expect("new() must refuse under cfg(test)");
+    assert!(error.to_string().contains("#288"), "unexpected error: {error}");
+}
+
 async fn setup_test_app() -> axum::Router {
-    let storage = Arc::new(SessionStorage::new().unwrap());
+    let base_dir = isolated_storage_base();
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
     let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
     let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
     session_controller.write().set_storage(storage.clone());
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         pty_manager.clone(),
-        SessionStorage::new().unwrap(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
@@ -91,14 +153,15 @@ async fn setup_test_app() -> axum::Router {
 }
 
 async fn setup_test_state() -> Arc<AppState> {
-    let storage = Arc::new(SessionStorage::new().unwrap());
+    let base_dir = isolated_storage_base();
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
     let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
     let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
     session_controller.write().set_storage(storage.clone());
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         pty_manager.clone(),
-        SessionStorage::new().unwrap(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
@@ -124,7 +187,7 @@ async fn setup_test_state() -> Arc<AppState> {
 }
 
 /// Setup test app with a specific storage base dir (hermetic). Returns router, controller, and the storage.
-async fn setup_test_app_with_controller_at(
+pub(super) async fn setup_test_app_with_controller_at(
     base_dir: std::path::PathBuf,
 ) -> (
     axum::Router,
@@ -168,7 +231,7 @@ async fn setup_test_app_with_controller_at(
 /// Like [`setup_test_app_with_controller_at`] but also hands back the `AppState`,
 /// so a test can reach the PTY manager and the durable queue directly (e.g. to
 /// register a live PTY, or to seed a leaked queue row).
-async fn setup_test_app_full(
+pub(super) async fn setup_test_app_full(
     base_dir: std::path::PathBuf,
 ) -> (
     axum::Router,
@@ -217,7 +280,7 @@ async fn setup_test_app_full(
 
 /// Register a live stub PTY for `agent_id` so code gated on PTY liveness is
 /// reachable from tests.
-fn register_live_pty(state: &AppState, agent_id: &str, role: AgentRole) {
+pub(super) fn register_live_pty(state: &AppState, agent_id: &str, role: AgentRole) {
     state
         .pty_manager
         .write()
@@ -260,14 +323,15 @@ async fn setup_isolated_test_app_with_config(
 
 /// Setup test app and return both the router and session controller for inserting test sessions
 async fn setup_test_app_with_controller() -> (axum::Router, Arc<RwLock<SessionController>>) {
-    let storage = Arc::new(SessionStorage::new().unwrap());
+    let base_dir = isolated_storage_base();
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
     let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
     let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
     session_controller.write().set_storage(storage.clone());
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         pty_manager.clone(),
-        SessionStorage::new().unwrap(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());
@@ -311,7 +375,7 @@ fn init_git_repo_for_launch_fixture(repo_path: &Path) {
     run_git_for_test(repo_path, &["commit", "-q", "-m", "initial commit"]);
 }
 
-fn make_test_session(id: &str, project_path: &str) -> Session {
+pub(super) fn make_test_session(id: &str, project_path: &str) -> Session {
     let now = chrono::Utc::now();
     Session {
         id: id.to_string(),
@@ -340,7 +404,7 @@ fn make_test_session(id: &str, project_path: &str) -> Session {
     }
 }
 
-fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str]) -> Session {
+pub(super) fn make_test_session_with_agents(id: &str, project_path: &str, agent_ids: &[&str]) -> Session {
     let agents: Vec<AgentInfo> = agent_ids
         .iter()
         .enumerate()
@@ -1185,8 +1249,8 @@ async fn test_patch_session_rejects_invalid_name() {
 
 #[tokio::test]
 async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
-    let (app, _controller) = setup_test_app_with_controller().await;
-    let storage = SessionStorage::new().unwrap();
+    let (app, _controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
     let session_id = format!("persisted-patch-{}", uuid::Uuid::new_v4());
     let session_dir = storage.session_dir(&session_id);
     let _ = std::fs::remove_dir_all(&session_dir);
@@ -5846,8 +5910,6 @@ async fn test_read_conversation_since_filter() {
         "After marker"
     );
 
-    let storage = SessionStorage::new().unwrap();
-    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
@@ -6010,8 +6072,6 @@ async fn test_conversation_concurrent_appends() {
     let messages = response_json.get("messages").unwrap().as_array().unwrap();
     assert_eq!(messages.len(), 5);
 
-    let storage = SessionStorage::new().unwrap();
-    let _ = std::fs::remove_dir_all(storage.session_dir(&session_id));
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
@@ -6928,10 +6988,10 @@ async fn test_list_artifacts_returns_empty_for_synthetic_cell() {
 
 #[tokio::test]
 async fn test_list_artifacts_uses_persisted_session_fallback() {
-    let app = setup_test_app().await;
+    let (app, _controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
     let session_id = format!("persisted-artifacts-{}", uuid::Uuid::new_v4());
     let temp_dir = TempDir::new().unwrap();
-    let storage = SessionStorage::new().unwrap();
     let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
     storage
@@ -7024,10 +7084,10 @@ async fn test_list_artifacts_rejects_invalid_cell_id() {
 
 #[tokio::test]
 async fn test_post_artifact_round_trip_and_cell_projection() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
     let session_id = format!("artifact-roundtrip-{}", uuid::Uuid::new_v4());
     let temp_dir = TempDir::new().unwrap();
-    let storage = SessionStorage::new().unwrap();
     let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
     controller.read().insert_test_session(make_test_session(
@@ -7122,10 +7182,10 @@ async fn test_post_artifact_round_trip_and_cell_projection() {
 
 #[tokio::test]
 async fn test_get_resolver_output_endpoint_returns_persisted_output() {
-    let (app, controller) = setup_test_app_with_controller().await;
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
     let session_id = format!("resolver-output-{}", uuid::Uuid::new_v4());
     let temp_dir = TempDir::new().unwrap();
-    let storage = SessionStorage::new().unwrap();
     let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
     controller.read().insert_test_session(make_test_session(
@@ -7173,9 +7233,9 @@ async fn test_get_resolver_output_endpoint_returns_persisted_output() {
 
 #[tokio::test]
 async fn test_get_resolver_output_returns_internal_error_for_invalid_persisted_session() {
-    let app = setup_test_app().await;
+    let (app, _controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
     let session_id = format!("resolver-invalid-session-{}", uuid::Uuid::new_v4());
-    let storage = SessionStorage::new().unwrap();
     let _cleanup = TestPathCleanup::new(vec![storage.session_dir(&session_id)]);
 
     std::fs::create_dir_all(storage.session_dir(&session_id)).unwrap();
@@ -7302,8 +7362,6 @@ async fn test_template_crud_endpoints() {
         .unwrap();
     assert_eq!(get_deleted_response.status(), StatusCode::NOT_FOUND);
 
-    let storage = SessionStorage::new().unwrap();
-    let _ = storage.delete_user_template(&template_id);
 }
 
 #[tokio::test]
@@ -7638,8 +7696,8 @@ async fn test_get_active_sessions_includes_heartbeat_after_post() {
 
 #[tokio::test]
 async fn test_list_sessions_reflects_fresh_heartbeat_activity_and_persists_it() {
-    let (app, controller) = setup_test_app_with_controller().await;
-    let storage = SessionStorage::new().unwrap();
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
     let session_id = format!("session-list-hb-{}", uuid::Uuid::new_v4());
     let temp_dir = std::env::temp_dir().join(&session_id);
     let _ = std::fs::create_dir_all(&temp_dir);
@@ -8377,8 +8435,8 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
 
 #[tokio::test]
 async fn test_resolver_launch_success_with_artifacts() {
-    let (app, controller) = setup_test_app_with_controller().await;
-    let storage = SessionStorage::new().unwrap();
+    let (app, controller, storage) =
+        setup_test_app_with_controller_at(isolated_storage_base()).await;
     let session_id = format!("resolver-launch-{}", uuid::Uuid::new_v4());
 
     // Create session dir and artifacts
@@ -8848,14 +8906,15 @@ async fn test_same_handler_both_callers() {
     use crate::pty::PtyManager;
 
     // Build a hermetic state + controller and insert one session.
-    let storage = Arc::new(SessionStorage::new().unwrap());
+    let base_dir = isolated_storage_base();
+    let storage = Arc::new(SessionStorage::new_with_base(base_dir.clone()).unwrap());
     let config = Arc::new(tokio::sync::RwLock::new(storage.load_config().unwrap()));
     let pty_manager = Arc::new(RwLock::new(PtyManager::new()));
     let session_controller = Arc::new(RwLock::new(SessionController::new(pty_manager.clone())));
     session_controller.write().set_storage(storage.clone());
     let injection_manager = Arc::new(RwLock::new(InjectionManager::new(
         pty_manager.clone(),
-        SessionStorage::new().unwrap(),
+        SessionStorage::new_with_base(base_dir).unwrap(),
     )));
     let event_bus = EventBus::new(storage.base_dir().clone());
     let app_state_db = Arc::new(crate::storage::ApplicationStateDb::open_in_memory().unwrap());

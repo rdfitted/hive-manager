@@ -1,13 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::borrow::Cow;
-use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::adapters::{PtySubmitPolicy, PtySubmitResult};
+
+use super::output_ring::{OutputRing, OutputSnapshot, RECENT_OUTPUT_VIEW_BYTES};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
@@ -292,9 +293,6 @@ fn sanitize_bracketed_paste(data: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(sanitized)
 }
 
-/// How much of the child's most recent output to retain for failure diagnostics.
-const RECENT_OUTPUT_CAPACITY: usize = 8 * 1024;
-
 pub struct PtySession {
     pub role: AgentRole,
     pub status: Arc<parking_lot::RwLock<AgentStatus>>,
@@ -303,14 +301,15 @@ pub struct PtySession {
     reader: Arc<Mutex<SendReader>>,
     child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>>,
     master: Arc<Mutex<MasterPtyHandle>>,
-    /// Bounded tail of everything the child wrote to the PTY.
+    /// Bounded, offset-addressed history of everything the child wrote to the PTY.
     ///
     /// A PTY merges stdout and stderr, and before #207 those bytes were forwarded to the
     /// UI and otherwise discarded — with no app handle (headless HTTP mode, and every
     /// test) no reader thread ran at all, so a CLI that died during startup left no trace
     /// in the process, on disk, or in the DB. Startup verification needs this text to say
-    /// *why* a worker failed instead of just that it did.
-    recent_output: Arc<Mutex<VecDeque<u8>>>,
+    /// *why* a worker failed instead of just that it did. Since #287 the same ring also
+    /// serves terminal replay, so a freshly mounted pane can show the agent's screen.
+    output_ring: Arc<Mutex<OutputRing>>,
 }
 
 // Make PtySession Send + Sync
@@ -345,6 +344,7 @@ impl PtySession {
         cwd: Option<&str>,
         cols: u16,
         rows: u16,
+        replay_capacity: usize,
     ) -> Result<Self, PtyError> {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
@@ -422,30 +422,26 @@ impl PtySession {
             reader: Arc::new(Mutex::new(SendReader(reader))),
             child: Arc::new(Mutex::new(Some(child))),
             master: Arc::new(Mutex::new(MasterPtyHandle(master))),
-            recent_output: Arc::new(Mutex::new(VecDeque::with_capacity(
-                RECENT_OUTPUT_CAPACITY,
-            ))),
+            output_ring: Arc::new(Mutex::new(OutputRing::new(replay_capacity))),
         })
     }
 
-    /// Append `bytes` to the rolling diagnostic tail, evicting the oldest bytes once the
-    /// buffer is full. Called by the reader thread for every chunk, whether or not the UI
-    /// is attached.
-    pub fn record_output(&self, bytes: &[u8]) {
-        let mut buffer = self.recent_output.lock();
-        for byte in bytes {
-            if buffer.len() == RECENT_OUTPUT_CAPACITY {
-                buffer.pop_front();
-            }
-            buffer.push_back(*byte);
-        }
+    /// Append `bytes` to the output ring, evicting the oldest bytes once the ring is
+    /// full. Called by the reader thread for every chunk, whether or not the UI is
+    /// attached. Returns the absolute byte offset at which `bytes` starts (#287).
+    pub fn record_output(&self, bytes: &[u8]) -> u64 {
+        self.output_ring.lock().record(bytes)
     }
 
-    /// The retained tail of the child's output, lossily decoded.
+    /// The retained tail of the child's output, lossily decoded. Fixed at the legacy
+    /// 8 KB view so inject's before/after comparisons are unaffected by ring size.
     pub fn recent_output(&self) -> String {
-        let buffer = self.recent_output.lock();
-        let bytes: Vec<u8> = buffer.iter().copied().collect();
-        String::from_utf8_lossy(&bytes).into_owned()
+        self.output_ring.lock().tail_lossy(RECENT_OUTPUT_VIEW_BYTES)
+    }
+
+    /// The whole retained history, aligned for a terminal to parse from its first byte.
+    pub fn snapshot(&self) -> OutputSnapshot {
+        self.output_ring.lock().snapshot()
     }
 
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {

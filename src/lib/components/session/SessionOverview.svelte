@@ -5,7 +5,8 @@
     import { agents } from '../../stores/agents';
     import { events } from '../../stores/events';
     import { conversationStore } from '../../stores/conversations';
-    import { activeSession, activeAgents } from '../../stores/sessions';
+    import { activeSession, serdeEnumVariantName, sessions } from '../../stores/sessions';
+    import { TERMINAL_SESSION_STATES, terminalPool } from '../../stores/terminalPool';
     import SessionHeader from './SessionHeader.svelte';
     import TerminalGrid from '../TerminalGrid.svelte';
     import TimelineView from '../timeline/TimelineView.svelte';
@@ -25,6 +26,41 @@
 
     const sessionNotFound = $derived($cells.sessionNotFound);
     let connectedSessionId: string | null = null;
+
+    // Keep-alive pool (#286): the active session plus the most recently visited ones keep
+    // their terminal grids mounted (hidden), so switching back shows the panes exactly as
+    // they were. The active session always leads so its grid exists on the same tick.
+    const POOL_SWEEP_INTERVAL_MS = 30_000;
+    const pooledSessions = $derived.by(() => {
+        const byId = new Map($sessions.sessions.map((session) => [session.id, session]));
+        const ids = [
+            ...($activeSession ? [$activeSession.id] : []),
+            ...$terminalPool.map((entry) => entry.sessionId),
+        ];
+        const seen = new Set<string>();
+        const result = [];
+        for (const id of ids) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            const session = byId.get(id);
+            if (session) result.push(session);
+        }
+        return result;
+    });
+
+    $effect(() => {
+        if (sessionId) terminalPool.touch(sessionId);
+    });
+
+    function sweepPool() {
+        const known = new Map($sessions.sessions.map((session) => [session.id, session]));
+        terminalPool.sweep(sessionId ?? null, {
+            exists: (id) => known.has(id),
+            isTerminal: (id) =>
+                TERMINAL_SESSION_STATES.has(serdeEnumVariantName(known.get(id)?.state) ?? ''),
+        });
+    }
+    const poolSweep = setInterval(sweepPool, POOL_SWEEP_INTERVAL_MS);
     let pollTimeout: ReturnType<typeof setTimeout> | null = null;
 
     function clearPollTimeout() {
@@ -91,6 +127,7 @@
     });
 
     onDestroy(() => {
+        clearInterval(poolSweep);
         clearPollTimeout();
         cells.setExternalRefreshHandler(null);
         events.disconnect();
@@ -119,13 +156,19 @@
                     </div>
                 </div>
                 <div class="terminal-wrapper">
-                    <div class="terminal-panel" class:hidden={activeView !== 'terminal'}>
-                        <TerminalGrid
-                            agents={$activeAgents}
-                            focusedAgentId={terminalAgentId}
-                            onSelect={selectTerminalAgent}
-                        />
-                    </div>
+                    {#each pooledSessions as pooled (pooled.id)}
+                        {@const isActiveGrid = pooled.id === sessionId}
+                        <!-- Pooled grids stay mounted but hidden so a session switch shows
+                             the terminals exactly as the operator left them (#286). -->
+                        <div class="terminal-panel" class:hidden={activeView !== 'terminal' || !isActiveGrid}>
+                            <TerminalGrid
+                                session={pooled}
+                                visible={activeView === 'terminal' && isActiveGrid}
+                                focusedAgentId={isActiveGrid ? terminalAgentId : null}
+                                onSelect={selectTerminalAgent}
+                            />
+                        </div>
+                    {/each}
                     {#if activeView === 'observability'}
                         <div class="observability-container">
                             <div class="obs-main">

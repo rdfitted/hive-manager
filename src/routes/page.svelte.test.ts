@@ -252,13 +252,20 @@ describe('page Escape priority', () => {
     const page = render(Page);
     render(TerminalGrid, {
       props: {
-        agents: [{
-          id: 'agent-1',
-          role: { Worker: { index: 1, parent: null } },
-          status: 'Running',
-          config: { cli: 'codex', flags: [] },
-          parent_id: null,
-        }],
+        session: {
+          id: 'session-1',
+          session_type: { Hive: { worker_count: 1 } },
+          project_path: 'D:/project',
+          state: 'Running',
+          created_at: '2026-09-14T00:00:00Z',
+          agents: [{
+            id: 'agent-1',
+            role: { Worker: { index: 1, parent: null } },
+            status: 'Running',
+            config: { cli: 'codex', flags: [] },
+            parent_id: null,
+          }],
+        },
         focusedAgentId: 'agent-1',
         onSelect: vi.fn(),
       },
