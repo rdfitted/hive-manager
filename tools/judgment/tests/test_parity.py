@@ -53,7 +53,11 @@ class RetrievalParityTests(unittest.TestCase):
     def test_current_rules_match_rust_golden(self):
         self.assertEqual("current", RUST_RULESET)
         self.assertTrue(GOLDEN_PATH.is_file(), "Rust golden must be checked in")
-        fixture_dirs = sorted(path for path in FIXTURES_ROOT.iterdir() if path.is_dir())
+        fixture_dirs = sorted(
+            path
+            for path in FIXTURES_ROOT.iterdir()
+            if path.is_dir() and (path / "plan.md").is_file()
+        )
         self.assertGreaterEqual(len(fixture_dirs), 3, "parity fixtures must be non-vacuous")
         expected = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
         self.assertEqual("hive-retrieval-golden/v1", expected["schema"])

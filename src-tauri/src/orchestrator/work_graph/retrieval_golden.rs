@@ -33,6 +33,7 @@ struct FixtureGolden {
     declared_touches: BTreeMap<TaskId, Vec<String>>,
     knowledge_attachment_touches: BTreeMap<TaskId, Vec<String>>,
     knowledge_edges: Vec<GoldenKnowledgeEdge>,
+    context_nodes: Vec<GoldenContextNode>,
     omissions: Vec<GoldenOmission>,
     hub_lints: Vec<GoldenHubLint>,
 }
@@ -42,6 +43,15 @@ struct GoldenKnowledgeEdge {
     task_id: TaskId,
     context_node_id: TaskId,
     rationale: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct GoldenContextNode {
+    id: TaskId,
+    title: String,
+    summary: String,
+    scope: Vec<String>,
+    parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +65,7 @@ struct GoldenOmission {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct GoldenHubLint {
     context_node_id: TaskId,
+    linked_task_ids: Vec<TaskId>,
     reason: String,
 }
 
@@ -179,12 +190,39 @@ fn fixture_golden(state: &GraphCompositionState, root: &Path) -> FixtureGolden {
         .iter()
         .map(|omission| golden_omission(omission, root))
         .collect();
+    let context_nodes = state
+        .context
+        .gotchas
+        .iter()
+        .map(|gotcha| {
+            let id = format!("context::knowledge::{}", gotcha.id);
+            let node = state
+                .graph
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .expect("reported gotcha must have a context node");
+            GoldenContextNode {
+                id,
+                title: node.title.clone(),
+                summary: gotcha.summary.clone(),
+                scope: gotcha.scope.clone(),
+                parameters: node
+                    .expansion
+                    .as_ref()
+                    .expect("derived context node must carry expansion parameters")
+                    .parameters
+                    .clone(),
+            }
+        })
+        .collect();
     let hub_lints = state
         .context
         .hub_lints
         .iter()
         .map(|lint| GoldenHubLint {
             context_node_id: lint.context_node_id.clone(),
+            linked_task_ids: lint.linked_task_ids.clone(),
             reason: lint.detail.clone(),
         })
         .collect();
@@ -194,6 +232,7 @@ fn fixture_golden(state: &GraphCompositionState, root: &Path) -> FixtureGolden {
         knowledge_attachment_touches: declared_touches.clone(),
         declared_touches,
         knowledge_edges,
+        context_nodes,
         omissions,
         hub_lints,
     }

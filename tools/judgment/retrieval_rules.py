@@ -506,6 +506,7 @@ def run_current(root: Path) -> dict[str, Any]:
             if len(task_ids) >= ANTI_HUB_MIN_TASKS and fraction >= ANTI_HUB_TASK_FRACTION:
                 hub_lints.append({
                     "context_node_id": context_id,
+                    "linked_task_ids": linked,
                     "reason": "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope",
                 })
                 continue
@@ -528,6 +529,22 @@ def run_current(root: Path) -> dict[str, Any]:
         "knowledge_edges": [
             {"task_id": edge["target"], "context_node_id": edge["source"], "rationale": edge["rationale"]}
             for edge in graph.informs_edges
+        ],
+        "context_nodes": [
+            {
+                "id": f"context::knowledge::{gotcha.id}",
+                "title": gotcha.summary,
+                "summary": gotcha.summary,
+                "scope": gotcha.scope,
+                "parameters": {
+                    "fingerprint_ref": gotcha.fingerprint_ref,
+                    "scope": ",".join(gotcha.scope),
+                    "source_hash": gotcha.source_hash,
+                    "source_ref": gotcha.source_ref,
+                    "summary": gotcha.summary,
+                },
+            }
+            for gotcha in gotchas
         ],
         "omissions": unique_omissions,
         "hub_lints": hub_lints,

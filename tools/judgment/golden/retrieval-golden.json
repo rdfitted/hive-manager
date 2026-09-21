@@ -6,6 +6,23 @@
       "declared_touches": {},
       "knowledge_attachment_touches": {},
       "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::b9f3a48d381ca247",
+          "title": "Service Boundary: Keep service changes focused.",
+          "summary": "Service Boundary: Keep service changes focused.",
+          "scope": [
+            "src/service.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/service.rs",
+            "source_hash": "cbe40cfb780520ae",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Service Boundary: Keep service changes focused."
+          }
+        }
+      ],
       "omissions": [
         {
           "reason": "codegraph_unavailable",
@@ -35,6 +52,23 @@
           "task_id": "T1",
           "context_node_id": "context::knowledge::452a054383c3acfe",
           "rationale": "task touches a module in this gotcha's scope"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Keep authentication changes explicit and reviewable.",
+          "summary": "Authentication Boundary: Keep authentication changes explicit and reviewable.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/auth.rs",
+            "source_hash": "7ea35a5e1db8aa57",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Keep authentication changes explicit and reviewable."
+          }
         }
       ],
       "omissions": [
@@ -76,10 +110,31 @@
         ]
       },
       "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::279bb9facc4fa69f",
+          "title": "Repository Convention: Apply repository conventions consistently.",
+          "summary": "Repository Convention: Apply repository conventions consistently.",
+          "scope": [
+            "*"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "*",
+            "source_hash": "d08d5d7487595920",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Repository Convention: Apply repository conventions consistently."
+          }
+        }
+      ],
       "omissions": [],
       "hub_lints": [
         {
           "context_node_id": "context::knowledge::279bb9facc4fa69f",
+          "linked_task_ids": [
+            "T1",
+            "T2"
+          ],
           "reason": "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope"
         }
       ]
