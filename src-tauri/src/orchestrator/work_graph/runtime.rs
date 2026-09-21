@@ -4,7 +4,7 @@
 //! Structural changes are captured separately as in-memory, append-only deltas;
 //! no claim or spawn path gains another persistent write.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -28,7 +28,9 @@ use super::archetypes::{
 use super::codegraph::{derive_codegraph_touches, CodegraphDerivationReport};
 use super::completion_ledger::NodeCompletionFact;
 use super::context::{
-    derive_project_context_from_coverage, ContextDerivationReport, TouchesResolver,
+    build_knowledge_touch_coverage, derive_project_context_from_coverage,
+    ContextDerivationReport, KnowledgeAttachmentConfig, TouchCoverageReport,
+    TouchesResolver,
 };
 use super::plan_parse::promote_initial_ready_nodes;
 use super::review::{
@@ -119,8 +121,13 @@ where
             (base_graph, None, Vec::new(), Vec::new())
         };
     let codegraph = derive_codegraph_touches(&mut graph, resolver);
-    let context =
-        derive_project_context_from_coverage(&mut graph, project_path, &codegraph.coverage());
+    let context = derive_knowledge_attachments(
+        &mut graph,
+        project_path,
+        resolver,
+        &codegraph.coverage(),
+        None,
+    );
     let expansions = instantiate_review_templates(&mut graph, &review_templates)?;
     let reviews = ReviewExpansionSidecar::from_expansions(&review_templates, expansions)?;
     stamp_checkpoint_waves(&mut graph, &checkpoints)?;
@@ -133,6 +140,26 @@ where
         context,
         reviews,
     })
+}
+
+pub(crate) fn derive_knowledge_attachments<R: TouchesResolver>(
+    graph: &mut TaskGraph,
+    project_path: &Path,
+    resolver: &R,
+    declared_coverage: &TouchCoverageReport,
+    file_inventory: Option<&BTreeSet<String>>,
+) -> ContextDerivationReport {
+    let knowledge = build_knowledge_touch_coverage(
+        graph,
+        resolver,
+        declared_coverage,
+        file_inventory,
+        KnowledgeAttachmentConfig::production(),
+    );
+    graph.omissions.extend(knowledge.resolution_omissions);
+    let mut attachment_coverage = declared_coverage.clone();
+    attachment_coverage.touches = knowledge.knowledge_attachment_touches;
+    derive_project_context_from_coverage(graph, project_path, &attachment_coverage)
 }
 
 /// Idempotently overlay planner output onto the persisted skeleton while

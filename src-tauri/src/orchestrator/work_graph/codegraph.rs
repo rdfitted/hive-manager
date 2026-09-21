@@ -207,6 +207,10 @@ impl TouchesResolver for ArtifactCodegraph {
             unresolved_task_ids,
         })
     }
+
+    fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
+        self.available.then(|| self.modules.clone())
+    }
 }
 
 impl RepoShapeFactsProvider for ArtifactCodegraph {

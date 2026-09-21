@@ -23,7 +23,16 @@ pub const DERIVED_CONTEXT_TEMPLATE: &str = "derived-project-context";
 /// task edges so one generic gotcha cannot become a prompt-dominating hub.
 pub const ANTI_HUB_TASK_FRACTION: f64 = 0.75;
 pub const ANTI_HUB_MIN_TASKS: usize = 2;
+pub const ENABLE_KNOWLEDGE_PER_INTENT: bool = false;
+pub const ENABLE_KNOWLEDGE_CONTRACT_HARVEST: bool = false;
+pub const ENABLE_KNOWLEDGE_EXACT_MATCH: bool = false;
+pub const ENABLE_KNOWLEDGE_UNIQUE_BASENAME_MATCH: bool = false;
+pub const ENABLE_KNOWLEDGE_PATH_SUFFIX_MATCH: bool = false;
+pub const ENABLE_KNOWLEDGE_PARENT_DIRECTORY_MATCH: bool = false;
+pub const ENABLE_KNOWLEDGE_AMBIGUOUS_MATCH: bool = false;
+pub const ENABLE_KNOWLEDGE_RESOLUTION_OMISSIONS: bool = false;
 const MAX_OMISSION_EXAMPLES: usize = 5;
+const MAX_KNOWLEDGE_TOUCHES_PER_TASK: usize = 256;
 
 /// Lossless codegraph/touches coverage shared by enrichment, context, and
 /// claim-time conflict projection.
@@ -61,6 +70,10 @@ pub trait TouchesResolver {
         &self,
         graph: &TaskGraph,
     ) -> Result<TouchCoverageReport, String>;
+
+    fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -73,6 +86,462 @@ impl TouchesResolver for NoTouchesResolver {
     ) -> Result<TouchCoverageReport, String> {
         Ok(TouchCoverageReport::unavailable())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathMatchType {
+    Exact,
+    UniqueBasename,
+    PathSuffix,
+    ParentDirectory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathResolution {
+    pub path: String,
+    pub match_type: PathMatchType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathResolutionFailure {
+    Ambiguous,
+    NoMatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KnowledgeAttachmentConfig {
+    pub per_intent: bool,
+    pub contract_harvest: bool,
+    pub exact: bool,
+    pub unique_basename: bool,
+    pub path_suffix: bool,
+    pub parent_directory: bool,
+    pub ambiguous: bool,
+    pub resolution_omissions: bool,
+}
+
+impl KnowledgeAttachmentConfig {
+    pub(crate) const fn production() -> Self {
+        Self {
+            per_intent: ENABLE_KNOWLEDGE_PER_INTENT,
+            contract_harvest: ENABLE_KNOWLEDGE_CONTRACT_HARVEST,
+            exact: ENABLE_KNOWLEDGE_EXACT_MATCH,
+            unique_basename: ENABLE_KNOWLEDGE_UNIQUE_BASENAME_MATCH,
+            path_suffix: ENABLE_KNOWLEDGE_PATH_SUFFIX_MATCH,
+            parent_directory: ENABLE_KNOWLEDGE_PARENT_DIRECTORY_MATCH,
+            ambiguous: ENABLE_KNOWLEDGE_AMBIGUOUS_MATCH,
+            resolution_omissions: ENABLE_KNOWLEDGE_RESOLUTION_OMISSIONS,
+        }
+    }
+
+    fn enables(self, match_type: PathMatchType) -> bool {
+        match match_type {
+            PathMatchType::Exact => self.exact,
+            PathMatchType::UniqueBasename => self.unique_basename,
+            PathMatchType::PathSuffix => self.path_suffix,
+            PathMatchType::ParentDirectory => self.parent_directory,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KnowledgeTouchCoverage {
+    pub declared_touches: BTreeMap<TaskId, BTreeSet<String>>,
+    pub knowledge_attachment_touches: BTreeMap<TaskId, BTreeSet<String>>,
+    pub provenance_by_task: BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+    pub resolution_omissions: Vec<WorkGraphOmission>,
+}
+
+pub(crate) fn build_knowledge_touch_coverage<R: TouchesResolver>(
+    graph: &TaskGraph,
+    resolver: &R,
+    declared_coverage: &TouchCoverageReport,
+    file_inventory: Option<&BTreeSet<String>>,
+    config: KnowledgeAttachmentConfig,
+) -> KnowledgeTouchCoverage {
+    let declared_touches = declared_coverage.touches.clone();
+    let mut knowledge_attachment_touches = declared_touches.clone();
+    let mut provenance_by_task = BTreeMap::new();
+    for (task_id, paths) in &declared_touches {
+        for path in paths {
+            record_knowledge_provenance(
+                &mut provenance_by_task,
+                task_id,
+                path,
+                "declared-scope",
+            );
+        }
+    }
+
+    let artifact_candidates = resolver.knowledge_candidates();
+    let candidates = artifact_candidates.as_ref().or(file_inventory);
+    let fallback = artifact_candidates.is_none() && file_inventory.is_some();
+    let mut resolution_omissions = Vec::new();
+    if let Some(candidates) = candidates {
+        for node in graph.nodes.iter().filter(|node| node.kind == NodeKind::Task) {
+            if config.per_intent {
+                for intent in declared_contract_path_intents(node) {
+                    attach_knowledge_intent(
+                        &node.id,
+                        &intent,
+                        "declared-scope",
+                        candidates,
+                        fallback,
+                        config,
+                        &mut knowledge_attachment_touches,
+                        &mut provenance_by_task,
+                        &mut resolution_omissions,
+                    );
+                }
+            }
+            if config.contract_harvest {
+                for intent in harvest_contract_path_intents(node) {
+                    attach_knowledge_intent(
+                        &node.id,
+                        &intent,
+                        "contract-path",
+                        candidates,
+                        fallback,
+                        config,
+                        &mut knowledge_attachment_touches,
+                        &mut provenance_by_task,
+                        &mut resolution_omissions,
+                    );
+                }
+            }
+        }
+    }
+
+    KnowledgeTouchCoverage {
+        declared_touches,
+        knowledge_attachment_touches,
+        provenance_by_task,
+        resolution_omissions,
+    }
+}
+
+fn attach_knowledge_intent(
+    task_id: &str,
+    intent: &str,
+    provenance: &str,
+    candidates: &BTreeSet<String>,
+    fallback: bool,
+    config: KnowledgeAttachmentConfig,
+    knowledge_attachment_touches: &mut BTreeMap<TaskId, BTreeSet<String>>,
+    provenance_by_task: &mut BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+    resolution_omissions: &mut Vec<WorkGraphOmission>,
+) {
+    match resolve_path_intent(intent, candidates, config.parent_directory) {
+        Ok(resolution) if config.enables(resolution.match_type) => {
+            let task_touches = knowledge_attachment_touches
+                .entry(task_id.to_string())
+                .or_default();
+            if task_touches.len() >= MAX_KNOWLEDGE_TOUCHES_PER_TASK
+                && !task_touches.contains(&resolution.path)
+            {
+                if config.resolution_omissions {
+                    push_knowledge_resolution_omission(
+                        resolution_omissions,
+                        task_id,
+                        intent,
+                        "knowledge touch limit was reached",
+                    );
+                }
+                return;
+            }
+            task_touches.insert(resolution.path.clone());
+            record_knowledge_provenance(
+                provenance_by_task,
+                task_id,
+                &resolution.path,
+                provenance,
+            );
+            if fallback {
+                record_knowledge_provenance(
+                    provenance_by_task,
+                    task_id,
+                    &resolution.path,
+                    "fallback",
+                );
+            }
+            if resolution.match_type == PathMatchType::ParentDirectory {
+                record_knowledge_provenance(
+                    provenance_by_task,
+                    task_id,
+                    &resolution.path,
+                    "parent-directory",
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(PathResolutionFailure::Ambiguous) => {
+            debug_assert!(
+                !config.ambiguous,
+                "ambiguous knowledge attachment has no deterministic target"
+            );
+            if config.resolution_omissions {
+                push_knowledge_resolution_omission(
+                    resolution_omissions,
+                    task_id,
+                    intent,
+                    "knowledge path resolution was ambiguous",
+                );
+            }
+        }
+        Err(PathResolutionFailure::NoMatch) => {
+            if config.resolution_omissions {
+                push_knowledge_resolution_omission(
+                    resolution_omissions,
+                    task_id,
+                    intent,
+                    "knowledge path resolution found no tracked path",
+                );
+            }
+        }
+    }
+}
+
+fn record_knowledge_provenance(
+    provenance_by_task: &mut BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+    task_id: &str,
+    path: &str,
+    provenance: &str,
+) {
+    provenance_by_task
+        .entry(task_id.to_string())
+        .or_default()
+        .entry(path.to_string())
+        .or_default()
+        .insert(provenance.to_string());
+}
+
+fn push_knowledge_resolution_omission(
+    omissions: &mut Vec<WorkGraphOmission>,
+    task_id: &str,
+    intent: &str,
+    detail: &str,
+) {
+    let mut omission = WorkGraphOmission::new(
+        WorkGraphOmissionReason::ResolutionIncomplete,
+        1,
+        vec![format!("{task_id}: {intent}")],
+    );
+    omission.detail = detail.to_string();
+    omissions.push(omission);
+}
+
+fn declared_contract_path_intents(node: &WorkNode) -> Vec<String> {
+    node.contract
+        .inputs
+        .iter()
+        .chain(node.contract.outputs.iter())
+        .chain(node.contract.acceptance.iter())
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            let raw = ["touch:", "file:", "module:"]
+                .iter()
+                .find_map(|prefix| lower.starts_with(prefix).then(|| &trimmed[prefix.len()..]))?;
+            (!raw.trim().eq_ignore_ascii_case("none")).then(|| raw.trim().to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn harvest_contract_path_intents(node: &WorkNode) -> Vec<String> {
+    let mut intents = BTreeSet::new();
+    for value in node
+        .contract
+        .inputs
+        .iter()
+        .chain(node.contract.outputs.iter())
+        .chain(node.contract.acceptance.iter())
+    {
+        let trimmed = value.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if ["touch:", "file:", "module:"]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+        {
+            continue;
+        }
+        for token in value.split(|character: char| {
+            character.is_ascii_whitespace()
+                || matches!(
+                    character,
+                    ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+                )
+        }) {
+            let token = strip_path_token(token);
+            if token.is_empty()
+                || is_line_range_fragment(token)
+                || token.contains("://")
+                || ["touch:", "file:", "module:"]
+                    .iter()
+                    .any(|prefix| token.to_ascii_lowercase().starts_with(prefix))
+                || !is_path_like_token(token)
+            {
+                continue;
+            }
+            if let Some(normalized) = normalize_path_reference(token) {
+                intents.insert(normalized);
+            }
+        }
+    }
+    intents.into_iter().collect()
+}
+
+pub(crate) fn resolve_path_intent(
+    intent: &str,
+    candidates: &BTreeSet<String>,
+    allow_parent_directory: bool,
+) -> Result<PathResolution, PathResolutionFailure> {
+    let Some(intent) = normalize_path_reference(intent) else {
+        return Err(PathResolutionFailure::NoMatch);
+    };
+    let candidates: BTreeSet<_> = candidates
+        .iter()
+        .filter_map(|candidate| normalize_path_reference(candidate))
+        .collect();
+
+    if candidates.contains(&intent) {
+        return Ok(PathResolution {
+            path: intent,
+            match_type: PathMatchType::Exact,
+        });
+    }
+
+    if !intent.contains('/') {
+        let matches: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.rsplit('/').next() == Some(intent.as_str()))
+            .cloned()
+            .collect();
+        return match matches.as_slice() {
+            [path] => Ok(PathResolution {
+                path: path.clone(),
+                match_type: PathMatchType::UniqueBasename,
+            }),
+            [] => Err(PathResolutionFailure::NoMatch),
+            _ => Err(PathResolutionFailure::Ambiguous),
+        };
+    }
+
+    let suffix = format!("/{intent}");
+    let matches: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.ends_with(&suffix))
+        .cloned()
+        .collect();
+    match matches.as_slice() {
+        [path] => {
+            return Ok(PathResolution {
+                path: path.clone(),
+                match_type: PathMatchType::PathSuffix,
+            });
+        }
+        [] => {}
+        _ => return Err(PathResolutionFailure::Ambiguous),
+    }
+
+    if allow_parent_directory {
+        let mut parent = intent.rsplit_once('/').map(|(parent, _)| parent);
+        while let Some(candidate_parent) = parent {
+            if candidate_parent.is_empty() {
+                break;
+            }
+            let prefix = format!("{candidate_parent}/");
+            let descendant_count = candidates
+                .iter()
+                .filter(|candidate| candidate.starts_with(&prefix))
+                .take(MAX_KNOWLEDGE_TOUCHES_PER_TASK + 1)
+                .count();
+            if (1..=MAX_KNOWLEDGE_TOUCHES_PER_TASK).contains(&descendant_count) {
+                return Ok(PathResolution {
+                    path: candidate_parent.to_string(),
+                    match_type: PathMatchType::ParentDirectory,
+                });
+            }
+            if descendant_count > MAX_KNOWLEDGE_TOUCHES_PER_TASK {
+                break;
+            }
+            parent = candidate_parent.rsplit_once('/').map(|(parent, _)| parent);
+        }
+    }
+
+    Err(PathResolutionFailure::NoMatch)
+}
+
+fn normalize_path_reference(value: &str) -> Option<String> {
+    let replaced = strip_path_token(value).replace('\\', "/");
+    if replaced.starts_with('/')
+        || replaced
+            .as_bytes()
+            .get(1)
+            .is_some_and(|character| *character == b':')
+    {
+        return None;
+    }
+    let normalized = replaced
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.split('/').any(|component| {
+            component.is_empty() || component == "." || component == ".."
+        })
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn strip_path_token(value: &str) -> &str {
+    let token = value
+        .trim()
+        .trim_matches(|character| matches!(character, '`' | '"' | '\''))
+        .trim_end_matches(|character| matches!(character, ',' | ';' | '.' | '!' | '?'));
+    let Some((path, range)) = token.rsplit_once(':') else {
+        return token;
+    };
+    if is_line_range(range) {
+        path.trim_end_matches(|character| matches!(character, ',' | ';' | '.' | '!' | '?'))
+    } else {
+        token
+    }
+}
+
+fn is_line_range(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let Some(start) = parts.next() else {
+        return false;
+    };
+    let end = parts.next();
+    parts.next().is_none()
+        && !start.is_empty()
+        && start.chars().all(|character| character.is_ascii_digit())
+        && end.map_or(true, |end| {
+            !end.is_empty() && end.chars().all(|character| character.is_ascii_digit())
+        })
+}
+
+fn is_line_range_fragment(value: &str) -> bool {
+    value
+        .strip_prefix(':')
+        .is_some_and(is_line_range)
+}
+
+fn is_path_like_token(value: &str) -> bool {
+    if value.contains('/') || value.contains('\\') {
+        return true;
+    }
+    let value = strip_path_token(value);
+    value.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && !extension.is_empty()
+            && extension
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -868,4 +1337,214 @@ fn stable_hash(bytes: &[u8]) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_knowledge_touch_coverage, harvest_contract_path_intents,
+        resolve_path_intent, KnowledgeAttachmentConfig, PathMatchType,
+        PathResolution, PathResolutionFailure, TouchCoverageReport,
+        TouchesResolver, MAX_KNOWLEDGE_TOUCHES_PER_TASK,
+    };
+    use crate::orchestrator::work_graph::{
+        BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Clone)]
+    struct CandidateResolver {
+        coverage: TouchCoverageReport,
+        candidates: BTreeSet<String>,
+    }
+
+    impl TouchesResolver for CandidateResolver {
+        fn resolve_touches(
+            &self,
+            _graph: &TaskGraph,
+        ) -> Result<TouchCoverageReport, String> {
+            Ok(self.coverage.clone())
+        }
+
+        fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
+            Some(self.candidates.clone())
+        }
+    }
+
+    #[test]
+    fn shared_path_resolver_orders_match_types_and_strips_line_ranges() {
+        let candidates = BTreeSet::from([
+            "src/exact.rs".to_string(),
+            "src-tauri/src/http/handlers/queue.rs".to_string(),
+            "src-tauri/src/orchestrator/work_graph/runtime.rs".to_string(),
+            "src-tauri/src/session/completion_ledger.rs".to_string(),
+            "src-tauri/src/storage/queue.rs".to_string(),
+            "src/fix.rs".to_string(),
+        ]);
+
+        assert_eq!(
+            resolve_path_intent("src/exact.rs:79-81,", &candidates, false),
+            Ok(PathResolution {
+                path: "src/exact.rs".to_string(),
+                match_type: PathMatchType::Exact,
+            })
+        );
+        assert_eq!(
+            resolve_path_intent("runtime.rs:1371-1408", &candidates, false),
+            Ok(PathResolution {
+                path: "src-tauri/src/orchestrator/work_graph/runtime.rs".to_string(),
+                match_type: PathMatchType::UniqueBasename,
+            })
+        );
+        assert_eq!(
+            resolve_path_intent(
+                "session/completion_ledger.rs:69-78",
+                &candidates,
+                false,
+            ),
+            Ok(PathResolution {
+                path: "src-tauri/src/session/completion_ledger.rs".to_string(),
+                match_type: PathMatchType::PathSuffix,
+            })
+        );
+        assert_eq!(
+            resolve_path_intent("queue.rs:79-81", &candidates, false),
+            Err(PathResolutionFailure::Ambiguous)
+        );
+        assert_eq!(
+            resolve_path_intent("x.rs", &candidates, false),
+            Err(PathResolutionFailure::NoMatch),
+            "suffix matching must respect path-component boundaries"
+        );
+    }
+
+    #[test]
+    fn contract_harvest_uses_real_range_bearing_strings() {
+        let node = task(
+            "T1",
+            NodeContract {
+                inputs: vec!["queue.rs:79-81".to_string()],
+                outputs: vec![
+                    "runtime.rs:1371-1408 and :1046-1054".to_string(),
+                    "file:src/declared.rs".to_string(),
+                ],
+                acceptance: vec!["completion_ledger.rs:69-78".to_string()],
+            },
+        );
+
+        assert_eq!(
+            harvest_contract_path_intents(&node),
+            vec![
+                "completion_ledger.rs".to_string(),
+                "queue.rs".to_string(),
+                "runtime.rs".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn knowledge_resolution_keeps_success_when_another_intent_fails() {
+        let graph = TaskGraph::new(
+            vec![task(
+                "T1",
+                NodeContract {
+                    inputs: vec!["file:src/good.rs".to_string()],
+                    outputs: vec!["file:src/missing.rs".to_string()],
+                    acceptance: Vec::new(),
+                },
+            )],
+            Vec::new(),
+        );
+        let coverage = TouchCoverageReport {
+            available: true,
+            artifact_languages: BTreeSet::from(["rust".to_string()]),
+            touches: BTreeMap::new(),
+            unresolved_task_ids: vec!["T1".to_string()],
+        };
+        let resolver = CandidateResolver {
+            coverage: coverage.clone(),
+            candidates: BTreeSet::from(["src/good.rs".to_string()]),
+        };
+
+        let mut config = enabled_config();
+        config.parent_directory = false;
+        let knowledge = build_knowledge_touch_coverage(
+            &graph,
+            &resolver,
+            &coverage,
+            None,
+            config,
+        );
+
+        assert_eq!(
+            knowledge.knowledge_attachment_touches,
+            BTreeMap::from([(
+                "T1".to_string(),
+                BTreeSet::from(["src/good.rs".to_string()]),
+            )])
+        );
+        assert_eq!(knowledge.resolution_omissions.len(), 1);
+        assert_eq!(
+            knowledge.resolution_omissions[0].detail,
+            "knowledge path resolution found no tracked path"
+        );
+        assert_eq!(
+            knowledge.resolution_omissions[0].examples,
+            vec!["T1: src/missing.rs"]
+        );
+    }
+
+    #[test]
+    fn new_file_intent_resolves_to_bounded_non_root_parent() {
+        let candidates = BTreeSet::from([
+            "src/new/existing.rs".to_string(),
+            "src/other.rs".to_string(),
+        ]);
+
+        assert_eq!(
+            resolve_path_intent("src/new/generated.rs", &candidates, true),
+            Ok(PathResolution {
+                path: "src/new".to_string(),
+                match_type: PathMatchType::ParentDirectory,
+            })
+        );
+        assert_eq!(
+            resolve_path_intent("generated.rs", &candidates, true),
+            Err(PathResolutionFailure::NoMatch),
+            "parent fallback requires a directory component"
+        );
+
+        let crowded: BTreeSet<_> = (0..=MAX_KNOWLEDGE_TOUCHES_PER_TASK)
+            .map(|index| format!("src/crowded/file-{index}.rs"))
+            .collect();
+        assert_eq!(
+            resolve_path_intent("src/crowded/generated.rs", &crowded, true),
+            Err(PathResolutionFailure::NoMatch),
+            "parent fallback must reject more than 256 descendants"
+        );
+    }
+
+    fn enabled_config() -> KnowledgeAttachmentConfig {
+        KnowledgeAttachmentConfig {
+            per_intent: true,
+            contract_harvest: true,
+            exact: true,
+            unique_basename: true,
+            path_suffix: true,
+            parent_directory: true,
+            ambiguous: false,
+            resolution_omissions: true,
+        }
+    }
+
+    fn task(id: &str, contract: NodeContract) -> WorkNode {
+        WorkNode::new(
+            id,
+            NodeKind::Task,
+            format!("Task {id}"),
+            contract,
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+        )
+    }
 }
