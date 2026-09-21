@@ -9,34 +9,11 @@ JUDGMENT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(JUDGMENT_ROOT))
 
 from retrieval_rules import RUST_RULESET, run_ruleset  # noqa: E402
+from fixture_support import materialize_fixture  # noqa: E402
 
 
 FIXTURES_ROOT = JUDGMENT_ROOT / "fixtures"
 GOLDEN_PATH = JUDGMENT_ROOT / "golden" / "retrieval-golden.json"
-
-
-def _materialize(source: Path, destination: Path) -> Path:
-    root = destination / source.name
-    root.mkdir()
-    for path in source.rglob("*"):
-        relative = path.relative_to(source)
-        if relative.parts[0] == "ai-docs":
-            relative = Path(".ai-docs", *relative.parts[1:])
-        target = root / relative
-        if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        content = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
-        if relative.name == "codegraph.json":
-            artifact = json.loads(content)
-            self_root = artifact.get("root")
-            if self_root != "<ROOT>":
-                raise AssertionError("fixture codegraph root must use <ROOT>")
-            artifact["root"] = str(root.resolve())
-            content = json.dumps(artifact, indent=2)
-        target.write_text(content, encoding="utf-8", newline="\n")
-    return root
 
 
 def _normalize_root(value, root: Path):
@@ -67,7 +44,7 @@ class RetrievalParityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             temporary_root = Path(temporary)
             for fixture in fixture_dirs:
-                root = _materialize(fixture, temporary_root)
+                root = materialize_fixture(fixture.name, temporary_root)
                 result = _normalize_root(run_ruleset(RUST_RULESET, root), root)
                 self.assertGreater(result["parsed_note_count"], 0, fixture.name)
                 actual[fixture.name] = result

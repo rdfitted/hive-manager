@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import string
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Any, Optional
@@ -551,7 +554,434 @@ def run_current(root: Path) -> dict[str, Any]:
     }
 
 
-RULESETS = {"current": run_current}
+_LINE_RANGE = re.compile(r":\d+(?:-\d+)?$")
+_CONTRACT_SPLIT = re.compile(r"[\s,;()\[\]{}<>]+")
+
+
+def _strip_path_decoration(value: str) -> str:
+    value = value.strip().strip("`\"'")
+    value = value.rstrip(".!?;,)")
+    return _LINE_RANGE.sub("", value)
+
+
+def resolve_path_intent(
+    intent: str, candidates: list[str], *, allow_parent: bool = False
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Mirror the ACKed exact -> basename -> suffix -> parent design order."""
+
+    decorated = _strip_path_decoration(intent)
+    normalized = normalize_artifact_path(decorated)
+    if normalized is None:
+        return None, None, "stale"
+    candidate_set = set(candidates)
+    if normalized in candidate_set:
+        return normalized, "exact", None
+    if "/" not in normalized:
+        basename = sorted(path for path in candidates if path.rsplit("/", 1)[-1] == normalized)
+        if len(basename) == 1:
+            return basename[0], "unique-basename", None
+        if len(basename) > 1:
+            return None, None, "ambiguous"
+    else:
+        suffix = sorted(
+            path
+            for path in candidates
+            if path == normalized or path.endswith(f"/{normalized}")
+        )
+        if len(suffix) == 1:
+            return suffix[0], "path-suffix", None
+        if len(suffix) > 1:
+            return None, None, "ambiguous"
+    if allow_parent and "/" in normalized:
+        components = normalized.split("/")[:-1]
+        while components:
+            parent = "/".join(components)
+            descendants = [
+                path for path in candidates if path == parent or path.startswith(f"{parent}/")
+            ][: MAX_TOUCH_MODULES_PER_TASK + 1]
+            if 0 < len(descendants) <= MAX_TOUCH_MODULES_PER_TASK:
+                return parent, "parent-directory", None
+            components.pop()
+    return None, None, "stale"
+
+
+def _candidate_inventory(root: Path) -> tuple[list[str], bool]:
+    artifact = _load_artifact(root)
+    if artifact is not None:
+        return artifact[0], False
+    inventory_path = root / "files.txt"
+    candidates = sorted(
+        {
+            normalized
+            for line in rust_lines(inventory_path.read_text(encoding="utf-8"))
+            if (normalized := normalize_artifact_path(line.strip())) is not None
+        }
+    )
+    return candidates, True
+
+
+def _contract_intents(node: TaskNode) -> list[tuple[str, str]]:
+    intents: list[tuple[str, str]] = []
+    for value in node.inputs + node.outputs + node.acceptance:
+        trimmed = value.strip()
+        lowered = _ascii_lower(trimmed)
+        declared = next(
+            (trimmed[len(prefix) :] for prefix in ("touch:", "file:", "module:") if lowered.startswith(prefix)),
+            None,
+        )
+        if declared is not None:
+            if _ascii_lower(declared.strip()) != "none":
+                intents.append((declared, "declared-scope"))
+            continue
+        for token in _CONTRACT_SPLIT.split(value):
+            token = _strip_path_decoration(token)
+            if not token or token.startswith(":"):
+                continue
+            lowered_token = _ascii_lower(token)
+            if any(lowered_token.startswith(prefix) for prefix in ("touch:", "file:", "module:")):
+                continue
+            final_component = token.replace("\\", "/").rsplit("/", 1)[-1]
+            path_like = "/" in token or "\\" in token or (
+                "." in final_component
+                and bool(final_component.split(".", 1)[0])
+                and bool(final_component.rsplit(".", 1)[-1])
+            )
+            if path_like:
+                intents.append((token, "contract-path"))
+    return intents
+
+
+def _knowledge_touches(
+    graph: TaskGraph,
+    declared_touches: dict[str, list[str]],
+    candidates: list[str],
+    fallback: bool,
+) -> tuple[dict[str, list[str]], dict[str, list[str]], list[dict[str, Any]]]:
+    touches = {task_id: paths[:] for task_id, paths in declared_touches.items()}
+    provenance: dict[str, list[str]] = {
+        task_id: ["declared-scope"] for task_id in declared_touches
+    }
+    failures: dict[tuple[str, str], list[str]] = {}
+    for node in sorted(graph.tasks, key=lambda item: item.id):
+        resolved = set(touches.get(node.id, []))
+        labels = set(provenance.get(node.id, []))
+        for raw, source in _contract_intents(node):
+            path, match_type, failure = resolve_path_intent(
+                raw, candidates, allow_parent=True
+            )
+            if path is None:
+                failures.setdefault((source, failure or "stale"), []).append(
+                    f"{node.id}:{_strip_path_decoration(raw)}"
+                )
+                continue
+            resolved.add(path)
+            label = "fallback" if fallback else source
+            if match_type == "parent-directory":
+                label = f"{label}:parent-directory"
+            labels.add(label)
+        if resolved:
+            touches[node.id] = sorted(resolved)
+            provenance[node.id] = sorted(labels)
+    omissions = []
+    for (source, failure), examples in sorted(failures.items()):
+        omissions.append(
+            _omission(
+                "resolution_incomplete",
+                len(examples),
+                sorted(examples)[:MAX_OMISSION_EXAMPLES],
+                f"knowledge {source} intent was {failure}",
+            )
+        )
+    return touches, provenance, omissions
+
+
+def _inferred_scope_candidates(
+    root: Path, candidates: list[str]
+) -> tuple[dict[str, list[str]], dict[str, list[str]], list[dict[str, Any]]]:
+    scopes: dict[str, list[str]] = {}
+    provenance: dict[str, list[str]] = {}
+    failures: dict[str, list[str]] = {}
+    for filename in ("project-dna.md", "bug-patterns.md"):
+        path = root / ".ai-docs" / filename
+        content = path.read_text(encoding="utf-8")
+        heading = ""
+        start_line = 1
+        body: list[str] = []
+
+        def flush() -> None:
+            if not heading or _ascii_lower(heading) in {"template", "bugs"}:
+                return
+            explicit = any(
+                "**scope**" in _ascii_lower(line)
+                or "**files**" in _ascii_lower(line)
+                or _ascii_lower(line.lstrip()).startswith("scope:")
+                for line in body
+            )
+            if explicit:
+                return
+            source_ref = f".ai-docs/{filename}#L{start_line}"
+            gotcha_id = stable_hash(f"{source_ref}:{heading}".encode())
+            resolved: set[str] = set()
+            labels: set[str] = set()
+            for line in body:
+                for raw in _code_spans(line):
+                    path_value, match_type, failure = resolve_path_intent(raw, candidates)
+                    if path_value is None:
+                        final = raw.replace("\\", "/").rsplit("/", 1)[-1]
+                        if "/" in raw or "\\" in raw or "." in final:
+                            failures.setdefault(failure or "stale", []).append(
+                                f"{source_ref}:{_strip_path_decoration(raw)}"
+                            )
+                        continue
+                    resolved.add(path_value)
+                    labels.add(f"inferred-scope:{match_type}")
+            if resolved:
+                scopes[gotcha_id] = sorted(resolved)[:MAX_CONTEXT_SCOPES_PER_GOTCHA]
+                provenance[gotcha_id] = sorted(labels)
+
+        in_fence = False
+        for index, line in enumerate(rust_lines(content)):
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            trimmed = line.strip()
+            hashes = len(trimmed) - len(trimmed.lstrip("#"))
+            if 2 <= hashes <= 4:
+                flush()
+                heading, start_line, body = trimmed[hashes:].strip(), index + 1, []
+            elif heading:
+                body.append(line)
+        flush()
+    omissions = [
+        _omission(
+            "resolution_incomplete",
+            len(examples),
+            sorted(examples)[:MAX_OMISSION_EXAMPLES],
+            f"inferred knowledge scope was {failure}",
+        )
+        for failure, examples in sorted(failures.items())
+    ]
+    return scopes, provenance, omissions
+
+
+def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict[str, Any]:
+    result = json.loads(json.dumps(run_current(root)))
+    plan, _diagnostics = parse_plan_markdown_with_diagnostics(
+        (root / "plan.md").read_text(encoding="utf-8")
+    )
+    graph = task_graph_from_plan(plan)
+    candidates, fallback = _candidate_inventory(root)
+    knowledge_touches = {
+        task_id: paths[:] for task_id, paths in result["declared_touches"].items()
+    }
+    task_provenance = {
+        task_id: ["declared-scope"] for task_id in knowledge_touches
+    }
+    additions: list[dict[str, Any]] = []
+    if contract_paths:
+        knowledge_touches, task_provenance, additions = _knowledge_touches(
+            graph, result["declared_touches"], candidates, fallback
+        )
+
+    gotchas, _load_omissions, _available = _load_knowledge(root)
+    inferred_scopes: dict[str, list[str]] = {}
+    scope_provenance: dict[str, list[str]] = {}
+    if inferred:
+        inferred_scopes, scope_provenance, scope_omissions = _inferred_scope_candidates(
+            root, candidates
+        )
+        additions.extend(scope_omissions)
+
+    base_edges = {
+        (edge["context_node_id"], edge["task_id"])
+        for edge in result["knowledge_edges"]
+    }
+    task_ids = [node.id for node in graph.tasks]
+    gotcha_by_id = {gotcha.id: gotcha for gotcha in gotchas}
+    for context_node in result["context_nodes"]:
+        gotcha_id = context_node["id"].removeprefix("context::knowledge::")
+        if gotcha_id in inferred_scopes:
+            context_node["scope"] = inferred_scopes[gotcha_id]
+            context_node["parameters"]["scope"] = ",".join(inferred_scopes[gotcha_id])
+            context_node["parameters"]["attachment_provenance"] = ",".join(
+                scope_provenance[gotcha_id]
+            )
+
+    for gotcha_id, gotcha in gotcha_by_id.items():
+        scope = inferred_scopes.get(gotcha_id, gotcha.scope)
+        context_id = f"context::knowledge::{gotcha_id}"
+        linked = [
+            task_id
+            for task_id in task_ids
+            if task_id in knowledge_touches
+            and _scope_intersects(scope, knowledge_touches[task_id])
+        ]
+        fraction = len(linked) / len(task_ids) if task_ids else 0.0
+        if len(task_ids) >= ANTI_HUB_MIN_TASKS and fraction >= ANTI_HUB_TASK_FRACTION:
+            if any((context_id, task_id) not in base_edges for task_id in linked):
+                lint = {
+                    "context_node_id": context_id,
+                    "linked_task_ids": linked,
+                    "reason": "expanded coverage makes context a high-fraction hub; base edges preserved and additions withheld",
+                }
+                if lint not in result["hub_lints"]:
+                    result["hub_lints"].append(lint)
+            continue
+        for task_id in linked:
+            if (context_id, task_id) in base_edges:
+                continue
+            labels = sorted(
+                set(scope_provenance.get(gotcha_id, []))
+                | set(task_provenance.get(task_id, ["declared-scope"]))
+            )
+            result["knowledge_edges"].append(
+                {
+                    "task_id": task_id,
+                    "context_node_id": context_id,
+                    "rationale": "knowledge attachment: " + ",".join(labels),
+                }
+            )
+    result["knowledge_attachment_touches"] = {
+        task_id: knowledge_touches[task_id] for task_id in sorted(knowledge_touches)
+    }
+    for omission in additions:
+        if omission not in result["omissions"]:
+            result["omissions"].append(omission)
+    return result
+
+
+def run_hv10(root: Path) -> dict[str, Any]:
+    return _counterfactual(root, inferred=True, contract_paths=False)
+
+
+def run_hv11(root: Path) -> dict[str, Any]:
+    return _counterfactual(root, inferred=False, contract_paths=True)
+
+
+def run_hv10_hv11(root: Path) -> dict[str, Any]:
+    return _counterfactual(root, inferred=True, contract_paths=True)
+
+
+def _tokens(value: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[A-Za-z0-9_./-]+", _ascii_lower(value))
+        if len(token) > 1
+    ]
+
+
+def bm25_shortlist(query: str, documents: list[tuple[str, str]]) -> list[tuple[str, float]]:
+    """Return a deterministic stdlib BM25 shortlist, highest score first."""
+
+    tokenized = [(key, _tokens(text)) for key, text in documents]
+    if not tokenized:
+        return []
+    query_terms = Counter(_tokens(query))
+    average_length = sum(len(tokens) for _, tokens in tokenized) / len(tokenized) or 1.0
+    document_frequency = Counter(
+        term for _, tokens in tokenized for term in set(tokens)
+    )
+    scored = []
+    for key, tokens in tokenized:
+        frequencies = Counter(tokens)
+        score = 0.0
+        for term, query_frequency in query_terms.items():
+            frequency = frequencies[term]
+            if not frequency:
+                continue
+            inverse = math.log(
+                1.0
+                + (len(tokenized) - document_frequency[term] + 0.5)
+                / (document_frequency[term] + 0.5)
+            )
+            denominator = frequency + 1.2 * (
+                1.0 - 0.75 + 0.75 * len(tokens) / average_length
+            )
+            score += query_frequency * inverse * frequency * 2.2 / denominator
+        if score > 0.0:
+            scored.append((key, score))
+    return sorted(scored, key=lambda item: (-item[1], item[0]))[:8]
+
+
+def _match_strength(scopes: list[str], touches: list[str]) -> int:
+    strength = 0
+    for scope in scopes:
+        for touch in touches:
+            if scope == touch:
+                strength = max(strength, 3)
+            elif touch.startswith(f"{scope}/") or scope.startswith(f"{touch}/"):
+                strength = max(strength, 2)
+            elif scope.rsplit("/", 1)[-1] == touch.rsplit("/", 1)[-1]:
+                strength = max(strength, 1)
+    return strength
+
+
+def run_hv12(root: Path) -> dict[str, Any]:
+    result = run_hv10_hv11(root)
+    plan, _diagnostics = parse_plan_markdown_with_diagnostics(
+        (root / "plan.md").read_text(encoding="utf-8")
+    )
+    graph = task_graph_from_plan(plan)
+    gotchas, _omissions, _available = _load_knowledge(root)
+    documents = [
+        (gotcha.id, f"{gotcha.summary} {' '.join(gotcha.scope)}") for gotcha in gotchas
+    ]
+    gotcha_by_id = {gotcha.id: gotcha for gotcha in gotchas}
+    candidates: dict[str, list[str]] = {}
+    for task in graph.tasks:
+        query = " ".join(
+            [task.title] + task.inputs + task.outputs + task.acceptance
+        )
+        scored = bm25_shortlist(query, documents)
+        ordered = sorted(
+            scored,
+            key=lambda item: (
+                -_match_strength(
+                    gotcha_by_id[item[0]].scope,
+                    result["knowledge_attachment_touches"].get(task.id, []),
+                ),
+                -item[1],
+                item[0],
+            ),
+        )[:3]
+        for gotcha_id, _score in ordered:
+            candidates.setdefault(gotcha_id, []).append(task.id)
+
+    result["knowledge_edges"] = []
+    result["hub_lints"] = []
+    task_count = len(graph.tasks)
+    for gotcha_id, linked in sorted(candidates.items()):
+        context_id = f"context::knowledge::{gotcha_id}"
+        fraction = len(linked) / task_count if task_count else 0.0
+        if task_count >= ANTI_HUB_MIN_TASKS and fraction >= ANTI_HUB_TASK_FRACTION:
+            result["hub_lints"].append(
+                {
+                    "context_node_id": context_id,
+                    "linked_task_ids": linked,
+                    "reason": "BM25 shortlist produced a high-fraction hub; attachment withheld",
+                }
+            )
+            continue
+        for task_id in linked:
+            result["knowledge_edges"].append(
+                {
+                    "task_id": task_id,
+                    "context_node_id": context_id,
+                    "rationale": "bm25 shortlist ordered by path match strength",
+                }
+            )
+    return result
+
+
+RULESETS = {
+    "current": run_current,
+    "hv10": run_hv10,
+    "hv11": run_hv11,
+    "hv10+hv11": run_hv10_hv11,
+    "hv12": run_hv12,
+}
 
 
 def run_ruleset(name: str, root: Path) -> dict[str, Any]:
