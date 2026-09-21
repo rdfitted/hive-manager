@@ -1178,3 +1178,45 @@ fn planner_rubric_defines_tiers_and_separates_priority() {
         );
     }
 }
+
+#[test]
+fn planner_file_input_survives_into_codegraph_touch_intent() {
+    let (plan, diagnostics) =
+        crate::actions::coordination::parse_plan_markdown_with_diagnostics(
+            "# Plan\n\n## Tasks\n- [ ] T1: Edit x (tier: low) (inputs: file:src/x.rs) (outputs: result) (acceptance: touch resolves) -> P1\n",
+        );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    let mut graph = crate::orchestrator::work_graph::plan_parse::task_graph_from_plan(&plan);
+    let task = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == "T1")
+        .expect("planner task");
+    assert_eq!(task.contract.inputs, vec!["file:src/x.rs"]);
+
+    let temp = TempDir::new().expect("temporary project");
+    let root = std::fs::canonicalize(temp.path()).expect("canonical project root");
+    let artifact = serde_json::json!({
+        "root": root,
+        "language": "rust",
+        "nodes": {
+            "src/x.rs": {"path": "src/x.rs"}
+        }
+    })
+    .to_string();
+    let codegraph = crate::orchestrator::work_graph::codegraph::ArtifactCodegraph::from_json(
+        temp.path(),
+        &artifact,
+    )
+    .expect("valid codegraph artifact");
+
+    let report = crate::orchestrator::work_graph::codegraph::derive_codegraph_touches(
+        &mut graph,
+        &codegraph,
+    );
+
+    assert!(report.available);
+    assert!(report.touches["T1"].contains("src/x.rs"));
+    assert_eq!(report.touch_edge_count, 1);
+}

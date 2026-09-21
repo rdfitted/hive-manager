@@ -5435,6 +5435,7 @@ This roster is available implementation capacity, not a required task count. Des
 - A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
   `- [ ] T1: Stable root task (tier: medium) (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
   `- [ ] T2: Stable dependent task (deps: T1) (tier: medium) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  Name files inside `(inputs: ...)` and `(outputs: ...)` as `file:<repo-relative path>` entries, one path per entry and without line ranges; put line references in `(acceptance: ...)` or the evidence section.
   Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
   Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
   Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.
@@ -17450,6 +17451,7 @@ This roster is available implementation capacity, not a required task count. Des
 - A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
   `- [ ] T1: Stable root task (tier: medium) (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
   `- [ ] T2: Stable dependent task (deps: T1) (tier: medium) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  Name files inside `(inputs: ...)` and `(outputs: ...)` as `file:<repo-relative path>` entries, one path per entry and without line ranges; put line references in `(acceptance: ...)` or the evidence section.
   Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
   Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
   Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.
