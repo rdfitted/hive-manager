@@ -37,6 +37,10 @@ OMISSION_DETAILS = {
     "resolution_incomplete": "one or more graph references could not be resolved",
 }
 
+TASK_PATH_UNRESOLVED_DETAIL = "knowledge path resolution found no tracked path"
+INFERRED_SCOPE_STALE_DETAIL = "inferred knowledge scope found no tracked path"
+STALE_SCOPE_OMISSION_DETAILS = frozenset({INFERRED_SCOPE_STALE_DETAIL})
+
 
 def _ascii_lower(value: str) -> str:
     return value.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
@@ -758,7 +762,7 @@ def _knowledge_touches(
                 detail = (
                     "knowledge path resolution was ambiguous"
                     if failure == "ambiguous"
-                    else "knowledge path resolution found no tracked path"
+                    else TASK_PATH_UNRESOLVED_DETAIL
                 )
                 failures.setdefault(detail, set()).add(
                     f"{node.id}: {_strip_path_decoration(raw)}"
@@ -834,7 +838,7 @@ def _inferred_scope_candidates(
                         detail = (
                             "inferred knowledge scope was ambiguous"
                             if failure == "ambiguous"
-                            else "inferred knowledge scope found no tracked path"
+                            else INFERRED_SCOPE_STALE_DETAIL
                         )
                         failures.setdefault(detail, set()).add(
                             f"{source_ref}: {_strip_path_decoration(raw)}"

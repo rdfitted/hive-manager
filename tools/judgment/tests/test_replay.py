@@ -17,6 +17,7 @@ sys.path.insert(0, str(JUDGMENT_ROOT))
 
 import ledger  # noqa: E402
 import retrieval_replay  # noqa: E402
+import retrieval_rules  # noqa: E402
 
 
 SESSION_IDS = {
@@ -274,6 +275,133 @@ class ReplayEndToEndTests(unittest.TestCase):
 
 
 class ReplayPlumbingTests(unittest.TestCase):
+    def test_task_status_matches_exact_task_token(self):
+        result = {
+            "declared_touches": {},
+            "knowledge_attachment_touches": {
+                "T1": ["src/one.rs"],
+                "T12": ["src/twelve.rs"],
+            },
+            "omissions": [
+                {
+                    "examples": ["T12: missing.rs"],
+                }
+            ],
+        }
+
+        self.assertEqual(
+            "contract-path", retrieval_replay._task_status(result, "T1")
+        )
+        self.assertEqual("partial", retrieval_replay._task_status(result, "T12"))
+        result["omissions"] = [{"examples": ["T1"]}]
+        self.assertEqual("partial", retrieval_replay._task_status(result, "T1"))
+
+    def test_touch_counts_ignore_tasks_with_empty_path_lists(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            _write(
+                sessions / SESSION_IDS["parseable"] / "plan.md",
+                "# Synthetic replay\n\n## Tasks\n\n"
+                "- [ ] [backend] T1: Empty touch set\n"
+                "- [ ] [backend] T2: Resolved touch set\n",
+            )
+            result = {
+                "declared_touches": {},
+                "knowledge_attachment_touches": {
+                    "T1": [],
+                    "T2": ["src/auth.rs"],
+                },
+                "knowledge_edges": [],
+                "context_nodes": [],
+                "omissions": [],
+                "hub_lints": [],
+            }
+            matrix = {
+                ruleset: result for ruleset in retrieval_replay.RULESET_ORDER
+            }
+            comparisons = {
+                ruleset: (result, result)
+                for ruleset in retrieval_replay.RULESET_ORDER[1:]
+            }
+            ledger_path = base / "output" / "ledger.jsonl"
+            stale_report = base / "output" / "stale-scopes.json"
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ), patch.object(
+                retrieval_replay,
+                "evaluate_replay_session",
+                return_value=(matrix, comparisons),
+            ):
+                report = retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=stale_report,
+                )
+
+        scorecards = report["repositories"][repo.name]["scorecards"]
+        for score in scorecards.values():
+            self.assertEqual(1, score["tasks_with_touches"])
+        for comparison in report["entry_mode_comparison"].values():
+            self.assertEqual(1, comparison["compose_tasks_with_touches"])
+            self.assertEqual(1, comparison["plan_ready_tasks_with_touches"])
+
+    def test_stale_fixture_populates_stale_scope_report_separately(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            _write(
+                repo / ".ai-docs" / "project-dna.md",
+                (repo / ".ai-docs" / "project-dna.md").read_text(encoding="utf-8")
+                + "\n## Removed module advisory\n\n"
+                + "The former `src/removed.rs` path should not be reused.\n",
+            )
+            _write(
+                sessions / SESSION_IDS["parseable"] / "plan.md",
+                "# Synthetic replay\n\n## Tasks\n\n"
+                "- [ ] T1: Review removed module "
+                "(inputs: src/auth.rs, missing.rs)\n",
+            )
+            ledger_path = base / "output" / "ledger.jsonl"
+            stale_report = base / "output" / "stale-scopes.json"
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ):
+                retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=stale_report,
+                )
+
+            stale = json.loads(stale_report.read_text(encoding="utf-8"))
+
+        stale_scopes = stale["stale_scope_omissions"]
+        unresolved_tasks = stale["unresolved_task_path_omissions"]
+        self.assertGreater(len(stale_scopes), 0)
+        self.assertGreater(len(unresolved_tasks), 0)
+        self.assertEqual(
+            {retrieval_rules.INFERRED_SCOPE_STALE_DETAIL},
+            {row["detail"] for row in stale_scopes},
+        )
+        self.assertEqual(
+            {retrieval_rules.TASK_PATH_UNRESOLVED_DETAIL},
+            {row["detail"] for row in unresolved_tasks},
+        )
+
     def test_ledger_resolution_precedence(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

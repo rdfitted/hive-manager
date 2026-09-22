@@ -18,7 +18,11 @@ from typing import Iterable, Iterator, Optional
 
 import ledger as judgment_ledger
 from plan_grammar import parse_plan_markdown_with_diagnostics
-from retrieval_rules import run_ruleset
+from retrieval_rules import (
+    STALE_SCOPE_OMISSION_DETAILS,
+    TASK_PATH_UNRESOLVED_DETAIL,
+    run_ruleset,
+)
 
 
 RULESET_ORDER = ("current", "hv10", "hv11", "hv10+hv11", "hv12")
@@ -365,7 +369,7 @@ def _task_status(result: dict, task_id: str) -> str:
     declared = result["declared_touches"].get(task_id, [])
     knowledge = result["knowledge_attachment_touches"].get(task_id, [])
     mentions = any(
-        task_id in example
+        example == task_id or example.startswith(f"{task_id}: ")
         for omission in result["omissions"]
         for example in omission.get("examples", [])
     )
@@ -510,6 +514,14 @@ def _empty_entry_comparison() -> dict:
     }
 
 
+def _tasks_with_non_empty_touches(result: dict) -> set[str]:
+    return {
+        task_id
+        for task_id, paths in result["knowledge_attachment_touches"].items()
+        if paths
+    }
+
+
 def _update_entry_comparison(
     comparison: dict,
     ruleset: str,
@@ -522,7 +534,7 @@ def _update_entry_comparison(
     ):
         attached = {edge["task_id"] for edge in result["knowledge_edges"]}
         comparison[ruleset][f"{entry}_tasks_with_touches"] += len(
-            result["knowledge_attachment_touches"]
+            _tasks_with_non_empty_touches(result)
         )
         comparison[ruleset][f"{entry}_tasks_with_knowledge"] += len(attached)
         comparison[ruleset][f"{entry}_knowledge_pairs"] += len(
@@ -580,7 +592,8 @@ def run_replay(
         "diff_unavailable": [],
         "path_miss_label": "upper bound (current knowledge copy)",
     }
-    stale_rows = []
+    stale_scope_rows = []
+    unresolved_task_path_rows = []
     for sessions_root, repo in zip(roots, repos):
         repo_name = repo.name
         inventory, inventory_error = tracked_files(repo)
@@ -633,7 +646,7 @@ def run_replay(
                 score = scorecards[ruleset]
                 score["sessions"] += 1
                 score["tasks"] += len(task_ids)
-                touched = set(result["knowledge_attachment_touches"])
+                touched = _tasks_with_non_empty_touches(result)
                 attached = {edge["task_id"] for edge in result["knowledge_edges"]}
                 score["tasks_with_touches"] += len(touched)
                 score["zero_knowledge_tasks"] += len(set(task_ids) - attached)
@@ -641,16 +654,18 @@ def run_replay(
                 score["knowledge_pairs"] += len(result["knowledge_edges"])
                 contexts = {node["id"]: node for node in result["context_nodes"]}
                 for omission in result["omissions"]:
-                    if "stale" in omission.get("detail", ""):
-                        stale_rows.append(
-                            {
-                                "repo": repo_name,
-                                "session_id": session.name,
-                                "ruleset": ruleset,
-                                "count": omission["count"],
-                                "detail": omission["detail"],
-                            }
-                        )
+                    detail = omission.get("detail", "")
+                    row = {
+                        "repo": repo_name,
+                        "session_id": session.name,
+                        "ruleset": ruleset,
+                        "count": omission["count"],
+                        "detail": detail,
+                    }
+                    if detail in STALE_SCOPE_OMISSION_DETAILS:
+                        stale_scope_rows.append(row)
+                    elif detail == TASK_PATH_UNRESOLVED_DETAIL:
+                        unresolved_task_path_rows.append(row)
                 unattached = [
                     _note_reason(result, context)
                     for context in result["context_nodes"]
@@ -706,7 +721,14 @@ def run_replay(
     )
     stale_report.parent.mkdir(parents=True, exist_ok=True)
     stale_report.write_text(
-        json.dumps({"stale_scope_omissions": stale_rows}, indent=2) + "\n",
+        json.dumps(
+            {
+                "stale_scope_omissions": stale_scope_rows,
+                "unresolved_task_path_omissions": unresolved_task_path_rows,
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
         newline="\n",
     )
