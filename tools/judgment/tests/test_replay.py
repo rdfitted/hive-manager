@@ -158,11 +158,47 @@ class ReplayEndToEndTests(unittest.TestCase):
             hashes_before = _tree_hashes(ai_docs)
             ledger_path = base / "output" / "ledger.jsonl"
             stale_report = base / "output" / "stale-scopes.json"
+            session_store = base / "session-store"
+            _write(
+                session_store
+                / SESSION_IDS["parseable"]
+                / "state"
+                / "work-graph.json",
+                json.dumps(
+                    {
+                        "nodes": [],
+                        "edges": [
+                            {
+                                "source": "context::knowledge::one",
+                                "target": "T1",
+                                "kind": "informs",
+                                "provenance": "knowledge",
+                            },
+                            {
+                                "source": "context::knowledge::two",
+                                "target": "T1",
+                                "kind": "informs",
+                                "provenance": "knowledge",
+                            },
+                            {
+                                "source": "T1",
+                                "target": "observation::one",
+                                "kind": "informs",
+                                "provenance": "runtime",
+                            },
+                        ],
+                        "omissions": [],
+                    }
+                )
+                + "\n",
+            )
             arguments = [
                 "--sessions",
                 str(sessions),
                 "--ledger",
                 str(ledger_path),
+                "--session-store",
+                str(session_store),
                 "--stale-report",
                 str(stale_report),
             ]
@@ -191,7 +227,7 @@ class ReplayEndToEndTests(unittest.TestCase):
 
             report = json.loads(first_stdout.getvalue())
             self.assertEqual(report, json.loads(second_stdout.getvalue()))
-            self.assertEqual(0, report["production_attached"])
+            self.assertEqual(2, report["production_attached"])
             self.assertEqual(
                 {
                     "current": "compose",
@@ -209,6 +245,7 @@ class ReplayEndToEndTests(unittest.TestCase):
             self.assertEqual(1, repository["parseable_sessions"])
             self.assertEqual(1, repository["pre_grammar_sessions"])
             self.assertEqual(1, repository["unparseable_sessions"])
+            self.assertEqual(2, repository["production_attached"])
             named = {row["session_id"]: row["reason"] for row in report["named_sessions"]}
             self.assertEqual(
                 "no planning retrieval possible",
@@ -217,7 +254,7 @@ class ReplayEndToEndTests(unittest.TestCase):
             self.assertIn("unterminated", named[SESSION_IDS["unparseable"]])
             for ruleset in retrieval_replay.RULESET_ORDER:
                 score = repository["scorecards"][ruleset]
-                self.assertEqual(0, score["production_attached"])
+                self.assertEqual(2, score["production_attached"])
                 self.assertIn("touch_coverage", score)
                 self.assertIn("zero_knowledge_tasks", score)
                 self.assertIn("attachable_share", score)
@@ -263,18 +300,70 @@ class ReplayEndToEndTests(unittest.TestCase):
                     [sessions],
                     ledger_path=outside,
                     stale_report=repo / "stale.json",
+                    session_store_root=base / "session-store",
                 )
             with self.assertRaisesRegex(ValueError, "judgment ledger"):
                 retrieval_replay.run_replay(
                     [sessions],
                     ledger_path=repo / "ledger.jsonl",
                     stale_report=outside,
+                    session_store_root=base / "session-store",
                 )
             self.assertFalse((repo / "stale.json").exists())
             self.assertFalse((repo / "ledger.jsonl").exists())
 
 
 class ReplayPlumbingTests(unittest.TestCase):
+    def test_replay_names_parseable_session_without_a_persisted_work_graph(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            result = {
+                "declared_touches": {},
+                "knowledge_attachment_touches": {},
+                "knowledge_edges": [],
+                "context_nodes": [],
+                "omissions": [],
+                "hub_lints": [],
+            }
+            matrix = {
+                ruleset: result for ruleset in retrieval_replay.RULESET_ORDER
+            }
+            comparisons = {
+                ruleset: (result, result)
+                for ruleset in retrieval_replay.RULESET_ORDER[1:]
+            }
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ), patch.object(
+                retrieval_replay,
+                "evaluate_replay_session",
+                return_value=(matrix, comparisons),
+            ):
+                report = retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=base / "output" / "ledger.jsonl",
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=base / "session-store",
+                )
+
+        self.assertIn(
+            {
+                "repo": repo.name,
+                "session_id": SESSION_IDS["parseable"],
+                "reason": "production work graph missing",
+            },
+            report["named_sessions"],
+        )
+        self.assertEqual(0, report["production_attached"])
+
     def test_replay_reports_missing_edge_context_clearly(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -322,6 +411,7 @@ class ReplayPlumbingTests(unittest.TestCase):
                         [sessions],
                         ledger_path=base / "output" / "ledger.jsonl",
                         stale_report=base / "output" / "stale-scopes.json",
+                        session_store_root=base / "session-store",
                     )
 
     def test_task_status_matches_exact_task_token(self):
@@ -456,6 +546,7 @@ class ReplayPlumbingTests(unittest.TestCase):
                     [sessions],
                     ledger_path=ledger_path,
                     stale_report=stale_report,
+                    session_store_root=base / "session-store",
                 )
 
         scorecards = report["repositories"][repo.name]["scorecards"]
@@ -497,6 +588,7 @@ class ReplayPlumbingTests(unittest.TestCase):
                     [sessions],
                     ledger_path=ledger_path,
                     stale_report=stale_report,
+                    session_store_root=base / "session-store",
                 )
 
             stale = json.loads(stale_report.read_text(encoding="utf-8"))

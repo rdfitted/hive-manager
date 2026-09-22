@@ -104,6 +104,38 @@ def resolve_ledger_path(override: Optional[Path] = None) -> Path:
     return appdata / "hive-manager" / "judgments" / "ledger.jsonl"
 
 
+def resolve_session_store_root(override: Optional[Path] = None) -> Path:
+    if override is not None:
+        return override
+    appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    return appdata / "hive-manager" / "sessions"
+
+
+def observed_production_attachments(
+    session_store_root: Path, session_id: str
+) -> tuple[int, Optional[str]]:
+    graph_path = session_store_root / session_id / "state" / "work-graph.json"
+    if not graph_path.is_file():
+        return 0, "production work graph missing"
+    try:
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return 0, f"production work graph unreadable: {error}"
+    edges = graph.get("edges") if isinstance(graph, dict) else None
+    if not isinstance(edges, list):
+        return 0, "production work graph has no edge list"
+    return (
+        sum(
+            1
+            for edge in edges
+            if isinstance(edge, dict)
+            and edge.get("kind") == "informs"
+            and edge.get("provenance") == "knowledge"
+        ),
+        None,
+    )
+
+
 def _is_within(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -570,6 +602,7 @@ def run_replay(
     *,
     ledger_path: Path,
     stale_report: Path,
+    session_store_root: Path,
 ) -> dict:
     roots = [Path(root).resolve() for root in sessions_roots]
     repos = [root.parent if root.name == ".hive-manager" else root for root in roots]
@@ -603,6 +636,7 @@ def run_replay(
             "pre_grammar_sessions": 0,
             "unparseable_sessions": 0,
             "inventory_error": inventory_error,
+            "production_attached": 0,
             "scorecards": scorecards,
         }
         for session in discover_sessions(sessions_root):
@@ -617,6 +651,21 @@ def run_replay(
                 )
                 continue
             repo_report["parseable_sessions"] += 1
+            production_attached, production_error = observed_production_attachments(
+                session_store_root, session.name
+            )
+            report["production_attached"] += production_attached
+            repo_report["production_attached"] += production_attached
+            for score in scorecards.values():
+                score["production_attached"] += production_attached
+            if production_error is not None:
+                report["named_sessions"].append(
+                    {
+                        "repo": repo_name,
+                        "session_id": session.name,
+                        "reason": production_error,
+                    }
+                )
             changed, diff_reason = recover_changed_files(repo, session.name)
             if changed is None:
                 report["diff_unavailable"].append(
@@ -753,6 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sessions", action="append", required=True, type=Path)
     parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--session-store", type=Path)
     parser.add_argument("--stale-report", type=Path, default=_default_stale_report())
     return parser
 
@@ -764,6 +814,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         arguments.sessions,
         ledger_path=ledger_path,
         stale_report=arguments.stale_report.resolve(),
+        session_store_root=resolve_session_store_root(arguments.session_store).resolve(),
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
