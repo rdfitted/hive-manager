@@ -26,7 +26,7 @@ fn agent_identity_env(id: &str, role: &AgentRole) -> Vec<(String, String)> {
         return Vec::new();
     };
     if id.as_bytes().get(36) != Some(&b'-')
-        || id.get(37..).map_or(true, str::is_empty)
+        || id.get(37..).is_none_or(str::is_empty)
         || uuid::Uuid::parse_str(session_id).is_err()
     {
         return Vec::new();

@@ -6769,6 +6769,7 @@ When the objective and every configured gate are complete, send this `completed`
     }
 
     /// Build a worker's role prompt
+    #[cfg(test)]
     pub(crate) fn build_worker_prompt(
         index: u8,
         config: &AgentConfig,
@@ -6794,6 +6795,7 @@ When the objective and every configured gate are complete, send this `completed`
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn build_worker_prompt_with_tier(
         index: u8,

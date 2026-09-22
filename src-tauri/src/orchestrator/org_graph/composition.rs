@@ -263,7 +263,7 @@ pub fn compose_context_with_remaining(
 
     let boundary = role
         .map(|definition| definition.context_boundary)
-        .unwrap_or_else(ContextBoundary::default);
+        .unwrap_or_default();
     admit_conversation_context(
         &spawn.conversation,
         boundary,
@@ -468,9 +468,7 @@ fn tag_rendered_knowledge(
     mut rendered: String,
 ) -> Option<String> {
     let marker = "### Knowledge References\n\n";
-    let Some(mut search_start) = rendered.find(marker).map(|index| index + marker.len()) else {
-        return None;
-    };
+    let mut search_start = rendered.find(marker).map(|index| index + marker.len())?;
 
     for (index, item) in context.knowledge.iter().enumerate() {
         let summary = item
@@ -494,9 +492,7 @@ fn tag_rendered_knowledge(
             item.reference.priority,
             summary
         );
-        let Some(offset) = rendered[search_start..].find(&legacy_line) else {
-            return None;
-        };
+        let offset = rendered[search_start..].find(&legacy_line)?;
         let line_start = search_start + offset;
         let line_end = line_start + legacy_line.len();
         rendered.replace_range(line_start..line_end, &tagged_line);
@@ -763,7 +759,7 @@ fn within_source_bounds(reference: &KnowledgeRef) -> bool {
         && reference
             .summary
             .as_deref()
-            .map_or(true, |summary| {
+            .is_none_or(|summary| {
                 summary.chars().count() <= MAX_KNOWLEDGE_SUMMARY_CHARS
             })
 }
