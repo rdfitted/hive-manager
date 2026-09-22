@@ -314,6 +314,159 @@ class ReplayEndToEndTests(unittest.TestCase):
 
 
 class ReplayPlumbingTests(unittest.TestCase):
+    def test_spawn_sidecars_write_schema_valid_rows_and_delivery_coverage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            session = sessions / SESSION_IDS["parseable"]
+            common = {
+                "schema_version": "hive.spawn-context/v1",
+                "session_id": SESSION_IDS["parseable"],
+                "role_definition_id": "backend",
+                "budget": {
+                    "role_chars": 4096,
+                    "task_chars": 4096,
+                    "conversation_chars": 4096,
+                },
+                "sampled": True,
+                "sample_rate": 0.33,
+                "question_version": 1,
+                "miss_sample_references": ["k2"],
+            }
+            _write(
+                session / "prompts" / "worker-1-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": f'{SESSION_IDS["parseable"]}-worker-1',
+                        "plan_task_id": "T1",
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "task",
+                                "source": "project",
+                                "pointer": ".ai-docs/project-dna.md",
+                                "priority": 80,
+                                "chars": 123,
+                            },
+                            {
+                                "tag": "k2",
+                                "position": 2,
+                                "origin": "role",
+                                "source": "institutional",
+                                "pointer": "testing.md",
+                                "priority": 60,
+                                "chars": 45,
+                            },
+                        ],
+                        "dropped": [
+                            {
+                                "pointer": ".ai-docs/bug-patterns.md",
+                                "origin": "role_and_task",
+                                "reason": "task_budget_exceeded",
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session / "prompts" / "worker-2-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": f'{SESSION_IDS["parseable"]}-worker-2',
+                        "plan_task_id": None,
+                        "role_definition_id": None,
+                        "sampled": False,
+                        "kept": [],
+                        "dropped": [],
+                        "miss_sample_references": [],
+                    }
+                )
+                + "\n",
+            )
+            result = {
+                "declared_touches": {},
+                "knowledge_attachment_touches": {},
+                "knowledge_edges": [],
+                "context_nodes": [],
+                "omissions": [],
+                "hub_lints": [],
+            }
+            matrix = {
+                ruleset: result for ruleset in retrieval_replay.RULESET_ORDER
+            }
+            comparisons = {
+                ruleset: (result, result)
+                for ruleset in retrieval_replay.RULESET_ORDER[1:]
+            }
+            ledger_path = base / "output" / "ledger.jsonl"
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ), patch.object(
+                retrieval_replay,
+                "evaluate_replay_session",
+                return_value=(matrix, comparisons),
+            ):
+                report = retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=base / "session-store",
+                )
+                retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=base / "session-store",
+                )
+
+            self.assertEqual(
+                {
+                    "worker_spawns": 2,
+                    "spawns_with_plan_task_id": 1,
+                    "share": 0.5,
+                },
+                report["delivery_coverage"],
+            )
+            self.assertEqual(
+                report["delivery_coverage"],
+                report["repositories"][repo.name]["delivery_coverage"],
+            )
+            rows = list(ledger.read_records([ledger_path]))
+            spawn_rows = [
+                row for row in rows if row.get("surface") == "hive.retrieval.spawn"
+            ]
+            self.assertEqual(3, len(spawn_rows), "replay must be idempotent")
+            self.assertEqual(
+                ["kept", "kept", "dropped"],
+                [row["answer"]["disposition"] for row in spawn_rows],
+            )
+            self.assertEqual(
+                {
+                    "disposition": "dropped",
+                    "reason": "task_budget_exceeded",
+                    "position": None,
+                    "origin": "role_and_task",
+                    "provenance": None,
+                    "priority": None,
+                    "cost": None,
+                    "miss_sample": False,
+                },
+                spawn_rows[2]["answer"],
+            )
+            self.assertTrue(spawn_rows[1]["answer"]["miss_sample"])
+            self.assertEqual((3, []), ledger.validate_file([ledger_path]))
+
     def test_replay_names_parseable_session_without_a_persisted_work_graph(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

@@ -57,6 +57,7 @@ NOTE_REASONS = (
     "codegraph-unavailable",
 )
 TASK_STATUSES = ("declared", "contract-path", "undeclared", "partial", "unresolved")
+SPAWN_CONTEXT_SCHEMA_VERSION = "hive.spawn-context/v1"
 
 
 def evaluate_fixture(
@@ -134,6 +135,120 @@ def observed_production_attachments(
         ),
         None,
     )
+
+
+def load_spawn_contexts(session: Path) -> tuple[list[dict], list[str]]:
+    contexts = []
+    errors = []
+    prompts = session / "prompts"
+    if not prompts.is_dir():
+        return contexts, errors
+    for path in sorted(prompts.glob("*-context.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            errors.append(f"{path.name}: {error}")
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"{path.name}: sidecar is not an object")
+            continue
+        if value.get("schema_version") != SPAWN_CONTEXT_SCHEMA_VERSION:
+            errors.append(f"{path.name}: unsupported spawn-context schema")
+            continue
+        if not isinstance(value.get("agent_id"), str):
+            errors.append(f"{path.name}: missing agent_id")
+            continue
+        if not isinstance(value.get("kept"), list) or not isinstance(
+            value.get("dropped"), list
+        ):
+            errors.append(f"{path.name}: kept and dropped must be arrays")
+            continue
+        contexts.append(value)
+    return contexts, errors
+
+
+def _spawn_reference_rows(context: dict) -> Iterator[tuple[int, dict, dict]]:
+    miss_tags = set(context.get("miss_sample_references", []))
+    reference_index = 0
+    for reference in context["kept"]:
+        if not isinstance(reference, dict):
+            continue
+        tag = reference.get("tag")
+        yield reference_index, reference, {
+            "disposition": "kept",
+            "reason": None,
+            "position": reference.get("position"),
+            "origin": reference.get("origin"),
+            "provenance": reference.get("source"),
+            "priority": reference.get("priority"),
+            "cost": reference.get("chars"),
+            "miss_sample": tag in miss_tags,
+        }
+        reference_index += 1
+    for reference in context["dropped"]:
+        if not isinstance(reference, dict):
+            continue
+        yield reference_index, reference, {
+            "disposition": "dropped",
+            "reason": reference.get("reason"),
+            "position": None,
+            "origin": reference.get("origin"),
+            "provenance": reference.get("source"),
+            "priority": reference.get("priority"),
+            "cost": reference.get("chars"),
+            "miss_sample": False,
+        }
+        reference_index += 1
+
+
+def _record_spawn_context(
+    *,
+    ledger_path: Path,
+    existing_decisions: set[str],
+    repo_name: str,
+    session_id: str,
+    context: dict,
+) -> None:
+    agent_id = context["agent_id"]
+    for reference_index, reference, answer in _spawn_reference_rows(context):
+        decision_id = _decision_id(
+            repo_name,
+            session_id,
+            "hive.retrieval.spawn",
+            agent_id,
+            str(reference_index),
+        )
+        if decision_id in existing_decisions:
+            continue
+        subject = {
+            "repo": repo_name,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "plan_task_id": context.get("plan_task_id"),
+            "reference_index": reference_index,
+            "tag": reference.get("tag"),
+            "pointer": reference.get("pointer"),
+        }
+        judgment_ledger.record_decision(
+            "hive.retrieval.spawn",
+            subject,
+            "code",
+            answer,
+            question_id="knowledge_ack",
+            question_version=str(context.get("question_version", "")) or None,
+            mode="shadow",
+            decision_id=decision_id,
+            ledger=ledger_path,
+        )
+        existing_decisions.add(decision_id)
+
+
+def _delivery_coverage(worker_spawns: int, planned_spawns: int) -> dict:
+    return {
+        "worker_spawns": worker_spawns,
+        "spawns_with_plan_task_id": planned_spawns,
+        "share": planned_spawns / worker_spawns if worker_spawns else 0.0,
+    }
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -621,8 +736,12 @@ def run_replay(
         "repositories": {},
         "named_sessions": [],
         "diff_unavailable": [],
+        "spawn_context_errors": [],
+        "delivery_coverage": _delivery_coverage(0, 0),
         "path_miss_label": "upper bound (current knowledge copy)",
     }
+    worker_spawns = 0
+    planned_spawns = 0
     stale_scope_rows = []
     unresolved_task_path_rows = []
     for sessions_root, repo in zip(roots, repos):
@@ -637,10 +756,37 @@ def run_replay(
             "unparseable_sessions": 0,
             "inventory_error": inventory_error,
             "production_attached": 0,
+            "spawn_context_errors": [],
+            "delivery_coverage": _delivery_coverage(0, 0),
             "scorecards": scorecards,
         }
+        repo_worker_spawns = 0
+        repo_planned_spawns = 0
         for session in discover_sessions(sessions_root):
             repo_report["sessions_seen"] += 1
+            spawn_contexts, spawn_errors = load_spawn_contexts(session)
+            for error in spawn_errors:
+                detail = {
+                    "repo": repo_name,
+                    "session_id": session.name,
+                    "reason": error,
+                }
+                report["spawn_context_errors"].append(detail)
+                repo_report["spawn_context_errors"].append(detail)
+            for context in spawn_contexts:
+                worker_spawns += 1
+                repo_worker_spawns += 1
+                plan_task_id = context.get("plan_task_id")
+                if isinstance(plan_task_id, str) and plan_task_id.strip():
+                    planned_spawns += 1
+                    repo_planned_spawns += 1
+                _record_spawn_context(
+                    ledger_path=ledger_path,
+                    existing_decisions=existing_decisions,
+                    repo_name=repo_name,
+                    session_id=session.name,
+                    context=context,
+                )
             content = (session / "plan.md").read_text(encoding="utf-8")
             classification, reason = _plan_classification(content)
             if classification != "parseable":
@@ -773,8 +919,14 @@ def run_replay(
         repo_report["entry_mode_comparison"] = _finalize_entry_comparison(
             entry_comparison
         )
+        repo_report["delivery_coverage"] = _delivery_coverage(
+            repo_worker_spawns, repo_planned_spawns
+        )
         report["repositories"][repo_name] = repo_report
 
+    report["delivery_coverage"] = _delivery_coverage(
+        worker_spawns, planned_spawns
+    )
     report["entry_mode_comparison"] = _finalize_entry_comparison(
         report["entry_mode_comparison"]
     )
