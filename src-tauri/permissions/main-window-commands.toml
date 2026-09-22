@@ -19,6 +19,7 @@ commands.allow = [
     "launch_fusion",
     "launch_debate",
     "get_session",
+    "get_qa_verdict",
     "list_sessions",
     "stop_session",
     "close_session",
