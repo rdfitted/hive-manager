@@ -28,9 +28,10 @@ use super::archetypes::{
 use super::codegraph::{derive_codegraph_touches, CodegraphDerivationReport};
 use super::completion_ledger::NodeCompletionFact;
 use super::context::{
-    build_knowledge_touch_coverage_with_resolver, derive_project_context_from_knowledge,
-    is_knowledge_derivation_omission, load_tracked_file_inventory, ContextDerivationReport,
-    KnowledgeAttachmentConfig, PathIntentResolver, TouchCoverageReport, TouchesResolver,
+    build_knowledge_touch_coverage, derive_project_context_from_knowledge,
+    is_knowledge_derivation_omission, prepare_knowledge_candidate_selection,
+    ContextDerivationReport, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
+    TouchCoverageReport, TouchesResolver,
 };
 use super::plan_parse::promote_initial_ready_nodes;
 use super::review::{
@@ -154,7 +155,7 @@ pub(crate) fn derive_knowledge_attachments<R: TouchesResolver>(
     file_inventory: Option<&BTreeSet<String>>,
 ) -> ContextDerivationReport {
     let config = KnowledgeAttachmentConfig::production();
-    derive_knowledge_attachments_with_config(
+    derive_knowledge_attachments_with_config_result(
         graph,
         project_path,
         institutional_wiki_root,
@@ -164,6 +165,19 @@ pub(crate) fn derive_knowledge_attachments<R: TouchesResolver>(
         file_inventory,
         config,
     )
+    .context
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlanReadyKnowledgeAttachmentResult {
+    pub context: ContextDerivationReport,
+    pub transient_declared_touches: BTreeMap<TaskId, BTreeSet<String>>,
+    pub knowledge_attachment_touches: BTreeMap<TaskId, BTreeSet<String>>,
+}
+
+struct KnowledgeAttachmentDerivation {
+    context: ContextDerivationReport,
+    knowledge: KnowledgeTouchCoverage,
 }
 
 /// Attach project knowledge to a reconciled planner graph without deriving
@@ -176,13 +190,13 @@ pub(crate) fn derive_plan_ready_knowledge_attachments<R: TouchesResolver>(
     inventory_root: &Path,
     resolver: &R,
     file_inventory: Option<&BTreeSet<String>>,
-) -> Option<ContextDerivationReport> {
+) -> Option<PlanReadyKnowledgeAttachmentResult> {
     graph
         .nodes
         .iter()
         .any(|node| node.kind == NodeKind::Task)
         .then(|| {
-            derive_knowledge_attachments(
+            let derivation = derive_knowledge_attachments_with_config_result(
                 graph,
                 project_path,
                 institutional_wiki_root,
@@ -190,11 +204,20 @@ pub(crate) fn derive_plan_ready_knowledge_attachments<R: TouchesResolver>(
                 resolver,
                 &TouchCoverageReport::unavailable(),
                 file_inventory,
-            )
+                KnowledgeAttachmentConfig::production(),
+            );
+            PlanReadyKnowledgeAttachmentResult {
+                context: derivation.context,
+                transient_declared_touches: derivation.knowledge.declared_touches,
+                knowledge_attachment_touches: derivation
+                    .knowledge
+                    .knowledge_attachment_touches,
+            }
         })
 }
 
 // The resolver, coverage, inventory, and policy inputs are intentionally independent seams.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn derive_knowledge_attachments_with_config<R: TouchesResolver>(
     graph: &mut TaskGraph,
@@ -206,55 +229,68 @@ fn derive_knowledge_attachments_with_config<R: TouchesResolver>(
     file_inventory: Option<&BTreeSet<String>>,
     config: KnowledgeAttachmentConfig,
 ) -> ContextDerivationReport {
+    derive_knowledge_attachments_with_config_result(
+        graph,
+        project_path,
+        institutional_wiki_root,
+        inventory_root,
+        resolver,
+        declared_coverage,
+        file_inventory,
+        config,
+    )
+    .context
+}
+
+// The resolver, coverage, inventory, and policy inputs are intentionally independent seams.
+#[allow(clippy::too_many_arguments)]
+fn derive_knowledge_attachments_with_config_result<R: TouchesResolver>(
+    graph: &mut TaskGraph,
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    inventory_root: &Path,
+    resolver: &R,
+    declared_coverage: &TouchCoverageReport,
+    file_inventory: Option<&BTreeSet<String>>,
+    config: KnowledgeAttachmentConfig,
+) -> KnowledgeAttachmentDerivation {
     graph
         .omissions
         .retain(|omission| !is_knowledge_derivation_omission(omission));
-    let artifact_candidates = resolver.knowledge_candidates();
-    let mut loaded_inventory = None;
-    if artifact_candidates.is_none()
-        && file_inventory.is_none()
-        && config.file_inventory_fallback
-    {
-        match load_tracked_file_inventory(inventory_root) {
-            Ok(inventory) => loaded_inventory = Some(inventory),
-            Err(detail) => {
-                let mut omission = WorkGraphOmission::new(
-                    WorkGraphOmissionReason::ResolutionIncomplete,
-                    1,
-                    vec!["git ls-files".to_string()],
-                );
-                omission.detail = detail.to_string();
-                graph.omissions.push(omission);
-            }
-        }
+    let selection = prepare_knowledge_candidate_selection(
+        resolver,
+        inventory_root,
+        file_inventory,
+        config,
+    );
+    if let Some(detail) = selection.inventory_omission() {
+        let mut omission = WorkGraphOmission::new(
+            WorkGraphOmissionReason::ResolutionIncomplete,
+            1,
+            vec!["git ls-files".to_string()],
+        );
+        omission.detail = detail.to_string();
+        graph.omissions.push(omission);
     }
-    let effective_inventory = file_inventory.or(loaded_inventory.as_ref());
-    let fallback_candidates = config
-        .file_inventory_fallback
-        .then_some(effective_inventory)
-        .flatten();
-    let candidates = artifact_candidates.as_ref().or(fallback_candidates);
-    let fallback = artifact_candidates.is_none() && fallback_candidates.is_some();
-    let path_resolver = candidates.map(PathIntentResolver::new);
-    let knowledge = build_knowledge_touch_coverage_with_resolver(
+    let knowledge = build_knowledge_touch_coverage(
         graph,
         declared_coverage,
-        path_resolver.as_ref(),
-        fallback,
+        &selection,
         config,
     );
     graph
         .omissions
         .extend(knowledge.resolution_omissions.clone());
-    derive_project_context_from_knowledge(
+    let context = derive_project_context_from_knowledge(
         graph,
         project_path,
         institutional_wiki_root,
         declared_coverage,
         &knowledge,
-        path_resolver.as_ref(),
+        selection.path_resolver(),
         config,
-    )
+    );
+    KnowledgeAttachmentDerivation { context, knowledge }
 }
 
 /// Idempotently overlay planner output onto the persisted skeleton while

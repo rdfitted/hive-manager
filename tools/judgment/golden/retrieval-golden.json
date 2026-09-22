@@ -110,7 +110,7 @@
             "T1",
             "T2"
           ],
-          "reason": "expanded knowledge coverage applies to a high fraction of tasks; base declared-scope edges were preserved and new inferred edges were withheld"
+          "reason": "expanded knowledge coverage applies to a high fraction of tasks; base attachment edges were preserved and expanded knowledge edges were withheld"
         }
       ]
     },
@@ -207,7 +207,14 @@
     "inferred-ambiguous": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
-      "declared_touches": {},
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ],
+        "T2": [
+          "tests/auth.rs"
+        ]
+      },
       "knowledge_attachment_touches": {
         "T1": [
           "src/auth.rs"
@@ -247,7 +254,11 @@
     "inferred-basename": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
-      "declared_touches": {},
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
       "knowledge_attachment_touches": {
         "T1": [
           "src/auth.rs"
@@ -284,7 +295,11 @@
     "inferred-exact": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
-      "declared_touches": {},
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
       "knowledge_attachment_touches": {
         "T1": [
           "src/auth.rs"
@@ -321,7 +336,11 @@
     "inferred-stale": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
-      "declared_touches": {},
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
       "knowledge_attachment_touches": {
         "T1": [
           "src/auth.rs"
@@ -358,7 +377,11 @@
     "inferred-suffix": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
-      "declared_touches": {},
+      "declared_touches": {
+        "T1": [
+          "src-tauri/src/auth.rs"
+        ]
+      },
       "knowledge_attachment_touches": {
         "T1": [
           "src-tauri/src/auth.rs"

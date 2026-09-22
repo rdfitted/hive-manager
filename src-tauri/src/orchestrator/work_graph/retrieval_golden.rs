@@ -9,8 +9,8 @@ use crate::actions::coordination::parse_plan_markdown_with_diagnostics;
 
 use super::codegraph::ArtifactCodegraph;
 use super::context::{
-    build_knowledge_touch_coverage, ContextDerivationReport, KnowledgeAttachmentConfig,
-    TouchCoverageReport,
+    build_knowledge_touch_coverage, prepare_knowledge_candidate_selection,
+    ContextDerivationReport, KnowledgeAttachmentConfig,
 };
 use super::plan_parse::task_graph_from_plan;
 use super::runtime::{
@@ -128,12 +128,14 @@ fn run_pipeline(
         )
         .expect("synthetic compose-path retrieval pipeline should compose");
         let declared_coverage = state.codegraph.coverage();
+        let config = KnowledgeAttachmentConfig::production();
+        let selection =
+            prepare_knowledge_candidate_selection(resolver, root, None, config);
         let knowledge = build_knowledge_touch_coverage(
             &state.graph,
-            resolver,
             &declared_coverage,
-            None,
-            KnowledgeAttachmentConfig::production(),
+            &selection,
+            config,
         );
         return PipelineOutput {
             graph: state.graph,
@@ -143,15 +145,7 @@ fn run_pipeline(
         };
     }
     assert_eq!(entry, "plan-ready", "fixture entry must be compose or plan-ready");
-    let declared_coverage = TouchCoverageReport::unavailable();
-    let knowledge = build_knowledge_touch_coverage(
-        &graph,
-        resolver,
-        &declared_coverage,
-        Some(file_inventory),
-        KnowledgeAttachmentConfig::production(),
-    );
-    let context = derive_plan_ready_knowledge_attachments(
+    let result = derive_plan_ready_knowledge_attachments(
         &mut graph,
         root,
         None,
@@ -162,9 +156,9 @@ fn run_pipeline(
     .expect("synthetic plan contains task nodes");
     PipelineOutput {
         graph,
-        context,
-        declared_touches: declared_coverage.touches,
-        knowledge_attachment_touches: knowledge.knowledge_attachment_touches,
+        context: result.context,
+        declared_touches: result.transient_declared_touches,
+        knowledge_attachment_touches: result.knowledge_attachment_touches,
     }
 }
 

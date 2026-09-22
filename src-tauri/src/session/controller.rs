@@ -13740,10 +13740,10 @@ The backend composed and persisted the following authoritative skeleton before l
         } else {
             None
         };
-        if let (Some(composition), Some(context)) =
+        if let (Some(composition), Some(knowledge)) =
             (reconciled_composition.as_mut(), context_report)
         {
-            composition.context = context;
+            composition.context = knowledge.context;
         }
 
         if self.storage.is_none() {
@@ -16659,6 +16659,10 @@ mod tests {
             .unwrap();
         assert_eq!(composition.graph, authoritative);
         assert_eq!(composition.codegraph, initial.codegraph);
+        assert_eq!(
+            composition.codegraph.unresolved_task_ids,
+            initial.codegraph.unresolved_task_ids
+        );
         assert!(composition.context.knowledge_available);
         let knowledge_edges: Vec<_> = authoritative
             .edges

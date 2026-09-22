@@ -39,9 +39,19 @@ class CounterfactualRuleTests(unittest.TestCase):
                     with self.subTest(fixture=fixture, ruleset=ruleset):
                         result = matrix[ruleset]
                         self.assertGreater(result["parsed_note_count"], 0)
-                        self.assertEqual(
-                            current["declared_touches"], result["declared_touches"]
-                        )
+                        if current["entry"] == "compose":
+                            self.assertEqual(
+                                current["declared_touches"],
+                                result["declared_touches"],
+                            )
+                        else:
+                            for task_id, paths in result["declared_touches"].items():
+                                self.assertTrue(paths)
+                                self.assertTrue(
+                                    set(paths).issubset(
+                                        result["knowledge_attachment_touches"][task_id]
+                                    )
+                                )
                         self.assertIn("knowledge_attachment_touches", result)
                         self.assertIn("knowledge_edges", result)
 
@@ -209,6 +219,42 @@ class CounterfactualRuleTests(unittest.TestCase):
                 "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope",
                 result["hub_lints"][0]["reason"],
             )
+
+    def test_plan_ready_declared_base_survives_expanded_hub(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture("file-list-fallback", Path(temporary))
+            (root / "plan.md").write_text(
+                "# Base and expanded coverage\n\n## Tasks\n\n"
+                "- [ ] T1: Declared authentication change "
+                "(inputs: file:src/auth.rs)\n"
+                "- [ ] T2: Harvested authentication check "
+                "(acceptance: src/auth.rs:10-20 remains covered)\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            result = run_ruleset("hv10+hv11", root)
+
+        self.assertEqual({"T1": ["src/auth.rs"]}, result["declared_touches"])
+        self.assertEqual(
+            {"T1": ["src/auth.rs"], "T2": ["src/auth.rs"]},
+            result["knowledge_attachment_touches"],
+        )
+        self.assertEqual(
+            ["T1"],
+            [edge["task_id"] for edge in result["knowledge_edges"]],
+        )
+        self.assertEqual(
+            "knowledge attachment matched declared-scope, fallback",
+            result["knowledge_edges"][0]["rationale"],
+        )
+        self.assertEqual(1, len(result["hub_lints"]))
+        self.assertEqual(["T1", "T2"], result["hub_lints"][0]["linked_task_ids"])
+        self.assertEqual(
+            "expanded knowledge coverage applies to a high fraction of tasks; "
+            "base attachment edges were preserved and expanded knowledge edges were withheld",
+            result["hub_lints"][0]["reason"],
+        )
 
     def test_hv10_plain_files_marker_suppresses_inference_and_global_ref_inherits_it(self):
         with tempfile.TemporaryDirectory() as temporary:

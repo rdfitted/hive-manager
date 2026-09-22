@@ -286,6 +286,54 @@ impl KnowledgeAttachmentConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct KnowledgeCandidateSelection {
+    path_resolver: Option<PathIntentResolver>,
+    fallback: bool,
+    inventory_omission: Option<&'static str>,
+}
+
+impl KnowledgeCandidateSelection {
+    pub(crate) fn path_resolver(&self) -> Option<&PathIntentResolver> {
+        self.path_resolver.as_ref()
+    }
+
+    pub(crate) fn inventory_omission(&self) -> Option<&'static str> {
+        self.inventory_omission
+    }
+}
+
+pub(crate) fn prepare_knowledge_candidate_selection<R: TouchesResolver>(
+    resolver: &R,
+    inventory_root: &Path,
+    file_inventory: Option<&BTreeSet<String>>,
+    config: KnowledgeAttachmentConfig,
+) -> KnowledgeCandidateSelection {
+    let artifact_candidates = resolver.knowledge_candidates();
+    let mut loaded_inventory = None;
+    let mut inventory_omission = None;
+    if artifact_candidates.is_none()
+        && file_inventory.is_none()
+        && config.file_inventory_fallback
+    {
+        match load_tracked_file_inventory(inventory_root) {
+            Ok(inventory) => loaded_inventory = Some(inventory),
+            Err(detail) => inventory_omission = Some(detail),
+        }
+    }
+    let effective_inventory = file_inventory.or(loaded_inventory.as_ref());
+    let fallback_inventory = config
+        .file_inventory_fallback
+        .then_some(effective_inventory)
+        .flatten();
+    let candidates = artifact_candidates.as_ref().or(fallback_inventory);
+    KnowledgeCandidateSelection {
+        path_resolver: candidates.map(PathIntentResolver::new),
+        fallback: artifact_candidates.is_none() && fallback_inventory.is_some(),
+        inventory_omission,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KnowledgeTouchCoverage {
     pub declared_touches: BTreeMap<TaskId, BTreeSet<String>>,
@@ -294,35 +342,13 @@ pub(crate) struct KnowledgeTouchCoverage {
     pub resolution_omissions: Vec<WorkGraphOmission>,
 }
 
-pub(crate) fn build_knowledge_touch_coverage<R: TouchesResolver>(
-    graph: &TaskGraph,
-    resolver: &R,
-    declared_coverage: &TouchCoverageReport,
-    file_inventory: Option<&BTreeSet<String>>,
-    config: KnowledgeAttachmentConfig,
-) -> KnowledgeTouchCoverage {
-    let artifact_candidates = resolver.knowledge_candidates();
-    let fallback_inventory = config.file_inventory_fallback.then_some(file_inventory).flatten();
-    let candidates = artifact_candidates.as_ref().or(fallback_inventory);
-    let fallback = artifact_candidates.is_none() && fallback_inventory.is_some();
-    let path_resolver = candidates.map(PathIntentResolver::new);
-    build_knowledge_touch_coverage_with_resolver(
-        graph,
-        declared_coverage,
-        path_resolver.as_ref(),
-        fallback,
-        config,
-    )
-}
-
-pub(crate) fn build_knowledge_touch_coverage_with_resolver(
+pub(crate) fn build_knowledge_touch_coverage(
     graph: &TaskGraph,
     declared_coverage: &TouchCoverageReport,
-    path_resolver: Option<&PathIntentResolver>,
-    fallback: bool,
+    selection: &KnowledgeCandidateSelection,
     config: KnowledgeAttachmentConfig,
 ) -> KnowledgeTouchCoverage {
-    let declared_touches = declared_coverage.touches.clone();
+    let mut declared_touches = declared_coverage.touches.clone();
     let mut knowledge_attachment_touches = declared_touches.clone();
     let mut provenance_by_task = BTreeMap::new();
     for (task_id, paths) in &declared_touches {
@@ -349,7 +375,7 @@ pub(crate) fn build_knowledge_touch_coverage_with_resolver(
             resolution_omissions.push(omission);
         }
 
-        if let Some(path_resolver) = path_resolver {
+        if let Some(path_resolver) = selection.path_resolver.as_ref() {
             if config.per_intent {
                 for intent in declared_intents {
                     attach_knowledge_intent(
@@ -357,8 +383,10 @@ pub(crate) fn build_knowledge_touch_coverage_with_resolver(
                         &intent,
                         "declared-scope",
                         path_resolver,
-                        fallback,
+                        selection.fallback,
+                        !declared_coverage.available,
                         config,
+                        &mut declared_touches,
                         &mut knowledge_attachment_touches,
                         &mut provenance_by_task,
                         &mut resolution_omissions,
@@ -372,8 +400,10 @@ pub(crate) fn build_knowledge_touch_coverage_with_resolver(
                         &intent,
                         "contract-path",
                         path_resolver,
-                        fallback,
+                        selection.fallback,
+                        false,
                         config,
+                        &mut declared_touches,
                         &mut knowledge_attachment_touches,
                         &mut provenance_by_task,
                         &mut resolution_omissions,
@@ -467,7 +497,9 @@ fn attach_knowledge_intent(
     provenance: &str,
     path_resolver: &PathIntentResolver,
     fallback: bool,
+    seed_declared_touches: bool,
     config: KnowledgeAttachmentConfig,
+    declared_touches: &mut BTreeMap<TaskId, BTreeSet<String>>,
     knowledge_attachment_touches: &mut BTreeMap<TaskId, BTreeSet<String>>,
     provenance_by_task: &mut BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
     resolution_omissions: &mut Vec<WorkGraphOmission>,
@@ -491,6 +523,12 @@ fn attach_knowledge_intent(
                 return;
             }
             task_touches.insert(resolution.path.clone());
+            if seed_declared_touches {
+                declared_touches
+                    .entry(task_id.to_string())
+                    .or_default()
+                    .insert(resolution.path.clone());
+            }
             record_knowledge_provenance(
                 provenance_by_task,
                 task_id,
@@ -806,6 +844,7 @@ pub fn derive_project_context<R: TouchesResolver>(
         load,
         &coverage,
         &coverage.touches,
+        &coverage.touches,
         &BTreeMap::new(),
     )
 }
@@ -861,6 +900,7 @@ pub(crate) fn derive_project_context_from_knowledge(
         graph,
         load,
         declared_coverage,
+        &knowledge.declared_touches,
         &knowledge.knowledge_attachment_touches,
         &knowledge.provenance_by_task,
     )
@@ -870,6 +910,7 @@ fn derive_loaded_context(
     graph: &mut TaskGraph,
     load: KnowledgeLoad,
     declared_coverage: &TouchCoverageReport,
+    base_touches: &BTreeMap<TaskId, BTreeSet<String>>,
     expanded_touches: &BTreeMap<TaskId, BTreeSet<String>>,
     provenance_by_task: &BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
 ) -> ContextDerivationReport {
@@ -906,8 +947,7 @@ fn derive_loaded_context(
             &gotcha.scope
         };
         for task_id in &task_ids {
-            if declared_coverage
-                .touches
+            if base_touches
                 .get(task_id)
                 .is_some_and(|touches| scope_intersects(base_scope, touches))
             {
@@ -961,6 +1001,17 @@ fn derive_loaded_context(
             continue;
         }
         for task_id in &base_linked {
+            let rationale = if declared_coverage.available {
+                "task touches a module in this gotcha's scope".to_string()
+            } else {
+                expanded_edge_rationale(
+                    gotcha,
+                    task_id,
+                    expanded_touches,
+                    provenance_by_task,
+                    &load.inferred_scope_provenance,
+                )
+            };
             graph.edges.push(
                 WorkEdge::new(
                     &context_id,
@@ -968,7 +1019,7 @@ fn derive_loaded_context(
                     EdgeKind::Informs,
                     EdgeProvenance::Knowledge,
                 )
-                .with_rationale("task touches a module in this gotcha's scope"),
+                .with_rationale(rationale),
             );
             knowledge_edge_count += 1;
         }
@@ -987,7 +1038,7 @@ fn derive_loaded_context(
                     linked_task_ids: expanded_linked,
                     task_fraction: expanded_fraction,
                     threshold: ANTI_HUB_TASK_FRACTION,
-                    detail: "expanded knowledge coverage applies to a high fraction of tasks; base declared-scope edges were preserved and new inferred edges were withheld".to_string(),
+                    detail: "expanded knowledge coverage applies to a high fraction of tasks; base attachment edges were preserved and expanded knowledge edges were withheld".to_string(),
                 });
             }
             continue;
@@ -1872,8 +1923,9 @@ mod tests {
     use super::{
         build_knowledge_touch_coverage, derive_project_context_from_knowledge,
         harvest_contract_path_intents, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
-        PathIntentResolver, PathMatchType, PathResolution, PathResolutionFailure,
-        TouchCoverageReport, TouchesResolver, MAX_KNOWLEDGE_TOUCHES_PER_TASK,
+        prepare_knowledge_candidate_selection, PathIntentResolver, PathMatchType,
+        PathResolution, PathResolutionFailure, TouchCoverageReport, TouchesResolver,
+        MAX_KNOWLEDGE_TOUCHES_PER_TASK,
     };
     use crate::orchestrator::work_graph::{
         BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
@@ -1996,11 +2048,16 @@ mod tests {
 
         let mut config = enabled_config();
         config.parent_directory = false;
+        let selection = prepare_knowledge_candidate_selection(
+            &resolver,
+            std::path::Path::new("."),
+            None,
+            config,
+        );
         let knowledge = build_knowledge_touch_coverage(
             &graph,
-            &resolver,
             &coverage,
-            None,
+            &selection,
             config,
         );
 
@@ -2137,38 +2194,69 @@ mod tests {
     }
 
     #[test]
-    fn expanded_hub_preserves_the_base_declared_edge() {
+    fn transient_declared_base_survives_expanded_hub_without_codegraph_topology() {
         let root = knowledge_project(
-            "## Shared rule\n**Scope**: `src/shared.rs`\nKeep shared code consistent.\n",
+            "## Authentication rule\n**Scope**: `src/auth.rs`\nKeep authentication code consistent.\n",
         );
         let mut graph = TaskGraph::new(
-            (1..=4)
-                .map(|index| task(&format!("T{index}"), NodeContract::default()))
-                .collect(),
+            vec![
+                task(
+                    "T1",
+                    NodeContract {
+                        inputs: vec!["file:src/auth.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task(
+                    "T2",
+                    NodeContract {
+                        acceptance: vec!["src/auth.rs:10-20".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+            ],
             Vec::new(),
         );
-        let declared = TouchCoverageReport {
-            available: true,
-            artifact_languages: BTreeSet::new(),
-            touches: BTreeMap::from([(
+        let declared = TouchCoverageReport::unavailable();
+        let original_declared = declared.clone();
+        let resolver = CandidateResolver {
+            coverage: declared.clone(),
+            candidates: BTreeSet::from(["src/auth.rs".to_string()]),
+        };
+        let config = enabled_config();
+        let selection = prepare_knowledge_candidate_selection(
+            &resolver,
+            std::path::Path::new("."),
+            None,
+            config,
+        );
+        let knowledge = build_knowledge_touch_coverage(
+            &graph,
+            &declared,
+            &selection,
+            config,
+        );
+
+        assert_eq!(
+            knowledge.declared_touches,
+            BTreeMap::from([(
                 "T1".to_string(),
-                BTreeSet::from(["src/shared.rs".to_string()]),
-            )]),
-            unresolved_task_ids: Vec::new(),
-        };
-        let expanded = BTreeMap::from([
-            ("T1".to_string(), BTreeSet::from(["src/shared.rs".to_string()])),
-            ("T2".to_string(), BTreeSet::from(["src/shared.rs".to_string()])),
-            ("T3".to_string(), BTreeSet::from(["src/shared.rs".to_string()])),
-        ]);
-        let knowledge = KnowledgeTouchCoverage {
-            declared_touches: declared.touches.clone(),
-            knowledge_attachment_touches: expanded,
-            provenance_by_task: BTreeMap::new(),
-            resolution_omissions: Vec::new(),
-        };
-        let path_resolver =
-            PathIntentResolver::new(&BTreeSet::from(["src/shared.rs".to_string()]));
+                BTreeSet::from(["src/auth.rs".to_string()]),
+            )])
+        );
+        assert_eq!(
+            knowledge.knowledge_attachment_touches,
+            BTreeMap::from([
+                (
+                    "T1".to_string(),
+                    BTreeSet::from(["src/auth.rs".to_string()]),
+                ),
+                (
+                    "T2".to_string(),
+                    BTreeSet::from(["src/auth.rs".to_string()]),
+                ),
+            ])
+        );
 
         let report = derive_project_context_from_knowledge(
             &mut graph,
@@ -2176,21 +2264,34 @@ mod tests {
             None,
             &declared,
             &knowledge,
-            Some(&path_resolver),
-            enabled_config(),
+            selection.path_resolver(),
+            config,
         );
 
-        let linked: Vec<_> = graph
+        let knowledge_edges: Vec<_> = graph
             .edges
             .iter()
             .filter(|edge| edge.kind == EdgeKind::Informs)
-            .map(|edge| edge.target.clone())
             .collect();
-        assert_eq!(linked, vec!["T1"]);
+        assert_eq!(knowledge_edges.len(), 1);
+        assert_eq!(knowledge_edges[0].target, "T1");
+        assert_eq!(
+            knowledge_edges[0].rationale.as_deref(),
+            Some("knowledge attachment matched declared-scope")
+        );
         assert_eq!(report.knowledge_edge_count, 1);
         assert_eq!(report.hub_lints.len(), 1);
-        assert_eq!(report.hub_lints[0].linked_task_ids, vec!["T1", "T2", "T3"]);
-        assert!(report.hub_lints[0].detail.contains("base declared-scope edges were preserved"));
+        assert_eq!(report.hub_lints[0].linked_task_ids, vec!["T1", "T2"]);
+        assert_eq!(
+            report.hub_lints[0].detail,
+            "expanded knowledge coverage applies to a high fraction of tasks; base attachment edges were preserved and expanded knowledge edges were withheld"
+        );
+        assert_eq!(declared, original_declared);
+        assert!(graph.edges.iter().all(|edge| edge.kind != EdgeKind::Touches));
+        assert!(graph.nodes.iter().all(|node| {
+            node.expansion.as_ref().map(|expansion| expansion.template.as_str())
+                != Some(crate::orchestrator::work_graph::codegraph::CODEGRAPH_MODULE_TEMPLATE)
+        }));
     }
 
     #[test]
@@ -2285,12 +2386,18 @@ mod tests {
             coverage: coverage.clone(),
             candidates: BTreeSet::new(),
         };
+        let config = enabled_config();
+        let selection = prepare_knowledge_candidate_selection(
+            &resolver,
+            std::path::Path::new("."),
+            None,
+            config,
+        );
         let knowledge = build_knowledge_touch_coverage(
             &graph,
-            &resolver,
             &coverage,
-            None,
-            enabled_config(),
+            &selection,
+            config,
         );
         assert_eq!(knowledge.resolution_omissions.len(), 1);
         assert_eq!(knowledge.resolution_omissions[0].count, 8);

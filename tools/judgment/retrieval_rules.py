@@ -911,25 +911,43 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
                 and omission["examples"] == ["touches-resolver"]
             )
         ]
-    knowledge_touches = {
+    base_touches = {
         task_id: paths[:] for task_id, paths in result["declared_touches"].items()
     }
-    task_provenance: dict[str, dict[str, set[str]]] = {
+    base_provenance: dict[str, dict[str, set[str]]] = {
         task_id: {path: {"declared-scope"} for path in paths}
-        for task_id, paths in knowledge_touches.items()
+        for task_id, paths in base_touches.items()
     }
     additions: list[dict[str, Any]] = inventory_omissions[:]
-    if candidates is not None and (
-        contract_paths or result["entry"] == "plan-ready"
-    ):
-        knowledge_touches, task_provenance, additions = _knowledge_touches(
+    declared_coverage_unavailable = result["entry"] == "plan-ready" or fallback
+    if candidates is not None and declared_coverage_unavailable:
+        base_touches, base_provenance, base_omissions = _knowledge_touches(
             graph,
             result["declared_touches"],
             candidates,
             fallback,
+            include_harvested=False,
+        )
+        additions.extend(base_omissions)
+        result["declared_touches"] = {
+            task_id: base_touches[task_id] for task_id in sorted(base_touches)
+        }
+
+    knowledge_touches = {
+        task_id: paths[:] for task_id, paths in base_touches.items()
+    }
+    task_provenance = base_provenance
+    if candidates is not None and (
+        contract_paths or result["entry"] == "plan-ready"
+    ):
+        knowledge_touches, task_provenance, touch_omissions = _knowledge_touches(
+            graph,
+            base_touches,
+            candidates,
+            fallback,
             include_harvested=contract_paths,
         )
-        additions = inventory_omissions + additions
+        additions.extend(touch_omissions)
 
     gotchas, _load_omissions, _available = _load_knowledge(root)
     inferred_scopes: dict[str, list[str]] = {}
@@ -975,6 +993,29 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
         (edge["context_node_id"], edge["task_id"])
         for edge in result["knowledge_edges"]
     }
+
+    def expanded_edge_rationale(
+        gotcha_id: str, scope: list[str], task_id: str
+    ) -> str:
+        labels: set[str] = set()
+        for scope_path in scope:
+            for touch_path in knowledge_touches.get(task_id, []):
+                if not _scope_intersects([scope_path], [touch_path]):
+                    continue
+                inferred_label = scope_provenance.get(gotcha_id, {}).get(
+                    scope_path
+                )
+                if inferred_label is not None:
+                    labels.add(inferred_label)
+                labels.update(
+                    task_provenance.get(task_id, {}).get(touch_path, set())
+                )
+        return (
+            "knowledge attachment matched " + ", ".join(sorted(labels))
+            if labels
+            else "knowledge attachment matched expanded scope"
+        )
+
     task_ids = [node.id for node in graph.tasks]
     for context_node in result["context_nodes"]:
         gotcha_id = context_node["id"].removeprefix("context::knowledge::")
@@ -991,60 +1032,82 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
     for gotcha_id, gotcha in gotcha_by_id.items():
         scope = effective_scopes[gotcha_id]
         context_id = f"context::knowledge::{gotcha_id}"
-        linked = [
+        base_scope = [] if gotcha_id in inferred_scopes else gotcha.scope
+        base_linked = [
+            task_id
+            for task_id in task_ids
+            if task_id in base_touches
+            and _scope_intersects(base_scope, base_touches[task_id])
+        ]
+        expanded_linked = [
             task_id
             for task_id in task_ids
             if task_id in knowledge_touches
             and _scope_intersects(scope, knowledge_touches[task_id])
         ]
-        fraction = len(linked) / len(task_ids) if task_ids else 0.0
-        if len(task_ids) >= ANTI_HUB_MIN_TASKS and fraction >= ANTI_HUB_TASK_FRACTION:
-            base_scope = [] if gotcha_id in inferred_scopes else gotcha.scope
-            base_linked = [
-                task_id
-                for task_id in task_ids
-                if task_id in result["declared_touches"]
-                and _scope_intersects(
-                    base_scope, result["declared_touches"][task_id]
-                )
-            ]
-            if "*" in gotcha.scope and len(task_ids) >= ANTI_HUB_MIN_TASKS:
-                base_linked = task_ids[:]
-            if linked != base_linked:
-                lint = {
-                    "context_node_id": context_id,
-                    "linked_task_ids": linked,
-                    "reason": "expanded knowledge coverage applies to a high fraction of tasks; base declared-scope edges were preserved and new inferred edges were withheld",
-                }
-                if lint not in result["hub_lints"]:
-                    result["hub_lints"].append(lint)
+        if "*" in gotcha.scope and len(task_ids) >= ANTI_HUB_MIN_TASKS:
+            base_linked = task_ids[:]
+            expanded_linked = task_ids[:]
+
+        base_fraction = len(base_linked) / len(task_ids) if task_ids else 0.0
+        if (
+            len(task_ids) >= ANTI_HUB_MIN_TASKS
+            and base_fraction >= ANTI_HUB_TASK_FRACTION
+        ):
+            lint = {
+                "context_node_id": context_id,
+                "linked_task_ids": base_linked,
+                "reason": "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope",
+            }
+            if lint not in result["hub_lints"]:
+                result["hub_lints"].append(lint)
             continue
-        for task_id in linked:
-            if (context_id, task_id) in base_edges:
+
+        for task_id in base_linked:
+            edge_key = (context_id, task_id)
+            if edge_key in base_edges:
                 continue
-            labels: set[str] = set()
-            for scope_path in scope:
-                for touch_path in knowledge_touches.get(task_id, []):
-                    if not _scope_intersects([scope_path], [touch_path]):
-                        continue
-                    inferred_label = scope_provenance.get(gotcha_id, {}).get(
-                        scope_path
-                    )
-                    if inferred_label is not None:
-                        labels.add(inferred_label)
-                    labels.update(
-                        task_provenance.get(task_id, {}).get(touch_path, set())
-                    )
             rationale = (
-                "knowledge attachment matched " + ", ".join(sorted(labels))
-                if labels
-                else "knowledge attachment matched expanded scope"
+                expanded_edge_rationale(gotcha_id, scope, task_id)
+                if declared_coverage_unavailable
+                else "task touches a module in this gotcha's scope"
             )
             result["knowledge_edges"].append(
                 {
                     "task_id": task_id,
                     "context_node_id": context_id,
                     "rationale": rationale,
+                }
+            )
+            base_edges.add(edge_key)
+
+        expanded_fraction = (
+            len(expanded_linked) / len(task_ids) if task_ids else 0.0
+        )
+        if (
+            len(task_ids) >= ANTI_HUB_MIN_TASKS
+            and expanded_fraction >= ANTI_HUB_TASK_FRACTION
+        ):
+            if expanded_linked != base_linked:
+                lint = {
+                    "context_node_id": context_id,
+                    "linked_task_ids": expanded_linked,
+                    "reason": "expanded knowledge coverage applies to a high fraction of tasks; base attachment edges were preserved and expanded knowledge edges were withheld",
+                }
+                if lint not in result["hub_lints"]:
+                    result["hub_lints"].append(lint)
+            continue
+
+        for task_id in expanded_linked:
+            if (context_id, task_id) in base_edges:
+                continue
+            result["knowledge_edges"].append(
+                {
+                    "task_id": task_id,
+                    "context_node_id": context_id,
+                    "rationale": expanded_edge_rationale(
+                        gotcha_id, scope, task_id
+                    ),
                 }
             )
     result["knowledge_attachment_touches"] = {
