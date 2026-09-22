@@ -275,6 +275,55 @@ class ReplayEndToEndTests(unittest.TestCase):
 
 
 class ReplayPlumbingTests(unittest.TestCase):
+    def test_replay_reports_missing_edge_context_clearly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            result = {
+                "declared_touches": {},
+                "knowledge_attachment_touches": {},
+                "knowledge_edges": [
+                    {
+                        "task_id": "T1",
+                        "context_node_id": "context::knowledge::missing",
+                        "rationale": "synthetic invalid edge",
+                    }
+                ],
+                "context_nodes": [],
+                "omissions": [],
+                "hub_lints": [],
+            }
+            matrix = {
+                ruleset: result for ruleset in retrieval_replay.RULESET_ORDER
+            }
+            comparisons = {
+                ruleset: (result, result)
+                for ruleset in retrieval_replay.RULESET_ORDER[1:]
+            }
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ), patch.object(
+                retrieval_replay,
+                "evaluate_replay_session",
+                return_value=(matrix, comparisons),
+            ):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "current.*missing context node.*context::knowledge::missing",
+                ):
+                    retrieval_replay.run_replay(
+                        [sessions],
+                        ledger_path=base / "output" / "ledger.jsonl",
+                        stale_report=base / "output" / "stale-scopes.json",
+                    )
+
     def test_task_status_matches_exact_task_token(self):
         result = {
             "declared_touches": {},

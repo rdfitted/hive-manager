@@ -651,6 +651,18 @@ def run_replay(
                 score["tasks_with_knowledge"] += len(attached)
                 score["knowledge_pairs"] += len(result["knowledge_edges"])
                 contexts = {node["id"]: node for node in result["context_nodes"]}
+                missing_context_ids = sorted(
+                    {
+                        edge["context_node_id"]
+                        for edge in result["knowledge_edges"]
+                    }
+                    - set(contexts)
+                )
+                if missing_context_ids:
+                    raise AssertionError(
+                        f"{ruleset} knowledge edges target missing context nodes: "
+                        + ", ".join(missing_context_ids[:5])
+                    )
                 for omission in result["omissions"]:
                     detail = omission.get("detail", "")
                     row = {

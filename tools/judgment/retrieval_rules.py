@@ -1384,11 +1384,16 @@ def run_hv12(root: Path) -> dict[str, Any]:
         (root / "plan.md").read_text(encoding="utf-8")
     )
     graph = task_graph_from_plan(plan)
-    gotchas, _omissions, _available = _load_knowledge(root)
+    context_prefix = "context::knowledge::"
+    gotcha_by_id = {
+        node["id"][len(context_prefix) :]: node
+        for node in result["context_nodes"]
+        if node["id"].startswith(context_prefix)
+    }
     documents = [
-        (gotcha.id, f"{gotcha.summary} {' '.join(gotcha.scope)}") for gotcha in gotchas
+        (gotcha_id, f"{node['summary']} {' '.join(node['scope'])}")
+        for gotcha_id, node in gotcha_by_id.items()
     ]
-    gotcha_by_id = {gotcha.id: gotcha for gotcha in gotchas}
     candidates: dict[str, list[str]] = {}
     for task in graph.tasks:
         query = " ".join(
@@ -1399,7 +1404,7 @@ def run_hv12(root: Path) -> dict[str, Any]:
             scored,
             key=lambda item: (
                 -_match_strength(
-                    gotcha_by_id[item[0]].scope,
+                    gotcha_by_id[item[0]]["scope"],
                     result["knowledge_attachment_touches"].get(task.id, []),
                 ),
                 -item[1],

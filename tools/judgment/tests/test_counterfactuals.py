@@ -554,6 +554,69 @@ class CounterfactualRuleTests(unittest.TestCase):
             _match_strength(["src/other.rs"], ["src/auth.rs"]),
         )
 
+    def test_every_ruleset_edge_targets_a_bounded_context_node(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture("declared-scope", Path(temporary))
+            sections = [
+                f"## Advisory {index:03d}\n\nGuidance token advisory{index:03d}.\n"
+                for index in range(200)
+            ]
+            sections[-1] = (
+                "## Advisory 199\n\n"
+                "The implementation at `src/target.rs` needs focused review.\n"
+            )
+            (root / ".ai-docs" / "project-dna.md").write_text(
+                "# Project DNA\n\n" + "\n".join(sections),
+                encoding="utf-8",
+                newline="\n",
+            )
+            (root / ".ai-docs" / "bug-patterns.md").write_text(
+                "# Bug Patterns\n\n## Bugs\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            (root / ".ai-docs" / "learnings.jsonl").write_text(
+                "", encoding="utf-8", newline="\n"
+            )
+            (root / "entry.txt").write_text(
+                "plan-ready\n", encoding="utf-8", newline="\n"
+            )
+            (root / "codegraph.json").unlink()
+            (root / "files.txt").write_text(
+                "src/target.rs\n", encoding="utf-8", newline="\n"
+            )
+            (root / "plan.md").write_text(
+                "# Bounded contexts\n\n## Tasks\n\n"
+                "- [ ] T1: Seed inferred scope (inputs: src/target.rs)\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            expanded = run_ruleset("hv10+hv11", root)
+            base_gotchas, _omissions, _available = _load_knowledge(root)
+            expanded_ids = {node["id"] for node in expanded["context_nodes"]}
+            base_by_context_id = {
+                f"context::knowledge::{gotcha.id}": gotcha for gotcha in base_gotchas
+            }
+            displaced = sorted(set(base_by_context_id) - expanded_ids)
+            self.assertEqual(1, len(displaced))
+            displaced_summary = base_by_context_id[displaced[0]].summary
+            (root / "plan.md").write_text(
+                "# Bounded contexts\n\n## Tasks\n\n"
+                f"- [ ] T1: {displaced_summary} (inputs: src/target.rs)\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            for ruleset in RULESET_ORDER:
+                with self.subTest(ruleset=ruleset):
+                    result = run_ruleset(ruleset, root)
+                    context_ids = {node["id"] for node in result["context_nodes"]}
+                    edge_targets = {
+                        edge["context_node_id"] for edge in result["knowledge_edges"]
+                    }
+                    self.assertLessEqual(edge_targets, context_ids)
+
 
 if __name__ == "__main__":
     unittest.main()
