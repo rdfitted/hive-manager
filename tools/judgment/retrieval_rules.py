@@ -400,29 +400,52 @@ def _parse_markdown(filename: str, content: str, source_hash: str) -> list[Gotch
     return gotchas
 
 
-def _load_knowledge(root: Path) -> tuple[list[Gotcha], list[dict[str, Any]], bool]:
+def _load_knowledge(
+    root: Path,
+    *,
+    inferred_scopes: Optional[dict[str, list[str]]] = None,
+    inferred_omissions: Optional[dict[str, list[dict[str, Any]]]] = None,
+) -> tuple[list[Gotcha], list[dict[str, Any]], bool]:
     ai_docs = root / ".ai-docs"
     if not ai_docs.is_dir():
         return [], [_omission("project_knowledge_unavailable", 1, [str(ai_docs)])], False
     omissions: list[dict[str, Any]] = []
     gotchas: list[Gotcha] = []
     curated_line_limit: Optional[int] = None
-    curation_content = (ai_docs / "curation-state.json").read_text(encoding="utf-8")
+    curation_path = ai_docs / "curation-state.json"
     try:
-        value = json.loads(curation_content)
-        line = value.get("last_curated_line")
-        if isinstance(line, int) and not isinstance(line, bool) and line >= 0:
-            curated_line_limit = line
-        else:
-            omissions.append(_omission("resolution_incomplete", 1, [".ai-docs/curation-state.json:last_curated_line"]))
-    except json.JSONDecodeError as error:
-        omissions.append(_omission("source_unreadable", 1, [f"{ai_docs / 'curation-state.json'}: {error}"]))
+        curation_content = curation_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        reason = "project_knowledge_unavailable" if isinstance(error, FileNotFoundError) else "source_unreadable"
+        omissions.append(_omission(reason, 1, [f"{curation_path}: {error}"]))
+    else:
+        try:
+            value = json.loads(curation_content)
+            line = value.get("last_curated_line") if isinstance(value, dict) else None
+            if (
+                isinstance(line, int)
+                and not isinstance(line, bool)
+                and 0 <= line <= (1 << 64) - 1
+            ):
+                curated_line_limit = line
+            else:
+                omissions.append(_omission("resolution_incomplete", 1, [".ai-docs/curation-state.json:last_curated_line"]))
+        except json.JSONDecodeError as error:
+            omissions.append(_omission("source_unreadable", 1, [f"{curation_path}: {error}"]))
 
     for filename in ("project-dna.md", "bug-patterns.md", "learnings.jsonl"):
-        content = (ai_docs / filename).read_text(encoding="utf-8")
+        path = ai_docs / filename
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            reason = "project_knowledge_unavailable" if isinstance(error, FileNotFoundError) else "source_unreadable"
+            omissions.append(_omission(reason, 1, [f"{path}: {error}"]))
+            continue
         source_hash = stable_hash(content.encode())
         if not filename.endswith(".jsonl"):
             gotchas.extend(_parse_markdown(filename, content, source_hash))
+            if inferred_omissions is not None:
+                omissions.extend(inferred_omissions.get(filename, []))
         elif curated_line_limit is not None:
             curated_hash = stable_hash(f"{source_hash}:last-curated-line={curated_line_limit}".encode())
             for index, line in enumerate(rust_lines(content)[:curated_line_limit]):
@@ -432,6 +455,8 @@ def _load_knowledge(root: Path) -> tuple[list[Gotcha], list[dict[str, Any]], boo
                     value = json.loads(line)
                 except json.JSONDecodeError as error:
                     omissions.append(_omission("source_unreadable", 1, [f".ai-docs/{filename}#L{index + 1}: {error}"]))
+                    continue
+                if not isinstance(value, dict):
                     continue
                 insight = value.get("insight")
                 if not isinstance(insight, str):
@@ -450,6 +475,8 @@ def _load_knowledge(root: Path) -> tuple[list[Gotcha], list[dict[str, Any]], boo
     dropped_count = 0
     dropped_sources: set[str] = set()
     for gotcha in gotchas:
+        if inferred_scopes is not None:
+            gotcha.scope.extend(inferred_scopes.get(gotcha.id, []))
         original = sorted(set(gotcha.scope))
         gotcha.scope = [scope for scope in original if len(scope) <= MAX_CONTEXT_SCOPE_CHARS][:MAX_CONTEXT_SCOPES_PER_GOTCHA]
         dropped = len(original) - len(gotcha.scope)
@@ -583,25 +610,52 @@ def run_current(root: Path) -> dict[str, Any]:
     }
 
 
-_LINE_RANGE = re.compile(r":\d+(?:-\d+)?$")
-_CONTRACT_SPLIT = re.compile(r"[\s,;()\[\]{}<>]+")
+_CONTRACT_SPLIT = re.compile(r"[\s,;()\[\]{}<>]+", re.ASCII)
+
+
+def _is_line_range(value: str) -> bool:
+    parts = value.split("-")
+    return (
+        len(parts) in {1, 2}
+        and all(part and all("0" <= character <= "9" for character in part) for part in parts)
+    )
 
 
 def _strip_path_decoration(value: str) -> str:
-    value = value.strip().strip("`\"'")
-    value = value.rstrip(".!?;,)")
-    return _LINE_RANGE.sub("", value)
+    token = value.strip().strip("`\"'").rstrip(",;.!?")
+    path, separator, line_range = token.rpartition(":")
+    if separator and _is_line_range(line_range):
+        return path.rstrip(",;.!?")
+    return token
 
 
 def _is_path_like_token(value: str) -> bool:
     if "/" in value or "\\" in value:
         return True
     stripped = _strip_path_decoration(value)
-    final_component = stripped.replace("\\", "/").rsplit("/", 1)[-1]
-    if "." not in final_component:
+    if "." not in stripped:
         return False
-    stem, extension = final_component.rsplit(".", 1)
-    return bool(stem and extension)
+    stem, extension = stripped.rsplit(".", 1)
+    return bool(
+        stem
+        and extension
+        and all(character.isascii() and character.isalnum() for character in extension)
+    )
+
+
+def _normalize_path_reference(value: str) -> Optional[str]:
+    replaced = _strip_path_decoration(value).replace("\\", "/")
+    encoded = replaced.encode("utf-8")
+    if replaced.startswith("/") or (len(encoded) > 1 and encoded[1] == ord(":")):
+        return None
+    while replaced.startswith("./"):
+        replaced = replaced[2:]
+    normalized = _ascii_lower(replaced.strip("/"))
+    if not normalized or any(
+        component in {"", ".", ".."} for component in normalized.split("/")
+    ):
+        return None
+    return normalized
 
 
 def resolve_path_intent(
@@ -609,15 +663,23 @@ def resolve_path_intent(
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Mirror the ACKed exact -> basename -> suffix -> parent design order."""
 
-    decorated = _strip_path_decoration(intent)
-    normalized = normalize_artifact_path(decorated)
+    normalized = _normalize_path_reference(intent)
     if normalized is None:
         return None, None, "stale"
-    candidate_set = set(candidates)
+    normalized_candidates = sorted({
+        normalized_candidate
+        for candidate in candidates
+        if (normalized_candidate := _normalize_path_reference(candidate)) is not None
+    })
+    candidate_set = set(normalized_candidates)
     if normalized in candidate_set:
         return normalized, "exact", None
     if "/" not in normalized:
-        basename = sorted(path for path in candidates if path.rsplit("/", 1)[-1] == normalized)
+        basename = [
+            path
+            for path in normalized_candidates
+            if path.rsplit("/", 1)[-1] == normalized
+        ]
         if len(basename) == 1:
             return basename[0], "unique-basename", None
         if len(basename) > 1:
@@ -625,7 +687,7 @@ def resolve_path_intent(
     else:
         suffix = sorted(
             path
-            for path in candidates
+            for path in normalized_candidates
             if path == normalized or path.endswith(f"/{normalized}")
         )
         if len(suffix) == 1:
@@ -637,7 +699,7 @@ def resolve_path_intent(
         while components:
             parent = "/".join(components)
             descendants = [
-                path for path in candidates if path.startswith(f"{parent}/")
+                path for path in normalized_candidates if path.startswith(f"{parent}/")
             ][: MAX_TOUCH_MODULES_PER_TASK + 1]
             if 0 < len(descendants) <= MAX_TOUCH_MODULES_PER_TASK:
                 return parent, "parent-directory", None
@@ -712,7 +774,7 @@ def _contract_intents(
         for token in _CONTRACT_SPLIT.split(value):
             token = _strip_path_decoration(token)
             if not token or (
-                token.startswith(":") and _LINE_RANGE.fullmatch(token[1:]) is not None
+                token.startswith(":") and _is_line_range(token[1:])
             ):
                 continue
             if "://" in token:
@@ -720,14 +782,8 @@ def _contract_intents(
             lowered_token = _ascii_lower(token)
             if any(lowered_token.startswith(prefix) for prefix in ("touch:", "file:", "module:")):
                 continue
-            final_component = token.replace("\\", "/").rsplit("/", 1)[-1]
-            path_like = "/" in token or "\\" in token or (
-                "." in final_component
-                and bool(final_component.split(".", 1)[0])
-                and bool(final_component.rsplit(".", 1)[-1])
-            )
-            if path_like:
-                normalized = normalize_artifact_path(token)
+            if _is_path_like_token(token):
+                normalized = _normalize_path_reference(token)
                 if normalized is not None:
                     harvested_intents.add((normalized, "contract-path"))
     return declared_intents + sorted(harvested_intents)
@@ -797,13 +853,6 @@ def _knowledge_touches(
         resolved = set(touches.get(node.id, []))
         path_labels = provenance.setdefault(node.id, {})
         declared_intents = _contract_intents(node, include_harvested=False)
-        if include_declared and not declared_intents:
-            record_failure(
-                node.id,
-                "explicit task touch intent was not declared",
-                node.id,
-                affects_status=False,
-            )
         intents = declared_intents[:] if include_declared else []
         if include_harvested:
             intents.extend(
@@ -852,6 +901,24 @@ def _knowledge_touches(
     return touches, provenance, failures, task_failures
 
 
+def _undeclared_knowledge_failures(
+    graph: TaskGraph,
+) -> dict[str, dict[str, Any]]:
+    examples = {
+        node.id
+        for node in graph.tasks
+        if not _contract_intents(node, include_harvested=False)
+    }
+    if not examples:
+        return {}
+    return {
+        "explicit task touch intent was not declared": {
+            "count": len(examples),
+            "examples": examples,
+        }
+    }
+
+
 def _knowledge_omissions(
     failures: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -873,17 +940,21 @@ def _inferred_scope_candidates(
 ) -> tuple[
     dict[str, list[str]],
     dict[str, dict[str, str]],
-    list[dict[str, Any]],
+    dict[str, list[dict[str, Any]]],
 ]:
     scopes: dict[str, list[str]] = {}
     provenance: dict[str, dict[str, str]] = {}
-    failures: dict[str, set[str]] = {}
+    omissions_by_file: dict[str, list[dict[str, Any]]] = {}
     for filename in ("project-dna.md", "bug-patterns.md"):
         path = root / ".ai-docs" / filename
-        content = path.read_text(encoding="utf-8")
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
         heading = ""
         start_line = 1
         body: list[str] = []
+        file_omissions: list[dict[str, Any]] = []
 
         def flush() -> None:
             if not heading or _ascii_lower(heading) in {"template", "bugs"}:
@@ -900,6 +971,17 @@ def _inferred_scope_candidates(
             source_ref = f".ai-docs/{filename}#L{start_line}"
             gotcha_id = stable_hash(f"{source_ref}:{heading}".encode())
             resolved: dict[str, str] = {}
+            failures: dict[str, dict[str, Any]] = {}
+
+            def record_failure(detail: str, raw: str) -> None:
+                failure = failures.setdefault(
+                    detail, {"count": 0, "examples": set()}
+                )
+                failure["count"] += 1
+                failure["examples"].add(
+                    f"{source_ref}: {_strip_path_decoration(raw)}"
+                )
+
             for line in body:
                 for raw in _code_spans(line):
                     if not _is_path_like_token(raw):
@@ -911,17 +993,15 @@ def _inferred_scope_candidates(
                             if failure == "ambiguous"
                             else INFERRED_SCOPE_STALE_DETAIL
                         )
-                        failures.setdefault(detail, set()).add(
-                            f"{source_ref}: {_strip_path_decoration(raw)}"
-                        )
+                        record_failure(detail, raw)
                         continue
                     if (
                         path_value not in resolved
                         and len(resolved) >= MAX_CONTEXT_SCOPES_PER_GOTCHA
                     ):
-                        failures.setdefault(
-                            "inferred knowledge scope exceeded the scope limit", set()
-                        ).add(f"{source_ref}: {_strip_path_decoration(raw)}")
+                        record_failure(
+                            "inferred knowledge scope exceeded the scope limit", raw
+                        )
                         continue
                     resolved[path_value] = f"inferred-scope:{match_type}"
             if resolved:
@@ -936,6 +1016,7 @@ def _inferred_scope_candidates(
                 for target_id in gotcha_ids:
                     scopes[target_id] = sorted(resolved)
                     provenance[target_id] = dict(sorted(resolved.items()))
+            file_omissions.extend(_knowledge_omissions(failures))
 
         in_fence = False
         for index, line in enumerate(rust_lines(content)):
@@ -952,16 +1033,8 @@ def _inferred_scope_candidates(
             elif heading:
                 body.append(line)
         flush()
-    omissions = [
-        _omission(
-            "resolution_incomplete",
-            len(examples),
-            sorted(examples)[:MAX_OMISSION_EXAMPLES],
-            detail,
-        )
-        for detail, examples in sorted(failures.items())
-    ]
-    return scopes, provenance, omissions
+        omissions_by_file[filename] = file_omissions
+    return scopes, provenance, omissions_by_file
 
 
 def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict[str, Any]:
@@ -970,18 +1043,22 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
         (root / "plan.md").read_text(encoding="utf-8")
     )
     graph = task_graph_from_plan(plan)
+    if result["entry"] == "compose":
+        (
+            declared_touches,
+            unresolved,
+            declared_coverage_available,
+            resolution_failures,
+        ) = _derive_codegraph(graph, _load_artifact(root))
+    else:
+        declared_touches, unresolved = {}, []
+        declared_coverage_available, resolution_failures = False, set()
+    result["declared_touches"] = {
+        task_id: declared_touches[task_id] for task_id in sorted(declared_touches)
+    }
     candidates, fallback, inventory_omissions = _candidate_inventory(
         root, result["entry"]
     )
-    if candidates is not None:
-        result["omissions"] = [
-            omission
-            for omission in result["omissions"]
-            if not (
-                omission["reason"] == "codegraph_unavailable"
-                and omission["examples"] == ["touches-resolver"]
-            )
-        ]
     base_touches = {
         task_id: paths[:] for task_id, paths in result["declared_touches"].items()
     }
@@ -989,15 +1066,12 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
         task_id: {path: {"declared-scope"} for path in paths}
         for task_id, paths in base_touches.items()
     }
-    additions: list[dict[str, Any]] = inventory_omissions[:]
-    knowledge_failures: dict[str, dict[str, Any]] = {}
+    knowledge_failures = _undeclared_knowledge_failures(graph)
     task_failures: dict[str, set[str]] = {
-        task_id: set(details)
-        for task_id, details in result.get(
-            "_task_resolution_failures", {}
-        ).items()
+        task_id: {"codegraph-resolution"}
+        for task_id in sorted(resolution_failures)
     }
-    declared_coverage_unavailable = result["entry"] == "plan-ready" or fallback
+    declared_coverage_unavailable = not declared_coverage_available
     if candidates is not None and declared_coverage_unavailable:
         (
             base_touches,
@@ -1010,6 +1084,7 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
             candidates,
             fallback,
             include_harvested=False,
+            initial_failures=knowledge_failures,
             initial_task_failures=task_failures,
         )
         result["declared_touches"] = {
@@ -1039,66 +1114,93 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
             initial_failures=knowledge_failures,
             initial_task_failures=task_failures,
         )
-    additions.extend(_knowledge_omissions(knowledge_failures))
     result["_task_resolution_failures"] = {
         task_id: sorted(details)
         for task_id, details in sorted(task_failures.items())
     }
 
-    gotchas, _load_omissions, _available = _load_knowledge(root)
     inferred_scopes: dict[str, list[str]] = {}
     scope_provenance: dict[str, dict[str, str]] = {}
+    inferred_omissions: dict[str, list[dict[str, Any]]] = {}
     if inferred and candidates is not None:
-        inferred_scopes, scope_provenance, scope_omissions = _inferred_scope_candidates(
-            root, candidates
+        (
+            inferred_scopes,
+            scope_provenance,
+            inferred_omissions,
+        ) = _inferred_scope_candidates(root, candidates)
+    gotchas, load_omissions, knowledge_available = _load_knowledge(
+        root,
+        inferred_scopes=inferred_scopes,
+        inferred_omissions=inferred_omissions,
+    )
+    effective_scopes = {gotcha.id: gotcha.scope[:] for gotcha in gotchas}
+    for gotcha_id, provenance in list(scope_provenance.items()):
+        bounded_scope = set(effective_scopes.get(gotcha_id, []))
+        scope_provenance[gotcha_id] = {
+            path: label
+            for path, label in provenance.items()
+            if path in bounded_scope
+        }
+    result["parsed_note_count"] = len(gotchas)
+    result["context_nodes"] = []
+    for gotcha in gotchas:
+        parameters = {
+            "fingerprint_ref": gotcha.fingerprint_ref,
+            "scope": ",".join(gotcha.scope),
+            "source_hash": gotcha.source_hash,
+            "source_ref": gotcha.source_ref,
+            "summary": gotcha.summary,
+        }
+        if gotcha.id in scope_provenance:
+            parameters["knowledge_provenance"] = ",".join(
+                f"{path}={label}"
+                for path, label in sorted(scope_provenance[gotcha.id].items())
+            )
+        result["context_nodes"].append(
+            {
+                "id": f"context::knowledge::{gotcha.id}",
+                "title": gotcha.summary,
+                "summary": gotcha.summary,
+                "scope": gotcha.scope,
+                "parameters": parameters,
+            }
         )
-        additions.extend(scope_omissions)
+    ordered_omissions = (
+        graph.omissions
+        + inventory_omissions
+        + _knowledge_omissions(knowledge_failures)
+        + load_omissions
+    )
+    if knowledge_available and candidates is None:
+        ordered_omissions.append(
+            _omission("codegraph_unavailable", 1, ["touches-resolver"])
+        )
+    elif knowledge_available and declared_coverage_available and unresolved:
+        ordered_omissions.append(
+            _omission(
+                "resolution_incomplete",
+                len(unresolved),
+                unresolved[:MAX_OMISSION_EXAMPLES],
+            )
+        )
+    if result["entry"] == "compose":
+        result["omissions"] = []
+        for omission in ordered_omissions:
+            if omission not in result["omissions"]:
+                result["omissions"].append(omission)
+    else:
+        result["omissions"] = ordered_omissions
+    result["knowledge_edges"] = []
+    result["hub_lints"] = []
 
     if candidates is None:
         result["knowledge_attachment_touches"] = {
             task_id: knowledge_touches[task_id]
             for task_id in sorted(knowledge_touches)
         }
-        for omission in additions:
-            if omission not in result["omissions"]:
-                result["omissions"].append(omission)
         return result
-
-    effective_scopes: dict[str, list[str]] = {}
-    dropped_scope_count = 0
-    dropped_scope_sources: set[str] = set()
     gotcha_by_id = {gotcha.id: gotcha for gotcha in gotchas}
-    for gotcha_id, gotcha in gotcha_by_id.items():
-        original_scope = sorted(set(gotcha.scope + inferred_scopes.get(gotcha_id, [])))
-        bounded_scope = [
-            scope
-            for scope in original_scope
-            if len(scope) <= MAX_CONTEXT_SCOPE_CHARS
-        ][:MAX_CONTEXT_SCOPES_PER_GOTCHA]
-        effective_scopes[gotcha_id] = bounded_scope
-        dropped = len(original_scope) - len(bounded_scope)
-        if dropped:
-            dropped_scope_count += dropped
-            dropped_scope_sources.add(gotcha.source_ref)
-        if gotcha_id in scope_provenance:
-            scope_provenance[gotcha_id] = {
-                path: label
-                for path, label in scope_provenance[gotcha_id].items()
-                if path in bounded_scope
-            }
-    if dropped_scope_count:
-        additions.append(
-            _omission(
-                "resolution_incomplete",
-                dropped_scope_count,
-                sorted(dropped_scope_sources)[:MAX_OMISSION_EXAMPLES],
-            )
-        )
-
-    base_edges = {
-        (edge["context_node_id"], edge["task_id"])
-        for edge in result["knowledge_edges"]
-    }
+    base_edges: set[tuple[str, str]] = set()
 
     def expanded_edge_rationale(
         gotcha_id: str, scope: list[str], task_id: str
@@ -1123,18 +1225,6 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
         )
 
     task_ids = [node.id for node in graph.tasks]
-    for context_node in result["context_nodes"]:
-        gotcha_id = context_node["id"].removeprefix("context::knowledge::")
-        if gotcha_id in inferred_scopes:
-            context_node["scope"] = effective_scopes[gotcha_id]
-            context_node["parameters"]["scope"] = ",".join(
-                effective_scopes[gotcha_id]
-            )
-            context_node["parameters"]["knowledge_provenance"] = ",".join(
-                f"{path}={label}"
-                for path, label in sorted(scope_provenance[gotcha_id].items())
-            )
-
     for gotcha_id, gotcha in gotcha_by_id.items():
         scope = effective_scopes[gotcha_id]
         context_id = f"context::knowledge::{gotcha_id}"
@@ -1219,9 +1309,6 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
     result["knowledge_attachment_touches"] = {
         task_id: knowledge_touches[task_id] for task_id in sorted(knowledge_touches)
     }
-    for omission in additions:
-        if omission not in result["omissions"]:
-            result["omissions"].append(omission)
     return result
 
 

@@ -11,11 +11,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fixture_support import FIXTURES_ROOT, materialize_fixture  # noqa: E402
 from retrieval_rules import (  # noqa: E402
+    INFERRED_SCOPE_STALE_DETAIL,
     TASK_PATH_UNRESOLVED_DETAIL,
     TaskNode,
     _contract_intents,
+    _is_path_like_token,
+    _load_knowledge,
     _match_strength,
+    _normalize_path_reference,
     bm25_shortlist,
+    resolve_path_intent,
     run_ruleset,
 )
 from retrieval_replay import RULESET_ORDER, evaluate_fixture  # noqa: E402
@@ -101,6 +106,152 @@ class CounterfactualRuleTests(unittest.TestCase):
             [("src/queue.rs", "contract-path")],
             _contract_intents(node),
         )
+
+    def test_knowledge_path_predicate_and_normalizer_match_rust(self):
+        self.assertFalse(_is_path_like_token("config.max_size"))
+        self.assertFalse(_is_path_like_token("settings.retry_limit"))
+        self.assertTrue(_is_path_like_token("config.toml"))
+        self.assertTrue(_is_path_like_token("src/pass.rs"))
+        self.assertEqual("src/pass.rs", _normalize_path_reference("`src/pass.rs:10-20`"))
+        self.assertEqual("src/pass.rs)", _normalize_path_reference("src/pass.rs)"))
+        self.assertEqual(
+            (None, None, "stale"),
+            resolve_path_intent("src/pass.rs", ["src//pass.rs"]),
+        )
+        for value in (
+            "src//pass.rs",
+            "src/./pass.rs",
+            "/src/pass.rs",
+            "C:src/pass.rs",
+        ):
+            with self.subTest(value=value):
+                self.assertIsNone(_normalize_path_reference(value))
+
+    def test_knowledge_reads_fail_open_per_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture("file-list-fallback", Path(temporary))
+            (root / ".ai-docs" / "curation-state.json").unlink()
+            (root / ".ai-docs" / "bug-patterns.md").unlink()
+            (root / ".ai-docs" / "learnings.jsonl").unlink()
+            gotchas, omissions, available = _load_knowledge(root)
+
+        self.assertTrue(available)
+        self.assertTrue(gotchas)
+        unavailable = [
+            omission
+            for omission in omissions
+            if omission["reason"] == "project_knowledge_unavailable"
+        ]
+        self.assertEqual(3, len(unavailable))
+        self.assertTrue(any("curation-state.json" in item["examples"][0] for item in unavailable))
+        self.assertTrue(any("bug-patterns.md" in item["examples"][0] for item in unavailable))
+        self.assertTrue(any("learnings.jsonl" in item["examples"][0] for item in unavailable))
+
+    def test_r3_fixtures_pin_unavailable_paths_and_pipeline_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            unavailable = run_ruleset(
+                "hv10+hv11",
+                materialize_fixture("undeclared-no-candidates", Path(temporary)),
+            )
+            strict = run_ruleset(
+                "hv10+hv11",
+                materialize_fixture("path-token-rules", Path(temporary)),
+            )
+            ordered = run_ruleset(
+                "hv10+hv11",
+                materialize_fixture("compose-omission-order", Path(temporary)),
+            )
+
+        self.assertEqual(
+            [
+                "codegraph output was unavailable, so repository relationships are incomplete",
+                "tracked file inventory was unavailable",
+                "explicit task touch intent was not declared",
+            ],
+            [item["detail"] for item in unavailable["omissions"]],
+        )
+        self.assertEqual([], unavailable["hub_lints"])
+        self.assertEqual(
+            {"T1": ["src/auth.rs"], "T2": ["config.toml"], "T7": ["src"]},
+            strict["knowledge_attachment_touches"],
+        )
+        self.assertEqual(
+            [
+                "explicit task touch intent was not declared",
+                TASK_PATH_UNRESOLVED_DETAIL,
+                "one or more graph references could not be resolved",
+                INFERRED_SCOPE_STALE_DETAIL,
+                INFERRED_SCOPE_STALE_DETAIL,
+            ],
+            [item["detail"] for item in strict["omissions"]],
+        )
+        self.assertEqual(
+            [
+                "codegraph artifact was available but did not cover or resolve declared language(s): rust",
+                TASK_PATH_UNRESOLVED_DETAIL,
+                "one or more graph references could not be resolved",
+            ],
+            [item["detail"] for item in ordered["omissions"]],
+        )
+
+    def test_inferred_scope_failures_are_event_counted_per_section(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture("file-list-fallback", Path(temporary))
+            (root / ".ai-docs" / "project-dna.md").write_text(
+                "# Project DNA\n\n"
+                "## First stale scope\n\n"
+                "Use `missing.rs` and retry `missing.rs`.\n\n"
+                "## Second stale scope\n\n"
+                "Use `missing.rs` and retry `missing.rs`.\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = run_ruleset("hv10", root)
+
+        inferred = [
+            omission
+            for omission in result["omissions"]
+            if omission["detail"] == INFERRED_SCOPE_STALE_DETAIL
+        ]
+        self.assertEqual(2, len(inferred))
+        self.assertEqual([2, 2], [item["count"] for item in inferred])
+        self.assertEqual([1, 1], [len(item["examples"]) for item in inferred])
+
+    def test_curation_line_rejects_values_outside_rust_u64_domain(self):
+        for value in ({"last_curated_line": 1 << 64}, [], {"last_curated_line": -1}):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
+                root = materialize_fixture("file-list-fallback", Path(temporary))
+                (root / ".ai-docs" / "curation-state.json").write_text(
+                    json.dumps(value),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                _gotchas, omissions, available = _load_knowledge(root)
+
+                self.assertTrue(available)
+                self.assertTrue(
+                    any(
+                        omission["reason"] == "resolution_incomplete"
+                        and omission["examples"]
+                        == [".ai-docs/curation-state.json:last_curated_line"]
+                        for omission in omissions
+                    )
+                )
+
+    def test_non_object_learning_rows_are_ignored_like_rust(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture("file-list-fallback", Path(temporary))
+            (root / ".ai-docs" / "curation-state.json").write_text(
+                '{"last_curated_line":1}\n', encoding="utf-8", newline="\n"
+            )
+            (root / ".ai-docs" / "learnings.jsonl").write_text(
+                '[]\n', encoding="utf-8", newline="\n"
+            )
+            gotchas, omissions, available = _load_knowledge(root)
+
+        self.assertTrue(available)
+        self.assertTrue(gotchas)
+        self.assertFalse(any("learnings.jsonl#L1" in str(item) for item in omissions))
 
     def test_hv11_keeps_ambiguous_basename_off(self):
         with tempfile.TemporaryDirectory() as temporary:

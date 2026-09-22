@@ -18,7 +18,8 @@ use super::runtime::{
 };
 use super::{EdgeKind, EdgeProvenance, TaskGraph, TaskId, WorkGraphOmission};
 
-const FIXTURES: [&str; 13] = [
+const FIXTURES: [&str; 16] = [
+    "compose-omission-order",
     "declared-scope",
     "star-hub",
     "codegraph-unavailable",
@@ -31,7 +32,9 @@ const FIXTURES: [&str; 13] = [
     "inferred-suffix",
     "mixed-intent-failures",
     "partial-task",
+    "path-token-rules",
     "star-hub-unavailable",
+    "undeclared-no-candidates",
 ];
 const KNOWLEDGE_FILES: [&str; 4] = [
     "project-dna.md",
