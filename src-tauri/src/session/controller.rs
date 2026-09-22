@@ -12097,7 +12097,11 @@ The backend composed and persisted the following authoritative skeleton before l
         evaluator_id: Option<&str>,
         commit_sha: Option<&str>,
         route_to_prince: bool,
-    ) -> (SessionState, Vec<(String, String, String)>) {
+    ) -> (
+        SessionState,
+        Vec<(String, String, String)>,
+        Option<&'static str>,
+    ) {
         if let Some(evaluator_id) = evaluator_id {
             if let Some(agent) = session
                 .agents
@@ -12116,14 +12120,13 @@ The backend composed and persisted the following authoritative skeleton before l
         if route_to_prince {
             let changes =
                 self.set_session_state_with_events(session, SessionState::PrinceRemediation);
-            return (SessionState::PrinceRemediation, changes);
+            return (SessionState::PrinceRemediation, changes, None);
         }
 
         match normalized_verdict {
             "PASS" | "QA_VERDICT: PASS" => {
                 let changes = self.set_session_state_with_events(session, SessionState::QaPassed);
-                self.record_terminal_qa_outcomes(&session.id, "pass");
-                (SessionState::QaPassed, changes)
+                (SessionState::QaPassed, changes, Some("pass"))
             }
             "FAIL" | "QA_VERDICT: FAIL" => {
                 let next_iteration = next_qa_failure_iteration(&session.state);
@@ -12137,14 +12140,13 @@ The backend composed and persisted the following authoritative skeleton before l
                     let changes = self
                         .set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                     session.auth_strategy = AuthStrategy::None;
-                    self.record_terminal_qa_outcomes(&session.id, "fail");
-                    (SessionState::QaMaxRetriesExceeded, changes)
+                    (SessionState::QaMaxRetriesExceeded, changes, Some("fail"))
                 } else {
                     let next_state = SessionState::QaFailed {
                         iteration: next_iteration,
                     };
                     let changes = self.set_session_state_with_events(session, next_state.clone());
-                    (next_state, changes)
+                    (next_state, changes, None)
                 }
             }
             _ => unreachable!("unsupported verdict already validated"),
@@ -12166,7 +12168,7 @@ The backend composed and persisted the following authoritative skeleton before l
             return Err(format!("Unsupported QA verdict '{}'", verdict));
         }
 
-        let (previous_session, updated_session, changes, new_state) = {
+        let (previous_session, updated_session, changes, new_state, outcome_label) = {
             let mut sessions = self.sessions.write();
             let session = sessions
                 .get_mut(session_id)
@@ -12190,14 +12192,20 @@ The backend composed and persisted the following authoritative skeleton before l
                 .agents
                 .iter()
                 .any(|agent| matches!(agent.role, AgentRole::Prince));
-            let (new_state, changes) = self.apply_qa_verdict_to_session(
+            let (new_state, changes, outcome_label) = self.apply_qa_verdict_to_session(
                 session,
                 normalized.as_str(),
                 Some(evaluator_id),
                 commit_sha,
                 has_prince,
             );
-            (previous_session, session.clone(), changes, new_state)
+            (
+                previous_session,
+                session.clone(),
+                changes,
+                new_state,
+                outcome_label,
+            )
         };
 
         if let Some(storage) = self.storage.as_ref() {
@@ -12217,6 +12225,10 @@ The backend composed and persisted the following authoritative skeleton before l
                 }
                 return Err(err);
             }
+        }
+
+        if let Some(label) = outcome_label {
+            self.record_terminal_qa_outcomes(session_id, label);
         }
 
         self.cancel_qa_timeout(session_id);
@@ -12691,13 +12703,15 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         self.cancel_qa_timeout(session_id);
-        let (new_state, changes) = {
+        let (new_state, changes, _outcome_label) = {
             let mut sessions = self.sessions.write();
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             // Operator overrides (force-pass / force-fail) and the legacy timeout path
             // are explicit decisions to resolve QA directly — they bypass the Prince.
+            // The evaluator handler records operator-override outcomes, so this path
+            // intentionally discards the downstream outcome label.
             self.apply_qa_verdict_to_session(session, normalized.as_str(), None, None, false)
         };
 
@@ -19840,18 +19854,23 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         write_test_qa_verdict_record(&storage, SESSION_ID, &["decision-1", "decision-2"]);
         let mut controller = test_controller();
         controller.set_storage(Arc::clone(&storage));
-        let mut session = qa_session_with(
+        let session = qa_session_with(
             SESSION_ID,
             SessionState::QaInProgress { iteration: Some(1) },
             temp.path().join("project"),
             false,
         );
+        controller.insert_test_session(session);
 
-        let (new_state, _) =
-            controller.apply_qa_verdict_to_session(&mut session, "PASS", None, None, false);
+        let new_state = controller
+            .record_http_qa_verdict(SESSION_ID, "qa-outcome-pass-evaluator", "PASS", None)
+            .unwrap();
 
         assert_eq!(new_state, SessionState::QaPassed);
-        assert_eq!(session.state, SessionState::QaPassed);
+        assert_eq!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::QaPassed
+        );
         let outcomes = read_test_outcomes(&storage);
         assert_eq!(outcomes.len(), 2);
         assert_eq!(
@@ -19878,19 +19897,16 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         const RETRY_SESSION: &str = "qa-outcome-retry";
         storage.create_session_dir(RETRY_SESSION).unwrap();
         write_test_qa_verdict_record(&storage, RETRY_SESSION, &["retry-decision"]);
-        let mut retry_session = qa_session_with(
+        let retry_session = qa_session_with(
             RETRY_SESSION,
             SessionState::QaInProgress { iteration: Some(1) },
             temp.path().join("retry-project"),
             false,
         );
-        let (retry_state, _) = controller.apply_qa_verdict_to_session(
-            &mut retry_session,
-            "FAIL",
-            None,
-            None,
-            false,
-        );
+        controller.insert_test_session(retry_session);
+        let retry_state = controller
+            .record_http_qa_verdict(RETRY_SESSION, "retry-evaluator", "FAIL", None)
+            .unwrap();
         assert_eq!(retry_state, SessionState::QaFailed { iteration: 2 });
         assert!(read_test_outcomes(&storage).is_empty());
 
@@ -19901,21 +19917,21 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             TERMINAL_SESSION,
             &["terminal-decision-1", "terminal-decision-2"],
         );
-        let mut terminal_session = qa_session_with(
+        let terminal_session = qa_session_with(
             TERMINAL_SESSION,
             SessionState::QaInProgress { iteration: Some(3) },
             temp.path().join("terminal-project"),
             false,
         );
-        let (terminal_state, _) = controller.apply_qa_verdict_to_session(
-            &mut terminal_session,
-            "FAIL",
-            None,
-            None,
-            false,
-        );
+        controller.insert_test_session(terminal_session);
+        let terminal_state = controller
+            .record_http_qa_verdict(TERMINAL_SESSION, "terminal-evaluator", "FAIL", None)
+            .unwrap();
         assert_eq!(terminal_state, SessionState::QaMaxRetriesExceeded);
-        assert_eq!(terminal_session.state, SessionState::QaMaxRetriesExceeded);
+        assert_eq!(
+            controller.get_session(TERMINAL_SESSION).unwrap().state,
+            SessionState::QaMaxRetriesExceeded
+        );
         let outcomes = read_test_outcomes(&storage);
         assert_eq!(outcomes.len(), 2);
         assert!(outcomes.iter().all(|row| {
@@ -19933,18 +19949,96 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         std::fs::write(storage.base_dir().join("judgments"), "blocks ledger directory").unwrap();
         let mut controller = test_controller();
         controller.set_storage(storage);
-        let mut session = qa_session_with(
+        let session = qa_session_with(
             SESSION_ID,
             SessionState::QaInProgress { iteration: Some(1) },
             temp.path().join("project"),
             false,
         );
+        controller.insert_test_session(session);
 
-        let (new_state, _) =
-            controller.apply_qa_verdict_to_session(&mut session, "PASS", None, None, false);
+        let new_state = controller
+            .record_http_qa_verdict(SESSION_ID, "qa-outcome-fail-open-evaluator", "PASS", None)
+            .unwrap();
 
         assert_eq!(new_state, SessionState::QaPassed);
-        assert_eq!(session.state, SessionState::QaPassed);
+        assert_eq!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::QaPassed
+        );
+    }
+
+    #[test]
+    fn qa_persist_failure_does_not_record_downstream_outcomes() {
+        const SESSION_ID: &str = "qa-outcome-persist-failure";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(&storage, SESSION_ID, &["decision-not-persisted"]);
+        std::fs::create_dir(storage.session_dir(SESSION_ID).join("session.json")).unwrap();
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("project"),
+            false,
+        ));
+
+        let error = controller
+            .record_http_qa_verdict(SESSION_ID, "persist-failure-evaluator", "PASS", None)
+            .unwrap_err();
+
+        assert!(error.contains("Failed to update session metadata"));
+        assert!(matches!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::QaInProgress { iteration: Some(1) }
+        ));
+        assert!(read_test_outcomes(&storage).is_empty());
+    }
+
+    #[test]
+    fn operator_overrides_do_not_record_downstream_outcomes() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+
+        const FORCE_PASS_SESSION: &str = "qa-override-force-pass";
+        storage.create_session_dir(FORCE_PASS_SESSION).unwrap();
+        write_test_qa_verdict_record(&storage, FORCE_PASS_SESSION, &["force-pass-decision"]);
+        controller.insert_test_session(qa_session_with(
+            FORCE_PASS_SESSION,
+            SessionState::QaFailed { iteration: 1 },
+            temp.path().join("force-pass-project"),
+            false,
+        ));
+        assert_eq!(
+            controller
+                .on_qa_verdict(FORCE_PASS_SESSION, "QA_VERDICT: PASS")
+                .unwrap(),
+            SessionState::QaPassed
+        );
+
+        const FORCE_FAIL_SESSION: &str = "qa-override-force-fail";
+        storage.create_session_dir(FORCE_FAIL_SESSION).unwrap();
+        write_test_qa_verdict_record(&storage, FORCE_FAIL_SESSION, &["force-fail-decision"]);
+        let mut force_fail_session = qa_session_with(
+            FORCE_FAIL_SESSION,
+            SessionState::QaPassed,
+            temp.path().join("force-fail-project"),
+            false,
+        );
+        force_fail_session.max_qa_iterations = 0;
+        controller.insert_test_session(force_fail_session);
+        assert_eq!(
+            controller
+                .on_qa_verdict(FORCE_FAIL_SESSION, "QA_VERDICT: FAIL")
+                .unwrap(),
+            SessionState::QaMaxRetriesExceeded
+        );
+
+        assert!(read_test_outcomes(&storage).is_empty());
     }
 
     #[test]
