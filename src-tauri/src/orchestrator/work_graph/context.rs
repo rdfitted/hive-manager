@@ -306,6 +306,8 @@ pub(crate) fn load_tracked_file_inventory(
     Ok(inventory)
 }
 
+// Keep the independent resolution inputs visible at the mutation boundary.
+#[allow(clippy::too_many_arguments)]
 fn attach_knowledge_intent(
     task_id: &str,
     intent: &str,
@@ -584,13 +586,13 @@ fn normalize_path_reference(value: &str) -> Option<String> {
 fn strip_path_token(value: &str) -> &str {
     let token = value
         .trim()
-        .trim_matches(|character| matches!(character, '`' | '"' | '\''))
-        .trim_end_matches(|character| matches!(character, ',' | ';' | '.' | '!' | '?'));
+        .trim_matches(['`', '"', '\''])
+        .trim_end_matches([',', ';', '.', '!', '?']);
     let Some((path, range)) = token.rsplit_once(':') else {
         return token;
     };
     if is_line_range(range) {
-        path.trim_end_matches(|character| matches!(character, ',' | ';' | '.' | '!' | '?'))
+        path.trim_end_matches([',', ';', '.', '!', '?'])
     } else {
         token
     }
@@ -605,7 +607,7 @@ fn is_line_range(value: &str) -> bool {
     parts.next().is_none()
         && !start.is_empty()
         && start.chars().all(|character| character.is_ascii_digit())
-        && end.map_or(true, |end| {
+        && end.is_none_or(|end| {
             !end.is_empty() && end.chars().all(|character| character.is_ascii_digit())
         })
 }
@@ -1250,6 +1252,8 @@ fn load_curated_line_limit(
     }
 }
 
+// Parsing threads bounded output and diagnostics through one section walk.
+#[allow(clippy::too_many_arguments)]
 fn parse_markdown(
     filename: &str,
     content: &str,
@@ -1318,6 +1322,8 @@ fn markdown_heading(line: &str) -> Option<String> {
     Some(trimmed[hashes..].trim().to_string())
 }
 
+// Section finalization keeps source identity, inference state, and diagnostics explicit.
+#[allow(clippy::too_many_arguments)]
 fn flush_markdown_section(
     filename: &str,
     heading: &str,
@@ -1343,14 +1349,14 @@ fn flush_markdown_section(
         return;
     }
     let source_ref = format!(".ai-docs/{filename}#L{start_line}");
-    let inferred = if config.inferred_scope
-        && !has_explicit_markdown_scope(body)
-        && scope_candidates.is_some()
-    {
+    let inferred = if let (true, Some(scope_candidates)) = (
+        config.inferred_scope && !has_explicit_markdown_scope(body),
+        scope_candidates,
+    ) {
         resolve_inferred_scope(
             body,
             &source_ref,
-            scope_candidates.expect("scope candidates checked above"),
+            scope_candidates,
             config,
             omissions,
         )

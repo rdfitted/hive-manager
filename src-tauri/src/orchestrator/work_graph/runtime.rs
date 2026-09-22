@@ -194,6 +194,8 @@ pub(crate) fn derive_plan_ready_knowledge_attachments<R: TouchesResolver>(
         })
 }
 
+// The resolver, coverage, inventory, and policy inputs are intentionally independent seams.
+#[allow(clippy::too_many_arguments)]
 fn derive_knowledge_attachments_with_config<R: TouchesResolver>(
     graph: &mut TaskGraph,
     project_path: &Path,
