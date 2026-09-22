@@ -57,7 +57,9 @@ def _make_fake_repo(base: Path) -> tuple[Path, Path]:
     _write(
         repo / ".ai-docs" / "project-dna.md",
         "# Project DNA\n\n## Authentication Boundary\n\n"
-        "- **Scope**: `src/auth.rs`\n- Keep authentication changes explicit.\n",
+        "- **Scope**: `src/auth.rs`\n- Keep authentication changes explicit.\n\n"
+        "## Authentication Advisory\n\n"
+        "Keep authentication reviews focused and explicit.\n",
     )
     _write(repo / ".ai-docs" / "bug-patterns.md", "# Bug Patterns\n")
     _write(
@@ -159,10 +161,20 @@ class ReplayEndToEndTests(unittest.TestCase):
                 self.assertIn("touch_coverage", score)
                 self.assertIn("zero_knowledge_tasks", score)
                 self.assertIn("attachable_share", score)
+                self.assertIn("path_unscoped_pairs", score)
                 self.assertEqual("upper bound (current knowledge copy)", score["path_miss_label"])
+            self.assertGreater(
+                repository["scorecards"]["hv12"]["path_unscoped_pairs"], 0
+            )
 
             rows = [json.loads(line) for line in first_bytes.decode("utf-8").splitlines()]
             decisions = [row for row in rows if row["kind"] == "decision"]
+            outcomes = [row for row in rows if row["kind"] == "outcome"]
+            measurable_pairs = sum(
+                score["path_relevant_pairs"] + score["path_miss_pairs"]
+                for score in repository["scorecards"].values()
+            )
+            self.assertEqual(measurable_pairs, len(outcomes))
             self.assertGreater(len(decisions), 0)
             self.assertEqual(len(decisions), len({row["decision_id"] for row in decisions}))
             for row in decisions:
@@ -230,6 +242,8 @@ class ReplayPlumbingTests(unittest.TestCase):
                     "refs/heads/main",
                 }
                 return subprocess.CompletedProcess(arguments, 0 if found else 1, b"", b"")
+            if arguments[0] == "rev-parse":
+                return subprocess.CompletedProcess(arguments, 0, b"branch-tip\n", b"")
             if arguments[0] == "merge-base":
                 return subprocess.CompletedProcess(arguments, 0, b"abc123\n", b"")
             if arguments[0] == "diff":
@@ -246,21 +260,50 @@ class ReplayPlumbingTests(unittest.TestCase):
         self.assertEqual({"src/auth.rs", "src/worker.rs"}, changed)
         self.assertEqual("recovered from local ref", reason)
         self.assertFalse(any("fetch" in call for call in calls))
-        self.assertIn(
-            ["merge-base", "refs/heads/main", "refs/remotes/origin/hive/session-1/primary"],
-            calls,
+        self.assertIn(["merge-base", "refs/heads/main", "branch-tip"], calls)
+        self.assertIn(["diff", "--name-only", "-z", "abc123", "branch-tip", "--"], calls)
+
+    def test_merged_branch_diff_is_recovered_from_local_merge_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+
+            def git(*arguments: str) -> None:
+                subprocess.run(
+                    ["git", "-C", str(repo), *arguments],
+                    check=True,
+                    capture_output=True,
+                )
+
+            git("init", "-b", "main")
+            git("config", "user.name", "Replay Test")
+            git("config", "user.email", "replay@example.invalid")
+            _write(repo / "README.md", "base\n")
+            git("add", "README.md")
+            git("commit", "-m", "base")
+            git("switch", "-c", "hive/session-merged/primary")
+            _write(repo / "src" / "feature.rs", "pub fn feature() {}\n")
+            git("add", "src/feature.rs")
+            git("commit", "-m", "session change")
+            git("switch", "main")
+            git("merge", "--no-ff", "--no-edit", "hive/session-merged/primary")
+
+            changed, reason = retrieval_replay.recover_changed_files(
+                repo, "session-merged"
+            )
+            self.assertEqual({"src/feature.rs"}, changed)
+            self.assertEqual("recovered from local merged branch", reason)
+
+    def test_path_relevance_uses_note_scope_and_unscoped_is_unmeasurable(self):
+        changed = {"src/auth.rs"}
+        self.assertFalse(
+            retrieval_replay._path_relevance({"scope": ["docs/guide.md"]}, changed)
         )
-        self.assertIn(
-            [
-                "diff",
-                "--name-only",
-                "-z",
-                "abc123",
-                "refs/remotes/origin/hive/session-1/primary",
-                "--",
-            ],
-            calls,
+        self.assertTrue(
+            retrieval_replay._path_relevance({"scope": ["src/auth.rs"]}, changed)
         )
+        self.assertTrue(retrieval_replay._path_relevance({"scope": ["*"]}, changed))
+        self.assertIsNone(retrieval_replay._path_relevance({"scope": []}, changed))
 
 
 if __name__ == "__main__":

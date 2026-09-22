@@ -121,6 +121,53 @@ def _local_ref(repo: Path, refs: Iterable[str]) -> Optional[str]:
     return None
 
 
+def _resolved_commit(repo: Path, reference: str) -> Optional[str]:
+    result = _git(repo, ["rev-parse", "--verify", f"{reference}^{{commit}}"])
+    if result.returncode != 0:
+        return None
+    commit = result.stdout.decode("utf-8", errors="replace").strip()
+    return commit or None
+
+
+def _diff_paths(repo: Path, base: str, tip: str) -> Optional[set[str]]:
+    changed = _git(repo, ["diff", "--name-only", "-z", base, tip, "--"])
+    if changed.returncode != 0:
+        return None
+    return {
+        value.replace("\\", "/").lower()
+        for value in changed.stdout.decode("utf-8", errors="replace").split("\0")
+        if value
+    }
+
+
+def _recover_merged_diff(
+    repo: Path, main: str, branch_tip: str
+) -> Optional[set[str]]:
+    merges = _git(
+        repo,
+        ["rev-list", "--merges", "--ancestry-path", f"{branch_tip}..{main}"],
+    )
+    if merges.returncode != 0:
+        return None
+    for merge in merges.stdout.decode("utf-8", errors="replace").splitlines():
+        parents = _git(repo, ["rev-list", "--parents", "-n", "1", merge])
+        if parents.returncode != 0:
+            continue
+        commits = parents.stdout.decode("utf-8", errors="replace").split()
+        if len(commits) < 3 or commits[2] != branch_tip:
+            continue
+        base = _git(repo, ["merge-base", commits[1], branch_tip])
+        if base.returncode != 0:
+            continue
+        first_parent_base = base.stdout.decode("utf-8", errors="replace").strip()
+        if not first_parent_base:
+            continue
+        changed = _diff_paths(repo, first_parent_base, branch_tip)
+        if changed:
+            return changed
+    return None
+
+
 def recover_changed_files(repo: Path, session_id: str) -> tuple[Optional[set[str]], str]:
     branch = _local_ref(
         repo,
@@ -134,19 +181,26 @@ def recover_changed_files(repo: Path, session_id: str) -> tuple[Optional[set[str
     main = _local_ref(repo, ("refs/heads/main", "refs/remotes/origin/main"))
     if main is None:
         return None, "no recoverable diff: local main ref missing"
-    merge_base = _git(repo, ["merge-base", main, branch])
+    branch_tip = _resolved_commit(repo, branch)
+    if branch_tip is None:
+        return None, "no recoverable diff: local session tip unavailable"
+    merge_base = _git(repo, ["merge-base", main, branch_tip])
     if merge_base.returncode != 0:
         return None, "no recoverable diff: merge-base unavailable"
     base = merge_base.stdout.decode("utf-8", errors="replace").strip()
-    changed = _git(repo, ["diff", "--name-only", "-z", base, branch, "--"])
-    if changed.returncode != 0:
+    if not base:
+        return None, "no recoverable diff: merge-base unavailable"
+    changed = _diff_paths(repo, base, branch_tip)
+    if changed is None:
         return None, "no recoverable diff: local diff failed"
-    paths = {
-        value.replace("\\", "/").lower()
-        for value in changed.stdout.decode("utf-8", errors="replace").split("\0")
-        if value
-    }
-    return paths, "recovered from local ref"
+    if changed:
+        return changed, "recovered from local ref"
+    if base == branch_tip:
+        merged = _recover_merged_diff(repo, main, branch_tip)
+        if merged:
+            return merged, "recovered from local merged branch"
+        return None, "no recoverable diff: local merge history was unavailable"
+    return None, "no recoverable diff: local branch diff was empty"
 
 
 def tracked_files(repo: Path) -> tuple[list[str], Optional[str]]:
@@ -241,6 +295,8 @@ def materialized_session(
 def _overlaps(paths: Iterable[str], changed: set[str]) -> bool:
     for raw in paths:
         path = raw.replace("\\", "/").lower().strip("/")
+        if path == "*":
+            return bool(changed)
         for changed_path in changed:
             if (
                 path == changed_path
@@ -249,6 +305,13 @@ def _overlaps(paths: Iterable[str], changed: set[str]) -> bool:
             ):
                 return True
     return False
+
+
+def _path_relevance(context_node: dict, changed: Optional[set[str]]) -> Optional[bool]:
+    scope = context_node.get("scope", [])
+    if not scope or changed is None:
+        return None
+    return _overlaps(scope, changed)
 
 
 def _task_status(result: dict, task_id: str) -> str:
@@ -359,13 +422,16 @@ def _record_pair(
             ledger=ledger_path,
         )
         existing_decisions.add(task_id)
-    outcome_key = (note_id, "path-relevant", "downstream")
-    if path_relevant is True and outcome_key not in existing_outcomes:
+    if path_relevant is None:
+        return
+    label = "path-relevant" if path_relevant else "path-miss"
+    outcome_key = (note_id, label, "downstream")
+    if outcome_key not in existing_outcomes:
         judgment_ledger.record_outcome(
             note_id,
-            "path-relevant",
+            label,
             "downstream",
-            note="current-copy knowledge; path-miss denominator is an upper bound",
+            note="current-copy knowledge; path misses are an upper bound",
             ledger=ledger_path,
         )
         existing_outcomes.add(outcome_key)
@@ -381,6 +447,7 @@ def _empty_scorecard() -> dict:
         "knowledge_pairs": 0,
         "path_relevant_pairs": 0,
         "path_miss_pairs": 0,
+        "path_unscoped_pairs": 0,
         "production_attached": 0,
     }
 
@@ -493,12 +560,10 @@ def run_replay(
                     )
                     for edge in result["knowledge_edges"]:
                         context = contexts[edge["context_node_id"]]
-                        relevant = None
-                        if changed is not None:
-                            relevant = _overlaps(context.get("scope", []), changed) or _overlaps(
-                                result["knowledge_attachment_touches"].get(edge["task_id"], []),
-                                changed,
-                            )
+                        relevant = _path_relevance(context, changed)
+                        if not context.get("scope", []):
+                            score["path_unscoped_pairs"] += 1
+                        elif relevant is not None:
                             score["path_relevant_pairs" if relevant else "path_miss_pairs"] += 1
                         status = _task_status(result, edge["task_id"])
                         if status not in TASK_STATUSES:
