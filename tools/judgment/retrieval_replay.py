@@ -22,6 +22,19 @@ from retrieval_rules import run_ruleset
 
 
 RULESET_ORDER = ("current", "hv10", "hv11", "hv10+hv11", "hv12")
+COLUMN_ENTRY_MODES = {
+    "current": "compose",
+    "hv10": "plan-ready",
+    "hv11": "plan-ready",
+    "hv10+hv11": "plan-ready",
+    "hv12": "plan-ready",
+    "production_attached": "observed",
+}
+ENTRY_COMPARISON_METRICS = (
+    "tasks_with_touches",
+    "tasks_with_knowledge",
+    "knowledge_pairs",
+)
 DECISION_NAMESPACE = uuid.NAMESPACE_URL
 GRAMMAR_TASK = re.compile(
     r"^\s*[-*]\s+\[[ xX]\]\s+(?:\[[^\]]+\]\s+)*T\d+:", re.MULTILINE
@@ -48,6 +61,33 @@ def evaluate_fixture(
     """Evaluate one materialized project fixture in stable rule-set order."""
 
     return {ruleset: run_ruleset(ruleset, root) for ruleset in rulesets}
+
+
+def evaluate_replay_session(
+    repo: Path,
+    session: Path,
+    inventory: list[str],
+) -> tuple[dict[str, dict], dict[str, tuple[dict, dict]]]:
+    """Evaluate replay columns at their explicit production entry modes."""
+
+    with materialized_session(
+        repo, session, inventory, entry=COLUMN_ENTRY_MODES["current"]
+    ) as compose_root:
+        compose_matrix = evaluate_fixture(compose_root)
+    with materialized_session(
+        repo, session, inventory, entry=COLUMN_ENTRY_MODES["hv10"]
+    ) as plan_ready_root:
+        plan_ready_matrix = evaluate_fixture(plan_ready_root, RULESET_ORDER[1:])
+
+    matrix = {"current": compose_matrix["current"]}
+    comparisons = {}
+    for ruleset in RULESET_ORDER[1:]:
+        matrix[ruleset] = plan_ready_matrix[ruleset]
+        comparisons[ruleset] = (
+            compose_matrix[ruleset],
+            plan_ready_matrix[ruleset],
+        )
+    return matrix, comparisons
 
 
 def resolve_ledger_path(override: Optional[Path] = None) -> Path:
@@ -242,7 +282,11 @@ def materialized_session(
     repo: Path,
     session: Path,
     inventory: list[str],
+    *,
+    entry: str,
 ) -> Iterator[Path]:
+    if entry not in {"compose", "plan-ready"}:
+        raise ValueError("replay entry must be compose or plan-ready")
     with tempfile.TemporaryDirectory(prefix="hive-retrieval-") as temporary:
         root = Path(temporary) / "project"
         ai_docs = root / ".ai-docs"
@@ -278,6 +322,9 @@ def materialized_session(
             (ai_docs / filename).write_text(content, encoding="utf-8", newline="\n")
         (root / "files.txt").write_text(
             "".join(f"{path}\n" for path in inventory), encoding="utf-8", newline="\n"
+        )
+        (root / "entry.txt").write_text(
+            f"{entry}\n", encoding="utf-8", newline="\n"
         )
         artifact_path = session / "artifacts" / "codegraph.json"
         if artifact_path.is_file():
@@ -452,6 +499,46 @@ def _empty_scorecard() -> dict:
     }
 
 
+def _empty_entry_comparison() -> dict:
+    return {
+        ruleset: {
+            f"{entry}_{metric}": 0
+            for entry in ("compose", "plan_ready")
+            for metric in ENTRY_COMPARISON_METRICS
+        }
+        for ruleset in RULESET_ORDER[1:]
+    }
+
+
+def _update_entry_comparison(
+    comparison: dict,
+    ruleset: str,
+    compose_result: dict,
+    plan_ready_result: dict,
+) -> None:
+    for entry, result in (
+        ("compose", compose_result),
+        ("plan_ready", plan_ready_result),
+    ):
+        attached = {edge["task_id"] for edge in result["knowledge_edges"]}
+        comparison[ruleset][f"{entry}_tasks_with_touches"] += len(
+            result["knowledge_attachment_touches"]
+        )
+        comparison[ruleset][f"{entry}_tasks_with_knowledge"] += len(attached)
+        comparison[ruleset][f"{entry}_knowledge_pairs"] += len(
+            result["knowledge_edges"]
+        )
+
+
+def _finalize_entry_comparison(comparison: dict) -> dict:
+    for values in comparison.values():
+        values["different"] = any(
+            values[f"compose_{metric}"] != values[f"plan_ready_{metric}"]
+            for metric in ENTRY_COMPARISON_METRICS
+        )
+    return comparison
+
+
 def _finalize_scorecard(scorecard: dict) -> dict:
     tasks = scorecard["tasks"]
     path_total = scorecard["path_relevant_pairs"] + scorecard["path_miss_pairs"]
@@ -485,7 +572,9 @@ def run_replay(
     existing_decisions, existing_outcomes = _existing_ledger_keys(ledger_path)
     report = {
         "rulesets": list(RULESET_ORDER),
+        "entry_modes": COLUMN_ENTRY_MODES,
         "production_attached": 0,
+        "entry_mode_comparison": _empty_entry_comparison(),
         "repositories": {},
         "named_sessions": [],
         "diff_unavailable": [],
@@ -496,6 +585,7 @@ def run_replay(
         repo_name = repo.name
         inventory, inventory_error = tracked_files(repo)
         scorecards = {ruleset: _empty_scorecard() for ruleset in RULESET_ORDER}
+        entry_comparison = _empty_entry_comparison()
         repo_report = {
             "sessions_seen": 0,
             "parseable_sessions": 0,
@@ -521,69 +611,99 @@ def run_replay(
                 report["diff_unavailable"].append(
                     {"repo": repo_name, "session_id": session.name, "reason": diff_reason}
                 )
-            with materialized_session(repo, session, inventory) as materialized:
-                matrix = evaluate_fixture(materialized)
-                plan, _diagnostics = parse_plan_markdown_with_diagnostics(content)
-                task_ids = [task.id for task in plan.tasks if task.explicit_id]
-                for ruleset, result in matrix.items():
-                    score = scorecards[ruleset]
-                    score["sessions"] += 1
-                    score["tasks"] += len(task_ids)
-                    touched = set(result["knowledge_attachment_touches"])
-                    attached = {edge["task_id"] for edge in result["knowledge_edges"]}
-                    score["tasks_with_touches"] += len(touched)
-                    score["zero_knowledge_tasks"] += len(set(task_ids) - attached)
-                    score["tasks_with_knowledge"] += len(attached)
-                    score["knowledge_pairs"] += len(result["knowledge_edges"])
-                    contexts = {node["id"]: node for node in result["context_nodes"]}
-                    for omission in result["omissions"]:
-                        if "stale" in omission.get("detail", ""):
-                            stale_rows.append(
-                                {
-                                    "repo": repo_name,
-                                    "session_id": session.name,
-                                    "ruleset": ruleset,
-                                    "count": omission["count"],
-                                    "detail": omission["detail"],
-                                }
-                            )
-                    unattached = [
-                        _note_reason(result, context)
-                        for context in result["context_nodes"]
-                        if context["id"] not in {edge["context_node_id"] for edge in result["knowledge_edges"]}
-                    ]
-                    unexpected = sorted(set(unattached) - set(NOTE_REASONS))
-                    if unexpected:
-                        raise AssertionError(f"unexpected unattached reasons: {unexpected}")
-                    score["unattached_reasons"] = dict(
-                        sorted((Counter(score.get("unattached_reasons", {})) + Counter(unattached)).items())
-                    )
-                    for edge in result["knowledge_edges"]:
-                        context = contexts[edge["context_node_id"]]
-                        relevant = _path_relevance(context, changed)
-                        if not context.get("scope", []):
-                            score["path_unscoped_pairs"] += 1
-                        elif relevant is not None:
-                            score["path_relevant_pairs" if relevant else "path_miss_pairs"] += 1
-                        status = _task_status(result, edge["task_id"])
-                        if status not in TASK_STATUSES:
-                            raise AssertionError(f"unexpected task status {status}")
-                        _record_pair(
-                            ledger_path=ledger_path,
-                            existing_decisions=existing_decisions,
-                            existing_outcomes=existing_outcomes,
-                            repo_name=repo_name,
-                            session_id=session.name,
-                            ruleset=ruleset,
-                            edge=edge,
-                            task_status=status,
-                            path_relevant=relevant,
+            matrix, comparisons = evaluate_replay_session(
+                repo, session, inventory
+            )
+            for ruleset, (compose_result, plan_ready_result) in comparisons.items():
+                _update_entry_comparison(
+                    entry_comparison,
+                    ruleset,
+                    compose_result,
+                    plan_ready_result,
+                )
+                _update_entry_comparison(
+                    report["entry_mode_comparison"],
+                    ruleset,
+                    compose_result,
+                    plan_ready_result,
+                )
+            plan, _diagnostics = parse_plan_markdown_with_diagnostics(content)
+            task_ids = [task.id for task in plan.tasks if task.explicit_id]
+            for ruleset, result in matrix.items():
+                score = scorecards[ruleset]
+                score["sessions"] += 1
+                score["tasks"] += len(task_ids)
+                touched = set(result["knowledge_attachment_touches"])
+                attached = {edge["task_id"] for edge in result["knowledge_edges"]}
+                score["tasks_with_touches"] += len(touched)
+                score["zero_knowledge_tasks"] += len(set(task_ids) - attached)
+                score["tasks_with_knowledge"] += len(attached)
+                score["knowledge_pairs"] += len(result["knowledge_edges"])
+                contexts = {node["id"]: node for node in result["context_nodes"]}
+                for omission in result["omissions"]:
+                    if "stale" in omission.get("detail", ""):
+                        stale_rows.append(
+                            {
+                                "repo": repo_name,
+                                "session_id": session.name,
+                                "ruleset": ruleset,
+                                "count": omission["count"],
+                                "detail": omission["detail"],
+                            }
                         )
+                unattached = [
+                    _note_reason(result, context)
+                    for context in result["context_nodes"]
+                    if context["id"] not in {
+                        edge["context_node_id"]
+                        for edge in result["knowledge_edges"]
+                    }
+                ]
+                unexpected = sorted(set(unattached) - set(NOTE_REASONS))
+                if unexpected:
+                    raise AssertionError(f"unexpected unattached reasons: {unexpected}")
+                score["unattached_reasons"] = dict(
+                    sorted(
+                        (
+                            Counter(score.get("unattached_reasons", {}))
+                            + Counter(unattached)
+                        ).items()
+                    )
+                )
+                for edge in result["knowledge_edges"]:
+                    context = contexts[edge["context_node_id"]]
+                    relevant = _path_relevance(context, changed)
+                    if not context.get("scope", []):
+                        score["path_unscoped_pairs"] += 1
+                    elif relevant is not None:
+                        score[
+                            "path_relevant_pairs" if relevant else "path_miss_pairs"
+                        ] += 1
+                    status = _task_status(result, edge["task_id"])
+                    if status not in TASK_STATUSES:
+                        raise AssertionError(f"unexpected task status {status}")
+                    _record_pair(
+                        ledger_path=ledger_path,
+                        existing_decisions=existing_decisions,
+                        existing_outcomes=existing_outcomes,
+                        repo_name=repo_name,
+                        session_id=session.name,
+                        ruleset=ruleset,
+                        edge=edge,
+                        task_status=status,
+                        path_relevant=relevant,
+                    )
         repo_report["scorecards"] = {
             ruleset: _finalize_scorecard(scorecards[ruleset]) for ruleset in RULESET_ORDER
         }
+        repo_report["entry_mode_comparison"] = _finalize_entry_comparison(
+            entry_comparison
+        )
         report["repositories"][repo_name] = repo_report
 
+    report["entry_mode_comparison"] = _finalize_entry_comparison(
+        report["entry_mode_comparison"]
+    )
     stale_report.parent.mkdir(parents=True, exist_ok=True)
     stale_report.write_text(
         json.dumps({"stale_scope_omissions": stale_rows}, indent=2) + "\n",

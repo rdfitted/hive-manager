@@ -99,6 +99,54 @@ def _make_fake_repo(base: Path) -> tuple[Path, Path]:
 
 
 class ReplayEndToEndTests(unittest.TestCase):
+    def test_replay_columns_use_explicit_entry_modes(self):
+        expected_modes = {
+            "current": "compose",
+            "hv10": "plan-ready",
+            "hv11": "plan-ready",
+            "hv10+hv11": "plan-ready",
+            "hv12": "plan-ready",
+            "production_attached": "observed",
+        }
+        self.assertEqual(expected_modes, retrieval_replay.COLUMN_ENTRY_MODES)
+
+        observed = []
+
+        def record_entry(ruleset: str, root: Path) -> dict:
+            entry = (root / "entry.txt").read_text(encoding="utf-8").strip()
+            observed.append((ruleset, entry))
+            return {"ruleset": ruleset, "entry": entry}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repo, sessions = _make_fake_repo(Path(temporary))
+            session = sessions / SESSION_IDS["parseable"]
+            with patch.object(
+                retrieval_replay, "run_ruleset", side_effect=record_entry
+            ):
+                matrix, comparisons = retrieval_replay.evaluate_replay_session(
+                    repo, session, ["src/auth.rs"]
+                )
+
+        self.assertEqual(
+            [
+                ("current", "compose"),
+                ("hv10", "compose"),
+                ("hv11", "compose"),
+                ("hv10+hv11", "compose"),
+                ("hv12", "compose"),
+                ("hv10", "plan-ready"),
+                ("hv11", "plan-ready"),
+                ("hv10+hv11", "plan-ready"),
+                ("hv12", "plan-ready"),
+            ],
+            observed,
+        )
+        self.assertEqual("compose", matrix["current"]["entry"])
+        for ruleset in retrieval_replay.RULESET_ORDER[1:]:
+            self.assertEqual("plan-ready", matrix[ruleset]["entry"])
+            self.assertEqual("compose", comparisons[ruleset][0]["entry"])
+            self.assertEqual("plan-ready", comparisons[ruleset][1]["entry"])
+
     def test_synthetic_cli_is_read_only_complete_and_idempotent(self):
         real_paths = _real_ledger_paths()
         real_before = {path: _ledger_state(path) for path in real_paths}
@@ -143,6 +191,17 @@ class ReplayEndToEndTests(unittest.TestCase):
             report = json.loads(first_stdout.getvalue())
             self.assertEqual(report, json.loads(second_stdout.getvalue()))
             self.assertEqual(0, report["production_attached"])
+            self.assertEqual(
+                {
+                    "current": "compose",
+                    "hv10": "plan-ready",
+                    "hv11": "plan-ready",
+                    "hv10+hv11": "plan-ready",
+                    "hv12": "plan-ready",
+                    "production_attached": "observed",
+                },
+                report["entry_modes"],
+            )
             self.assertEqual("upper bound (current knowledge copy)", report["path_miss_label"])
             repository = report["repositories"][repo.name]
             self.assertEqual(3, repository["sessions_seen"])
@@ -163,6 +222,11 @@ class ReplayEndToEndTests(unittest.TestCase):
                 self.assertIn("attachable_share", score)
                 self.assertIn("path_unscoped_pairs", score)
                 self.assertEqual("upper bound (current knowledge copy)", score["path_miss_label"])
+            for ruleset in retrieval_replay.RULESET_ORDER[1:]:
+                comparison = report["entry_mode_comparison"][ruleset]
+                self.assertIn("compose_knowledge_pairs", comparison)
+                self.assertIn("plan_ready_knowledge_pairs", comparison)
+                self.assertIsInstance(comparison["different"], bool)
             self.assertGreater(
                 repository["scorecards"]["hv12"]["path_unscoped_pairs"], 0
             )
