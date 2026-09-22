@@ -5245,17 +5245,20 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
 
 When ALL {completion_scope} have completed, you MUST signal the existing Evaluator:
 
-1. You MUST create or update the contract FIRST. For smoke tests, use this contract:
+1. You MUST create or update the contract FIRST. Use `# Sprint Contract: <milestone>`, `## Acceptance Criteria` with typed kind brackets such as `[FUNC]`, `[DESIGN 1-10 floor 5]`, or `[PERF lighthouse >= 80]`, and `## Pass Threshold`. For smoke tests, use this contract:
    ```bash
    mkdir -p "{contracts_dir}"
    cat > "{contract_path}" << 'CONTRACT_EOF'
-   # Smoke Test Contract
+   # Sprint Contract: Smoke Test
 
-   ## Criteria
-   1. All workers spawned and ran successfully
-   2. Heartbeat API exercised by all workers
-   3. Conversation API exercised (queen inbox + shared channel)
-   4. All task files transitioned to COMPLETED status
+   ## Acceptance Criteria
+   1. [FUNC] All workers spawned and ran successfully
+   2. [FUNC] Heartbeat API exercised by all workers
+   3. [FUNC] Conversation API exercised (queen inbox + shared channel)
+   4. [FUNC] All task files transitioned to COMPLETED status
+
+   ## Pass Threshold
+   - All pass/fail criteria must PASS
    CONTRACT_EOF
    ```
 
@@ -16262,7 +16265,7 @@ mod tests {
         SessionError, SessionState, SessionType,
     };
     use super::{heartbeat_cadence_label, CliBehavior, CliRegistry};
-    use crate::coordination::StateManager;
+    use crate::coordination::{parse_sprint_contract, CriterionKind, StateManager};
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
     use crate::orchestrator::org_graph::composition::SpawnContext;
     use crate::orchestrator::work_graph::schema::TaskTier;
@@ -16281,6 +16284,33 @@ mod tests {
     use tempfile::TempDir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn qa_milestone_handoff_smoke_contract_parses_as_typed() {
+        let handoff = SessionController::build_qa_milestone_handoff(
+            "typed-contract-test",
+            Path::new("/tmp/typed-contract-test"),
+            "workers",
+        );
+        let contract_start = handoff
+            .rfind("# Sprint Contract:")
+            .expect("rendered smoke contract title");
+        let contract_end = handoff[contract_start..]
+            .find("\n   CONTRACT_EOF")
+            .map(|offset| contract_start + offset)
+            .expect("rendered smoke contract heredoc terminator");
+        let contract_markdown = &handoff[contract_start..contract_end];
+
+        let contract = parse_sprint_contract(contract_markdown)
+            .expect("rendered smoke contract must use the typed Sprint Contract format");
+
+        assert_eq!(contract.milestone_name, "Smoke Test");
+        assert_eq!(contract.acceptance_criteria.len(), 4);
+        assert!(contract
+            .acceptance_criteria
+            .iter()
+            .all(|criterion| !matches!(criterion.kind, CriterionKind::Unspecified)));
+    }
 
     #[test]
     fn legacy_hive_launch_config_omits_work_graph_selection_exactly() {
