@@ -302,6 +302,7 @@ pub struct PtySession {
     /// isolation (#207) actually reached the spawn rather than just the helper that
     /// computes it.
     args: Vec<String>,
+    env: Vec<(String, String)>,
     output_ring: Arc<Mutex<OutputRing>>,
 }
 
@@ -323,6 +324,7 @@ impl PtySession {
         role: AgentRole,
         _command: &str,
         submit_policy: PtySubmitPolicy,
+        identity_env: &[(String, String)],
         args: &[&str],
         _cwd: Option<&str>,
         _cols: u16,
@@ -345,6 +347,7 @@ impl PtySession {
                 Vec::new(),
             ))))),
             args: args.iter().map(|arg| arg.to_string()).collect(),
+            env: identity_env.to_vec(),
             output_ring,
         };
 
@@ -366,6 +369,10 @@ impl PtySession {
 
     pub fn args(&self) -> &[String] {
         &self.args
+    }
+
+    pub fn env(&self) -> &[(String, String)] {
+        &self.env
     }
 
     pub fn record_output(&self, bytes: &[u8]) -> u64 {
