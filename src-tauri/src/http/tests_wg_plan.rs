@@ -185,7 +185,11 @@ fn production_continue_builds_plan_graph_before_every_running_dispatch() {
                 .expect("production continue persisted the plan graph");
             assert_eq!(graph.nodes.len(), 5, "{session_id} node count");
             assert_eq!(graph.edges.len(), 5, "{session_id} edge count");
-            assert!(graph.omissions.is_empty(), "{session_id} omissions");
+            assert_eq!(graph.omissions.len(), 1, "{session_id} omissions");
+            assert_eq!(
+                graph.omissions[0].reason,
+                WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+            );
         }
 
         assert_session_state(&controller, session_id, SessionState::PlanReady);
@@ -204,6 +208,7 @@ fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
             "continue-malformed",
             Some(malformed_plan),
             1,
+            2,
             WorkGraphOmissionReason::ResolutionIncomplete,
             "unterminated",
         ),
@@ -211,12 +216,21 @@ fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
             "continue-missing",
             None,
             0,
+            1,
             WorkGraphOmissionReason::SourceUnreadable,
             "plan.md",
         ),
     ];
 
-    for (session_id, plan, expected_nodes, expected_reason, expected_example) in cases {
+    for (
+        session_id,
+        plan,
+        expected_nodes,
+        expected_omissions,
+        expected_reason,
+        expected_example,
+    ) in cases
+    {
         let (_temp, controller, storage) = controller_with_plan(session_id, plan);
 
         let error = controller
@@ -234,9 +248,13 @@ fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
             .expect("production continue replaced the creation-time seed");
         assert_eq!(graph.nodes.len(), expected_nodes);
         assert!(graph.edges.is_empty());
-        assert_eq!(graph.omissions.len(), 1);
-        assert_eq!(graph.omissions[0].reason, expected_reason);
-        assert!(graph.omissions[0].examples[0].contains(expected_example));
+        assert_eq!(graph.omissions.len(), expected_omissions);
+        let expected = graph
+            .omissions
+            .iter()
+            .find(|omission| omission.reason == expected_reason)
+            .expect("expected source omission");
+        assert!(expected.examples[0].contains(expected_example));
     }
 }
 
@@ -712,7 +730,11 @@ Keep the existing parser behavior.
         .unwrap();
     assert_eq!(graph.nodes.len(), 2);
     assert!(graph.edges.is_empty());
-    assert!(graph.omissions.is_empty());
+    assert_eq!(graph.omissions.len(), 1);
+    assert_eq!(
+        graph.omissions[0].reason,
+        WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+    );
     assert!(
         StateManager::new(storage.session_dir("legacy-plan"))
             .read_graph_composition_state()
@@ -743,12 +765,16 @@ fn malformed_graph_metadata_preserves_task_and_degrades_to_edgeless_graph() {
     assert_eq!(graph.nodes.len(), 1);
     assert_eq!(graph.nodes[0].id, "T1");
     assert!(graph.edges.is_empty());
-    assert_eq!(graph.omissions.len(), 1);
-    assert_eq!(
-        graph.omissions[0].reason,
-        WorkGraphOmissionReason::ResolutionIncomplete
-    );
-    assert!(graph.omissions[0].examples[0].contains("unterminated"));
+    assert_eq!(graph.omissions.len(), 2);
+    let parser_omission = graph
+        .omissions
+        .iter()
+        .find(|omission| omission.reason == WorkGraphOmissionReason::ResolutionIncomplete)
+        .expect("parser omission");
+    assert!(parser_omission.examples[0].contains("unterminated"));
+    assert!(graph.omissions.iter().any(|omission| {
+        omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+    }));
 }
 
 #[test]
@@ -792,7 +818,20 @@ fn explicit_graph_preserves_resolved_tasks_and_reports_every_lost_reference() {
     assert!(graph
         .omissions
         .iter()
+        .filter(|omission| {
+            omission.reason != WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+        })
         .all(|omission| omission.reason == WorkGraphOmissionReason::ResolutionIncomplete));
+    assert_eq!(
+        graph
+            .omissions
+            .iter()
+            .filter(|omission| {
+                omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+            })
+            .count(),
+        1
+    );
     let examples = graph
         .omissions
         .iter()
@@ -876,7 +915,11 @@ fn all_legacy_checkbox_tasks_are_preserved_without_omissions() {
             .collect::<Vec<_>>(),
         vec!["task-1", "task-2"]
     );
-    assert!(graph.omissions.is_empty());
+    assert_eq!(graph.omissions.len(), 1);
+    assert_eq!(
+        graph.omissions[0].reason,
+        WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+    );
 }
 
 #[test]

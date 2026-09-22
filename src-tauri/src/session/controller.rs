@@ -13519,7 +13519,7 @@ The backend composed and persisted the following authoritative skeleton before l
             TaskGraph, WorkGraphOmission, WorkGraphOmissionReason,
         };
 
-        let (project_path, ceiling_percent) = {
+        let (project_path, inventory_root, ceiling_percent) = {
             let sessions = self.sessions.read();
             let session = sessions
                 .get(session_id)
@@ -13530,8 +13530,18 @@ The backend composed and persisted the following authoritative skeleton before l
                     session.state
                 ));
             }
+            let inventory_root = if session.no_git {
+                session.project_path.clone()
+            } else {
+                session
+                    .worktree_path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| session.project_path.clone())
+            };
             (
                 session.project_path.clone(),
+                inventory_root,
                 session
                     .execution_policy
                     .tier_policy
@@ -13689,6 +13699,50 @@ The backend composed and persisted the following authoritative skeleton before l
             ) => {
                 return Err(error.to_string());
             }
+        }
+
+        let institutional_wiki_root = self.configured_institutional_wiki_root();
+        let context_report = if graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == crate::orchestrator::work_graph::NodeKind::Task)
+        {
+            let artifact_path = Self::planning_codegraph_artifact_path(&project_path, session_id);
+            match crate::orchestrator::work_graph::codegraph::ArtifactCodegraph::load(
+                &project_path,
+                &artifact_path,
+            ) {
+                Ok(resolver) => crate::orchestrator::work_graph::runtime::derive_plan_ready_knowledge_attachments(
+                    &mut graph,
+                    &project_path,
+                    institutional_wiki_root.as_deref(),
+                    &inventory_root,
+                    &resolver,
+                    None,
+                ),
+                Err(_) => {
+                    tracing::warn!(
+                        session_id,
+                        artifact_path = %artifact_path.display(),
+                        "Planning codegraph artifact could not be loaded; knowledge attachment is degrading to an unavailable resolver"
+                    );
+                    crate::orchestrator::work_graph::runtime::derive_plan_ready_knowledge_attachments(
+                        &mut graph,
+                        &project_path,
+                        institutional_wiki_root.as_deref(),
+                        &inventory_root,
+                        &crate::orchestrator::work_graph::context::NoTouchesResolver,
+                        None,
+                    )
+                }
+            }
+        } else {
+            None
+        };
+        if let (Some(composition), Some(context)) =
+            (reconciled_composition.as_mut(), context_report)
+        {
+            composition.context = context;
         }
 
         if self.storage.is_none() {
@@ -16486,6 +16540,134 @@ mod tests {
                 .graph,
             authoritative,
             "both persisted graph representations must contain the same deduped omissions"
+        );
+    }
+
+    #[test]
+    fn mark_plan_ready_attaches_declared_and_harvested_knowledge_without_codegraph_side_effects() {
+        const SESSION_ID: &str = "plan-ready-knowledge";
+        const TIER_SESSION_ID: &str = "plan-ready-tier-before-knowledge";
+        let temp = tempfile::tempdir().expect("temporary plan-ready knowledge fixture");
+        let project_path = temp.path().join("project");
+        let ai_docs = project_path.join(".ai-docs");
+        std::fs::create_dir_all(&ai_docs).unwrap();
+        std::fs::write(
+            ai_docs.join("project-dna.md"),
+            "## Declared rule\n**Scope**: `src/declared.rs`\nKeep declared work stable.\n\n## Harvested rule\n**Scope**: `src/harvested.rs`\nKeep harvested work stable.\n",
+        )
+        .unwrap();
+        std::fs::write(ai_docs.join("bug-patterns.md"), "").unwrap();
+        std::fs::write(ai_docs.join("learnings.jsonl"), "").unwrap();
+        std::fs::write(
+            ai_docs.join("curation-state.json"),
+            "{\"last_curated_line\":0}",
+        )
+        .unwrap();
+
+        let managed_worktree = temp.path().join("managed-worktree");
+        std::fs::create_dir_all(managed_worktree.join("src")).unwrap();
+        std::fs::write(managed_worktree.join("src/declared.rs"), "").unwrap();
+        std::fs::write(managed_worktree.join("src/harvested.rs"), "").unwrap();
+        for args in [
+            vec!["init"],
+            vec!["add", "src/declared.rs", "src/harvested.rs"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&managed_worktree)
+                .output()
+                .expect("git must be available to materialize the managed worktree");
+            assert!(
+                output.status.success(),
+                "git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let project_session_dir = project_path.join(".hive-manager").join(SESSION_ID);
+        std::fs::create_dir_all(&project_session_dir).unwrap();
+        std::fs::write(
+            project_session_dir.join("plan.md"),
+            "# Knowledge plan\n\n## Tasks\n- [ ] T1: Attach task knowledge (tier: medium) (inputs: file:src/declared.rs, src/harvested.rs:10-20) (outputs: result) (acceptance: knowledge attached) -> P1\n- [ ] T2: Preserve undeclared task (tier: medium) (inputs: issue) (outputs: result) (acceptance: topology unchanged) -> P2\n",
+        )
+        .unwrap();
+
+        let storage = Arc::new(
+            SessionStorage::new_with_base(temp.path().join("storage"))
+                .expect("isolated session storage"),
+        );
+        storage
+            .create_session_dir(SESSION_ID)
+            .expect("session state directory");
+        storage
+            .create_session_dir(TIER_SESSION_ID)
+            .expect("tier session state directory");
+        let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+        controller.set_storage(Arc::clone(&storage));
+        let mut session =
+            test_completion_session(SESSION_ID, SessionState::Planning, Utc::now(), false);
+        session.session_type = SessionType::Hive { worker_count: 0 };
+        session.project_path = project_path.clone();
+        session.worktree_path = Some(managed_worktree.to_string_lossy().into_owned());
+        controller.insert_test_session(session);
+
+        let initial = controller
+            .prepare_initial_work_graph(
+                &project_path,
+                SESSION_ID,
+                Some("feature-build"),
+                &BTreeMap::from([("component".to_string(), "knowledge".to_string())]),
+            )
+            .unwrap()
+            .expect("archetype composition sidecar");
+        controller
+            .mark_plan_ready(SESSION_ID)
+            .expect("knowledge-only plan-ready derivation");
+
+        let state_manager = StateManager::new(storage.session_dir(SESSION_ID));
+        let authoritative = state_manager.read_work_graph().unwrap().unwrap();
+        let composition = state_manager
+            .read_graph_composition_state()
+            .unwrap()
+            .unwrap();
+        assert_eq!(composition.graph, authoritative);
+        assert_eq!(composition.codegraph, initial.codegraph);
+        assert!(composition.context.knowledge_available);
+        assert!(authoritative
+            .edges
+            .iter()
+            .all(|edge| edge.kind != crate::orchestrator::work_graph::EdgeKind::Touches));
+        assert!(authoritative.nodes.iter().all(|node| {
+            node.expansion.as_ref().map(|expansion| expansion.template.as_str())
+                != Some(crate::orchestrator::work_graph::codegraph::CODEGRAPH_MODULE_TEMPLATE)
+        }));
+
+        let tier_session_dir = project_path
+            .join(".hive-manager")
+            .join(TIER_SESSION_ID);
+        std::fs::create_dir_all(&tier_session_dir).unwrap();
+        std::fs::write(
+            tier_session_dir.join("plan.md"),
+            "# Tier ceiling plan\n\n## Tasks\n- [ ] T1: High-tier task (tier: high) (inputs: file:src/declared.rs) -> P1\n- [ ] T2: Medium-tier task (tier: medium) (inputs: file:src/harvested.rs) -> P2\n",
+        )
+        .unwrap();
+        let mut tier_session =
+            test_completion_session(TIER_SESSION_ID, SessionState::Planning, Utc::now(), false);
+        tier_session.session_type = SessionType::Hive { worker_count: 0 };
+        tier_session.project_path = project_path;
+        tier_session.worktree_path = Some(managed_worktree.to_string_lossy().into_owned());
+        controller.insert_test_session(tier_session);
+
+        let error = controller
+            .mark_plan_ready(TIER_SESSION_ID)
+            .expect_err("planner tasks must exceed the tier ceiling before knowledge is derived");
+        assert!(
+            error.contains("1 of 2 planner-rated nodes exceed medium"),
+            "tier ceiling must be computed from planner tasks before readable knowledge adds context nodes: {error}"
+        );
+        assert_eq!(
+            controller.get_session(TIER_SESSION_ID).unwrap().state,
+            SessionState::Planning
         );
     }
 

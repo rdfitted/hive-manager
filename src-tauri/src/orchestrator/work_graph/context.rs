@@ -189,10 +189,21 @@ pub(crate) fn build_knowledge_touch_coverage<R: TouchesResolver>(
     let candidates = artifact_candidates.as_ref().or(fallback_inventory);
     let fallback = artifact_candidates.is_none() && fallback_inventory.is_some();
     let mut resolution_omissions = Vec::new();
-    if let Some(candidates) = candidates {
-        for node in graph.nodes.iter().filter(|node| node.kind == NodeKind::Task) {
+    for node in graph.nodes.iter().filter(|node| node.kind == NodeKind::Task) {
+        let declared_intents = declared_contract_path_intents(node);
+        if config.resolution_omissions && declared_intents.is_empty() {
+            let mut omission = WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                1,
+                vec![node.id.clone()],
+            );
+            omission.detail = "explicit task touch intent was not declared".to_string();
+            resolution_omissions.push(omission);
+        }
+
+        if let Some(candidates) = candidates {
             if config.per_intent {
-                for intent in declared_contract_path_intents(node) {
+                for intent in declared_intents {
                     attach_knowledge_intent(
                         &node.id,
                         &intent,

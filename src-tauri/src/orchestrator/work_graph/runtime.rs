@@ -166,6 +166,34 @@ pub(crate) fn derive_knowledge_attachments<R: TouchesResolver>(
     )
 }
 
+/// Attach project knowledge to a reconciled planner graph without deriving
+/// scheduling or ownership coverage. Empty plans deliberately preserve their
+/// source-only omissions and skip all knowledge I/O.
+pub(crate) fn derive_plan_ready_knowledge_attachments<R: TouchesResolver>(
+    graph: &mut TaskGraph,
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    inventory_root: &Path,
+    resolver: &R,
+    file_inventory: Option<&BTreeSet<String>>,
+) -> Option<ContextDerivationReport> {
+    graph
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Task)
+        .then(|| {
+            derive_knowledge_attachments(
+                graph,
+                project_path,
+                institutional_wiki_root,
+                inventory_root,
+                resolver,
+                &TouchCoverageReport::unavailable(),
+                file_inventory,
+            )
+        })
+}
+
 fn derive_knowledge_attachments_with_config<R: TouchesResolver>(
     graph: &mut TaskGraph,
     project_path: &Path,
