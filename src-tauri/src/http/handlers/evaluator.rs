@@ -3,13 +3,26 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::{fmt, sync::Arc};
+use serde_json::{json, Map, Value};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt, fs, io,
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+};
+use tempfile::NamedTempFile;
 
-use crate::coordination::{CoordinationMessage, StateManager};
+use crate::coordination::{
+    parse_sprint_contract, CompareOp, ContractCriterion, CoordinationMessage, CriterionKind,
+    SprintContract, StateManager,
+};
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
+use crate::judgment::ledger::{
+    DecisionInput, Judge, JudgmentLedger, JudgmentMode, OutcomeInput, OutcomeSource,
+};
 use crate::orchestrator::work_graph::completion_ledger::{
     NodeCompletionFact, NodeCompletionProvenance,
 };
@@ -330,6 +343,11 @@ pub struct PostVerdictRequest {
     pub commit_sha: Option<String>,
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Optional typed-contract results. Absence preserves the legacy verdict
+    /// path exactly; when present with a parsed contract, all criterion numbers
+    /// must be known and covered exactly once.
+    #[serde(default)]
+    pub criteria: Option<Vec<PostCriterionResult>>,
     /// When the Evaluator cannot reach a PASS/FAIL it submits `verdict: "BLOCKED"`
     /// with a machine-readable category so the operator knows whether the blocker is
     /// an absent UI/host (criteria can't be exercised) or a transport failure
@@ -340,6 +358,58 @@ pub struct PostVerdictRequest {
     /// Free-text detail accompanying a BLOCKED verdict (which criterion, which worker).
     #[serde(default)]
     pub blocked_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostCriterionResult {
+    pub number: u16,
+    pub result: CriterionSubmissionResult,
+    pub evidence: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CriterionSubmissionResult {
+    Pass,
+    Fail,
+    Scored(f64),
+    Measured(f64),
+    Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct QaCriterionVerdictRecord {
+    pub number: u16,
+    pub label: String,
+    pub kind: CriterionKind,
+    pub result: CriterionSubmissionResult,
+    pub passed: bool,
+    pub evidence: String,
+    pub evidence_refs: Vec<String>,
+    pub decision_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct QaVerdictRecord {
+    pub schema_version: u8,
+    pub session_id: String,
+    pub milestone_id: String,
+    pub iteration: u8,
+    pub verdict: String,
+    pub passed: bool,
+    pub summary: String,
+    pub timestamp: String,
+    pub contract_path: Option<String>,
+    pub contract_typed: bool,
+    pub omission: Option<String>,
+    pub criteria: Vec<QaCriterionVerdictRecord>,
+}
+
+struct ContractContext {
+    path: Option<String>,
+    contract: Option<SprintContract>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -400,10 +470,10 @@ fn require_qa_in_progress(
     )))
 }
 
-/// Operator overrides (force-pass / force-fail) are valid whenever QA is unresolved:
-/// in progress, stalled as inconclusive, or mid-Prince-remediation. This lets the
-/// operator unblock a session that QA left inconclusive or that the Prince couldn't
-/// resolve.
+/// Operator overrides (force-pass / force-fail) are valid throughout the QA lifecycle:
+/// in progress, stalled as inconclusive, mid-Prince-remediation, or after a recorded
+/// pass/failure. The resolved-state cases let an operator supersede a criterion verdict
+/// and produce joined `operator-override` outcomes rather than losing that correction.
 fn require_qa_overridable(
     controller: &SessionController,
     session_id: &str,
@@ -417,6 +487,8 @@ fn require_qa_overridable(
         session.state,
         SessionState::QaInProgress { .. }
             | SessionState::QaInconclusive
+            | SessionState::QaPassed
+            | SessionState::QaFailed { .. }
             | SessionState::PrinceRemediation
     ) {
         return Ok(());
@@ -440,7 +512,7 @@ fn require_qa_overridable(
     }
 
     Err(ApiError::bad_request(format!(
-        "Cannot {}: session is in {:?} state, expected QaInProgress, QaInconclusive, PrinceRemediation, or an evaluator-backed Running session",
+        "Cannot {}: session is in {:?} state, expected a QA state or an evaluator-backed Running session",
         action, session.state
     )))
 }
@@ -515,6 +587,406 @@ fn build_verdict_content(
         content.insert("commit_sha".to_string(), json!(commit_sha));
     }
     Value::Object(content).to_string()
+}
+
+const QA_VERDICT_RECORD_SCHEMA_VERSION: u8 = 1;
+const BLOCKED_CRITERION_OMISSION: &str = "blocked-verdict-no-criterion-rows";
+
+fn judgment_ledger(state: &AppState) -> JudgmentLedger {
+    JudgmentLedger::new(
+        state
+            .storage
+            .base_dir()
+            .join("judgments")
+            .join("ledger.jsonl"),
+    )
+}
+
+pub(crate) fn qa_verdict_record_path(session_dir: &FsPath) -> PathBuf {
+    session_dir.join("state").join("qa-verdict.json")
+}
+
+pub(crate) fn read_qa_verdict_record(
+    session_dir: &FsPath,
+) -> io::Result<Option<QaVerdictRecord>> {
+    let path = qa_verdict_record_path(session_dir);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn write_qa_verdict_record(
+    session_dir: &FsPath,
+    record: &QaVerdictRecord,
+) -> io::Result<()> {
+    let path = qa_verdict_record_path(session_dir);
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("QA verdict record has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let mut temp = NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(temp.as_file_mut(), record).map_err(io::Error::other)?;
+    temp.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn contract_path_from_handoff(project_path: &FsPath, session_root: &FsPath) -> Option<PathBuf> {
+    let handoff = fs::read(session_root.join("peer").join("milestone-ready.json")).ok()?;
+    let handoff: Value = serde_json::from_slice(&handoff).ok()?;
+    let content = handoff.get("content")?.as_str()?;
+    let value = content.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case("contract")
+            .then(|| value.trim())
+    })?;
+    if value.is_empty() {
+        return None;
+    }
+
+    let named = PathBuf::from(value);
+    if named.is_absolute() {
+        return Some(named);
+    }
+    if named.starts_with(".hive-manager") {
+        return Some(project_path.join(named));
+    }
+    Some(session_root.join(named))
+}
+
+fn path_is_within_session(candidate: &FsPath, session_root: &FsPath) -> bool {
+    let Ok(candidate) = fs::canonicalize(candidate) else {
+        return false;
+    };
+    let Ok(session_root) = fs::canonicalize(session_root) else {
+        return false;
+    };
+    candidate.starts_with(session_root)
+}
+
+fn load_contract_context(
+    project_path: &FsPath,
+    session_root: &FsPath,
+    state_manager: &StateManager,
+    session_id: &str,
+) -> ContractContext {
+    if let Some(path) = contract_path_from_handoff(project_path, session_root) {
+        let contract_display = path.to_string_lossy().to_string();
+        if !path_is_within_session(&path, session_root) {
+            tracing::warn!(
+                %session_id,
+                contract = contract_display.as_str(),
+                "Ignoring milestone contract path outside the project-scoped session directory"
+            );
+            return ContractContext {
+                path: Some(contract_display),
+                contract: None,
+            };
+        }
+        match fs::read_to_string(&path) {
+            Ok(markdown) => match parse_sprint_contract(&markdown) {
+                Ok(contract) => {
+                    return ContractContext {
+                        path: Some(contract_display),
+                        contract: Some(contract),
+                    };
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        contract = contract_display.as_str(),
+                        %error,
+                        "QA contract is untyped; preserving the legacy verdict path"
+                    );
+                    return ContractContext {
+                        path: Some(contract_display),
+                        contract: None,
+                    };
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    contract = contract_display.as_str(),
+                    %error,
+                    "Named QA contract is unreadable; preserving the legacy verdict path"
+                );
+                return ContractContext {
+                    path: Some(contract_display),
+                    contract: None,
+                };
+            }
+        }
+    }
+
+    let fallback = session_root.join("contracts").join("milestone-1.md");
+    let fallback_display = "contracts/milestone-1.md".to_string();
+    match state_manager.read_contract(1) {
+        Ok(Some(contract)) => ContractContext {
+            path: Some(fallback_display),
+            contract: Some(contract),
+        },
+        Ok(None) => ContractContext {
+            path: None,
+            contract: None,
+        },
+        Err(error) => {
+            tracing::warn!(
+                %session_id,
+                contract = %fallback.display(),
+                %error,
+                "Fallback QA contract is untyped; preserving the legacy verdict path"
+            );
+            ContractContext {
+                path: Some(fallback_display),
+                contract: None,
+            }
+        }
+    }
+}
+
+fn validated_criteria(
+    contract: &SprintContract,
+    submitted: &[PostCriterionResult],
+) -> Result<Vec<(ContractCriterion, PostCriterionResult)>, ApiError> {
+    let known: BTreeSet<u16> = contract
+        .acceptance_criteria
+        .iter()
+        .map(|criterion| criterion.number)
+        .collect();
+    let mut by_number = HashMap::new();
+    let mut duplicates = BTreeSet::new();
+    for criterion in submitted {
+        if by_number
+            .insert(criterion.number, criterion.clone())
+            .is_some()
+        {
+            duplicates.insert(criterion.number);
+        }
+    }
+    let submitted_numbers: BTreeSet<u16> = by_number.keys().copied().collect();
+    let unknown: Vec<u16> = submitted_numbers.difference(&known).copied().collect();
+    if !unknown.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "Unknown QA criterion numbers: {}",
+            unknown
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if !duplicates.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "Duplicate QA criterion numbers: {}",
+            duplicates
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let missing: Vec<u16> = known.difference(&submitted_numbers).copied().collect();
+    if !missing.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "Missing QA criterion numbers: {}",
+            missing
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
+    Ok(contract
+        .acceptance_criteria
+        .iter()
+        .map(|criterion| {
+            (
+                criterion.clone(),
+                by_number
+                    .remove(&criterion.number)
+                    .expect("known criterion was validated as present"),
+            )
+        })
+        .collect())
+}
+
+fn criterion_passed(
+    kind: &CriterionKind,
+    result: &CriterionSubmissionResult,
+) -> bool {
+    match (kind, result) {
+        (_, CriterionSubmissionResult::Pass) => true,
+        (_, CriterionSubmissionResult::Fail | CriterionSubmissionResult::Blocked) => false,
+        (
+            CriterionKind::Scored { max, floor, .. },
+            CriterionSubmissionResult::Scored(value),
+        ) => floor.is_some_and(|floor| {
+            value.is_finite() && *value >= f64::from(floor) && *value <= f64::from(*max)
+        }),
+        (
+            CriterionKind::Measured { op, target, .. },
+            CriterionSubmissionResult::Measured(value),
+        ) if value.is_finite() && target.is_finite() => match op {
+            CompareOp::Lt => value < target,
+            CompareOp::Le => value <= target,
+            CompareOp::Eq => value == target,
+            CompareOp::Ge => value >= target,
+            CompareOp::Gt => value > target,
+        },
+        _ => false,
+    }
+}
+
+fn base_verdict_record(
+    session_id: &str,
+    verdict: &str,
+    rationale: Option<&str>,
+    iteration: u8,
+    context: &ContractContext,
+) -> QaVerdictRecord {
+    QaVerdictRecord {
+        schema_version: QA_VERDICT_RECORD_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        milestone_id: context
+            .contract
+            .as_ref()
+            .map(|contract| contract.milestone_name.clone())
+            .unwrap_or_else(|| "milestone-1".to_string()),
+        iteration,
+        verdict: verdict.to_string(),
+        passed: verdict == "PASS",
+        summary: rationale
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("QA verdict: {verdict}")),
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        contract_path: context.path.clone(),
+        contract_typed: context.contract.is_some(),
+        omission: (verdict == "BLOCKED").then(|| BLOCKED_CRITERION_OMISSION.to_string()),
+        criteria: Vec::new(),
+    }
+}
+
+fn persist_verdict_record_fail_open(
+    state: &AppState,
+    session_id: &str,
+    record: &QaVerdictRecord,
+) {
+    if let Err(error) = write_qa_verdict_record(&state.storage.session_dir(session_id), record) {
+        tracing::warn!(
+            %session_id,
+            %error,
+            "Failed to persist per-criterion QA verdict record"
+        );
+    }
+}
+
+fn record_typed_criteria(
+    state: &AppState,
+    session_id: &str,
+    verdict: &str,
+    rationale: Option<&str>,
+    evaluator_model: &str,
+    record: &mut QaVerdictRecord,
+    criteria: Vec<(ContractCriterion, PostCriterionResult)>,
+) {
+    let ledger = judgment_ledger(state);
+    for (criterion, submitted) in criteria {
+        let mut subject_ref = Map::new();
+        subject_ref.insert("session_id".to_string(), json!(session_id));
+        subject_ref.insert("milestone_id".to_string(), json!(record.milestone_id));
+        subject_ref.insert("criterion_number".to_string(), json!(criterion.number));
+        let observations = json!({
+            "criterion": {
+                "number": criterion.number,
+                "description": criterion.description,
+                "kind": criterion.kind,
+            },
+            "evidence": submitted.evidence,
+            "evidence_refs": submitted.evidence_refs,
+        });
+        let answer = json!({
+            "result": submitted.result,
+            "rationale": rationale,
+        });
+        let decision = ledger.record_decision(DecisionInput {
+            decision_id: None,
+            surface: "hive.qa.criterion".to_string(),
+            subject_ref,
+            observations,
+            answer,
+            question_id: Some("hive.qa.criterion".to_string()),
+            question_version: None,
+            judge: Judge::IncumbentLlm,
+            model: Some(evaluator_model.to_string()),
+            sampling: None,
+            mode: JudgmentMode::Shadow,
+            probabilities: None,
+            confidence: None,
+            threshold_id: Some(record.milestone_id.clone()),
+            routed: format!("gated-{}", verdict.to_ascii_lowercase()),
+            latency_ms: None,
+            cost_usd: None,
+            error: None,
+            extra: Map::new(),
+        });
+        record.criteria.push(QaCriterionVerdictRecord {
+            number: criterion.number,
+            label: criterion.description,
+            passed: criterion_passed(&criterion.kind, &submitted.result),
+            kind: criterion.kind,
+            result: submitted.result,
+            evidence: submitted.evidence,
+            evidence_refs: submitted.evidence_refs,
+            decision_id: decision.map(|decision| decision.decision_id),
+        });
+    }
+}
+
+fn record_operator_override_outcomes(
+    state: &AppState,
+    session_id: &str,
+    verdict: &str,
+    rationale: Option<&str>,
+) {
+    let record = match read_qa_verdict_record(&state.storage.session_dir(session_id)) {
+        Ok(Some(record)) => record,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                %session_id,
+                %error,
+                "Failed to read QA verdict record for operator outcomes"
+            );
+            return;
+        }
+    };
+    let label = if verdict.trim().to_ascii_uppercase().contains("PASS") {
+        "pass"
+    } else {
+        "fail"
+    };
+    let ledger = judgment_ledger(state);
+    for criterion in record.criteria {
+        let Some(decision_id) = criterion.decision_id else {
+            continue;
+        };
+        let mut extra = Map::new();
+        extra.insert("session_id".to_string(), json!(session_id));
+        extra.insert("criterion_number".to_string(), json!(criterion.number));
+        let _ = ledger.record_outcome(OutcomeInput {
+            decision_id,
+            label: json!(label),
+            source: OutcomeSource::OperatorOverride,
+            note: rationale.map(str::to_string),
+            extra,
+        });
+    }
 }
 
 const MISSING_WORK_GRAPH_VERDICT_ID: &str = "qa-verdict:missing-work-graph-verdict-id";
@@ -863,6 +1335,7 @@ pub(crate) fn apply_verdict(
     if is_override {
         let (log_action, detail) = override_log_details(verdict)?;
         append_operator_log(state, session_id, log_action, detail, rationale);
+        record_operator_override_outcomes(state, session_id, verdict, rationale);
     }
 
     Ok(new_state)
@@ -919,23 +1392,56 @@ pub async fn post_verdict(
     // Resolve peer identities + project path up front (needed for both BLOCKED and
     // PASS/FAIL paths). require_qa_in_progress rejects verdicts posted outside the
     // QaInProgress window so a stale POST can't jump the state machine.
-    let (project_path, evaluator_id, queen_id) = {
+    let (project_path, evaluator_id, queen_id, evaluator_model, iteration) = {
         let controller = state.session_controller.read();
         require_qa_in_progress(&controller, &session_id, "qa-verdict")?;
         let session = controller
             .get_session(&session_id)
             .ok_or_else(|| ApiError::not_found(format!("Session {} not found", session_id)))?;
-        let evaluator_id = session
+        let evaluator = session
             .agents
             .iter()
-            .find(|agent| matches!(agent.role, AgentRole::Evaluator))
+            .find(|agent| matches!(agent.role, AgentRole::Evaluator));
+        let evaluator_id = evaluator
             .map(|agent| agent.id.clone())
             .unwrap_or_else(|| format!("{}-evaluator", session_id));
+        let evaluator_model = evaluator
+            .map(|agent| match agent.config.model.as_deref() {
+                Some(model) => format!("{}/{}", agent.config.cli, model),
+                None => agent.config.cli.clone(),
+            })
+            .unwrap_or_else(|| match session.default_model.as_deref() {
+                Some(model) => format!("{}/{}", session.default_cli, model),
+                None => session.default_cli.clone(),
+            });
+        let iteration = match session.state {
+            SessionState::QaInProgress { iteration } => iteration.unwrap_or(1),
+            _ => 1,
+        };
         (
             session.project_path.clone(),
             evaluator_id,
             format!("{}-queen", session_id),
+            evaluator_model,
+            iteration,
         )
+    };
+
+    let session_root = project_path.join(".hive-manager").join(&session_id);
+    let state_manager = StateManager::new(session_root.clone());
+    let contract_context = load_contract_context(
+        &project_path,
+        &session_root,
+        &state_manager,
+        &session_id,
+    );
+    let typed_criteria = if verdict != "BLOCKED" {
+        match (&contract_context.contract, &req.criteria) {
+            (Some(contract), Some(criteria)) => Some(validated_criteria(contract, criteria)?),
+            _ => None,
+        }
+    } else {
+        None
     };
 
     // BLOCKED: the Evaluator could not produce a usable PASS/FAIL. Mark the session
@@ -954,6 +1460,19 @@ pub async fn post_verdict(
                 .mark_qa_inconclusive(&session_id, &reason)
                 .map_err(map_verdict_state_error)?
         };
+        let record = base_verdict_record(
+            &session_id,
+            verdict,
+            Some(&reason),
+            iteration,
+            &contract_context,
+        );
+        persist_verdict_record_fail_open(&state, &session_id, &record);
+        tracing::warn!(
+            %session_id,
+            omission = BLOCKED_CRITERION_OMISSION,
+            "BLOCKED QA verdict intentionally omitted criterion judgment rows"
+        );
         return Ok(Json(json!({
             "session_id": session_id,
             "action": "qa-verdict",
@@ -973,7 +1492,6 @@ pub async fn post_verdict(
     // having transitioned the state machine — so the retry lands cleanly instead of
     // hitting an "expected QaInProgress" rejection. This closes root-cause (b):
     // a failed peer-file write is no longer swallowed behind an HTTP 200.
-    let state_manager = StateManager::new(project_path.join(".hive-manager").join(&session_id));
     state_manager
         .write_qa_verdict_async(&evaluator_id, &queen_id, &verdict_content, commit_sha)
         .await
@@ -1018,6 +1536,30 @@ pub async fn post_verdict(
             );
         }
     }
+
+    // Persist the record before the session transition. T13 consumes these
+    // decision ids synchronously when that transition reaches a terminal QA
+    // state, while work-graph validation above must still be able to reject the
+    // request without leaving duplicate judgment rows behind for a retry.
+    let mut verdict_record = base_verdict_record(
+        &session_id,
+        verdict,
+        rationale,
+        iteration,
+        &contract_context,
+    );
+    if let Some(criteria) = typed_criteria {
+        record_typed_criteria(
+            &state,
+            &session_id,
+            verdict,
+            rationale,
+            &evaluator_model,
+            &mut verdict_record,
+            criteria,
+        );
+    }
+    persist_verdict_record_fail_open(&state, &session_id, &verdict_record);
 
     let new_state = {
         let controller = state.session_controller.read();
@@ -1260,12 +1802,18 @@ pub async fn force_fail(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_work_graph_verdict_for_agent, map_add_qa_worker_error, persist_work_graph_verdict,
+        apply_work_graph_verdict_for_agent, load_contract_context, map_add_qa_worker_error,
+        persist_work_graph_verdict, qa_verdict_record_path, read_qa_verdict_record,
     };
-    use axum::http::StatusCode;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use tempfile::TempDir;
+    use tower::ServiceExt;
 
     use crate::coordination::StateManager;
+    use crate::http::tests::{make_test_session, setup_test_app_with_controller_at};
     use crate::orchestrator::work_graph::completion_ledger::{
         NodeCompletionFact, NodeCompletionProvenance,
     };
@@ -1275,6 +1823,45 @@ mod tests {
     use crate::orchestrator::work_graph::{
         BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
     };
+    use crate::pty::{AgentConfig, AgentRole, AgentStatus};
+    use crate::session::{AgentInfo, SessionState};
+
+    fn install_typed_contract(project: &std::path::Path, session_id: &str) {
+        let contracts = project
+            .join(".hive-manager")
+            .join(session_id)
+            .join("contracts");
+        std::fs::create_dir_all(&contracts).unwrap();
+        std::fs::write(
+            contracts.join("milestone-1.md"),
+            "# Sprint Contract: Typed HTTP QA\n\n\
+             ## Acceptance Criteria\n\
+             1. [FUNC] The endpoint records functional evidence\n\
+             2. [DESIGN 1-10 floor 5] The result preserves a design score\n\n\
+             ## Pass Threshold\n\
+             - All pass/fail criteria must pass\n\
+             - Any scored criterion below its floor fails\n",
+        )
+        .unwrap();
+    }
+
+    fn evaluator_agent(session_id: &str) -> AgentInfo {
+        AgentInfo {
+            id: format!("{session_id}-evaluator"),
+            role: AgentRole::Evaluator,
+            status: AgentStatus::Running,
+            config: AgentConfig {
+                cli: "codex".to_string(),
+                model: Some("gpt-test".to_string()),
+                ..AgentConfig::default()
+            },
+            parent_id: None,
+            role_definition_id: None,
+            role_definition_version: None,
+            commit_sha: None,
+            base_commit_sha: None,
+        }
+    }
 
     #[test]
     fn maps_missing_session_to_not_found() {
@@ -1294,6 +1881,321 @@ mod tests {
     fn maps_spawn_failures_to_internal() {
         let error = map_add_qa_worker_error("Failed to spawn QA worker 1: boom".to_string());
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn contract_path_is_resolved_from_milestone_handoff_before_fallback() {
+        let project = TempDir::new().unwrap();
+        let session_id = "named-contract-session";
+        let session_root = project.path().join(".hive-manager").join(session_id);
+        std::fs::create_dir_all(session_root.join("peer")).unwrap();
+        std::fs::create_dir_all(session_root.join("contracts")).unwrap();
+        std::fs::write(
+            session_root.join("contracts").join("release.md"),
+            "# Sprint Contract: Named Release\n\n\
+             ## Acceptance Criteria\n\
+             7. [FUNC] Named contract selected\n\n\
+             ## Pass Threshold\n\
+             - All pass/fail criteria must pass\n",
+        )
+        .unwrap();
+        std::fs::write(
+            session_root.join("peer").join("milestone-ready.json"),
+            r#"{"content":"MILESTONE_READY\ncontract: contracts/release.md\nscope: named"}"#,
+        )
+        .unwrap();
+        let manager = StateManager::new(session_root.clone());
+
+        let context = load_contract_context(project.path(), &session_root, &manager, session_id);
+
+        assert!(context
+            .path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("contracts\\release.md")
+                || path.ends_with("contracts/release.md")));
+        let contract = context.contract.unwrap();
+        assert_eq!(contract.milestone_name, "Named Release");
+        assert_eq!(contract.acceptance_criteria[0].number, 7);
+    }
+
+    #[tokio::test]
+    async fn typed_http_verdict_writes_decisions_evidence_record_and_override_outcomes() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("typed-qa-{}", uuid::Uuid::new_v4());
+        install_typed_contract(project.path(), &session_id);
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(2) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let request = serde_json::json!({
+            "verdict": "PASS",
+            "rationale": "Typed criteria passed",
+            "criteria": [
+                {
+                    "number": 1,
+                    "result": "pass",
+                    "evidence": "API worker observed a durable record",
+                    "evidence_refs": ["qa-worker-api#1"]
+                },
+                {
+                    "number": 2,
+                    "result": {"scored": 8},
+                    "evidence": "Design worker scored the rendered result",
+                    "evidence_refs": ["qa-worker-ui#2"]
+                }
+            ]
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let verdict_record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(verdict_record.iteration, 2);
+        assert_eq!(verdict_record.milestone_id, "Typed HTTP QA");
+        assert_eq!(verdict_record.criteria.len(), 2);
+        assert!(verdict_record.criteria.iter().all(|criterion| criterion
+            .decision_id
+            .is_some()));
+
+        let judgments = storage.path().join("judgments");
+        let ledger_path = judgments.join("ledger.jsonl");
+        let decision_rows: Vec<serde_json::Value> = std::fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(decision_rows.len(), 2);
+        assert!(decision_rows.iter().all(|row| row["kind"] == "decision"));
+        assert!(decision_rows
+            .iter()
+            .all(|row| row["judge"] == "incumbent-llm"));
+        assert!(decision_rows.iter().all(|row| row["mode"] == "shadow"));
+        assert!(decision_rows.iter().all(|row| row["sampling"].is_null()));
+        assert!(decision_rows
+            .iter()
+            .all(|row| row["model"] == "codex/gpt-test"));
+        for row in &decision_rows {
+            let evidence = std::fs::read_to_string(judgments.join(row["state_ref"].as_str().unwrap()))
+                .unwrap();
+            let evidence: serde_json::Value = serde_json::from_str(&evidence).unwrap();
+            assert!(evidence.get("result").is_none());
+            assert!(evidence.get("rationale").is_none());
+            assert!(!evidence.to_string().contains("Typed criteria passed"));
+        }
+
+        let override_response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/force-fail"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"confirm":true,"rationale":"Operator found a regression"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(override_response.status(), StatusCode::OK);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let outcomes: Vec<_> = rows
+            .iter()
+            .filter(|row| row["kind"] == "outcome")
+            .collect();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes
+            .iter()
+            .all(|row| row["source"] == "operator-override"));
+        assert!(outcomes
+            .iter()
+            .all(|row| row["label"] == "fail"));
+        assert!(outcomes
+            .iter()
+            .all(|row| row["note"] == "Operator found a regression"));
+    }
+
+    #[tokio::test]
+    async fn unknown_typed_criterion_is_rejected_before_any_mutation() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("unknown-qa-{}", uuid::Uuid::new_v4());
+        install_typed_contract(project.path(), &session_id);
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(1) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"verdict":"PASS","criteria":[{"number":99,"result":"pass","evidence":"not in contract"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("99"));
+        assert!(matches!(
+            controller.read().get_session(&session_id).unwrap().state,
+            SessionState::QaInProgress { .. }
+        ));
+        assert!(!storage.path().join("judgments").join("ledger.jsonl").exists());
+        assert!(!qa_verdict_record_path(&session_storage.session_dir(&session_id)).exists());
+        assert!(!project
+            .path()
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("peer")
+            .join("qa-verdict.json")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn untyped_verdict_keeps_legacy_http_peer_state_and_project_shape() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("untyped-qa-{}", uuid::Uuid::new_v4());
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: None };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"verdict":"PASS","commit_sha":"legacy-sha","rationale":"Legacy bare verdict"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["verdict"], "PASS");
+        assert_eq!(body["new_state"], "QaPassed");
+        assert_eq!(body["commit_sha"], "legacy-sha");
+        assert_eq!(body["rationale"], "Legacy bare verdict");
+
+        let peer_path = project
+            .path()
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("peer")
+            .join("qa-verdict.json");
+        let peer: crate::coordination::PeerMessageRecord =
+            serde_json::from_slice(&std::fs::read(&peer_path).unwrap()).unwrap();
+        assert_eq!(
+            peer.content,
+            r#"{"commit_sha":"legacy-sha","kind":"qa-verdict","rationale":"Legacy bare verdict","verdict":"PASS"}"#
+        );
+        let session_root = project.path().join(".hive-manager").join(&session_id);
+        let session_entries: Vec<_> = std::fs::read_dir(&session_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(session_entries, vec![std::ffi::OsString::from("peer")]);
+        let peer_entries: Vec<_> = std::fs::read_dir(session_root.join("peer"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            peer_entries,
+            vec![std::ffi::OsString::from("qa-verdict.json")]
+        );
+        let record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert!(!record.contract_typed);
+        assert!(record.criteria.is_empty());
+        assert!(!storage.path().join("judgments").join("ledger.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn blocked_typed_verdict_records_named_omission_without_judgment_rows() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("blocked-qa-{}", uuid::Uuid::new_v4());
+        install_typed_contract(project.path(), &session_id);
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(3) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"verdict":"BLOCKED","blocked_reason":"ui-unavailable","blocked_detail":"criterion 1 needs a host"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.iteration, 3);
+        assert!(record.contract_typed);
+        assert_eq!(
+            record.omission.as_deref(),
+            Some("blocked-verdict-no-criterion-rows")
+        );
+        assert!(record.criteria.is_empty());
+        assert!(!storage.path().join("judgments").join("ledger.jsonl").exists());
+    }
+
+    #[test]
+    fn evaluator_http_documentation_uses_one_typed_criteria_shape() {
+        let source = include_str!("../../templates/mod.rs");
+        let doc_shape = "Typed body: `{";
+        assert_eq!(source.matches(doc_shape).count(), 3);
+        let criterion_shape = r#""number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]"#;
+        assert_eq!(source.matches(criterion_shape).count(), 6);
     }
 
     #[test]

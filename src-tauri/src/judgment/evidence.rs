@@ -77,7 +77,9 @@ where
 
     let python = if !(-4..16).contains(&normalized_exponent) {
         let mut chars = significant.chars();
-        let first = chars.next().expect("significant digits are non-empty");
+        let first = chars.next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "significant digits are empty")
+        })?;
         let rest: String = chars.collect();
         let mantissa = if rest.is_empty() {
             first.to_string()
@@ -171,7 +173,7 @@ pub(super) fn write_evidence(
 
     let clean = scrub_value(observations)?;
     let canonical = canonical_json(&clean)?;
-    let state_hash = format!("sha256:{:x}", Sha256::digest(&canonical));
+    let state_hash = sha256_of(&clean)?;
     let parent = ledger_path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no parent"))?;
