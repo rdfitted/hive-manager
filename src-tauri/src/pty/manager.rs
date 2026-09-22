@@ -1,14 +1,14 @@
-use base64::Engine;
-use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
+use base64::Engine;
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 
 use super::output_ring::{clamp_replay_capacity, OutputSnapshot, DEFAULT_REPLAY_CAPACITY};
-use super::session::{read_from_reader, AgentRole, AgentStatus, PtyError, PtySession};
+use super::session::{AgentRole, AgentStatus, PtyError, PtySession, read_from_reader};
 use crate::adapters::{pty_submit_policy, PtySubmitResult};
 use crate::cli::agent_store;
 use crate::tauri_shim::{AppHandle, Emitter};
@@ -143,14 +143,8 @@ const EMITTER_QUEUE_CAPACITY: usize = 1024;
 /// Reader-thread → emitter-thread messages. Data and exit travel the same channel so an
 /// agent's final bytes are always emitted before its `Completed` status.
 enum EmitterMessage {
-    Output {
-        id: String,
-        offset: u64,
-        bytes: Vec<u8>,
-    },
-    Exited {
-        id: String,
-    },
+    Output { id: String, offset: u64, bytes: Vec<u8> },
+    Exited { id: String },
 }
 
 impl EmitterMessage {
@@ -164,14 +158,8 @@ impl EmitterMessage {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CoalescedEvent {
-    Output {
-        id: String,
-        offset: u64,
-        bytes: Vec<u8>,
-    },
-    Exited {
-        id: String,
-    },
+    Output { id: String, offset: u64, bytes: Vec<u8> },
+    Exited { id: String },
 }
 
 /// Merge a batch of reader messages into at most one output event per contiguous run
@@ -564,13 +552,10 @@ impl PtyManager {
         // Session already inserted before thread spawn (see above)
 
         if let Some(ref app_handle) = self.app_handle {
-            let _ = app_handle.emit(
-                PTY_STATUS_EVENT,
-                PtyStatusChange {
-                    id: id.clone(),
-                    status: AgentStatus::Running,
-                },
-            );
+            let _ = app_handle.emit(PTY_STATUS_EVENT, PtyStatusChange {
+                id: id.clone(),
+                status: AgentStatus::Running,
+            });
         }
 
         Ok(id)
@@ -579,10 +564,7 @@ impl PtyManager {
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
         tracing::debug!("PtyManager::write called for session: {}", id);
         let sessions = self.sessions.read();
-        tracing::debug!(
-            "Available sessions: {:?}",
-            sessions.keys().collect::<Vec<_>>()
-        );
+        tracing::debug!("Available sessions: {:?}", sessions.keys().collect::<Vec<_>>());
         let session = sessions.get(id).ok_or_else(|| {
             tracing::error!("PTY session not found: {}", id);
             PtyError::NotFound(id.to_string())
@@ -603,23 +585,15 @@ impl PtyManager {
 
     /// Write with bracketed paste mode wrapping for large pastes
     pub fn write_bracketed(&self, id: &str, data: &[u8]) -> Result<(), PtyError> {
-        tracing::debug!(
-            "PtyManager::write_bracketed called for session: {} ({} bytes)",
-            id,
-            data.len()
-        );
+        tracing::debug!("PtyManager::write_bracketed called for session: {} ({} bytes)", id, data.len());
         let sessions = self.sessions.read();
-        let session = sessions
-            .get(id)
-            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         session.write_bracketed(data)
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), PtyError> {
         let sessions = self.sessions.read();
-        let session = sessions
-            .get(id)
-            .ok_or_else(|| PtyError::NotFound(id.to_string()))?;
+        let session = sessions.get(id).ok_or_else(|| PtyError::NotFound(id.to_string()))?;
         tracing::debug!("Resizing PTY {} to {}x{}", id, cols, rows);
         session.resize(cols, rows)
     }
@@ -722,7 +696,10 @@ impl PtyManager {
     }
 
     #[cfg(all(test, windows))]
-    pub fn submit_policy_for_test(&self, id: &str) -> Option<crate::adapters::PtySubmitPolicy> {
+    pub fn submit_policy_for_test(
+        &self,
+        id: &str,
+    ) -> Option<crate::adapters::PtySubmitPolicy> {
         let sessions = self.sessions.read();
         sessions
             .get(id)
@@ -734,13 +711,7 @@ impl PtyManager {
         sessions
             .iter()
             .filter(|(_, session)| !matches!(&session.role, AgentRole::ScratchShell))
-            .map(|(id, session)| {
-                (
-                    id.clone(),
-                    session.role.clone(),
-                    session.status.read().clone(),
-                )
-            })
+            .map(|(id, session)| (id.clone(), session.role.clone(), session.status.read().clone()))
             .collect()
     }
 }
@@ -984,7 +955,15 @@ mod tests {
             ("cursor-policy-agent", "wsl", "cursor"),
         ] {
             manager
-                .create_session(id.to_string(), worker_role(), command, &[], None, 80, 24)
+                .create_session(
+                    id.to_string(),
+                    worker_role(),
+                    command,
+                    &[],
+                    None,
+                    80,
+                    24,
+                )
                 .unwrap();
             let policy = manager.submit_policy_for_test(id).unwrap();
             assert_eq!(policy.adapter, Some(expected_adapter));
@@ -1086,10 +1065,7 @@ mod tests {
         assert!(!writes[1].ends_with(b"\r"));
         assert!(!writes[1].ends_with(b"\n"));
         assert!(!writes[enter_index].contains(&b'\n'));
-        assert_eq!(
-            result.payload_bytes_written,
-            b"line one\nline two\nline three".len()
-        );
+        assert_eq!(result.payload_bytes_written, b"line one\nline two\nline three".len());
         assert_eq!(result.submit_bytes_written, 1);
     }
 
@@ -1446,10 +1422,7 @@ mod transport_tests {
     fn coalesce_starts_a_new_batch_when_offsets_are_not_contiguous() {
         let events = coalesce(vec![output("a", 0, b"abc"), output("a", 10, b"xyz")]);
         assert_eq!(events.len(), 2);
-        assert!(matches!(
-            &events[1],
-            CoalescedEvent::Output { offset: 10, .. }
-        ));
+        assert!(matches!(&events[1], CoalescedEvent::Output { offset: 10, .. }));
     }
 
     #[test]
@@ -1462,10 +1435,7 @@ mod transport_tests {
             output("a", 3, b"def"),
         ]);
         assert_eq!(events.len(), 3);
-        assert!(matches!(
-            &events[2],
-            CoalescedEvent::Output { offset: 3, .. }
-        ));
+        assert!(matches!(&events[2], CoalescedEvent::Output { offset: 3, .. }));
     }
 
     #[test]
@@ -1487,11 +1457,7 @@ mod transport_tests {
     #[test]
     fn a_4kb_chunk_crosses_ipc_in_well_under_1_4x_its_size() {
         let bytes: Vec<u8> = (0..4096u32).map(|i| (i % 256) as u8).collect();
-        let payload = PtyOutput::new(
-            "7c4790a1-370c-4d98-8690-a5fbe4b35e5b-worker-12",
-            123,
-            &bytes,
-        );
+        let payload = PtyOutput::new("7c4790a1-370c-4d98-8690-a5fbe4b35e5b-worker-12", 123, &bytes);
         let json = serde_json::to_string(&payload).unwrap();
 
         assert_eq!(payload.data.len(), 4096_usize.div_ceil(3) * 4);
@@ -1513,14 +1479,8 @@ mod transport_tests {
         let mut manager = PtyManager::new();
         assert_eq!(manager.replay_capacity(), DEFAULT_REPLAY_CAPACITY);
         manager.set_replay_capacity(1);
-        assert_eq!(
-            manager.replay_capacity(),
-            super::super::output_ring::MIN_REPLAY_CAPACITY
-        );
+        assert_eq!(manager.replay_capacity(), super::super::output_ring::MIN_REPLAY_CAPACITY);
         manager.set_replay_capacity(usize::MAX);
-        assert_eq!(
-            manager.replay_capacity(),
-            super::super::output_ring::MAX_REPLAY_CAPACITY
-        );
+        assert_eq!(manager.replay_capacity(), super::super::output_ring::MAX_REPLAY_CAPACITY);
     }
 }

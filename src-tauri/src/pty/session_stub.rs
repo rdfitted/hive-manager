@@ -208,7 +208,10 @@ fn warn_rejected_submit_gap_override(override_value: SubmitGapOverride) {
     }
 }
 
-fn resolve_submit_gap(policy: PtySubmitPolicy, override_gap: Option<Duration>) -> Duration {
+fn resolve_submit_gap(
+    policy: PtySubmitPolicy,
+    override_gap: Option<Duration>,
+) -> Duration {
     override_gap.unwrap_or(policy.default_gap)
 }
 
@@ -490,7 +493,10 @@ impl PtySession {
         self.write_records.lock().clone()
     }
 
-    fn write_bracketed_locked(writer: &mut SendWriter, data: &[u8]) -> Result<usize, PtyError> {
+    fn write_bracketed_locked(
+        writer: &mut SendWriter,
+        data: &[u8],
+    ) -> Result<usize, PtyError> {
         let sanitized = sanitize_bracketed_paste(data);
 
         writer.0.write_all(BRACKETED_PASTE_START)?;
@@ -559,8 +565,8 @@ pub fn read_from_reader(
 mod tests {
     use super::{
         cached_submit_gap_override, parse_submit_gap_override, resolve_submit_gap,
-        sanitize_bracketed_paste, SubmitGapInvalidReason, SubmitGapOverride, BRACKETED_PASTE_END,
-        MAX_PTY_SUBMIT_GAP_OVERRIDE_MS,
+        sanitize_bracketed_paste, SubmitGapInvalidReason, SubmitGapOverride,
+        BRACKETED_PASTE_END, MAX_PTY_SUBMIT_GAP_OVERRIDE_MS,
     };
     use crate::adapters::PtySubmitPolicy;
     use std::cell::Cell;
@@ -625,31 +631,35 @@ mod tests {
             let cache = OnceLock::new();
             let warning_count = Cell::new(0);
             let warning = Cell::new(None);
-            let override_gap =
-                cached_submit_gap_override(&cache, Some(OsStr::new(raw)), |rejected| {
+            let override_gap = cached_submit_gap_override(
+                &cache,
+                Some(OsStr::new(raw)),
+                |rejected| {
                     warning_count.set(warning_count.get() + 1);
                     warning.set(Some(rejected));
-                });
+                },
+            );
 
             assert_eq!(override_gap, None);
             assert_eq!(warning.get(), Some(expected_warning));
-            assert_eq!(
-                resolve_submit_gap(adapter_policy, override_gap),
-                adapter_policy.default_gap
-            );
+            assert_eq!(resolve_submit_gap(adapter_policy, override_gap), adapter_policy.default_gap);
 
-            let second = cached_submit_gap_override(&cache, Some(OsStr::new("65000")), |_| {
-                warning_count.set(warning_count.get() + 1)
-            });
+            let second = cached_submit_gap_override(
+                &cache,
+                Some(OsStr::new("65000")),
+                |_| warning_count.set(warning_count.get() + 1),
+            );
             assert_eq!(second, None, "a rejected process override stays rejected");
             assert_eq!(warning_count.get(), 1, "a rejected override warns once");
         }
 
         let valid_cache = OnceLock::new();
         let valid_warning_count = Cell::new(0);
-        let valid = cached_submit_gap_override(&valid_cache, Some(OsStr::new("65000")), |_| {
-            valid_warning_count.set(valid_warning_count.get() + 1)
-        });
+        let valid = cached_submit_gap_override(
+            &valid_cache,
+            Some(OsStr::new("65000")),
+            |_| valid_warning_count.set(valid_warning_count.get() + 1),
+        );
         assert_eq!(valid, Some(Duration::from_secs(65)));
         assert_eq!(valid_warning_count.get(), 0);
 
@@ -671,7 +681,9 @@ mod tests {
         );
         assert_eq!(
             parse_submit_gap_override(Some(OsStr::new("300000"))),
-            SubmitGapOverride::Valid(Duration::from_millis(MAX_PTY_SUBMIT_GAP_OVERRIDE_MS)),
+            SubmitGapOverride::Valid(Duration::from_millis(
+                MAX_PTY_SUBMIT_GAP_OVERRIDE_MS
+            )),
             "the named safety ceiling itself remains valid"
         );
         assert_eq!(
@@ -735,7 +747,9 @@ mod tests {
         let sample: serde_json::Value =
             serde_json::from_str(json_sample).expect("valid documented JSON sample");
         let output = sample["output"].as_str().expect("sample output string");
-        let byte_count = sample["byte_count"].as_u64().expect("sample byte_count") as usize;
+        let byte_count = sample["byte_count"]
+            .as_u64()
+            .expect("sample byte_count") as usize;
 
         assert_eq!(
             byte_count,
