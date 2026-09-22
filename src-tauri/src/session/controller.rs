@@ -13720,10 +13720,11 @@ The backend composed and persisted the following authoritative skeleton before l
                     &resolver,
                     None,
                 ),
-                Err(_) => {
+                Err(error) => {
                     tracing::warn!(
                         session_id,
                         artifact_path = %artifact_path.display(),
+                        error = %error,
                         "Planning codegraph artifact could not be loaded; knowledge attachment is degrading to an unavailable resolver"
                     );
                     crate::orchestrator::work_graph::runtime::derive_plan_ready_knowledge_attachments(
@@ -16633,6 +16634,49 @@ mod tests {
         assert_eq!(composition.graph, authoritative);
         assert_eq!(composition.codegraph, initial.codegraph);
         assert!(composition.context.knowledge_available);
+        let knowledge_edges: Vec<_> = authoritative
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == crate::orchestrator::work_graph::EdgeKind::Informs
+                    && edge.provenance
+                        == crate::orchestrator::work_graph::EdgeProvenance::Knowledge
+                    && edge.target == "T1"
+            })
+            .collect();
+        let undeclared_omissions: Vec<_> = authoritative
+            .omissions
+            .iter()
+            .filter(|omission| {
+                omission.reason
+                    == crate::orchestrator::work_graph::WorkGraphOmissionReason::ResolutionIncomplete
+                    && omission.detail == "explicit task touch intent was not declared"
+                    && omission.examples.iter().any(|example| example == "T2")
+            })
+            .collect();
+        assert_eq!(
+            (knowledge_edges.len(), undeclared_omissions.len()),
+            (2, 1),
+            "the plan-ready entry must attach both declared and harvested knowledge and aggregate the undeclared task"
+        );
+        let mut rationales: Vec<_> = knowledge_edges
+            .iter()
+            .map(|edge| edge.rationale.as_deref().unwrap_or_default())
+            .collect();
+        rationales.sort_unstable();
+        assert_eq!(
+            rationales,
+            vec![
+                "knowledge attachment matched contract-path, fallback",
+                "knowledge attachment matched declared-scope, fallback",
+            ]
+        );
+        assert_eq!(undeclared_omissions[0].count, 5);
+        assert!(undeclared_omissions[0]
+            .examples
+            .iter()
+            .any(|example| example == "T2"));
+        assert!(undeclared_omissions[0].examples.len() <= 5);
         assert!(authoritative
             .edges
             .iter()

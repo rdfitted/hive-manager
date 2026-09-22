@@ -185,11 +185,33 @@ fn production_continue_builds_plan_graph_before_every_running_dispatch() {
                 .expect("production continue persisted the plan graph");
             assert_eq!(graph.nodes.len(), 5, "{session_id} node count");
             assert_eq!(graph.edges.len(), 5, "{session_id} edge count");
-            assert_eq!(graph.omissions.len(), 1, "{session_id} omissions");
+            assert_eq!(graph.omissions.len(), 3, "{session_id} omissions");
             assert_eq!(
-                graph.omissions[0].reason,
-                WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+                graph
+                    .omissions
+                    .iter()
+                    .filter(|omission| {
+                        omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+                            && omission.detail
+                                == "project knowledge was unavailable, so context relationships are incomplete"
+                    })
+                    .count(),
+                1
             );
+            let inventory_omission = graph
+                .omissions
+                .iter()
+                .find(|omission| omission.detail == "tracked file inventory was unavailable")
+                .expect("stable tracked-file inventory omission");
+            assert_eq!(inventory_omission.examples, vec!["git ls-files"]);
+            let undeclared_omission = graph
+                .omissions
+                .iter()
+                .find(|omission| {
+                    omission.detail == "explicit task touch intent was not declared"
+                })
+                .expect("aggregated undeclared-task omission");
+            assert_eq!(undeclared_omission.count, 5);
         }
 
         assert_session_state(&controller, session_id, SessionState::PlanReady);
@@ -208,7 +230,7 @@ fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
             "continue-malformed",
             Some(malformed_plan),
             1,
-            2,
+            4,
             WorkGraphOmissionReason::ResolutionIncomplete,
             "unterminated",
         ),
@@ -252,9 +274,31 @@ fn production_continue_replaces_empty_seed_with_typed_source_omissions() {
         let expected = graph
             .omissions
             .iter()
-            .find(|omission| omission.reason == expected_reason)
+            .find(|omission| {
+                omission.reason == expected_reason
+                    && omission
+                        .examples
+                        .iter()
+                        .any(|example| example.contains(expected_example))
+            })
             .expect("expected source omission");
         assert!(expected.examples[0].contains(expected_example));
+        if expected_nodes > 0 {
+            let inventory_omission = graph
+                .omissions
+                .iter()
+                .find(|omission| omission.detail == "tracked file inventory was unavailable")
+                .expect("stable tracked-file inventory omission");
+            assert_eq!(inventory_omission.examples, vec!["git ls-files"]);
+            let undeclared_omission = graph
+                .omissions
+                .iter()
+                .find(|omission| {
+                    omission.detail == "explicit task touch intent was not declared"
+                })
+                .expect("aggregated undeclared-task omission");
+            assert_eq!(undeclared_omission.count, expected_nodes);
+        }
     }
 }
 
@@ -730,11 +774,29 @@ Keep the existing parser behavior.
         .unwrap();
     assert_eq!(graph.nodes.len(), 2);
     assert!(graph.edges.is_empty());
-    assert_eq!(graph.omissions.len(), 1);
+    assert_eq!(graph.omissions.len(), 3);
     assert_eq!(
-        graph.omissions[0].reason,
-        WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+        graph
+            .omissions
+            .iter()
+            .filter(|omission| {
+                omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+                    && omission.detail
+                        == "project knowledge was unavailable, so context relationships are incomplete"
+            })
+            .count(),
+        1
     );
+    assert!(graph
+        .omissions
+        .iter()
+        .any(|omission| omission.detail == "tracked file inventory was unavailable"));
+    let undeclared_omission = graph
+        .omissions
+        .iter()
+        .find(|omission| omission.detail == "explicit task touch intent was not declared")
+        .expect("aggregated undeclared-task omission");
+    assert_eq!(undeclared_omission.count, 2);
     assert!(
         StateManager::new(storage.session_dir("legacy-plan"))
             .read_graph_composition_state()
@@ -765,16 +827,32 @@ fn malformed_graph_metadata_preserves_task_and_degrades_to_edgeless_graph() {
     assert_eq!(graph.nodes.len(), 1);
     assert_eq!(graph.nodes[0].id, "T1");
     assert!(graph.edges.is_empty());
-    assert_eq!(graph.omissions.len(), 2);
+    assert_eq!(graph.omissions.len(), 4);
     let parser_omission = graph
         .omissions
         .iter()
-        .find(|omission| omission.reason == WorkGraphOmissionReason::ResolutionIncomplete)
+        .find(|omission| {
+            omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+                && omission
+                    .examples
+                    .iter()
+                    .any(|example| example.contains("unterminated"))
+        })
         .expect("parser omission");
     assert!(parser_omission.examples[0].contains("unterminated"));
     assert!(graph.omissions.iter().any(|omission| {
         omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
     }));
+    assert!(graph
+        .omissions
+        .iter()
+        .any(|omission| omission.detail == "tracked file inventory was unavailable"));
+    let undeclared_omission = graph
+        .omissions
+        .iter()
+        .find(|omission| omission.detail == "explicit task touch intent was not declared")
+        .expect("aggregated undeclared-task omission");
+    assert_eq!(undeclared_omission.count, 1);
 }
 
 #[test]
@@ -915,11 +993,29 @@ fn all_legacy_checkbox_tasks_are_preserved_without_omissions() {
             .collect::<Vec<_>>(),
         vec!["task-1", "task-2"]
     );
-    assert_eq!(graph.omissions.len(), 1);
+    assert_eq!(graph.omissions.len(), 3);
     assert_eq!(
-        graph.omissions[0].reason,
-        WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+        graph
+            .omissions
+            .iter()
+            .filter(|omission| {
+                omission.reason == WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+                    && omission.detail
+                        == "project knowledge was unavailable, so context relationships are incomplete"
+            })
+            .count(),
+        1
     );
+    assert!(graph
+        .omissions
+        .iter()
+        .any(|omission| omission.detail == "tracked file inventory was unavailable"));
+    let undeclared_omission = graph
+        .omissions
+        .iter()
+        .find(|omission| omission.detail == "explicit task touch intent was not declared")
+        .expect("aggregated undeclared-task omission");
+    assert_eq!(undeclared_omission.count, 2);
 }
 
 #[test]

@@ -16,7 +16,7 @@ from typing import Any, Optional
 from plan_grammar import PlanTask, SessionPlan, parse_plan_markdown_with_diagnostics, rust_lines
 
 
-RUST_RULESET = "current"
+RUST_RULESET = "hv10+hv11"
 
 MAX_CONTEXT_SUMMARY_CHARS = 240
 MAX_DERIVED_CONTEXT_NODES = 128

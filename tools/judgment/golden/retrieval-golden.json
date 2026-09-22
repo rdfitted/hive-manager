@@ -32,6 +32,14 @@
           "examples": [
             "touches-resolver"
           ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "tracked file inventory was unavailable",
+          "examples": [
+            "git ls-files"
+          ]
         }
       ],
       "hub_lints": []
@@ -46,6 +54,10 @@
       },
       "knowledge_attachment_touches": {
         "T1": [
+          "src/auth.rs"
+        ],
+        "T2": [
+          "src",
           "src/auth.rs"
         ]
       },
@@ -91,14 +103,33 @@
           ]
         }
       ],
-      "hub_lints": []
+      "hub_lints": [
+        {
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "linked_task_ids": [
+            "T1",
+            "T2"
+          ],
+          "reason": "expanded knowledge coverage applies to a high fraction of tasks; base declared-scope edges were preserved and new inferred edges were withheld"
+        }
+      ]
     },
     "file-list-fallback": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
-      "knowledge_edges": [],
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched contract-path, fallback"
+        }
+      ],
       "context_nodes": [
         {
           "id": "context::knowledge::452a054383c3acfe",
@@ -118,11 +149,11 @@
       ],
       "omissions": [
         {
-          "reason": "codegraph_unavailable",
+          "reason": "resolution_incomplete",
           "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "detail": "explicit task touch intent was not declared",
           "examples": [
-            "touches-resolver"
+            "T1"
           ]
         }
       ],
@@ -132,8 +163,18 @@
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
-      "knowledge_edges": [],
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/queue.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::add8f50084a9a0ab",
+          "rationale": "knowledge attachment matched contract-path"
+        }
+      ],
       "context_nodes": [
         {
           "id": "context::knowledge::add8f50084a9a0ab",
@@ -153,11 +194,11 @@
       ],
       "omissions": [
         {
-          "reason": "codegraph_unavailable",
+          "reason": "resolution_incomplete",
           "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "detail": "explicit task touch intent was not declared",
           "examples": [
-            "touches-resolver"
+            "T1"
           ]
         }
       ],
@@ -167,7 +208,14 @@
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ],
+        "T2": [
+          "tests/auth.rs"
+        ]
+      },
       "knowledge_edges": [],
       "context_nodes": [
         {
@@ -186,11 +234,11 @@
       ],
       "omissions": [
         {
-          "reason": "codegraph_unavailable",
+          "reason": "resolution_incomplete",
           "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "detail": "inferred knowledge scope was ambiguous",
           "examples": [
-            "touches-resolver"
+            ".ai-docs/project-dna.md#L3: auth.rs"
           ]
         }
       ],
@@ -200,73 +248,85 @@
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
-      "knowledge_edges": [],
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, inferred-scope:unique-basename"
+        }
+      ],
       "context_nodes": [
         {
           "id": "context::knowledge::452a054383c3acfe",
           "title": "Authentication Boundary: Changes to `auth.rs` require focused review.",
           "summary": "Authentication Boundary: Changes to `auth.rs` require focused review.",
-          "scope": [],
+          "scope": [
+            "src/auth.rs"
+          ],
           "parameters": {
             "fingerprint_ref": ".ai-docs/project-dna.md",
-            "scope": "",
+            "knowledge_provenance": "src/auth.rs=inferred-scope:unique-basename",
+            "scope": "src/auth.rs",
             "source_hash": "c25bdfd6cb3b7be5",
             "source_ref": ".ai-docs/project-dna.md#L3",
             "summary": "Authentication Boundary: Changes to `auth.rs` require focused review."
           }
         }
       ],
-      "omissions": [
-        {
-          "reason": "codegraph_unavailable",
-          "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
-          "examples": [
-            "touches-resolver"
-          ]
-        }
-      ],
+      "omissions": [],
       "hub_lints": []
     },
     "inferred-exact": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
-      "knowledge_edges": [],
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, inferred-scope:exact"
+        }
+      ],
       "context_nodes": [
         {
           "id": "context::knowledge::452a054383c3acfe",
           "title": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
           "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
-          "scope": [],
+          "scope": [
+            "src/auth.rs"
+          ],
           "parameters": {
             "fingerprint_ref": ".ai-docs/project-dna.md",
-            "scope": "",
+            "knowledge_provenance": "src/auth.rs=inferred-scope:exact",
+            "scope": "src/auth.rs",
             "source_hash": "906c529ef0800f14",
             "source_ref": ".ai-docs/project-dna.md#L3",
             "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review."
           }
         }
       ],
-      "omissions": [
-        {
-          "reason": "codegraph_unavailable",
-          "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
-          "examples": [
-            "touches-resolver"
-          ]
-        }
-      ],
+      "omissions": [],
       "hub_lints": []
     },
     "inferred-stale": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
       "knowledge_edges": [],
       "context_nodes": [
         {
@@ -285,11 +345,11 @@
       ],
       "omissions": [
         {
-          "reason": "codegraph_unavailable",
+          "reason": "resolution_incomplete",
           "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "detail": "inferred knowledge scope found no tracked path",
           "examples": [
-            "touches-resolver"
+            ".ai-docs/project-dna.md#L3: src/missing.rs"
           ]
         }
       ],
@@ -299,41 +359,55 @@
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
-      "knowledge_edges": [],
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src-tauri/src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, inferred-scope:path-suffix"
+        }
+      ],
       "context_nodes": [
         {
           "id": "context::knowledge::452a054383c3acfe",
           "title": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
           "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
-          "scope": [],
+          "scope": [
+            "src-tauri/src/auth.rs"
+          ],
           "parameters": {
             "fingerprint_ref": ".ai-docs/project-dna.md",
-            "scope": "",
+            "knowledge_provenance": "src-tauri/src/auth.rs=inferred-scope:path-suffix",
+            "scope": "src-tauri/src/auth.rs",
             "source_hash": "906c529ef0800f14",
             "source_ref": ".ai-docs/project-dna.md#L3",
             "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review."
           }
         }
       ],
-      "omissions": [
-        {
-          "reason": "codegraph_unavailable",
-          "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
-          "examples": [
-            "touches-resolver"
-          ]
-        }
-      ],
+      "omissions": [],
       "hub_lints": []
     },
     "partial-task": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
       "declared_touches": {},
-      "knowledge_attachment_touches": {},
-      "knowledge_edges": [],
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched contract-path"
+        }
+      ],
       "context_nodes": [
         {
           "id": "context::knowledge::452a054383c3acfe",
@@ -353,11 +427,19 @@
       ],
       "omissions": [
         {
-          "reason": "codegraph_unavailable",
+          "reason": "resolution_incomplete",
           "count": 1,
-          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "detail": "explicit task touch intent was not declared",
           "examples": [
-            "touches-resolver"
+            "T1"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "knowledge path resolution found no tracked path",
+          "examples": [
+            "T1: missing.rs"
           ]
         }
       ],

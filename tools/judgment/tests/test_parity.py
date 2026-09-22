@@ -27,8 +27,8 @@ def _normalize_root(value, root: Path):
 
 
 class RetrievalParityTests(unittest.TestCase):
-    def test_current_rules_match_rust_golden(self):
-        self.assertEqual("current", RUST_RULESET)
+    def test_rust_ruleset_matches_rust_golden(self):
+        self.assertEqual("hv10+hv11", RUST_RULESET)
         self.assertTrue(GOLDEN_PATH.is_file(), "Rust golden must be checked in")
         fixture_dirs = sorted(
             path
