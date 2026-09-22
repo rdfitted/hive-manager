@@ -141,11 +141,24 @@ def resolve_ledger_path(override: Optional[Path] = None) -> Path:
     return appdata / "hive-manager" / "judgments" / "ledger.jsonl"
 
 
-def resolve_session_store_root(override: Optional[Path] = None) -> Path:
+def resolve_session_store_root(
+    override: Optional[Path] = None,
+    *,
+    platform: Optional[str] = None,
+    environment: Optional[dict[str, str]] = None,
+) -> Path:
     if override is not None:
         return override
-    appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    return appdata / "hive-manager" / "sessions"
+    platform = os.name if platform is None else platform
+    environment = os.environ if environment is None else environment
+    variable = "APPDATA" if platform == "nt" else "HOME"
+    base = environment.get(variable)
+    if not base:
+        raise ValueError(f"{variable} not set")
+    root = Path(base)
+    if platform != "nt":
+        root = root / ".config"
+    return root / "hive-manager" / "sessions"
 
 
 def observed_production_attachments(
@@ -238,6 +251,42 @@ def load_latest_knowledge_acks(
             continue
         acknowledgements[value["agent_id"]] = set(tags)
     return acknowledgements, errors
+
+
+def load_completed_spawn_keys(
+    session_store_root: Path, session_id: str
+) -> tuple[set[tuple[str, str]], list[str]]:
+    path = (
+        session_store_root
+        / session_id
+        / "state"
+        / "work-graph-completions.jsonl"
+    )
+    if not path.is_file():
+        return set(), []
+    completed = set()
+    errors = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        return set(), [f"completion ledger unreadable: {error}"]
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            errors.append(f"completion ledger line {line_number}: {error}")
+            continue
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("agent_id"), str)
+            or not isinstance(value.get("task_id"), str)
+        ):
+            errors.append(f"completion ledger line {line_number}: invalid record")
+            continue
+        completed.add((value["agent_id"], value["task_id"]))
+    return completed, errors
 
 
 def load_agent_clis(session_store_root: Path, session_id: str) -> dict[str, str]:
@@ -352,6 +401,8 @@ def summarize_knowledge_acks(
 ) -> dict:
     by_cli = {}
     for spawn in sampled_spawns:
+        if not spawn["completed"]:
+            continue
         cli = spawn["cli"]
         counts = by_cli.setdefault(cli, {"sampled_completions": 0, "acknowledged": 0})
         counts["sampled_completions"] += 1
@@ -483,16 +534,28 @@ def _evaluate_spawn_ack(
     session: Path,
     context: dict,
     acknowledgement: Optional[set[str]],
+    completed: bool,
     cli: str,
     changed: Optional[set[str]],
-) -> tuple[Optional[dict], list[dict], Optional[dict]]:
+) -> tuple[Optional[dict], list[dict], Optional[dict], list[str]]:
     if not context.get("sampled"):
-        return None, [], None
+        return None, [], None, []
     agent_id = context["agent_id"]
     session_id = session.name
+    kept_tags = {
+        reference.get("tag")
+        for reference in context["kept"]
+        if isinstance(reference, dict) and isinstance(reference.get("tag"), str)
+    }
+    out_of_context_tags = (
+        sorted(acknowledgement - kept_tags)
+        if acknowledgement is not None
+        else []
+    )
     sampled_spawn = {
         "cli": cli,
-        "acknowledged": acknowledgement is not None,
+        "completed": completed,
+        "acknowledged": acknowledgement is not None and not out_of_context_tags,
     }
     excerpts = _tagged_prompt_excerpts(session, agent_id)
     corpus = _completion_proxy_corpus(
@@ -563,7 +626,7 @@ def _evaluate_spawn_ack(
         "human_agreement": "",
         "review_notes": "",
     }
-    return sampled_spawn, observations, spot_check
+    return sampled_spawn, observations, spot_check, out_of_context_tags
 
 
 def _evaluate_session_acks(
@@ -575,23 +638,40 @@ def _evaluate_session_acks(
     session_store_root: Path,
     contexts: list[dict],
     changed: Optional[set[str]],
-) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+) -> tuple[list[dict], list[dict], list[dict], list[dict], list[str]]:
     acknowledgements, errors = load_latest_knowledge_acks(
         session_store_root, session.name
     )
+    completed_spawn_keys, completion_errors = load_completed_spawn_keys(
+        session_store_root, session.name
+    )
+    errors.extend(completion_errors)
     agent_clis = load_agent_clis(session_store_root, session.name)
     sampled_spawns = []
     observations = []
     spot_checks = []
+    out_of_context = []
     for context in contexts:
         agent_id = context["agent_id"]
-        sampled_spawn, context_observations, spot_check = _evaluate_spawn_ack(
+        acknowledgement = acknowledgements.get(agent_id)
+        plan_task_id = context.get("plan_task_id")
+        completed = acknowledgement is not None or (
+            isinstance(plan_task_id, str)
+            and (agent_id, plan_task_id) in completed_spawn_keys
+        )
+        (
+            sampled_spawn,
+            context_observations,
+            spot_check,
+            context_out_of_context,
+        ) = _evaluate_spawn_ack(
             ledger_path=ledger_path,
             existing_outcomes=existing_outcomes,
             repo_name=repo_name,
             session=session,
             context=context,
-            acknowledgement=acknowledgements.get(agent_id),
+            acknowledgement=acknowledgement,
+            completed=completed,
             cli=agent_clis.get(agent_id, "unknown"),
             changed=changed,
         )
@@ -600,7 +680,11 @@ def _evaluate_session_acks(
         observations.extend(context_observations)
         if spot_check is not None:
             spot_checks.append(spot_check)
-    return sampled_spawns, observations, spot_checks, errors
+        out_of_context.extend(
+            {"agent_id": agent_id, "tag": tag}
+            for tag in context_out_of_context
+        )
+    return sampled_spawns, observations, spot_checks, out_of_context, errors
 
 
 def write_spot_check_csv(path: Path, rows: list[dict]) -> None:
@@ -1123,6 +1207,7 @@ def run_replay(
         "diff_unavailable": [],
         "spawn_context_errors": [],
         "knowledge_ack_errors": [],
+        "out_of_context_ack_tags": [],
         "delivery_coverage": _delivery_coverage(0, 0),
         "knowledge_ack_metrics": summarize_knowledge_acks([], []),
         "spot_check_csv": str(spot_check_csv),
@@ -1149,6 +1234,7 @@ def run_replay(
             "production_attached": 0,
             "spawn_context_errors": [],
             "knowledge_ack_errors": [],
+            "out_of_context_ack_tags": [],
             "delivery_coverage": _delivery_coverage(0, 0),
             "knowledge_ack_metrics": summarize_knowledge_acks([], []),
             "scorecards": scorecards,
@@ -1194,6 +1280,7 @@ def run_replay(
                     session_sampled_spawns,
                     session_observations,
                     session_spot_checks,
+                    session_out_of_context,
                     ack_errors,
                 ) = _evaluate_session_acks(
                     ledger_path=ledger_path,
@@ -1209,6 +1296,14 @@ def run_replay(
                 ack_observations.extend(session_observations)
                 repo_ack_observations.extend(session_observations)
                 spot_check_rows.extend(session_spot_checks)
+                for item in session_out_of_context:
+                    detail = {
+                        "repo": repo_name,
+                        "session_id": session.name,
+                        **item,
+                    }
+                    report["out_of_context_ack_tags"].append(detail)
+                    repo_report["out_of_context_ack_tags"].append(detail)
                 for error in ack_errors:
                     detail = {
                         "repo": repo_name,
@@ -1243,6 +1338,7 @@ def run_replay(
                 session_sampled_spawns,
                 session_observations,
                 session_spot_checks,
+                session_out_of_context,
                 ack_errors,
             ) = _evaluate_session_acks(
                 ledger_path=ledger_path,
@@ -1258,6 +1354,14 @@ def run_replay(
             ack_observations.extend(session_observations)
             repo_ack_observations.extend(session_observations)
             spot_check_rows.extend(session_spot_checks)
+            for item in session_out_of_context:
+                detail = {
+                    "repo": repo_name,
+                    "session_id": session.name,
+                    **item,
+                }
+                report["out_of_context_ack_tags"].append(detail)
+                repo_report["out_of_context_ack_tags"].append(detail)
             for error in ack_errors:
                 detail = {
                     "repo": repo_name,

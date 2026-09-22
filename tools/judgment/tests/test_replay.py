@@ -330,6 +330,8 @@ class ReplayPlumbingTests(unittest.TestCase):
             session_store = base / "session-store"
             agent_one = f"{session_id}-worker-1"
             agent_two = f"{session_id}-worker-2"
+            agent_three = f"{session_id}-worker-3"
+            agent_four = f"{session_id}-worker-4"
             common = {
                 "schema_version": "hive.spawn-context/v1",
                 "session_id": session_id,
@@ -399,6 +401,50 @@ class ReplayPlumbingTests(unittest.TestCase):
                 + "\n",
             )
             _write(
+                session / "prompts" / f"{agent_three}-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": agent_three,
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "task",
+                                "source": "project",
+                                "pointer": ".ai-docs/learnings.jsonl",
+                                "priority": 65,
+                                "chars": 80,
+                            }
+                        ],
+                        "miss_sample_references": [],
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session / "prompts" / f"{agent_four}-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": agent_four,
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "role",
+                                "source": "institutional",
+                                "pointer": "testing.md",
+                                "priority": 55,
+                                "chars": 70,
+                            }
+                        ],
+                        "miss_sample_references": [],
+                    }
+                )
+                + "\n",
+            )
+            _write(
                 session / "prompts" / f"{agent_one}-prompt.md",
                 "- [k1] Durable authentication boundary guidance\n"
                 "- [k2] Conservative database transaction handling\n",
@@ -414,7 +460,26 @@ class ReplayPlumbingTests(unittest.TestCase):
                         "agents": [
                             {"id": agent_one, "config": {"cli": "codex"}},
                             {"id": agent_two, "config": {"cli": "codex"}},
+                            {"id": agent_three, "config": {"cli": "codex"}},
+                            {"id": agent_four, "config": {"cli": "codex"}},
                         ]
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session_store
+                / session_id
+                / "state"
+                / "work-graph-completions.jsonl",
+                json.dumps(
+                    {
+                        "id": "synthetic-completion",
+                        "task_id": "T1",
+                        "agent_id": agent_two,
+                        "provenance": "heartbeat",
+                        "completed_at": "2026-09-22T00:02:00Z",
+                        "executed_as": None,
                     }
                 )
                 + "\n",
@@ -428,6 +493,16 @@ class ReplayPlumbingTests(unittest.TestCase):
                         "agent_id": agent_one,
                         "knowledge_ack": [],
                         "recorded_at": "2026-09-22T00:00:00Z",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "schema_version": "hive.knowledge-ack/v1",
+                        "session_id": session_id,
+                        "agent_id": agent_three,
+                        "knowledge_ack": ["k9"],
+                        "recorded_at": "2026-09-22T00:01:00Z",
                     }
                 )
                 + "\n",
@@ -481,30 +556,40 @@ class ReplayPlumbingTests(unittest.TestCase):
             metrics = report["knowledge_ack_metrics"]
             self.assertEqual(
                 {
-                    "sampled_completions": 2,
+                    "sampled_completions": 3,
                     "acknowledged": 1,
-                    "compliance": 0.5,
+                    "compliance": 1 / 3,
                     "reliable": False,
                 },
                 metrics["compliance_by_cli"]["codex"],
             )
-            self.assertEqual(1, metrics["precision"]["overall"]["shown"])
+            self.assertEqual(2, metrics["precision"]["overall"]["shown"])
             self.assertEqual(0, metrics["precision"]["overall"]["used"])
-            self.assertEqual(1, metrics["precision"]["by_cli"]["codex"]["shown"])
+            self.assertEqual(2, metrics["precision"]["by_cli"]["codex"]["shown"])
             self.assertEqual(1, metrics["miss_rate"]["shown"])
             self.assertFalse(metrics["miss_rate"]["enough_samples"])
             self.assertTrue(metrics["miss_rate"]["flagged_low_n"])
+            self.assertEqual(2, metrics["proxy_agreement"]["agree"])
+            self.assertEqual(3, metrics["proxy_agreement"]["total"])
+            self.assertAlmostEqual(2 / 3, metrics["proxy_agreement"]["rate"])
             self.assertEqual(
-                {"agree": 1, "total": 2, "rate": 0.5},
-                metrics["proxy_agreement"],
+                [
+                    {
+                        "repo": repo.name,
+                        "session_id": session_id,
+                        "agent_id": agent_three,
+                        "tag": "k9",
+                    }
+                ],
+                report["out_of_context_ack_tags"],
             )
 
             rows = list(ledger.read_records([ledger_path]))
             outcomes = [row for row in rows if row.get("kind") == "outcome"]
-            self.assertEqual(2, len(outcomes), "ack outcomes must be idempotent")
+            self.assertEqual(3, len(outcomes), "ack outcomes must be idempotent")
             self.assertTrue(all(row["label"] == "unused" for row in outcomes))
             self.assertEqual(
-                [False, True],
+                [False, False, True],
                 sorted(row["proxy_mentioned"] for row in outcomes),
             )
             absent_decision_ids = {
@@ -521,13 +606,13 @@ class ReplayPlumbingTests(unittest.TestCase):
                 "an absent ack must remain undecided with no outcome row",
             )
             checked, errors = ledger.validate_file([ledger_path])
-            self.assertEqual(5, checked)
+            self.assertEqual(8, checked)
             self.assertEqual([], errors)
 
             with open(spot_check, encoding="utf-8", newline="") as handle:
                 spot_rows = list(csv.DictReader(handle))
-            self.assertEqual(1, len(spot_rows))
-            self.assertEqual("decided", spot_rows[0]["ack_state"])
+            self.assertEqual(2, len(spot_rows))
+            self.assertTrue(all(row["ack_state"] == "decided" for row in spot_rows))
             self.assertTrue(all(row["human_used_tags"] == "" for row in spot_rows))
 
     def test_spawn_sidecars_write_schema_valid_rows_and_delivery_coverage(self):
@@ -994,6 +1079,28 @@ class ReplayPlumbingTests(unittest.TestCase):
                     appdata / "hive-manager" / "judgments" / "ledger.jsonl",
                     retrieval_replay.resolve_ledger_path(),
                 )
+
+    def test_session_store_resolution_matches_session_storage_on_each_platform(self):
+        self.assertEqual(
+            Path("C:/Users/operator/AppData/Roaming")
+            / "hive-manager"
+            / "sessions",
+            retrieval_replay.resolve_session_store_root(
+                platform="nt",
+                environment={"APPDATA": "C:/Users/operator/AppData/Roaming"},
+            ),
+        )
+        self.assertEqual(
+            Path("/c/Users/RDuff/.config/hive-manager/sessions"),
+            retrieval_replay.resolve_session_store_root(
+                platform="posix",
+                environment={"HOME": "/c/Users/RDuff"},
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "HOME not set"):
+            retrieval_replay.resolve_session_store_root(
+                platform="posix", environment={}
+            )
 
     def test_changed_files_use_only_local_refs_and_merge_base(self):
         calls: list[list[str]] = []
