@@ -455,15 +455,21 @@ pub fn render_composed_context(context: &ComposedContext) -> String {
 
 /// Render acknowledgement tags without changing the legacy renderer used by
 /// composition-sidecar and unsampled spawns.
-pub fn render_composed_context_with_ack_tags(context: &ComposedContext) -> String {
+pub fn render_composed_context_with_ack_tags(context: &ComposedContext) -> Option<String> {
     if context.knowledge.is_empty() {
-        return render_composed_context(context);
+        return None;
     }
 
-    let mut rendered = render_composed_context(context);
+    tag_rendered_knowledge(context, render_composed_context(context))
+}
+
+fn tag_rendered_knowledge(
+    context: &ComposedContext,
+    mut rendered: String,
+) -> Option<String> {
     let marker = "### Knowledge References\n\n";
     let Some(mut search_start) = rendered.find(marker).map(|index| index + marker.len()) else {
-        return rendered;
+        return None;
     };
 
     for (index, item) in context.knowledge.iter().enumerate() {
@@ -489,7 +495,7 @@ pub fn render_composed_context_with_ack_tags(context: &ComposedContext) -> Strin
             summary
         );
         let Some(offset) = rendered[search_start..].find(&legacy_line) else {
-            return render_composed_context(context);
+            return None;
         };
         let line_start = search_start + offset;
         let line_end = line_start + legacy_line.len();
@@ -497,7 +503,7 @@ pub fn render_composed_context_with_ack_tags(context: &ComposedContext) -> Strin
         search_start = line_start + tagged_line.len();
     }
     rendered.insert_str(search_start, &format!("\n{ACK_INSTRUCTION}\n"));
-    rendered
+    Some(rendered)
 }
 
 /// Stable, replayable acknowledgement draw keyed only on the full agent id.
@@ -908,7 +914,7 @@ mod tests {
             ..ComposedContext::default()
         };
 
-        let rendered = render_composed_context_with_ack_tags(&context);
+        let rendered = render_composed_context_with_ack_tags(&context).expect("tagged context");
         assert!(rendered.contains("- [k1] [task] `project:first.md`"));
         assert!(rendered.contains("- [k2] [role+task] `project:second.md`"));
         assert!(rendered.contains("First line\n\nSecond line"));
@@ -917,6 +923,26 @@ mod tests {
         assert_eq!(rendered.matches(ACK_INSTRUCTION).count(), 1);
         assert!(!ACK_INSTRUCTION.contains("caus"));
         assert!(ACK_INSTRUCTION.contains("relevant"));
+    }
+
+    #[test]
+    fn sampled_renderer_reports_fallback_when_legacy_knowledge_cannot_be_tagged() {
+        let context = ComposedContext {
+            knowledge: vec![ComposedKnowledgeRef {
+                reference: reference("expected.md"),
+                origin: ContextOrigin::Task,
+            }],
+            ..ComposedContext::default()
+        };
+
+        assert_eq!(
+            tag_rendered_knowledge(
+                &context,
+                "## Composed Role and Task Context\n\n### Task Summary\n\nNo knowledge section\n"
+                    .to_string(),
+            ),
+            None
+        );
     }
 
     #[test]

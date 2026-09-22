@@ -15,6 +15,8 @@ use crate::coordination::queue_manager::{heartbeat_cadence_label, STUCK_CUTOFF_S
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::domain::{ArtifactBundle, HiveExecutionPolicy, HiveLaunchKind, WorkspaceStrategy};
 use crate::events::{EventBus, EventEmitter};
+use crate::http::handlers::evaluator::read_qa_verdict_record;
+use crate::judgment::ledger::{JudgmentLedger, OutcomeInput, OutcomeSource};
 use crate::orchestrator::org_graph::composition::{
     admit_ack_miss_sample, compose_context_with_remaining, is_ack_sampled,
     knowledge_reference_chars, knowledge_refs_from_work_graph, render_composed_context,
@@ -6979,7 +6981,7 @@ When the objective and every configured gate are complete, send this `completed`
         let mut composition =
             compose_context_with_remaining(resolved_role.definition.as_ref(), spawn_context);
         let drawn = ack_eligible && is_ack_sampled(&agent_id);
-        let miss_sample_positions = if drawn {
+        let mut miss_sample_positions = if drawn {
             admit_ack_miss_sample(
                 &mut composition.context,
                 &mut composition.remaining,
@@ -6991,11 +6993,22 @@ When the objective and every configured gate are complete, send this `completed`
         } else {
             Vec::new()
         };
-        let sampled = drawn && !composition.context.knowledge.is_empty();
-        let composed_context = if sampled {
-            render_composed_context_with_ack_tags(&composition.context)
+        let sample_requested = drawn && !composition.context.knowledge.is_empty();
+        let (sampled, composed_context) = if sample_requested {
+            match render_composed_context_with_ack_tags(&composition.context) {
+                Some(rendered) => (true, rendered),
+                None => {
+                    tracing::warn!(
+                        session_id,
+                        agent_id,
+                        "Failed to tag sampled knowledge; rendering unsampled context"
+                    );
+                    miss_sample_positions.clear();
+                    (false, render_composed_context(&composition.context))
+                }
+            }
         } else {
-            render_composed_context(&composition.context)
+            (false, render_composed_context(&composition.context))
         };
         let activation_wait_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
@@ -12027,6 +12040,54 @@ The backend composed and persisted the following authoritative skeleton before l
         }
     }
 
+    fn record_terminal_qa_outcomes(&self, session_id: &str, label: &str) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let record = match read_qa_verdict_record(&storage.session_dir(session_id)) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                tracing::warn!(
+                    session_id,
+                    "QA reached a terminal state without a persisted verdict record"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    %error,
+                    "Failed to read QA verdict record for downstream outcomes"
+                );
+                return;
+            }
+        };
+        let ledger = JudgmentLedger::new(
+            storage
+                .base_dir()
+                .join("judgments")
+                .join("ledger.jsonl"),
+        );
+        for criterion in record.criteria {
+            let Some(decision_id) = criterion.decision_id else {
+                continue;
+            };
+            let mut extra = serde_json::Map::new();
+            extra.insert("session_id".to_string(), serde_json::json!(session_id));
+            extra.insert(
+                "criterion_number".to_string(),
+                serde_json::json!(criterion.number),
+            );
+            let _ = ledger.record_outcome(OutcomeInput {
+                decision_id,
+                label: serde_json::json!(label),
+                source: OutcomeSource::Downstream,
+                note: None,
+                extra,
+            });
+        }
+    }
+
     fn apply_qa_verdict_to_session(
         &self,
         session: &mut Session,
@@ -12059,6 +12120,7 @@ The backend composed and persisted the following authoritative skeleton before l
         match normalized_verdict {
             "PASS" | "QA_VERDICT: PASS" => {
                 let changes = self.set_session_state_with_events(session, SessionState::QaPassed);
+                self.record_terminal_qa_outcomes(&session.id, "pass");
                 (SessionState::QaPassed, changes)
             }
             "FAIL" | "QA_VERDICT: FAIL" => {
@@ -12073,6 +12135,7 @@ The backend composed and persisted the following authoritative skeleton before l
                     let changes = self
                         .set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                     session.auth_strategy = AuthStrategy::None;
+                    self.record_terminal_qa_outcomes(&session.id, "fail");
                     (SessionState::QaMaxRetriesExceeded, changes)
                 } else {
                     let next_state = SessionState::QaFailed {
@@ -19705,6 +19768,181 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             no_git: false,
             resume_report: None,
         }
+    }
+
+    fn write_test_qa_verdict_record(
+        storage: &SessionStorage,
+        session_id: &str,
+        decision_ids: &[&str],
+    ) {
+        let state_dir = storage.session_dir(session_id).join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let criteria = decision_ids
+            .iter()
+            .enumerate()
+            .map(|(index, decision_id)| {
+                serde_json::json!({
+                    "number": index + 1,
+                    "label": format!("Criterion {}", index + 1),
+                    "kind": "PassFail",
+                    "result": "pass",
+                    "passed": true,
+                    "evidence": "Observed",
+                    "evidence_refs": [format!("qa#{}", index + 1)],
+                    "decision_id": decision_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "milestone_id": "milestone-1",
+            "iteration": 1,
+            "verdict": "PASS",
+            "passed": true,
+            "summary": "Typed verdict fixture",
+            "timestamp": "2026-09-22T22:00:00.000Z",
+            "contract_path": null,
+            "contract_typed": true,
+            "omission": null,
+            "criteria": criteria,
+        });
+        std::fs::write(
+            state_dir.join("qa-verdict.json"),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn read_test_outcomes(storage: &SessionStorage) -> Vec<serde_json::Value> {
+        let path = storage
+            .base_dir()
+            .join("judgments")
+            .join("ledger.jsonl");
+        match std::fs::read_to_string(path) {
+            Ok(content) => content
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read test judgment ledger: {error}"),
+        }
+    }
+
+    #[test]
+    fn qa_pass_records_one_downstream_outcome_per_criterion() {
+        const SESSION_ID: &str = "qa-outcome-pass";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(&storage, SESSION_ID, &["decision-1", "decision-2"]);
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        let mut session = qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("project"),
+            false,
+        );
+
+        let (new_state, _) =
+            controller.apply_qa_verdict_to_session(&mut session, "PASS", None, None, false);
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        assert_eq!(session.state, SessionState::QaPassed);
+        let outcomes = read_test_outcomes(&storage);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|row| row["decision_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["decision-1", "decision-2"]
+        );
+        assert!(outcomes.iter().all(|row| {
+            row["kind"] == "outcome"
+                && row["label"] == "pass"
+                && row["source"] == "downstream"
+        }));
+    }
+
+    #[test]
+    fn qa_failure_records_outcomes_only_after_retry_exhaustion() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+
+        const RETRY_SESSION: &str = "qa-outcome-retry";
+        storage.create_session_dir(RETRY_SESSION).unwrap();
+        write_test_qa_verdict_record(&storage, RETRY_SESSION, &["retry-decision"]);
+        let mut retry_session = qa_session_with(
+            RETRY_SESSION,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("retry-project"),
+            false,
+        );
+        let (retry_state, _) = controller.apply_qa_verdict_to_session(
+            &mut retry_session,
+            "FAIL",
+            None,
+            None,
+            false,
+        );
+        assert_eq!(retry_state, SessionState::QaFailed { iteration: 2 });
+        assert!(read_test_outcomes(&storage).is_empty());
+
+        const TERMINAL_SESSION: &str = "qa-outcome-terminal-fail";
+        storage.create_session_dir(TERMINAL_SESSION).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            TERMINAL_SESSION,
+            &["terminal-decision-1", "terminal-decision-2"],
+        );
+        let mut terminal_session = qa_session_with(
+            TERMINAL_SESSION,
+            SessionState::QaInProgress { iteration: Some(3) },
+            temp.path().join("terminal-project"),
+            false,
+        );
+        let (terminal_state, _) = controller.apply_qa_verdict_to_session(
+            &mut terminal_session,
+            "FAIL",
+            None,
+            None,
+            false,
+        );
+        assert_eq!(terminal_state, SessionState::QaMaxRetriesExceeded);
+        assert_eq!(terminal_session.state, SessionState::QaMaxRetriesExceeded);
+        let outcomes = read_test_outcomes(&storage);
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|row| {
+            row["label"] == "fail" && row["source"] == "downstream"
+        }));
+    }
+
+    #[test]
+    fn downstream_outcome_write_failure_does_not_change_qa_transition() {
+        const SESSION_ID: &str = "qa-outcome-fail-open";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(&storage, SESSION_ID, &["decision-unwritable"]);
+        std::fs::write(storage.base_dir().join("judgments"), "blocks ledger directory").unwrap();
+        let mut controller = test_controller();
+        controller.set_storage(storage);
+        let mut session = qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("project"),
+            false,
+        );
+
+        let (new_state, _) =
+            controller.apply_qa_verdict_to_session(&mut session, "PASS", None, None, false);
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        assert_eq!(session.state, SessionState::QaPassed);
     }
 
     #[test]
