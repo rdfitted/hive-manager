@@ -9,6 +9,7 @@ mod coordination;
 pub mod domain;
 pub mod events;
 mod http;
+mod judgment;
 pub mod orchestrator;
 mod preview;
 mod process;

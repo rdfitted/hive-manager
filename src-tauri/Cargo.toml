@@ -39,6 +39,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 notify = "6.1"
 tempfile = "3"
 fs2 = "0.4"
+sha2 = "0.10.9"
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
