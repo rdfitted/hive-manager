@@ -640,15 +640,33 @@ for index in range(500):
         raise RuntimeError(f"python row {index} was not written")
 "#;
 
-        let mut child = Command::new("python")
-            .arg("-c")
-            .arg(python)
-            .arg("--ledger")
-            .arg(&path)
-            .arg("--module")
-            .arg(&vendored)
-            .spawn()
-            .expect("python is required for judgment writer interoperability tests");
+        let mut python_commands = std::env::var_os("PYTHON")
+            .into_iter()
+            .chain(["python".into(), "python3".into()]);
+        let mut attempted = Vec::new();
+        let mut child = python_commands
+            .find_map(|program| {
+                attempted.push(program.to_string_lossy().into_owned());
+                match Command::new(&program)
+                    .arg("-c")
+                    .arg(python)
+                    .arg("--ledger")
+                    .arg(&path)
+                    .arg("--module")
+                    .arg(&vendored)
+                    .spawn()
+                {
+                    Ok(child) => Some(child),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => panic!("failed to launch {program:?}: {error}"),
+                }
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "python is required for judgment writer interoperability tests; tried {}",
+                    attempted.join(", ")
+                )
+            });
         let rust_path = path.clone();
         let rust_writer = thread::spawn(move || {
             let ledger = JudgmentLedger::new(rust_path);

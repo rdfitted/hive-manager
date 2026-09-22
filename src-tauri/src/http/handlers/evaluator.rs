@@ -824,11 +824,14 @@ fn criterion_passed(
         (_, CriterionSubmissionResult::Pass) => true,
         (_, CriterionSubmissionResult::Fail | CriterionSubmissionResult::Blocked) => false,
         (
-            CriterionKind::Scored { max, floor, .. },
+            CriterionKind::Scored { min, max, floor },
             CriterionSubmissionResult::Scored(value),
-        ) => floor.is_some_and(|floor| {
-            value.is_finite() && *value >= f64::from(floor) && *value <= f64::from(*max)
-        }),
+        ) => {
+            let lower_bound = floor.unwrap_or(*min);
+            value.is_finite()
+                && *value >= f64::from(lower_bound)
+                && *value <= f64::from(*max)
+        }
         (
             CriterionKind::Measured { op, target, .. },
             CriterionSubmissionResult::Measured(value),
@@ -1883,6 +1886,36 @@ mod tests {
     fn maps_spawn_failures_to_internal() {
         let error = map_add_qa_worker_error("Failed to spawn QA worker 1: boom".to_string());
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn scored_criterion_without_floor_uses_declared_range() {
+        let kind = crate::coordination::CriterionKind::Scored {
+            min: 1,
+            max: 10,
+            floor: None,
+        };
+
+        assert!(super::criterion_passed(
+            &kind,
+            &super::CriterionSubmissionResult::Scored(1.0)
+        ));
+        assert!(super::criterion_passed(
+            &kind,
+            &super::CriterionSubmissionResult::Scored(10.0)
+        ));
+        assert!(!super::criterion_passed(
+            &kind,
+            &super::CriterionSubmissionResult::Scored(0.99)
+        ));
+        assert!(!super::criterion_passed(
+            &kind,
+            &super::CriterionSubmissionResult::Scored(10.01)
+        ));
+        assert!(!super::criterion_passed(
+            &kind,
+            &super::CriterionSubmissionResult::Scored(f64::NAN)
+        ));
     }
 
     #[test]
