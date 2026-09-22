@@ -40,6 +40,41 @@ const MAX_OMISSION_EXAMPLES: usize = 5;
 const MAX_KNOWLEDGE_TOUCHES_PER_TASK: usize = 256;
 const MAX_FILE_INVENTORY_ENTRIES: usize = 50_000;
 const MAX_FILE_INVENTORY_PATH_CHARS: usize = 512;
+const EXPLICIT_TASK_TOUCH_INTENT_UNDECLARED: &str =
+    "explicit task touch intent was not declared";
+const KNOWLEDGE_TOUCH_LIMIT_REACHED: &str = "knowledge touch limit was reached";
+const KNOWLEDGE_PATH_RESOLUTION_AMBIGUOUS: &str =
+    "knowledge path resolution was ambiguous";
+const KNOWLEDGE_PATH_RESOLUTION_NO_MATCH: &str =
+    "knowledge path resolution found no tracked path";
+const INFERRED_KNOWLEDGE_SCOPE_LIMIT_REACHED: &str =
+    "inferred knowledge scope exceeded the scope limit";
+const INFERRED_KNOWLEDGE_SCOPE_AMBIGUOUS: &str =
+    "inferred knowledge scope was ambiguous";
+const INFERRED_KNOWLEDGE_SCOPE_NO_MATCH: &str =
+    "inferred knowledge scope found no tracked path";
+const FILE_INVENTORY_ROOT_INVALID: &str = "file inventory root was not valid Unicode";
+const TRACKED_FILE_INVENTORY_UNAVAILABLE: &str = "tracked file inventory was unavailable";
+const TRACKED_FILE_INVENTORY_INVALID_UTF8: &str =
+    "tracked file inventory was not valid UTF-8";
+const TRACKED_FILE_INVENTORY_LIMIT_REACHED: &str =
+    "tracked file inventory exceeded the entry limit";
+const TRACKED_FILE_INVENTORY_INVALID_PATH: &str =
+    "tracked file inventory contained an invalid path";
+const KNOWLEDGE_DERIVATION_OMISSION_DETAILS: &[&str] = &[
+    EXPLICIT_TASK_TOUCH_INTENT_UNDECLARED,
+    KNOWLEDGE_TOUCH_LIMIT_REACHED,
+    KNOWLEDGE_PATH_RESOLUTION_AMBIGUOUS,
+    KNOWLEDGE_PATH_RESOLUTION_NO_MATCH,
+    INFERRED_KNOWLEDGE_SCOPE_LIMIT_REACHED,
+    INFERRED_KNOWLEDGE_SCOPE_AMBIGUOUS,
+    INFERRED_KNOWLEDGE_SCOPE_NO_MATCH,
+    FILE_INVENTORY_ROOT_INVALID,
+    TRACKED_FILE_INVENTORY_UNAVAILABLE,
+    TRACKED_FILE_INVENTORY_INVALID_UTF8,
+    TRACKED_FILE_INVENTORY_LIMIT_REACHED,
+    TRACKED_FILE_INVENTORY_INVALID_PATH,
+];
 
 /// Lossless codegraph/touches coverage shared by enrichment, context, and
 /// claim-time conflict projection.
@@ -115,6 +150,102 @@ pub(crate) enum PathResolutionFailure {
     NoMatch,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PathIntentResolver {
+    candidates: BTreeSet<String>,
+}
+
+impl PathIntentResolver {
+    pub(crate) fn new(candidates: &BTreeSet<String>) -> Self {
+        Self {
+            candidates: candidates
+                .iter()
+                .filter_map(|candidate| normalize_path_reference(candidate))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        intent: &str,
+        allow_parent_directory: bool,
+    ) -> Result<PathResolution, PathResolutionFailure> {
+        let Some(intent) = normalize_path_reference(intent) else {
+            return Err(PathResolutionFailure::NoMatch);
+        };
+
+        if self.candidates.contains(&intent) {
+            return Ok(PathResolution {
+                path: intent,
+                match_type: PathMatchType::Exact,
+            });
+        }
+
+        if !intent.contains('/') {
+            let matches: Vec<_> = self
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.rsplit('/').next() == Some(intent.as_str()))
+                .cloned()
+                .collect();
+            return match matches.as_slice() {
+                [path] => Ok(PathResolution {
+                    path: path.clone(),
+                    match_type: PathMatchType::UniqueBasename,
+                }),
+                [] => Err(PathResolutionFailure::NoMatch),
+                _ => Err(PathResolutionFailure::Ambiguous),
+            };
+        }
+
+        let suffix = format!("/{intent}");
+        let matches: Vec<_> = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.ends_with(&suffix))
+            .cloned()
+            .collect();
+        match matches.as_slice() {
+            [path] => {
+                return Ok(PathResolution {
+                    path: path.clone(),
+                    match_type: PathMatchType::PathSuffix,
+                });
+            }
+            [] => {}
+            _ => return Err(PathResolutionFailure::Ambiguous),
+        }
+
+        if allow_parent_directory {
+            let mut parent = intent.rsplit_once('/').map(|(parent, _)| parent);
+            while let Some(candidate_parent) = parent {
+                if candidate_parent.is_empty() {
+                    break;
+                }
+                let prefix = format!("{candidate_parent}/");
+                let descendant_count = self
+                    .candidates
+                    .iter()
+                    .filter(|candidate| candidate.starts_with(&prefix))
+                    .take(MAX_KNOWLEDGE_TOUCHES_PER_TASK + 1)
+                    .count();
+                if (1..=MAX_KNOWLEDGE_TOUCHES_PER_TASK).contains(&descendant_count) {
+                    return Ok(PathResolution {
+                        path: candidate_parent.to_string(),
+                        match_type: PathMatchType::ParentDirectory,
+                    });
+                }
+                if descendant_count > MAX_KNOWLEDGE_TOUCHES_PER_TASK {
+                    break;
+                }
+                parent = candidate_parent.rsplit_once('/').map(|(parent, _)| parent);
+            }
+        }
+
+        Err(PathResolutionFailure::NoMatch)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KnowledgeAttachmentConfig {
     pub per_intent: bool,
@@ -170,6 +301,27 @@ pub(crate) fn build_knowledge_touch_coverage<R: TouchesResolver>(
     file_inventory: Option<&BTreeSet<String>>,
     config: KnowledgeAttachmentConfig,
 ) -> KnowledgeTouchCoverage {
+    let artifact_candidates = resolver.knowledge_candidates();
+    let fallback_inventory = config.file_inventory_fallback.then_some(file_inventory).flatten();
+    let candidates = artifact_candidates.as_ref().or(fallback_inventory);
+    let fallback = artifact_candidates.is_none() && fallback_inventory.is_some();
+    let path_resolver = candidates.map(PathIntentResolver::new);
+    build_knowledge_touch_coverage_with_resolver(
+        graph,
+        declared_coverage,
+        path_resolver.as_ref(),
+        fallback,
+        config,
+    )
+}
+
+pub(crate) fn build_knowledge_touch_coverage_with_resolver(
+    graph: &TaskGraph,
+    declared_coverage: &TouchCoverageReport,
+    path_resolver: Option<&PathIntentResolver>,
+    fallback: bool,
+    config: KnowledgeAttachmentConfig,
+) -> KnowledgeTouchCoverage {
     let declared_touches = declared_coverage.touches.clone();
     let mut knowledge_attachment_touches = declared_touches.clone();
     let mut provenance_by_task = BTreeMap::new();
@@ -184,10 +336,6 @@ pub(crate) fn build_knowledge_touch_coverage<R: TouchesResolver>(
         }
     }
 
-    let artifact_candidates = resolver.knowledge_candidates();
-    let fallback_inventory = config.file_inventory_fallback.then_some(file_inventory).flatten();
-    let candidates = artifact_candidates.as_ref().or(fallback_inventory);
-    let fallback = artifact_candidates.is_none() && fallback_inventory.is_some();
     let mut resolution_omissions = Vec::new();
     for node in graph.nodes.iter().filter(|node| node.kind == NodeKind::Task) {
         let declared_intents = declared_contract_path_intents(node);
@@ -197,18 +345,18 @@ pub(crate) fn build_knowledge_touch_coverage<R: TouchesResolver>(
                 1,
                 vec![node.id.clone()],
             );
-            omission.detail = "explicit task touch intent was not declared".to_string();
+            omission.detail = EXPLICIT_TASK_TOUCH_INTENT_UNDECLARED.to_string();
             resolution_omissions.push(omission);
         }
 
-        if let Some(candidates) = candidates {
+        if let Some(path_resolver) = path_resolver {
             if config.per_intent {
                 for intent in declared_intents {
                     attach_knowledge_intent(
                         &node.id,
                         &intent,
                         "declared-scope",
-                        candidates,
+                        path_resolver,
                         fallback,
                         config,
                         &mut knowledge_attachment_touches,
@@ -223,7 +371,7 @@ pub(crate) fn build_knowledge_touch_coverage<R: TouchesResolver>(
                         &node.id,
                         &intent,
                         "contract-path",
-                        candidates,
+                        path_resolver,
                         fallback,
                         config,
                         &mut knowledge_attachment_touches,
@@ -266,6 +414,11 @@ fn aggregate_resolution_omissions(
         .collect()
 }
 
+pub(crate) fn is_knowledge_derivation_omission(omission: &WorkGraphOmission) -> bool {
+    omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+        && KNOWLEDGE_DERIVATION_OMISSION_DETAILS.contains(&omission.detail.as_str())
+}
+
 /// Load the repository's tracked-file inventory without exposing Git or OS
 /// diagnostics in graph output. Callers turn the stable error category into a
 /// fail-open omission.
@@ -273,12 +426,12 @@ pub(crate) fn load_tracked_file_inventory(
     inventory_root: &Path,
 ) -> Result<BTreeSet<String>, &'static str> {
     let Some(root) = inventory_root.to_str() else {
-        return Err("file inventory root was not valid Unicode");
+        return Err(FILE_INVENTORY_ROOT_INVALID);
     };
     let output = run_git_in_dir(&["ls-files", "-z"], root)
-        .map_err(|_| "tracked file inventory was unavailable")?;
+        .map_err(|_| TRACKED_FILE_INVENTORY_UNAVAILABLE)?;
     if output.contains('\u{fffd}') {
-        return Err("tracked file inventory was not valid UTF-8");
+        return Err(TRACKED_FILE_INVENTORY_INVALID_UTF8);
     }
 
     let mut inventory = BTreeSet::new();
@@ -288,7 +441,7 @@ pub(crate) fn load_tracked_file_inventory(
         .enumerate()
     {
         if index >= MAX_FILE_INVENTORY_ENTRIES {
-            return Err("tracked file inventory exceeded the entry limit");
+            return Err(TRACKED_FILE_INVENTORY_LIMIT_REACHED);
         }
         let slash_normalized = raw.replace('\\', "/");
         let normalized = normalize_scope(raw);
@@ -299,7 +452,7 @@ pub(crate) fn load_tracked_file_inventory(
             || normalized.split('/').any(|component| component == "..")
             || Path::new(&normalized).is_absolute()
         {
-            return Err("tracked file inventory contained an invalid path");
+            return Err(TRACKED_FILE_INVENTORY_INVALID_PATH);
         }
         inventory.insert(normalized);
     }
@@ -312,14 +465,14 @@ fn attach_knowledge_intent(
     task_id: &str,
     intent: &str,
     provenance: &str,
-    candidates: &BTreeSet<String>,
+    path_resolver: &PathIntentResolver,
     fallback: bool,
     config: KnowledgeAttachmentConfig,
     knowledge_attachment_touches: &mut BTreeMap<TaskId, BTreeSet<String>>,
     provenance_by_task: &mut BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
     resolution_omissions: &mut Vec<WorkGraphOmission>,
 ) {
-    match resolve_path_intent(intent, candidates, config.parent_directory) {
+    match path_resolver.resolve(intent, config.parent_directory) {
         Ok(resolution) if config.enables(resolution.match_type) => {
             let task_touches = knowledge_attachment_touches
                 .entry(task_id.to_string())
@@ -332,7 +485,7 @@ fn attach_knowledge_intent(
                         resolution_omissions,
                         task_id,
                         intent,
-                        "knowledge touch limit was reached",
+                        KNOWLEDGE_TOUCH_LIMIT_REACHED,
                     );
                 }
                 return;
@@ -372,7 +525,7 @@ fn attach_knowledge_intent(
                     resolution_omissions,
                     task_id,
                     intent,
-                    "knowledge path resolution was ambiguous",
+                    KNOWLEDGE_PATH_RESOLUTION_AMBIGUOUS,
                 );
             }
         }
@@ -382,7 +535,7 @@ fn attach_knowledge_intent(
                     resolution_omissions,
                     task_id,
                     intent,
-                    "knowledge path resolution found no tracked path",
+                    KNOWLEDGE_PATH_RESOLUTION_NO_MATCH,
                 );
             }
         }
@@ -476,87 +629,6 @@ pub(crate) fn harvest_contract_path_intents(node: &WorkNode) -> Vec<String> {
         }
     }
     intents.into_iter().collect()
-}
-
-pub(crate) fn resolve_path_intent(
-    intent: &str,
-    candidates: &BTreeSet<String>,
-    allow_parent_directory: bool,
-) -> Result<PathResolution, PathResolutionFailure> {
-    let Some(intent) = normalize_path_reference(intent) else {
-        return Err(PathResolutionFailure::NoMatch);
-    };
-    let candidates: BTreeSet<_> = candidates
-        .iter()
-        .filter_map(|candidate| normalize_path_reference(candidate))
-        .collect();
-
-    if candidates.contains(&intent) {
-        return Ok(PathResolution {
-            path: intent,
-            match_type: PathMatchType::Exact,
-        });
-    }
-
-    if !intent.contains('/') {
-        let matches: Vec<_> = candidates
-            .iter()
-            .filter(|candidate| candidate.rsplit('/').next() == Some(intent.as_str()))
-            .cloned()
-            .collect();
-        return match matches.as_slice() {
-            [path] => Ok(PathResolution {
-                path: path.clone(),
-                match_type: PathMatchType::UniqueBasename,
-            }),
-            [] => Err(PathResolutionFailure::NoMatch),
-            _ => Err(PathResolutionFailure::Ambiguous),
-        };
-    }
-
-    let suffix = format!("/{intent}");
-    let matches: Vec<_> = candidates
-        .iter()
-        .filter(|candidate| candidate.ends_with(&suffix))
-        .cloned()
-        .collect();
-    match matches.as_slice() {
-        [path] => {
-            return Ok(PathResolution {
-                path: path.clone(),
-                match_type: PathMatchType::PathSuffix,
-            });
-        }
-        [] => {}
-        _ => return Err(PathResolutionFailure::Ambiguous),
-    }
-
-    if allow_parent_directory {
-        let mut parent = intent.rsplit_once('/').map(|(parent, _)| parent);
-        while let Some(candidate_parent) = parent {
-            if candidate_parent.is_empty() {
-                break;
-            }
-            let prefix = format!("{candidate_parent}/");
-            let descendant_count = candidates
-                .iter()
-                .filter(|candidate| candidate.starts_with(&prefix))
-                .take(MAX_KNOWLEDGE_TOUCHES_PER_TASK + 1)
-                .count();
-            if (1..=MAX_KNOWLEDGE_TOUCHES_PER_TASK).contains(&descendant_count) {
-                return Ok(PathResolution {
-                    path: candidate_parent.to_string(),
-                    match_type: PathMatchType::ParentDirectory,
-                });
-            }
-            if descendant_count > MAX_KNOWLEDGE_TOUCHES_PER_TASK {
-                break;
-            }
-            parent = candidate_parent.rsplit_once('/').map(|(parent, _)| parent);
-        }
-    }
-
-    Err(PathResolutionFailure::NoMatch)
 }
 
 fn normalize_path_reference(value: &str) -> Option<String> {
@@ -744,14 +816,14 @@ pub(crate) fn derive_project_context_from_knowledge(
     institutional_wiki_root: Option<&Path>,
     declared_coverage: &TouchCoverageReport,
     knowledge: &KnowledgeTouchCoverage,
-    scope_candidates: Option<&BTreeSet<String>>,
+    path_resolver: Option<&PathIntentResolver>,
     config: KnowledgeAttachmentConfig,
 ) -> ContextDerivationReport {
     clear_derived_context(graph);
     let load = load_project_knowledge(
         project_path,
         institutional_wiki_root,
-        scope_candidates,
+        path_resolver,
         config,
     );
     graph.omissions.extend(load.omissions.clone());
@@ -767,7 +839,7 @@ pub(crate) fn derive_project_context_from_knowledge(
     }
 
     let expanded_available = declared_coverage.available
-        || (config.file_inventory_fallback && scope_candidates.is_some());
+        || (config.file_inventory_fallback && path_resolver.is_some());
     if !expanded_available {
         graph.omissions.push(WorkGraphOmission::new(
             WorkGraphOmissionReason::CodegraphUnavailable,
@@ -1049,7 +1121,7 @@ struct KnowledgeLoad {
 fn load_project_knowledge(
     project_path: &Path,
     institutional_wiki_root: Option<&Path>,
-    scope_candidates: Option<&BTreeSet<String>>,
+    path_resolver: Option<&PathIntentResolver>,
     config: KnowledgeAttachmentConfig,
 ) -> KnowledgeLoad {
     let ai_docs = project_path.join(".ai-docs");
@@ -1114,7 +1186,7 @@ fn load_project_knowledge(
                         &content,
                         &source_hash,
                         institutional_wiki_root,
-                        scope_candidates,
+                        path_resolver,
                         config,
                         &mut gotchas,
                         &mut inferred_scope_provenance,
@@ -1259,7 +1331,7 @@ fn parse_markdown(
     content: &str,
     source_hash: &str,
     institutional_wiki_root: Option<&Path>,
-    scope_candidates: Option<&BTreeSet<String>>,
+    path_resolver: Option<&PathIntentResolver>,
     config: KnowledgeAttachmentConfig,
     gotchas: &mut Vec<DerivedGotcha>,
     inferred_scope_provenance: &mut BTreeMap<String, BTreeMap<String, String>>,
@@ -1285,7 +1357,7 @@ fn parse_markdown(
                 &body,
                 source_hash,
                 institutional_wiki_root,
-                scope_candidates,
+                path_resolver,
                 config,
                 gotchas,
                 inferred_scope_provenance,
@@ -1305,7 +1377,7 @@ fn parse_markdown(
         &body,
         source_hash,
         institutional_wiki_root,
-        scope_candidates,
+        path_resolver,
         config,
         gotchas,
         inferred_scope_provenance,
@@ -1331,7 +1403,7 @@ fn flush_markdown_section(
     body: &[String],
     source_hash: &str,
     institutional_wiki_root: Option<&Path>,
-    scope_candidates: Option<&BTreeSet<String>>,
+    path_resolver: Option<&PathIntentResolver>,
     config: KnowledgeAttachmentConfig,
     gotchas: &mut Vec<DerivedGotcha>,
     inferred_scope_provenance: &mut BTreeMap<String, BTreeMap<String, String>>,
@@ -1349,14 +1421,14 @@ fn flush_markdown_section(
         return;
     }
     let source_ref = format!(".ai-docs/{filename}#L{start_line}");
-    let inferred = if let (true, Some(scope_candidates)) = (
+    let inferred = if let (true, Some(path_resolver)) = (
         config.inferred_scope && !has_explicit_markdown_scope(body),
-        scope_candidates,
+        path_resolver,
     ) {
         resolve_inferred_scope(
             body,
             &source_ref,
-            scope_candidates,
+            path_resolver,
             config,
             omissions,
         )
@@ -1415,7 +1487,7 @@ fn has_explicit_markdown_scope(body: &[String]) -> bool {
 fn resolve_inferred_scope(
     body: &[String],
     source_ref: &str,
-    candidates: &BTreeSet<String>,
+    path_resolver: &PathIntentResolver,
     config: KnowledgeAttachmentConfig,
     omissions: &mut Vec<WorkGraphOmission>,
 ) -> BTreeMap<String, String> {
@@ -1426,7 +1498,7 @@ fn resolve_inferred_scope(
         .flat_map(|line| code_spans(line))
         .filter(|value| is_path_like_token(value))
     {
-        match resolve_path_intent(&raw, candidates, false) {
+        match path_resolver.resolve(&raw, false) {
             Ok(resolution) if config.enables(resolution.match_type) => {
                 if resolved.len() >= MAX_CONTEXT_SCOPES_PER_GOTCHA
                     && !resolved.contains_key(&resolution.path)
@@ -1435,7 +1507,7 @@ fn resolve_inferred_scope(
                         &mut local_omissions,
                         source_ref,
                         &raw,
-                        "inferred knowledge scope exceeded the scope limit",
+                        INFERRED_KNOWLEDGE_SCOPE_LIMIT_REACHED,
                     );
                     continue;
                 }
@@ -1450,7 +1522,7 @@ fn resolve_inferred_scope(
                     &mut local_omissions,
                     source_ref,
                     &raw,
-                    "inferred knowledge scope was ambiguous",
+                    INFERRED_KNOWLEDGE_SCOPE_AMBIGUOUS,
                 );
             }
             Err(PathResolutionFailure::NoMatch) if config.resolution_omissions => {
@@ -1458,7 +1530,7 @@ fn resolve_inferred_scope(
                     &mut local_omissions,
                     source_ref,
                     &raw,
-                    "inferred knowledge scope found no tracked path",
+                    INFERRED_KNOWLEDGE_SCOPE_NO_MATCH,
                 );
             }
             Err(_) => {}
@@ -1798,11 +1870,10 @@ fn expanded_edge_rationale(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_knowledge_touch_coverage, harvest_contract_path_intents,
-        derive_project_context_from_knowledge, resolve_path_intent,
-        KnowledgeAttachmentConfig, KnowledgeTouchCoverage, PathMatchType,
-        PathResolution, PathResolutionFailure, TouchCoverageReport, TouchesResolver,
-        MAX_KNOWLEDGE_TOUCHES_PER_TASK,
+        build_knowledge_touch_coverage, derive_project_context_from_knowledge,
+        harvest_contract_path_intents, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
+        PathIntentResolver, PathMatchType, PathResolution, PathResolutionFailure,
+        TouchCoverageReport, TouchesResolver, MAX_KNOWLEDGE_TOUCHES_PER_TASK,
     };
     use crate::orchestrator::work_graph::{
         BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
@@ -1841,38 +1912,35 @@ mod tests {
             "src-tauri/src/storage/queue.rs".to_string(),
             "src/fix.rs".to_string(),
         ]);
+        let resolver = PathIntentResolver::new(&candidates);
 
         assert_eq!(
-            resolve_path_intent("src/exact.rs:79-81,", &candidates, false),
+            resolver.resolve("src/exact.rs:79-81,", false),
             Ok(PathResolution {
                 path: "src/exact.rs".to_string(),
                 match_type: PathMatchType::Exact,
             })
         );
         assert_eq!(
-            resolve_path_intent("runtime.rs:1371-1408", &candidates, false),
+            resolver.resolve("runtime.rs:1371-1408", false),
             Ok(PathResolution {
                 path: "src-tauri/src/orchestrator/work_graph/runtime.rs".to_string(),
                 match_type: PathMatchType::UniqueBasename,
             })
         );
         assert_eq!(
-            resolve_path_intent(
-                "session/completion_ledger.rs:69-78",
-                &candidates,
-                false,
-            ),
+            resolver.resolve("session/completion_ledger.rs:69-78", false),
             Ok(PathResolution {
                 path: "src-tauri/src/session/completion_ledger.rs".to_string(),
                 match_type: PathMatchType::PathSuffix,
             })
         );
         assert_eq!(
-            resolve_path_intent("queue.rs:79-81", &candidates, false),
+            resolver.resolve("queue.rs:79-81", false),
             Err(PathResolutionFailure::Ambiguous)
         );
         assert_eq!(
-            resolve_path_intent("x.rs", &candidates, false),
+            resolver.resolve("x.rs", false),
             Err(PathResolutionFailure::NoMatch),
             "suffix matching must respect path-component boundaries"
         );
@@ -1960,16 +2028,17 @@ mod tests {
             "src/new/existing.rs".to_string(),
             "src/other.rs".to_string(),
         ]);
+        let resolver = PathIntentResolver::new(&candidates);
 
         assert_eq!(
-            resolve_path_intent("src/new/generated.rs", &candidates, true),
+            resolver.resolve("src/new/generated.rs", true),
             Ok(PathResolution {
                 path: "src/new".to_string(),
                 match_type: PathMatchType::ParentDirectory,
             })
         );
         assert_eq!(
-            resolve_path_intent("generated.rs", &candidates, true),
+            resolver.resolve("generated.rs", true),
             Err(PathResolutionFailure::NoMatch),
             "parent fallback requires a directory component"
         );
@@ -1977,8 +2046,9 @@ mod tests {
         let crowded: BTreeSet<_> = (0..=MAX_KNOWLEDGE_TOUCHES_PER_TASK)
             .map(|index| format!("src/crowded/file-{index}.rs"))
             .collect();
+        let crowded_resolver = PathIntentResolver::new(&crowded);
         assert_eq!(
-            resolve_path_intent("src/crowded/generated.rs", &crowded, true),
+            crowded_resolver.resolve("src/crowded/generated.rs", true),
             Err(PathResolutionFailure::NoMatch),
             "parent fallback must reject more than 256 descendants"
         );
@@ -2015,6 +2085,7 @@ mod tests {
             unresolved_task_ids: Vec::new(),
         };
         let candidates = touches.values().flatten().cloned().collect();
+        let path_resolver = PathIntentResolver::new(&candidates);
         let knowledge = KnowledgeTouchCoverage {
             declared_touches: touches.clone(),
             knowledge_attachment_touches: touches,
@@ -2028,7 +2099,7 @@ mod tests {
             None,
             &coverage,
             &knowledge,
-            Some(&candidates),
+            Some(&path_resolver),
             enabled_config(),
         );
 
@@ -2096,6 +2167,8 @@ mod tests {
             provenance_by_task: BTreeMap::new(),
             resolution_omissions: Vec::new(),
         };
+        let path_resolver =
+            PathIntentResolver::new(&BTreeSet::from(["src/shared.rs".to_string()]));
 
         let report = derive_project_context_from_knowledge(
             &mut graph,
@@ -2103,7 +2176,7 @@ mod tests {
             None,
             &declared,
             &knowledge,
-            Some(&BTreeSet::from(["src/shared.rs".to_string()])),
+            Some(&path_resolver),
             enabled_config(),
         );
 

@@ -28,9 +28,9 @@ use super::archetypes::{
 use super::codegraph::{derive_codegraph_touches, CodegraphDerivationReport};
 use super::completion_ledger::NodeCompletionFact;
 use super::context::{
-    build_knowledge_touch_coverage, derive_project_context_from_knowledge,
-    load_tracked_file_inventory, ContextDerivationReport, KnowledgeAttachmentConfig,
-    TouchCoverageReport, TouchesResolver,
+    build_knowledge_touch_coverage_with_resolver, derive_project_context_from_knowledge,
+    is_knowledge_derivation_omission, load_tracked_file_inventory, ContextDerivationReport,
+    KnowledgeAttachmentConfig, PathIntentResolver, TouchCoverageReport, TouchesResolver,
 };
 use super::plan_parse::promote_initial_ready_nodes;
 use super::review::{
@@ -206,6 +206,9 @@ fn derive_knowledge_attachments_with_config<R: TouchesResolver>(
     file_inventory: Option<&BTreeSet<String>>,
     config: KnowledgeAttachmentConfig,
 ) -> ContextDerivationReport {
+    graph
+        .omissions
+        .retain(|omission| !is_knowledge_derivation_omission(omission));
     let artifact_candidates = resolver.knowledge_candidates();
     let mut loaded_inventory = None;
     if artifact_candidates.is_none()
@@ -226,28 +229,30 @@ fn derive_knowledge_attachments_with_config<R: TouchesResolver>(
         }
     }
     let effective_inventory = file_inventory.or(loaded_inventory.as_ref());
-    let knowledge = build_knowledge_touch_coverage(
+    let fallback_candidates = config
+        .file_inventory_fallback
+        .then_some(effective_inventory)
+        .flatten();
+    let candidates = artifact_candidates.as_ref().or(fallback_candidates);
+    let fallback = artifact_candidates.is_none() && fallback_candidates.is_some();
+    let path_resolver = candidates.map(PathIntentResolver::new);
+    let knowledge = build_knowledge_touch_coverage_with_resolver(
         graph,
-        resolver,
         declared_coverage,
-        effective_inventory,
+        path_resolver.as_ref(),
+        fallback,
         config,
     );
     graph
         .omissions
         .extend(knowledge.resolution_omissions.clone());
-    let fallback_candidates = config
-        .file_inventory_fallback
-        .then_some(effective_inventory)
-        .flatten();
-    let scope_candidates = artifact_candidates.as_ref().or(fallback_candidates);
     derive_project_context_from_knowledge(
         graph,
         project_path,
         institutional_wiki_root,
         declared_coverage,
         &knowledge,
-        scope_candidates,
+        path_resolver.as_ref(),
         config,
     )
 }

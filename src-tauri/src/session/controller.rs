@@ -16621,11 +16621,37 @@ mod tests {
             )
             .unwrap()
             .expect("archetype composition sidecar");
+        let state_manager = StateManager::new(storage.session_dir(SESSION_ID));
+        let non_knowledge_omission = WorkGraphOmission::new(
+            WorkGraphOmissionReason::SourceUnreadable,
+            1,
+            vec!["plan.md: retained source omission".to_string()],
+        );
+        let mut persisted = state_manager
+            .read_graph_composition_state()
+            .unwrap()
+            .unwrap();
+        let compose_undeclared = persisted
+            .graph
+            .omissions
+            .iter()
+            .find(|omission| {
+                omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+                    && omission.detail == "explicit task touch intent was not declared"
+            })
+            .expect("archetype composition emits its own undeclared-task omission");
+        assert_eq!(compose_undeclared.count, 4);
+        persisted
+            .graph
+            .omissions
+            .push(non_knowledge_omission.clone());
+        state_manager
+            .write_graph_composition_state(&persisted)
+            .unwrap();
         controller
             .mark_plan_ready(SESSION_ID)
             .expect("knowledge-only plan-ready derivation");
 
-        let state_manager = StateManager::new(storage.session_dir(SESSION_ID));
         let authoritative = state_manager.read_work_graph().unwrap().unwrap();
         let composition = state_manager
             .read_graph_composition_state()
@@ -16651,7 +16677,6 @@ mod tests {
                 omission.reason
                     == crate::orchestrator::work_graph::WorkGraphOmissionReason::ResolutionIncomplete
                     && omission.detail == "explicit task touch intent was not declared"
-                    && omission.examples.iter().any(|example| example == "T2")
             })
             .collect();
         assert_eq!(
@@ -16677,6 +16702,7 @@ mod tests {
             .iter()
             .any(|example| example == "T2"));
         assert!(undeclared_omissions[0].examples.len() <= 5);
+        assert!(authoritative.omissions.contains(&non_knowledge_omission));
         assert!(authoritative
             .edges
             .iter()
