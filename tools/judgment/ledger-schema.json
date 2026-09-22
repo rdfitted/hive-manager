@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "judgment-ledger/v1",
+  "title": "judgment-ledger/v1",
+  "description": "One append-only JSONL stream, two record kinds. Unknown fields are allowed and must be preserved by readers. Canonical copy: ~/.claude/tools/judgment/ledger-schema.json (rdfitted/Claude-Code-Setup#24). Other repos vendor it with a provenance header and hash check.",
+  "oneOf": [
+    { "$ref": "#/$defs/decision" },
+    { "$ref": "#/$defs/outcome" }
+  ],
+  "$defs": {
+    "nullableString": { "type": ["string", "null"] },
+    "nullableNumber": { "type": ["number", "null"] },
+    "decision": {
+      "type": "object",
+      "required": ["v", "kind", "ts", "decision_id", "surface", "subject_ref", "judge", "mode", "answer"],
+      "properties": {
+        "v": { "type": "integer", "minimum": 1 },
+        "kind": { "const": "decision" },
+        "ts": { "type": "string", "description": "UTC ISO-8601 with Z" },
+        "decision_id": { "type": "string", "minLength": 1 },
+        "surface": { "type": "string", "minLength": 1, "description": "e.g. docket.admission.meeting-debrief, hive.qa.criterion.scored, wiki.retrieval.relevance" },
+        "subject_ref": { "type": "object", "description": "What was judged: run id + item key, session + milestone + criterion, ..." },
+        "state_hash": { "$ref": "#/$defs/nullableString", "description": "sha256:<hex> of the canonical JSON of the state actually judged" },
+        "state_ref": { "$ref": "#/$defs/nullableString", "description": "evidence/<decision_id>.json, relative to the ledger directory" },
+        "question_id": { "$ref": "#/$defs/nullableString" },
+        "question_version": { "$ref": "#/$defs/nullableString", "description": "sha256 of the exact instructions + criteria sent" },
+        "judge": { "enum": ["jev", "incumbent-llm", "code", "human"] },
+        "model": { "$ref": "#/$defs/nullableString", "description": "Resolved model version as returned by the provider (e.g. jev-1.13.0), not the alias requested" },
+        "sampling": {
+          "type": ["object", "null"],
+          "description": "null means UNKNOWN. The auditor reports unknown sampling as not comparable rather than assuming temperature 0.",
+          "properties": {
+            "temperature": { "$ref": "#/$defs/nullableNumber" },
+            "top_p": { "$ref": "#/$defs/nullableNumber" },
+            "seed": { "type": ["integer", "null"] }
+          }
+        },
+        "mode": { "enum": ["shadow", "advisory", "gating"] },
+        "answer": { "description": "Any JSON value; null when the call failed (see error)" },
+        "probabilities": { "type": ["object", "null"], "additionalProperties": { "type": "number" } },
+        "confidence": { "$ref": "#/$defs/nullableNumber", "description": "Choice/Score distribution concentration. Noul has none; do not confuse with the top probability." },
+        "threshold_id": { "$ref": "#/$defs/nullableString" },
+        "routed": { "type": "string", "description": "What the system did with this judgment: none | admitted | audit-sample | advisory-shown | tier-b | gated-*" },
+        "latency_ms": { "type": ["integer", "null"] },
+        "cost_usd": { "$ref": "#/$defs/nullableNumber" },
+        "error": { "$ref": "#/$defs/nullableString", "description": "Non-null means the judge failed and the caller fell back (fail-open)" },
+        "source_decision_id": { "$ref": "#/$defs/nullableString", "description": "Shadow rows: the incumbent decision this row re-judges. Outcomes on the source apply to this row too." }
+      },
+      "additionalProperties": true
+    },
+    "outcome": {
+      "type": "object",
+      "required": ["v", "kind", "ts", "decision_id", "label", "source"],
+      "properties": {
+        "v": { "type": "integer", "minimum": 1 },
+        "kind": { "const": "outcome" },
+        "ts": { "type": "string" },
+        "decision_id": { "type": "string", "minLength": 1 },
+        "label": { "description": "Ground truth: the user's chosen disposition, an override verdict, a human label" },
+        "source": { "enum": ["user-answer", "operator-override", "human-label", "model-ack", "downstream"], "description": "Authority order when several outcomes exist: human-label > operator-override > user-answer > model-ack > downstream. model-ack = the model ticked what it found relevant (a self-report, cross-checked)." },
+        "note": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

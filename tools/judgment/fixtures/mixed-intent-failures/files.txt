@@ -1,0 +1,3 @@
+src/a/auth.rs
+src/b/auth.rs
+src/pass.rs

@@ -1,0 +1,7 @@
+{
+  "root": "<ROOT>",
+  "language": "rust",
+  "nodes": {
+    "queue": {"path": "src/queue.rs"}
+  }
+}

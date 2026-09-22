@@ -207,6 +207,10 @@ impl TouchesResolver for ArtifactCodegraph {
             unresolved_task_ids,
         })
     }
+
+    fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
+        self.available.then(|| self.modules.clone())
+    }
 }
 
 impl RepoShapeFactsProvider for ArtifactCodegraph {
@@ -826,5 +830,318 @@ fn workspace_strategy_label(strategy: WorkspaceStrategy) -> &'static str {
         WorkspaceStrategy::SharedCell => "shared_cell",
         WorkspaceStrategy::IsolatedCell => "isolated_cell",
         WorkspaceStrategy::None => "none",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::{
+        conflicting_ready_tasks, derive_codegraph_touches, ArtifactCodegraph,
+        CodegraphDerivationReport, ConflictDetectionReport, ConflictDetectionState,
+        ParallelConflictAction, ReadyTaskConflict, CODEGRAPH_MODULE_TEMPLATE,
+    };
+    use crate::domain::WorkspaceStrategy;
+    use crate::orchestrator::org_graph::ownership::{
+        derive_path_ownership, LivePrincipal, PrincipalPathOwnership,
+    };
+    use crate::orchestrator::work_graph::runtime::compose_initial_work_graph;
+    use crate::orchestrator::work_graph::{
+        BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
+        WorkNode,
+    };
+
+    #[test]
+    fn knowledge_only_contract_paths_leave_parallelism_and_ownership_unchanged() {
+        let temp = TempDir::new().expect("temp directory");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical temp directory");
+        let artifact = serde_json::json!({
+            "root": root,
+            "language": "rust",
+            "nodes": {
+                "src/harvested.rs": {"path": "src/harvested.rs"},
+                "src/declared.rs": {"path": "src/declared.rs"}
+            }
+        })
+        .to_string();
+        let resolver =
+            ArtifactCodegraph::from_json(temp.path(), &artifact).expect("valid artifact");
+        let mut graph = TaskGraph::new(
+            vec![
+                task_with_contract(
+                    "T1",
+                    NodeContract {
+                        acceptance: vec!["src/harvested.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task_with_contract(
+                    "T2",
+                    NodeContract {
+                        outputs: vec!["src/harvested.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task_with_contract(
+                    "T3",
+                    NodeContract {
+                        inputs: vec!["file:src/declared.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task_with_contract(
+                    "T4",
+                    NodeContract {
+                        acceptance: vec!["file:src/declared.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+            ],
+            Vec::new(),
+        );
+
+        let derivation = derive_codegraph_touches(&mut graph, &resolver);
+
+        assert_eq!(derivation, expected_derivation());
+        assert_eq!(
+            conflicting_ready_tasks(
+                &graph,
+                &derivation,
+                WorkspaceStrategy::SharedCell,
+            ),
+            ConflictDetectionReport {
+                state: ConflictDetectionState::Partial,
+                decisions: vec![ReadyTaskConflict {
+                    first_task_id: "T3".to_string(),
+                    second_task_id: "T4".to_string(),
+                    overlapping_modules: vec!["src/declared.rs".to_string()],
+                    action: ParallelConflictAction::Serialize,
+                    reason: "ready tasks T3 and T4 overlap codegraph modules [src/declared.rs]; serialize claims because workspace strategy is shared_cell".to_string(),
+                }],
+                unresolved_ready_task_ids: vec!["T1".to_string(), "T2".to_string()],
+            }
+        );
+        assert_eq!(
+            derive_path_ownership(
+                &graph,
+                &[
+                    live_principal("principal-1", "T1", true),
+                    live_principal("principal-2", "T2", true),
+                    live_principal("principal-3", "T3", true),
+                    live_principal("principal-4", "T4", false),
+                ],
+            ),
+            vec![
+                PrincipalPathOwnership {
+                    principal_id: "principal-3".to_string(),
+                    task_id: "T3".to_string(),
+                    path: "src/declared.rs".to_string(),
+                    write_capable: true,
+                },
+                PrincipalPathOwnership {
+                    principal_id: "principal-4".to_string(),
+                    task_id: "T4".to_string(),
+                    path: "src/declared.rs".to_string(),
+                    write_capable: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn composition_keeps_knowledge_paths_out_of_parallelism_and_ownership() {
+        let temp = TempDir::new().expect("temp directory");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical temp directory");
+        let ai_docs = root.join(".ai-docs");
+        std::fs::create_dir_all(&ai_docs).expect("knowledge directory");
+        std::fs::write(
+            ai_docs.join("project-dna.md"),
+            "# Project knowledge\n\n## Harvested path\n\n**Scope**: `src/harvested.rs`\n\nHarvested-path guidance.\n\n## Declared path\n\n**Scope**: `src/declared.rs`\n\nDeclared-path guidance.\n",
+        )
+        .expect("project knowledge");
+        std::fs::write(ai_docs.join("bug-patterns.md"), "# Bug patterns\n")
+            .expect("bug patterns");
+        std::fs::write(ai_docs.join("learnings.jsonl"), "").expect("learnings");
+        std::fs::write(
+            ai_docs.join("curation-state.json"),
+            "{\"last_curated_line\":0}\n",
+        )
+        .expect("curation state");
+        let artifact = serde_json::json!({
+            "root": root,
+            "language": "rust",
+            "nodes": {
+                "src/harvested.rs": {"path": "src/harvested.rs"},
+                "src/declared.rs": {"path": "src/declared.rs"}
+            }
+        })
+        .to_string();
+        let resolver =
+            ArtifactCodegraph::from_json(temp.path(), &artifact).expect("valid artifact");
+        let state = compose_initial_work_graph(
+            invariance_graph(),
+            temp.path(),
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+            &resolver,
+        )
+        .expect("composed work graph");
+
+        assert_eq!(state.codegraph, expected_derivation());
+        assert_eq!(
+            conflicting_ready_tasks(
+                &state.graph,
+                &state.codegraph,
+                WorkspaceStrategy::SharedCell,
+            ),
+            expected_conflicts()
+        );
+        assert_eq!(
+            derive_path_ownership(&state.graph, &invariance_principals()),
+            expected_ownership()
+        );
+        assert_eq!(
+            state
+                .graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Touches)
+                .count(),
+            2
+        );
+        assert_eq!(
+            state
+                .graph
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.expansion.as_ref().is_some_and(|expansion| {
+                        expansion.template == CODEGRAPH_MODULE_TEMPLATE
+                    })
+                })
+                .count(),
+            1
+        );
+    }
+
+    fn expected_derivation() -> CodegraphDerivationReport {
+        CodegraphDerivationReport {
+            available: true,
+            artifact_languages: std::collections::BTreeSet::from(["rust".to_string()]),
+            touches: std::collections::BTreeMap::from([
+                (
+                    "T3".to_string(),
+                    std::collections::BTreeSet::from(["src/declared.rs".to_string()]),
+                ),
+                (
+                    "T4".to_string(),
+                    std::collections::BTreeSet::from(["src/declared.rs".to_string()]),
+                ),
+            ]),
+            unresolved_task_ids: vec!["T1".to_string(), "T2".to_string()],
+            module_node_count: 1,
+            touch_edge_count: 2,
+        }
+    }
+
+    fn expected_conflicts() -> ConflictDetectionReport {
+        ConflictDetectionReport {
+            state: ConflictDetectionState::Partial,
+            decisions: vec![ReadyTaskConflict {
+                first_task_id: "T3".to_string(),
+                second_task_id: "T4".to_string(),
+                overlapping_modules: vec!["src/declared.rs".to_string()],
+                action: ParallelConflictAction::Serialize,
+                reason: "ready tasks T3 and T4 overlap codegraph modules [src/declared.rs]; serialize claims because workspace strategy is shared_cell".to_string(),
+            }],
+            unresolved_ready_task_ids: vec!["T1".to_string(), "T2".to_string()],
+        }
+    }
+
+    fn expected_ownership() -> Vec<PrincipalPathOwnership> {
+        vec![
+            PrincipalPathOwnership {
+                principal_id: "principal-3".to_string(),
+                task_id: "T3".to_string(),
+                path: "src/declared.rs".to_string(),
+                write_capable: true,
+            },
+            PrincipalPathOwnership {
+                principal_id: "principal-4".to_string(),
+                task_id: "T4".to_string(),
+                path: "src/declared.rs".to_string(),
+                write_capable: false,
+            },
+        ]
+    }
+
+    fn invariance_graph() -> TaskGraph {
+        TaskGraph::new(
+            vec![
+                task_with_contract(
+                    "T1",
+                    NodeContract {
+                        acceptance: vec!["src/harvested.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task_with_contract(
+                    "T2",
+                    NodeContract {
+                        outputs: vec!["src/harvested.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task_with_contract(
+                    "T3",
+                    NodeContract {
+                        inputs: vec!["file:src/declared.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task_with_contract(
+                    "T4",
+                    NodeContract {
+                        acceptance: vec!["file:src/declared.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+            ],
+            Vec::new(),
+        )
+    }
+
+    fn invariance_principals() -> Vec<LivePrincipal> {
+        vec![
+            live_principal("principal-1", "T1", true),
+            live_principal("principal-2", "T2", true),
+            live_principal("principal-3", "T3", true),
+            live_principal("principal-4", "T4", false),
+        ]
+    }
+
+    fn task_with_contract(id: &str, contract: NodeContract) -> WorkNode {
+        WorkNode::new(
+            id,
+            NodeKind::Task,
+            format!("Task {id}"),
+            contract,
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+        )
+    }
+
+    fn live_principal(
+        principal_id: &str,
+        task_id: &str,
+        write_capable: bool,
+    ) -> LivePrincipal {
+        LivePrincipal {
+            principal_id: principal_id.to_string(),
+            task_id: task_id.to_string(),
+            write_capable,
+        }
     }
 }

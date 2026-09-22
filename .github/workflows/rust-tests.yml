@@ -41,6 +41,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: python tools/codegraph/ci_gate.py --lang rs --root .
 
+      - name: Verify vendored judgment tooling
+        working-directory: ${{ github.workspace }}
+        run: python tools/judgment/verify_vendor.py
+
+      - name: Judgment tooling tests
+        working-directory: ${{ github.workspace }}
+        run: python -m unittest discover -s tools/judgment/tests -v
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
 

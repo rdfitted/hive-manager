@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "files": {
+    "ledger-schema.json": {
+      "source": "~/.claude/tools/judgment/ledger-schema.json",
+      "upstream_sha256": "af67c094e902968daa104d02b19ca9b022a85a2307bcae6ba02128dfdb7672a6",
+      "normalized_sha256": "af67c094e902968daa104d02b19ca9b022a85a2307bcae6ba02128dfdb7672a6"
+    },
+    "ledger.py": {
+      "source": "~/.claude/tools/judgment/ledger.py",
+      "upstream_sha256": "536d9d616fb989c4854070931770122c2f9e0adedf986877863f4edd01a27549",
+      "normalized_sha256": "23dae27ef23a814b3440cb71192a2cb62fbc0958d7adff78ac54e313f8916a4c"
+    }
+  }
+}

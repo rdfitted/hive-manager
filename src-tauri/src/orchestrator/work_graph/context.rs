@@ -6,6 +6,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::actions::git::run_git_in_dir;
+use crate::http::handlers::knowledge::{first_h1, frontmatter_field, split_frontmatter};
+
 use super::archetypes::{GotchaAttachment, GotchaAttachmentProvider};
 use super::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
@@ -23,7 +26,55 @@ pub const DERIVED_CONTEXT_TEMPLATE: &str = "derived-project-context";
 /// task edges so one generic gotcha cannot become a prompt-dominating hub.
 pub const ANTI_HUB_TASK_FRACTION: f64 = 0.75;
 pub const ANTI_HUB_MIN_TASKS: usize = 2;
+pub const ENABLE_KNOWLEDGE_PER_INTENT: bool = true;
+pub const ENABLE_KNOWLEDGE_CONTRACT_HARVEST: bool = true;
+pub const ENABLE_KNOWLEDGE_EXACT_MATCH: bool = true;
+pub const ENABLE_KNOWLEDGE_UNIQUE_BASENAME_MATCH: bool = true;
+pub const ENABLE_KNOWLEDGE_PATH_SUFFIX_MATCH: bool = true;
+pub const ENABLE_KNOWLEDGE_PARENT_DIRECTORY_MATCH: bool = true;
+pub const ENABLE_KNOWLEDGE_AMBIGUOUS_MATCH: bool = false;
+pub const ENABLE_KNOWLEDGE_RESOLUTION_OMISSIONS: bool = true;
+pub const ENABLE_KNOWLEDGE_INFERRED_SCOPE: bool = true;
+pub const ENABLE_KNOWLEDGE_FILE_INVENTORY_FALLBACK: bool = true;
 const MAX_OMISSION_EXAMPLES: usize = 5;
+const MAX_KNOWLEDGE_TOUCHES_PER_TASK: usize = 256;
+const MAX_FILE_INVENTORY_ENTRIES: usize = 50_000;
+const MAX_FILE_INVENTORY_PATH_CHARS: usize = 512;
+const EXPLICIT_TASK_TOUCH_INTENT_UNDECLARED: &str =
+    "explicit task touch intent was not declared";
+const KNOWLEDGE_TOUCH_LIMIT_REACHED: &str = "knowledge touch limit was reached";
+const KNOWLEDGE_PATH_RESOLUTION_AMBIGUOUS: &str =
+    "knowledge path resolution was ambiguous";
+const KNOWLEDGE_PATH_RESOLUTION_NO_MATCH: &str =
+    "knowledge path resolution found no tracked path";
+const INFERRED_KNOWLEDGE_SCOPE_LIMIT_REACHED: &str =
+    "inferred knowledge scope exceeded the scope limit";
+const INFERRED_KNOWLEDGE_SCOPE_AMBIGUOUS: &str =
+    "inferred knowledge scope was ambiguous";
+const INFERRED_KNOWLEDGE_SCOPE_NO_MATCH: &str =
+    "inferred knowledge scope found no tracked path";
+const FILE_INVENTORY_ROOT_INVALID: &str = "file inventory root was not valid Unicode";
+const TRACKED_FILE_INVENTORY_UNAVAILABLE: &str = "tracked file inventory was unavailable";
+const TRACKED_FILE_INVENTORY_INVALID_UTF8: &str =
+    "tracked file inventory was not valid UTF-8";
+const TRACKED_FILE_INVENTORY_LIMIT_REACHED: &str =
+    "tracked file inventory exceeded the entry limit";
+const TRACKED_FILE_INVENTORY_INVALID_PATH: &str =
+    "tracked file inventory contained an invalid path";
+const KNOWLEDGE_DERIVATION_OMISSION_DETAILS: &[&str] = &[
+    EXPLICIT_TASK_TOUCH_INTENT_UNDECLARED,
+    KNOWLEDGE_TOUCH_LIMIT_REACHED,
+    KNOWLEDGE_PATH_RESOLUTION_AMBIGUOUS,
+    KNOWLEDGE_PATH_RESOLUTION_NO_MATCH,
+    INFERRED_KNOWLEDGE_SCOPE_LIMIT_REACHED,
+    INFERRED_KNOWLEDGE_SCOPE_AMBIGUOUS,
+    INFERRED_KNOWLEDGE_SCOPE_NO_MATCH,
+    FILE_INVENTORY_ROOT_INVALID,
+    TRACKED_FILE_INVENTORY_UNAVAILABLE,
+    TRACKED_FILE_INVENTORY_INVALID_UTF8,
+    TRACKED_FILE_INVENTORY_LIMIT_REACHED,
+    TRACKED_FILE_INVENTORY_INVALID_PATH,
+];
 
 /// Lossless codegraph/touches coverage shared by enrichment, context, and
 /// claim-time conflict projection.
@@ -61,6 +112,10 @@ pub trait TouchesResolver {
         &self,
         graph: &TaskGraph,
     ) -> Result<TouchCoverageReport, String>;
+
+    fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -73,6 +128,618 @@ impl TouchesResolver for NoTouchesResolver {
     ) -> Result<TouchCoverageReport, String> {
         Ok(TouchCoverageReport::unavailable())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathMatchType {
+    Exact,
+    UniqueBasename,
+    PathSuffix,
+    ParentDirectory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathResolution {
+    pub path: String,
+    pub match_type: PathMatchType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathResolutionFailure {
+    Ambiguous,
+    NoMatch,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PathIntentResolver {
+    candidates: BTreeSet<String>,
+}
+
+impl PathIntentResolver {
+    pub(crate) fn new(candidates: &BTreeSet<String>) -> Self {
+        Self {
+            candidates: candidates
+                .iter()
+                .filter_map(|candidate| normalize_path_reference(candidate))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        intent: &str,
+        allow_parent_directory: bool,
+    ) -> Result<PathResolution, PathResolutionFailure> {
+        let Some(intent) = normalize_path_reference(intent) else {
+            return Err(PathResolutionFailure::NoMatch);
+        };
+
+        if self.candidates.contains(&intent) {
+            return Ok(PathResolution {
+                path: intent,
+                match_type: PathMatchType::Exact,
+            });
+        }
+
+        if !intent.contains('/') {
+            let matches: Vec<_> = self
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.rsplit('/').next() == Some(intent.as_str()))
+                .cloned()
+                .collect();
+            return match matches.as_slice() {
+                [path] => Ok(PathResolution {
+                    path: path.clone(),
+                    match_type: PathMatchType::UniqueBasename,
+                }),
+                [] => Err(PathResolutionFailure::NoMatch),
+                _ => Err(PathResolutionFailure::Ambiguous),
+            };
+        }
+
+        let suffix = format!("/{intent}");
+        let matches: Vec<_> = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.ends_with(&suffix))
+            .cloned()
+            .collect();
+        match matches.as_slice() {
+            [path] => {
+                return Ok(PathResolution {
+                    path: path.clone(),
+                    match_type: PathMatchType::PathSuffix,
+                });
+            }
+            [] => {}
+            _ => return Err(PathResolutionFailure::Ambiguous),
+        }
+
+        if allow_parent_directory {
+            let mut parent = intent.rsplit_once('/').map(|(parent, _)| parent);
+            while let Some(candidate_parent) = parent {
+                if candidate_parent.is_empty() {
+                    break;
+                }
+                let prefix = format!("{candidate_parent}/");
+                let descendant_count = self
+                    .candidates
+                    .iter()
+                    .filter(|candidate| candidate.starts_with(&prefix))
+                    .take(MAX_KNOWLEDGE_TOUCHES_PER_TASK + 1)
+                    .count();
+                if (1..=MAX_KNOWLEDGE_TOUCHES_PER_TASK).contains(&descendant_count) {
+                    return Ok(PathResolution {
+                        path: candidate_parent.to_string(),
+                        match_type: PathMatchType::ParentDirectory,
+                    });
+                }
+                if descendant_count > MAX_KNOWLEDGE_TOUCHES_PER_TASK {
+                    break;
+                }
+                parent = candidate_parent.rsplit_once('/').map(|(parent, _)| parent);
+            }
+        }
+
+        Err(PathResolutionFailure::NoMatch)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KnowledgeAttachmentConfig {
+    pub per_intent: bool,
+    pub contract_harvest: bool,
+    pub exact: bool,
+    pub unique_basename: bool,
+    pub path_suffix: bool,
+    pub parent_directory: bool,
+    pub ambiguous: bool,
+    pub resolution_omissions: bool,
+    pub inferred_scope: bool,
+    pub file_inventory_fallback: bool,
+}
+
+impl KnowledgeAttachmentConfig {
+    pub(crate) const fn production() -> Self {
+        Self {
+            per_intent: ENABLE_KNOWLEDGE_PER_INTENT,
+            contract_harvest: ENABLE_KNOWLEDGE_CONTRACT_HARVEST,
+            exact: ENABLE_KNOWLEDGE_EXACT_MATCH,
+            unique_basename: ENABLE_KNOWLEDGE_UNIQUE_BASENAME_MATCH,
+            path_suffix: ENABLE_KNOWLEDGE_PATH_SUFFIX_MATCH,
+            parent_directory: ENABLE_KNOWLEDGE_PARENT_DIRECTORY_MATCH,
+            ambiguous: ENABLE_KNOWLEDGE_AMBIGUOUS_MATCH,
+            resolution_omissions: ENABLE_KNOWLEDGE_RESOLUTION_OMISSIONS,
+            inferred_scope: ENABLE_KNOWLEDGE_INFERRED_SCOPE,
+            file_inventory_fallback: ENABLE_KNOWLEDGE_FILE_INVENTORY_FALLBACK,
+        }
+    }
+
+    fn enables(self, match_type: PathMatchType) -> bool {
+        match match_type {
+            PathMatchType::Exact => self.exact,
+            PathMatchType::UniqueBasename => self.unique_basename,
+            PathMatchType::PathSuffix => self.path_suffix,
+            PathMatchType::ParentDirectory => self.parent_directory,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct KnowledgeCandidateSelection {
+    path_resolver: Option<PathIntentResolver>,
+    fallback: bool,
+    inventory_omission: Option<&'static str>,
+}
+
+impl KnowledgeCandidateSelection {
+    pub(crate) fn path_resolver(&self) -> Option<&PathIntentResolver> {
+        self.path_resolver.as_ref()
+    }
+
+    pub(crate) fn inventory_omission(&self) -> Option<&'static str> {
+        self.inventory_omission
+    }
+}
+
+pub(crate) fn prepare_knowledge_candidate_selection<R: TouchesResolver>(
+    resolver: &R,
+    inventory_root: &Path,
+    file_inventory: Option<&BTreeSet<String>>,
+    config: KnowledgeAttachmentConfig,
+) -> KnowledgeCandidateSelection {
+    let artifact_candidates = resolver.knowledge_candidates();
+    let mut loaded_inventory = None;
+    let mut inventory_omission = None;
+    if artifact_candidates.is_none()
+        && file_inventory.is_none()
+        && config.file_inventory_fallback
+    {
+        match load_tracked_file_inventory(inventory_root) {
+            Ok(inventory) => loaded_inventory = Some(inventory),
+            Err(detail) => inventory_omission = Some(detail),
+        }
+    }
+    let effective_inventory = file_inventory.or(loaded_inventory.as_ref());
+    let fallback_inventory = config
+        .file_inventory_fallback
+        .then_some(effective_inventory)
+        .flatten();
+    let candidates = artifact_candidates.as_ref().or(fallback_inventory);
+    KnowledgeCandidateSelection {
+        path_resolver: candidates.map(PathIntentResolver::new),
+        fallback: artifact_candidates.is_none() && fallback_inventory.is_some(),
+        inventory_omission,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KnowledgeTouchCoverage {
+    pub declared_touches: BTreeMap<TaskId, BTreeSet<String>>,
+    pub knowledge_attachment_touches: BTreeMap<TaskId, BTreeSet<String>>,
+    pub provenance_by_task: BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+    pub resolution_omissions: Vec<WorkGraphOmission>,
+}
+
+pub(crate) fn build_knowledge_touch_coverage(
+    graph: &TaskGraph,
+    declared_coverage: &TouchCoverageReport,
+    selection: &KnowledgeCandidateSelection,
+    config: KnowledgeAttachmentConfig,
+) -> KnowledgeTouchCoverage {
+    let mut declared_touches = declared_coverage.touches.clone();
+    let mut knowledge_attachment_touches = declared_touches.clone();
+    let mut provenance_by_task = BTreeMap::new();
+    for (task_id, paths) in &declared_touches {
+        for path in paths {
+            record_knowledge_provenance(
+                &mut provenance_by_task,
+                task_id,
+                path,
+                "declared-scope",
+            );
+        }
+    }
+
+    let mut resolution_omissions = Vec::new();
+    for node in graph.nodes.iter().filter(|node| node.kind == NodeKind::Task) {
+        let declared_intents = declared_contract_path_intents(node);
+        if config.resolution_omissions && declared_intents.is_empty() {
+            let mut omission = WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                1,
+                vec![node.id.clone()],
+            );
+            omission.detail = EXPLICIT_TASK_TOUCH_INTENT_UNDECLARED.to_string();
+            resolution_omissions.push(omission);
+        }
+
+        if let Some(path_resolver) = selection.path_resolver.as_ref() {
+            if config.per_intent {
+                for intent in declared_intents {
+                    attach_knowledge_intent(
+                        &node.id,
+                        &intent,
+                        "declared-scope",
+                        path_resolver,
+                        selection.fallback,
+                        !declared_coverage.available,
+                        config,
+                        &mut declared_touches,
+                        &mut knowledge_attachment_touches,
+                        &mut provenance_by_task,
+                        &mut resolution_omissions,
+                    );
+                }
+            }
+            if config.contract_harvest {
+                for intent in harvest_contract_path_intents(node) {
+                    attach_knowledge_intent(
+                        &node.id,
+                        &intent,
+                        "contract-path",
+                        path_resolver,
+                        selection.fallback,
+                        false,
+                        config,
+                        &mut declared_touches,
+                        &mut knowledge_attachment_touches,
+                        &mut provenance_by_task,
+                        &mut resolution_omissions,
+                    );
+                }
+            }
+        }
+    }
+
+    KnowledgeTouchCoverage {
+        declared_touches,
+        knowledge_attachment_touches,
+        provenance_by_task,
+        resolution_omissions: aggregate_resolution_omissions(resolution_omissions),
+    }
+}
+
+fn aggregate_resolution_omissions(
+    omissions: Vec<WorkGraphOmission>,
+) -> Vec<WorkGraphOmission> {
+    let mut grouped: BTreeMap<String, (usize, BTreeSet<String>)> = BTreeMap::new();
+    for omission in omissions {
+        let entry = grouped.entry(omission.detail).or_default();
+        entry.0 += omission.count;
+        entry.1.extend(omission.examples);
+    }
+    grouped
+        .into_iter()
+        .map(|(detail, (count, examples))| {
+            let mut omission = WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                count,
+                examples.into_iter().take(MAX_OMISSION_EXAMPLES).collect(),
+            );
+            omission.detail = detail;
+            omission
+        })
+        .collect()
+}
+
+pub(crate) fn is_knowledge_derivation_omission(omission: &WorkGraphOmission) -> bool {
+    omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+        && KNOWLEDGE_DERIVATION_OMISSION_DETAILS.contains(&omission.detail.as_str())
+}
+
+/// Load the repository's tracked-file inventory without exposing Git or OS
+/// diagnostics in graph output. Callers turn the stable error category into a
+/// fail-open omission.
+pub(crate) fn load_tracked_file_inventory(
+    inventory_root: &Path,
+) -> Result<BTreeSet<String>, &'static str> {
+    let Some(root) = inventory_root.to_str() else {
+        return Err(FILE_INVENTORY_ROOT_INVALID);
+    };
+    let output = run_git_in_dir(&["ls-files", "-z"], root)
+        .map_err(|_| TRACKED_FILE_INVENTORY_UNAVAILABLE)?;
+    if output.contains('\u{fffd}') {
+        return Err(TRACKED_FILE_INVENTORY_INVALID_UTF8);
+    }
+
+    let mut inventory = BTreeSet::new();
+    for (index, raw) in output
+        .split('\0')
+        .filter(|value| !value.is_empty())
+        .enumerate()
+    {
+        if index >= MAX_FILE_INVENTORY_ENTRIES {
+            return Err(TRACKED_FILE_INVENTORY_LIMIT_REACHED);
+        }
+        let slash_normalized = raw.replace('\\', "/");
+        let normalized = normalize_scope(raw);
+        if normalized.is_empty()
+            || normalized.chars().count() > MAX_FILE_INVENTORY_PATH_CHARS
+            || slash_normalized.starts_with('/')
+            || slash_normalized.as_bytes().get(1) == Some(&b':')
+            || normalized.split('/').any(|component| component == "..")
+            || Path::new(&normalized).is_absolute()
+        {
+            return Err(TRACKED_FILE_INVENTORY_INVALID_PATH);
+        }
+        inventory.insert(normalized);
+    }
+    Ok(inventory)
+}
+
+// Keep the independent resolution inputs visible at the mutation boundary.
+#[allow(clippy::too_many_arguments)]
+fn attach_knowledge_intent(
+    task_id: &str,
+    intent: &str,
+    provenance: &str,
+    path_resolver: &PathIntentResolver,
+    fallback: bool,
+    seed_declared_touches: bool,
+    config: KnowledgeAttachmentConfig,
+    declared_touches: &mut BTreeMap<TaskId, BTreeSet<String>>,
+    knowledge_attachment_touches: &mut BTreeMap<TaskId, BTreeSet<String>>,
+    provenance_by_task: &mut BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+    resolution_omissions: &mut Vec<WorkGraphOmission>,
+) {
+    match path_resolver.resolve(intent, config.parent_directory) {
+        Ok(resolution) if config.enables(resolution.match_type) => {
+            let task_touches = knowledge_attachment_touches
+                .entry(task_id.to_string())
+                .or_default();
+            if task_touches.len() >= MAX_KNOWLEDGE_TOUCHES_PER_TASK
+                && !task_touches.contains(&resolution.path)
+            {
+                if config.resolution_omissions {
+                    push_knowledge_resolution_omission(
+                        resolution_omissions,
+                        task_id,
+                        intent,
+                        KNOWLEDGE_TOUCH_LIMIT_REACHED,
+                    );
+                }
+                return;
+            }
+            task_touches.insert(resolution.path.clone());
+            if seed_declared_touches {
+                declared_touches
+                    .entry(task_id.to_string())
+                    .or_default()
+                    .insert(resolution.path.clone());
+            }
+            record_knowledge_provenance(
+                provenance_by_task,
+                task_id,
+                &resolution.path,
+                provenance,
+            );
+            if fallback {
+                record_knowledge_provenance(
+                    provenance_by_task,
+                    task_id,
+                    &resolution.path,
+                    "fallback",
+                );
+            }
+            if resolution.match_type == PathMatchType::ParentDirectory {
+                record_knowledge_provenance(
+                    provenance_by_task,
+                    task_id,
+                    &resolution.path,
+                    "parent-directory",
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(PathResolutionFailure::Ambiguous) => {
+            debug_assert!(
+                !config.ambiguous,
+                "ambiguous knowledge attachment has no deterministic target"
+            );
+            if config.resolution_omissions {
+                push_knowledge_resolution_omission(
+                    resolution_omissions,
+                    task_id,
+                    intent,
+                    KNOWLEDGE_PATH_RESOLUTION_AMBIGUOUS,
+                );
+            }
+        }
+        Err(PathResolutionFailure::NoMatch) => {
+            if config.resolution_omissions {
+                push_knowledge_resolution_omission(
+                    resolution_omissions,
+                    task_id,
+                    intent,
+                    KNOWLEDGE_PATH_RESOLUTION_NO_MATCH,
+                );
+            }
+        }
+    }
+}
+
+fn record_knowledge_provenance(
+    provenance_by_task: &mut BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+    task_id: &str,
+    path: &str,
+    provenance: &str,
+) {
+    provenance_by_task
+        .entry(task_id.to_string())
+        .or_default()
+        .entry(path.to_string())
+        .or_default()
+        .insert(provenance.to_string());
+}
+
+fn push_knowledge_resolution_omission(
+    omissions: &mut Vec<WorkGraphOmission>,
+    task_id: &str,
+    intent: &str,
+    detail: &str,
+) {
+    let mut omission = WorkGraphOmission::new(
+        WorkGraphOmissionReason::ResolutionIncomplete,
+        1,
+        vec![format!("{task_id}: {intent}")],
+    );
+    omission.detail = detail.to_string();
+    omissions.push(omission);
+}
+
+fn declared_contract_path_intents(node: &WorkNode) -> Vec<String> {
+    node.contract
+        .inputs
+        .iter()
+        .chain(node.contract.outputs.iter())
+        .chain(node.contract.acceptance.iter())
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            let raw = ["touch:", "file:", "module:"]
+                .iter()
+                .find_map(|prefix| lower.starts_with(prefix).then(|| &trimmed[prefix.len()..]))?;
+            (!raw.trim().eq_ignore_ascii_case("none")).then(|| raw.trim().to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn harvest_contract_path_intents(node: &WorkNode) -> Vec<String> {
+    let mut intents = BTreeSet::new();
+    for value in node
+        .contract
+        .inputs
+        .iter()
+        .chain(node.contract.outputs.iter())
+        .chain(node.contract.acceptance.iter())
+    {
+        let trimmed = value.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if ["touch:", "file:", "module:"]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+        {
+            continue;
+        }
+        for token in value.split(|character: char| {
+            character.is_ascii_whitespace()
+                || matches!(
+                    character,
+                    ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+                )
+        }) {
+            let token = strip_path_token(token);
+            if token.is_empty()
+                || is_line_range_fragment(token)
+                || token.contains("://")
+                || ["touch:", "file:", "module:"]
+                    .iter()
+                    .any(|prefix| token.to_ascii_lowercase().starts_with(prefix))
+                || !is_path_like_token(token)
+            {
+                continue;
+            }
+            if let Some(normalized) = normalize_path_reference(token) {
+                intents.insert(normalized);
+            }
+        }
+    }
+    intents.into_iter().collect()
+}
+
+fn normalize_path_reference(value: &str) -> Option<String> {
+    let replaced = strip_path_token(value).replace('\\', "/");
+    if replaced.starts_with('/')
+        || replaced
+            .as_bytes()
+            .get(1)
+            .is_some_and(|character| *character == b':')
+    {
+        return None;
+    }
+    let normalized = replaced
+        .trim_start_matches("./")
+        .trim_matches('/')
+        .to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.split('/').any(|component| {
+            component.is_empty() || component == "." || component == ".."
+        })
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn strip_path_token(value: &str) -> &str {
+    let token = value
+        .trim()
+        .trim_matches(['`', '"', '\''])
+        .trim_end_matches([',', ';', '.', '!', '?']);
+    let Some((path, range)) = token.rsplit_once(':') else {
+        return token;
+    };
+    if is_line_range(range) {
+        path.trim_end_matches([',', ';', '.', '!', '?'])
+    } else {
+        token
+    }
+}
+
+fn is_line_range(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let Some(start) = parts.next() else {
+        return false;
+    };
+    let end = parts.next();
+    parts.next().is_none()
+        && !start.is_empty()
+        && start.chars().all(|character| character.is_ascii_digit())
+        && end.is_none_or(|end| {
+            !end.is_empty() && end.chars().all(|character| character.is_ascii_digit())
+        })
+}
+
+fn is_line_range_fragment(value: &str) -> bool {
+    value
+        .strip_prefix(':')
+        .is_some_and(is_line_range)
+}
+
+fn is_path_like_token(value: &str) -> bool {
+    if value.contains('/') || value.contains('\\') {
+        return true;
+    }
+    let value = strip_path_token(value);
+    value.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && !extension.is_empty()
+            && extension
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,8 +785,13 @@ pub fn derive_project_context<R: TouchesResolver>(
     resolver: &R,
 ) -> ContextDerivationReport {
     clear_derived_context(graph);
-    let load = load_project_knowledge(project_path);
-    graph.omissions.extend(load.omissions);
+    let load = load_project_knowledge(
+        project_path,
+        None,
+        None,
+        KnowledgeAttachmentConfig::production(),
+    );
+    graph.omissions.extend(load.omissions.clone());
     if !load.available {
         return ContextDerivationReport {
             gotchas: Vec::new(),
@@ -139,7 +811,7 @@ pub fn derive_project_context<R: TouchesResolver>(
                 1,
                 vec!["touches-resolver".to_string()],
             ));
-            append_context_nodes(graph, &load.gotchas);
+            append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
             return ContextDerivationReport {
                 gotchas: load.gotchas,
                 hub_lints: Vec::new(),
@@ -155,7 +827,7 @@ pub fn derive_project_context<R: TouchesResolver>(
                 1,
                 vec![format!("touches-resolver: {error}")],
             ));
-            append_context_nodes(graph, &load.gotchas);
+            append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
             return ContextDerivationReport {
                 gotchas: load.gotchas,
                 hub_lints: Vec::new(),
@@ -167,14 +839,89 @@ pub fn derive_project_context<R: TouchesResolver>(
         }
     };
 
-    append_context_nodes(graph, &load.gotchas);
+    derive_loaded_context(
+        graph,
+        load,
+        &coverage,
+        &coverage.touches,
+        &coverage.touches,
+        &BTreeMap::new(),
+    )
+}
+
+pub(crate) fn derive_project_context_from_knowledge(
+    graph: &mut TaskGraph,
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    declared_coverage: &TouchCoverageReport,
+    knowledge: &KnowledgeTouchCoverage,
+    path_resolver: Option<&PathIntentResolver>,
+    config: KnowledgeAttachmentConfig,
+) -> ContextDerivationReport {
+    clear_derived_context(graph);
+    let load = load_project_knowledge(
+        project_path,
+        institutional_wiki_root,
+        path_resolver,
+        config,
+    );
+    graph.omissions.extend(load.omissions.clone());
+    if !load.available {
+        return ContextDerivationReport {
+            gotchas: Vec::new(),
+            hub_lints: Vec::new(),
+            source_fingerprints: load.fingerprints,
+            knowledge_available: false,
+            touches_available: false,
+            knowledge_edge_count: 0,
+        };
+    }
+
+    let expanded_available = declared_coverage.available
+        || (config.file_inventory_fallback && path_resolver.is_some());
+    if !expanded_available {
+        graph.omissions.push(WorkGraphOmission::new(
+            WorkGraphOmissionReason::CodegraphUnavailable,
+            1,
+            vec!["touches-resolver".to_string()],
+        ));
+        append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
+        return ContextDerivationReport {
+            gotchas: load.gotchas,
+            hub_lints: Vec::new(),
+            source_fingerprints: load.fingerprints,
+            knowledge_available: true,
+            touches_available: false,
+            knowledge_edge_count: 0,
+        };
+    }
+
+    derive_loaded_context(
+        graph,
+        load,
+        declared_coverage,
+        &knowledge.declared_touches,
+        &knowledge.knowledge_attachment_touches,
+        &knowledge.provenance_by_task,
+    )
+}
+
+fn derive_loaded_context(
+    graph: &mut TaskGraph,
+    load: KnowledgeLoad,
+    declared_coverage: &TouchCoverageReport,
+    base_touches: &BTreeMap<TaskId, BTreeSet<String>>,
+    expanded_touches: &BTreeMap<TaskId, BTreeSet<String>>,
+    provenance_by_task: &BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+) -> ContextDerivationReport {
+    append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
     let all_task_ids: Vec<_> = graph
         .nodes
         .iter()
         .filter(|node| node.kind == NodeKind::Task)
         .map(|node| node.id.clone())
         .collect();
-    let missing_task_ids = coverage.unresolved_task_ids.clone();
+    let missing_task_ids = declared_coverage.unresolved_task_ids.clone();
     if !missing_task_ids.is_empty() {
         graph.omissions.push(WorkGraphOmission::new(
             WorkGraphOmissionReason::ResolutionIncomplete,
@@ -190,15 +937,30 @@ pub fn derive_project_context<R: TouchesResolver>(
     // resolver must not shrink the denominator until generic context appears
     // discriminating; missing facts remain visible through the omission above.
     let task_ids = all_task_ids;
-    let mut candidates: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
+    let mut base_candidates: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
+    let mut expanded_candidates: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
     for gotcha in &load.gotchas {
         let context_id = context_node_id(&gotcha.id);
+        let base_scope: &[String] = if load.inferred_scope_provenance.contains_key(&gotcha.id) {
+            &[]
+        } else {
+            &gotcha.scope
+        };
         for task_id in &task_ids {
-            let Some(task_touches) = coverage.touches.get(task_id) else {
-                continue;
-            };
-            if scope_intersects(&gotcha.scope, task_touches) {
-                candidates
+            if base_touches
+                .get(task_id)
+                .is_some_and(|touches| scope_intersects(base_scope, touches))
+            {
+                base_candidates
+                    .entry(context_id.clone())
+                    .or_default()
+                    .push(task_id.clone());
+            }
+            if expanded_touches
+                .get(task_id)
+                .is_some_and(|touches| scope_intersects(&gotcha.scope, touches))
+            {
+                expanded_candidates
                     .entry(context_id.clone())
                     .or_default()
                     .push(task_id.clone());
@@ -210,31 +972,46 @@ pub fn derive_project_context<R: TouchesResolver>(
     let mut knowledge_edge_count = 0;
     for gotcha in &load.gotchas {
         let context_id = context_node_id(&gotcha.id);
-        let mut linked = candidates.remove(&context_id).unwrap_or_default();
+        let mut base_linked = base_candidates.remove(&context_id).unwrap_or_default();
+        let mut expanded_linked = expanded_candidates.remove(&context_id).unwrap_or_default();
         // `*` declares repo-wide applicability. Even partial or successfully
         // empty touch facts cannot make that declaration task-specific, so
         // lint it against the complete plan while still adding no edges.
         if gotcha.scope.iter().any(|scope| scope == "*")
             && task_ids.len() >= ANTI_HUB_MIN_TASKS
         {
-            linked = task_ids.clone();
+            base_linked = task_ids.clone();
+            expanded_linked = task_ids.clone();
         }
-        let fraction = if task_ids.is_empty() {
+        let base_fraction = if task_ids.is_empty() {
             0.0
         } else {
-            linked.len() as f64 / task_ids.len() as f64
+            base_linked.len() as f64 / task_ids.len() as f64
         };
-        if task_ids.len() >= ANTI_HUB_MIN_TASKS && fraction >= ANTI_HUB_TASK_FRACTION {
+        if task_ids.len() >= ANTI_HUB_MIN_TASKS
+            && base_fraction >= ANTI_HUB_TASK_FRACTION
+        {
             hub_lints.push(ContextHubLint {
                 context_node_id: context_id,
-                linked_task_ids: linked,
-                task_fraction: fraction,
+                linked_task_ids: base_linked,
+                task_fraction: base_fraction,
                 threshold: ANTI_HUB_TASK_FRACTION,
                 detail: "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope".to_string(),
             });
             continue;
         }
-        for task_id in linked {
+        for task_id in &base_linked {
+            let rationale = if declared_coverage.available {
+                "task touches a module in this gotcha's scope".to_string()
+            } else {
+                expanded_edge_rationale(
+                    gotcha,
+                    task_id,
+                    expanded_touches,
+                    provenance_by_task,
+                    &load.inferred_scope_provenance,
+                )
+            };
             graph.edges.push(
                 WorkEdge::new(
                     &context_id,
@@ -242,7 +1019,49 @@ pub fn derive_project_context<R: TouchesResolver>(
                     EdgeKind::Informs,
                     EdgeProvenance::Knowledge,
                 )
-                .with_rationale("task touches a module in this gotcha's scope"),
+                .with_rationale(rationale),
+            );
+            knowledge_edge_count += 1;
+        }
+
+        let expanded_fraction = if task_ids.is_empty() {
+            0.0
+        } else {
+            expanded_linked.len() as f64 / task_ids.len() as f64
+        };
+        if task_ids.len() >= ANTI_HUB_MIN_TASKS
+            && expanded_fraction >= ANTI_HUB_TASK_FRACTION
+        {
+            if expanded_linked != base_linked {
+                hub_lints.push(ContextHubLint {
+                    context_node_id: context_id,
+                    linked_task_ids: expanded_linked,
+                    task_fraction: expanded_fraction,
+                    threshold: ANTI_HUB_TASK_FRACTION,
+                    detail: "expanded knowledge coverage applies to a high fraction of tasks; base attachment edges were preserved and expanded knowledge edges were withheld".to_string(),
+                });
+            }
+            continue;
+        }
+        let base_set: BTreeSet<_> = base_linked.into_iter().collect();
+        for task_id in expanded_linked.drain(..) {
+            if base_set.contains(&task_id) {
+                continue;
+            }
+            graph.edges.push(
+                WorkEdge::new(
+                    &context_id,
+                    &task_id,
+                    EdgeKind::Informs,
+                    EdgeProvenance::Knowledge,
+                )
+                .with_rationale(expanded_edge_rationale(
+                    gotcha,
+                    &task_id,
+                    expanded_touches,
+                    provenance_by_task,
+                    &load.inferred_scope_provenance,
+                )),
             );
             knowledge_edge_count += 1;
         }
@@ -344,16 +1163,23 @@ pub fn context_node_is_stale(
 
 struct KnowledgeLoad {
     gotchas: Vec<DerivedGotcha>,
+    inferred_scope_provenance: BTreeMap<String, BTreeMap<String, String>>,
     fingerprints: Vec<KnowledgeSourceFingerprint>,
     omissions: Vec<WorkGraphOmission>,
     available: bool,
 }
 
-fn load_project_knowledge(project_path: &Path) -> KnowledgeLoad {
+fn load_project_knowledge(
+    project_path: &Path,
+    institutional_wiki_root: Option<&Path>,
+    path_resolver: Option<&PathIntentResolver>,
+    config: KnowledgeAttachmentConfig,
+) -> KnowledgeLoad {
     let ai_docs = project_path.join(".ai-docs");
     if !ai_docs.is_dir() {
         return KnowledgeLoad {
             gotchas: Vec::new(),
+            inferred_scope_provenance: BTreeMap::new(),
             fingerprints: Vec::new(),
             omissions: vec![WorkGraphOmission::new(
                 WorkGraphOmissionReason::ProjectKnowledgeUnavailable,
@@ -365,6 +1191,7 @@ fn load_project_knowledge(project_path: &Path) -> KnowledgeLoad {
     }
 
     let mut gotchas = Vec::new();
+    let mut inferred_scope_provenance = BTreeMap::new();
     let mut fingerprints = Vec::new();
     let mut omissions = Vec::new();
     let curated_line_limit = load_curated_line_limit(
@@ -405,7 +1232,17 @@ fn load_project_knowledge(project_path: &Path) -> KnowledgeLoad {
                         source_ref: format!(".ai-docs/{filename}"),
                         content_hash: source_hash.clone(),
                     });
-                    parse_markdown(filename, &content, &source_hash, &mut gotchas);
+                    parse_markdown(
+                        filename,
+                        &content,
+                        &source_hash,
+                        institutional_wiki_root,
+                        path_resolver,
+                        config,
+                        &mut gotchas,
+                        &mut inferred_scope_provenance,
+                        &mut omissions,
+                    );
                 }
             }
             Err(error) => omissions.push(WorkGraphOmission::new(
@@ -431,6 +1268,9 @@ fn load_project_knowledge(project_path: &Path) -> KnowledgeLoad {
             .retain(|scope| scope.chars().count() <= MAX_CONTEXT_SCOPE_CHARS);
         if gotcha.scope.len() > MAX_CONTEXT_SCOPES_PER_GOTCHA {
             gotcha.scope.truncate(MAX_CONTEXT_SCOPES_PER_GOTCHA);
+        }
+        if let Some(provenance) = inferred_scope_provenance.get_mut(&gotcha.id) {
+            provenance.retain(|scope, _| gotcha.scope.contains(scope));
         }
         let dropped = original_len - gotcha.scope.len();
         if dropped > 0 {
@@ -473,6 +1313,7 @@ fn load_project_knowledge(project_path: &Path) -> KnowledgeLoad {
 
     KnowledgeLoad {
         gotchas,
+        inferred_scope_provenance,
         fingerprints,
         omissions,
         available: true,
@@ -534,11 +1375,18 @@ fn load_curated_line_limit(
     }
 }
 
+// Parsing threads bounded output and diagnostics through one section walk.
+#[allow(clippy::too_many_arguments)]
 fn parse_markdown(
     filename: &str,
     content: &str,
     source_hash: &str,
+    institutional_wiki_root: Option<&Path>,
+    path_resolver: Option<&PathIntentResolver>,
+    config: KnowledgeAttachmentConfig,
     gotchas: &mut Vec<DerivedGotcha>,
+    inferred_scope_provenance: &mut BTreeMap<String, BTreeMap<String, String>>,
+    omissions: &mut Vec<WorkGraphOmission>,
 ) {
     let mut heading = String::new();
     let mut start_line = 1;
@@ -559,7 +1407,12 @@ fn parse_markdown(
                 start_line,
                 &body,
                 source_hash,
+                institutional_wiki_root,
+                path_resolver,
+                config,
                 gotchas,
+                inferred_scope_provenance,
+                omissions,
             );
             heading = next_heading;
             start_line = index + 1;
@@ -574,7 +1427,12 @@ fn parse_markdown(
         start_line,
         &body,
         source_hash,
+        institutional_wiki_root,
+        path_resolver,
+        config,
         gotchas,
+        inferred_scope_provenance,
+        omissions,
     );
 }
 
@@ -587,13 +1445,20 @@ fn markdown_heading(line: &str) -> Option<String> {
     Some(trimmed[hashes..].trim().to_string())
 }
 
+// Section finalization keeps source identity, inference state, and diagnostics explicit.
+#[allow(clippy::too_many_arguments)]
 fn flush_markdown_section(
     filename: &str,
     heading: &str,
     start_line: usize,
     body: &[String],
     source_hash: &str,
+    institutional_wiki_root: Option<&Path>,
+    path_resolver: Option<&PathIntentResolver>,
+    config: KnowledgeAttachmentConfig,
     gotchas: &mut Vec<DerivedGotcha>,
+    inferred_scope_provenance: &mut BTreeMap<String, BTreeMap<String, String>>,
+    omissions: &mut Vec<WorkGraphOmission>,
 ) {
     if heading.is_empty()
         || matches!(heading.to_ascii_lowercase().as_str(), "template" | "bugs")
@@ -601,34 +1466,166 @@ fn flush_markdown_section(
     {
         return;
     }
-    let scope = markdown_scope(body);
+    let mut scope = markdown_scope(body);
     let summary = markdown_summary(heading, body);
     if summary.is_empty() {
         return;
     }
     let source_ref = format!(".ai-docs/{filename}#L{start_line}");
+    let inferred = if let (true, Some(path_resolver)) = (
+        config.inferred_scope && !has_explicit_markdown_scope(body),
+        path_resolver,
+    ) {
+        resolve_inferred_scope(
+            body,
+            &source_ref,
+            path_resolver,
+            config,
+            omissions,
+        )
+    } else {
+        BTreeMap::new()
+    };
+    scope.extend(inferred.keys().cloned());
+    scope.sort();
+    scope.dedup();
+    let gotcha_id = stable_hash(format!("{source_ref}:{heading}").as_bytes());
     gotchas.push(DerivedGotcha {
-        id: stable_hash(format!("{source_ref}:{heading}").as_bytes()),
+        id: gotcha_id.clone(),
         scope: scope.clone(),
         summary,
         fingerprint_ref: format!(".ai-docs/{filename}"),
         source_ref,
         source_hash: source_hash.to_string(),
     });
+    if !inferred.is_empty() {
+        inferred_scope_provenance.insert(gotcha_id, inferred.clone());
+    }
 
     for line in body {
         if let Some(global_ref) = global_cross_ref(line) {
             let source_ref = format!("global:{global_ref}");
+            let gotcha_id = stable_hash(format!("{source_ref}:{heading}").as_bytes());
             gotchas.push(DerivedGotcha {
-                id: stable_hash(format!("{source_ref}:{heading}").as_bytes()),
+                id: gotcha_id.clone(),
                 scope: scope.clone(),
-                summary: bound_summary(&format!("{heading}: institutional context")),
+                summary: institutional_wiki_root
+                    .and_then(|root| read_global_summary(root, &global_ref))
+                    .unwrap_or_else(|| {
+                        bound_summary(&format!("{heading}: institutional context"))
+                    }),
                 fingerprint_ref: format!(".ai-docs/{filename}"),
                 source_ref,
                 source_hash: source_hash.to_string(),
             });
+            if !inferred.is_empty() {
+                inferred_scope_provenance.insert(gotcha_id, inferred.clone());
+            }
         }
     }
+}
+
+fn has_explicit_markdown_scope(body: &[String]) -> bool {
+    body.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("**scope**")
+            || lower.contains("**files**")
+            || lower.trim_start().starts_with("scope:")
+            || lower.trim_start().starts_with("files:")
+    })
+}
+
+fn resolve_inferred_scope(
+    body: &[String],
+    source_ref: &str,
+    path_resolver: &PathIntentResolver,
+    config: KnowledgeAttachmentConfig,
+    omissions: &mut Vec<WorkGraphOmission>,
+) -> BTreeMap<String, String> {
+    let mut resolved = BTreeMap::new();
+    let mut local_omissions = Vec::new();
+    for raw in body
+        .iter()
+        .flat_map(|line| code_spans(line))
+        .filter(|value| is_path_like_token(value))
+    {
+        match path_resolver.resolve(&raw, false) {
+            Ok(resolution) if config.enables(resolution.match_type) => {
+                if resolved.len() >= MAX_CONTEXT_SCOPES_PER_GOTCHA
+                    && !resolved.contains_key(&resolution.path)
+                {
+                    push_inferred_scope_omission(
+                        &mut local_omissions,
+                        source_ref,
+                        &raw,
+                        INFERRED_KNOWLEDGE_SCOPE_LIMIT_REACHED,
+                    );
+                    continue;
+                }
+                resolved.insert(
+                    resolution.path,
+                    format!("inferred-scope:{}", match_type_label(resolution.match_type)),
+                );
+            }
+            Ok(_) => {}
+            Err(PathResolutionFailure::Ambiguous) if config.resolution_omissions => {
+                push_inferred_scope_omission(
+                    &mut local_omissions,
+                    source_ref,
+                    &raw,
+                    INFERRED_KNOWLEDGE_SCOPE_AMBIGUOUS,
+                );
+            }
+            Err(PathResolutionFailure::NoMatch) if config.resolution_omissions => {
+                push_inferred_scope_omission(
+                    &mut local_omissions,
+                    source_ref,
+                    &raw,
+                    INFERRED_KNOWLEDGE_SCOPE_NO_MATCH,
+                );
+            }
+            Err(_) => {}
+        }
+    }
+    omissions.extend(aggregate_resolution_omissions(local_omissions));
+    resolved
+}
+
+fn push_inferred_scope_omission(
+    omissions: &mut Vec<WorkGraphOmission>,
+    source_ref: &str,
+    raw: &str,
+    detail: &str,
+) {
+    let mut omission = WorkGraphOmission::new(
+        WorkGraphOmissionReason::ResolutionIncomplete,
+        1,
+        vec![format!("{source_ref}: {}", strip_path_token(raw))],
+    );
+    omission.detail = detail.to_string();
+    omissions.push(omission);
+}
+
+fn match_type_label(match_type: PathMatchType) -> &'static str {
+    match match_type {
+        PathMatchType::Exact => "exact",
+        PathMatchType::UniqueBasename => "unique-basename",
+        PathMatchType::PathSuffix => "path-suffix",
+        PathMatchType::ParentDirectory => "parent-directory",
+    }
+}
+
+fn read_global_summary(institutional_wiki_root: &Path, global_ref: &str) -> Option<String> {
+    let root = institutional_wiki_root.canonicalize().ok()?;
+    let candidate = root.join(global_ref).canonicalize().ok()?;
+    if !candidate.starts_with(&root) || !candidate.is_file() {
+        return None;
+    }
+    let content = fs::read_to_string(candidate).ok()?;
+    let (frontmatter, body) = split_frontmatter(&content);
+    let title = frontmatter_field(frontmatter, "title").or_else(|| first_h1(body))?;
+    let description = frontmatter_field(frontmatter, "description")?;
+    Some(bound_summary(&format!("{title}: {description}")))
 }
 
 fn markdown_scope(body: &[String]) -> Vec<String> {
@@ -725,7 +1722,11 @@ fn parse_learnings(
     }
 }
 
-fn append_context_nodes(graph: &mut TaskGraph, gotchas: &[DerivedGotcha]) {
+fn append_context_nodes(
+    graph: &mut TaskGraph,
+    gotchas: &[DerivedGotcha],
+    inferred_scope_provenance: &BTreeMap<String, BTreeMap<String, String>>,
+) {
     for gotcha in gotchas {
         let id = context_node_id(&gotcha.id);
         let mut parameters = BTreeMap::new();
@@ -737,6 +1738,16 @@ fn append_context_nodes(graph: &mut TaskGraph, gotchas: &[DerivedGotcha]) {
             gotcha.fingerprint_ref.clone(),
         );
         parameters.insert("source_hash".to_string(), gotcha.source_hash.clone());
+        if let Some(provenance) = inferred_scope_provenance.get(&gotcha.id) {
+            parameters.insert(
+                "knowledge_provenance".to_string(),
+                provenance
+                    .iter()
+                    .map(|(path, label)| format!("{path}={label}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
         let mut node = WorkNode::new(
             id,
             NodeKind::Context,
@@ -868,4 +1879,573 @@ fn stable_hash(bytes: &[u8]) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+fn expanded_edge_rationale(
+    gotcha: &DerivedGotcha,
+    task_id: &str,
+    expanded_touches: &BTreeMap<TaskId, BTreeSet<String>>,
+    provenance_by_task: &BTreeMap<TaskId, BTreeMap<String, BTreeSet<String>>>,
+    inferred_scope_provenance: &BTreeMap<String, BTreeMap<String, String>>,
+) -> String {
+    let mut labels = BTreeSet::new();
+    let Some(task_touches) = expanded_touches.get(task_id) else {
+        return "knowledge attachment matched expanded scope".to_string();
+    };
+    for scope in &gotcha.scope {
+        for touch in task_touches {
+            if !scope_intersects(std::slice::from_ref(scope), &BTreeSet::from([touch.clone()])) {
+                continue;
+            }
+            if let Some(label) = inferred_scope_provenance
+                .get(&gotcha.id)
+                .and_then(|paths| paths.get(scope))
+            {
+                labels.insert(label.clone());
+            }
+            if let Some(path_labels) = provenance_by_task
+                .get(task_id)
+                .and_then(|paths| paths.get(touch))
+            {
+                labels.extend(path_labels.iter().cloned());
+            }
+        }
+    }
+    if labels.is_empty() {
+        "knowledge attachment matched expanded scope".to_string()
+    } else {
+        format!("knowledge attachment matched {}", labels.into_iter().collect::<Vec<_>>().join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_knowledge_touch_coverage, derive_project_context_from_knowledge,
+        harvest_contract_path_intents, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
+        prepare_knowledge_candidate_selection, PathIntentResolver, PathMatchType,
+        PathResolution, PathResolutionFailure, TouchCoverageReport, TouchesResolver,
+        MAX_KNOWLEDGE_TOUCHES_PER_TASK,
+    };
+    use crate::orchestrator::work_graph::{
+        BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
+        WorkGraphOmissionReason, WorkNode,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[derive(Clone)]
+    struct CandidateResolver {
+        coverage: TouchCoverageReport,
+        candidates: BTreeSet<String>,
+    }
+
+    impl TouchesResolver for CandidateResolver {
+        fn resolve_touches(
+            &self,
+            _graph: &TaskGraph,
+        ) -> Result<TouchCoverageReport, String> {
+            Ok(self.coverage.clone())
+        }
+
+        fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
+            Some(self.candidates.clone())
+        }
+    }
+
+    #[test]
+    fn shared_path_resolver_orders_match_types_and_strips_line_ranges() {
+        let candidates = BTreeSet::from([
+            "src/exact.rs".to_string(),
+            "src-tauri/src/http/handlers/queue.rs".to_string(),
+            "src-tauri/src/orchestrator/work_graph/runtime.rs".to_string(),
+            "src-tauri/src/session/completion_ledger.rs".to_string(),
+            "src-tauri/src/storage/queue.rs".to_string(),
+            "src/fix.rs".to_string(),
+        ]);
+        let resolver = PathIntentResolver::new(&candidates);
+
+        assert_eq!(
+            resolver.resolve("src/exact.rs:79-81,", false),
+            Ok(PathResolution {
+                path: "src/exact.rs".to_string(),
+                match_type: PathMatchType::Exact,
+            })
+        );
+        assert_eq!(
+            resolver.resolve("runtime.rs:1371-1408", false),
+            Ok(PathResolution {
+                path: "src-tauri/src/orchestrator/work_graph/runtime.rs".to_string(),
+                match_type: PathMatchType::UniqueBasename,
+            })
+        );
+        assert_eq!(
+            resolver.resolve("session/completion_ledger.rs:69-78", false),
+            Ok(PathResolution {
+                path: "src-tauri/src/session/completion_ledger.rs".to_string(),
+                match_type: PathMatchType::PathSuffix,
+            })
+        );
+        assert_eq!(
+            resolver.resolve("queue.rs:79-81", false),
+            Err(PathResolutionFailure::Ambiguous)
+        );
+        assert_eq!(
+            resolver.resolve("x.rs", false),
+            Err(PathResolutionFailure::NoMatch),
+            "suffix matching must respect path-component boundaries"
+        );
+    }
+
+    #[test]
+    fn contract_harvest_uses_real_range_bearing_strings() {
+        let node = task(
+            "T1",
+            NodeContract {
+                inputs: vec!["queue.rs:79-81".to_string()],
+                outputs: vec![
+                    "runtime.rs:1371-1408 and :1046-1054".to_string(),
+                    "file:src/declared.rs".to_string(),
+                ],
+                acceptance: vec!["completion_ledger.rs:69-78".to_string()],
+            },
+        );
+
+        assert_eq!(
+            harvest_contract_path_intents(&node),
+            vec![
+                "completion_ledger.rs".to_string(),
+                "queue.rs".to_string(),
+                "runtime.rs".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn knowledge_resolution_keeps_success_when_another_intent_fails() {
+        let graph = TaskGraph::new(
+            vec![task(
+                "T1",
+                NodeContract {
+                    inputs: vec!["file:src/good.rs".to_string()],
+                    outputs: vec!["file:src/missing.rs".to_string()],
+                    acceptance: Vec::new(),
+                },
+            )],
+            Vec::new(),
+        );
+        let coverage = TouchCoverageReport {
+            available: true,
+            artifact_languages: BTreeSet::from(["rust".to_string()]),
+            touches: BTreeMap::new(),
+            unresolved_task_ids: vec!["T1".to_string()],
+        };
+        let resolver = CandidateResolver {
+            coverage: coverage.clone(),
+            candidates: BTreeSet::from(["src/good.rs".to_string()]),
+        };
+
+        let mut config = enabled_config();
+        config.parent_directory = false;
+        let selection = prepare_knowledge_candidate_selection(
+            &resolver,
+            std::path::Path::new("."),
+            None,
+            config,
+        );
+        let knowledge = build_knowledge_touch_coverage(
+            &graph,
+            &coverage,
+            &selection,
+            config,
+        );
+
+        assert_eq!(
+            knowledge.knowledge_attachment_touches,
+            BTreeMap::from([(
+                "T1".to_string(),
+                BTreeSet::from(["src/good.rs".to_string()]),
+            )])
+        );
+        assert_eq!(knowledge.resolution_omissions.len(), 1);
+        assert_eq!(
+            knowledge.resolution_omissions[0].detail,
+            "knowledge path resolution found no tracked path"
+        );
+        assert_eq!(
+            knowledge.resolution_omissions[0].examples,
+            vec!["T1: src/missing.rs"]
+        );
+    }
+
+    #[test]
+    fn new_file_intent_resolves_to_bounded_non_root_parent() {
+        let candidates = BTreeSet::from([
+            "src/new/existing.rs".to_string(),
+            "src/other.rs".to_string(),
+        ]);
+        let resolver = PathIntentResolver::new(&candidates);
+
+        assert_eq!(
+            resolver.resolve("src/new/generated.rs", true),
+            Ok(PathResolution {
+                path: "src/new".to_string(),
+                match_type: PathMatchType::ParentDirectory,
+            })
+        );
+        assert_eq!(
+            resolver.resolve("generated.rs", true),
+            Err(PathResolutionFailure::NoMatch),
+            "parent fallback requires a directory component"
+        );
+
+        let crowded: BTreeSet<_> = (0..=MAX_KNOWLEDGE_TOUCHES_PER_TASK)
+            .map(|index| format!("src/crowded/file-{index}.rs"))
+            .collect();
+        let crowded_resolver = PathIntentResolver::new(&crowded);
+        assert_eq!(
+            crowded_resolver.resolve("src/crowded/generated.rs", true),
+            Err(PathResolutionFailure::NoMatch),
+            "parent fallback must reject more than 256 descendants"
+        );
+    }
+
+    #[test]
+    fn inferred_scope_records_match_provenance_and_stale_omissions() {
+        let root = knowledge_project(
+            "## Exact\nUse `src/exact.rs`.\n\n## Basename\nUse `runtime.rs`.\n\n## Suffix\nUse `work_graph/suffix.rs`.\n\n## Stale\nUse `missing.rs`.\n",
+        );
+        let mut graph = TaskGraph::new(
+            vec![
+                task("T1", NodeContract::default()),
+                task("T2", NodeContract::default()),
+                task("T3", NodeContract::default()),
+            ],
+            Vec::new(),
+        );
+        let touches = BTreeMap::from([
+            ("T1".to_string(), BTreeSet::from(["src/exact.rs".to_string()])),
+            (
+                "T2".to_string(),
+                BTreeSet::from(["src/orchestrator/runtime.rs".to_string()]),
+            ),
+            (
+                "T3".to_string(),
+                BTreeSet::from(["src/work_graph/suffix.rs".to_string()]),
+            ),
+        ]);
+        let coverage = TouchCoverageReport {
+            available: true,
+            artifact_languages: BTreeSet::new(),
+            touches: touches.clone(),
+            unresolved_task_ids: Vec::new(),
+        };
+        let candidates = touches.values().flatten().cloned().collect();
+        let path_resolver = PathIntentResolver::new(&candidates);
+        let knowledge = KnowledgeTouchCoverage {
+            declared_touches: touches.clone(),
+            knowledge_attachment_touches: touches,
+            provenance_by_task: BTreeMap::new(),
+            resolution_omissions: Vec::new(),
+        };
+
+        let report = derive_project_context_from_knowledge(
+            &mut graph,
+            root.path(),
+            None,
+            &coverage,
+            &knowledge,
+            Some(&path_resolver),
+            enabled_config(),
+        );
+
+        assert_eq!(report.knowledge_edge_count, 3);
+        let rationales: BTreeSet<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Informs)
+            .filter_map(|edge| edge.rationale.clone())
+            .collect();
+        assert!(rationales.iter().any(|value| value.contains("inferred-scope:exact")));
+        assert!(rationales
+            .iter()
+            .any(|value| value.contains("inferred-scope:unique-basename")));
+        assert!(rationales
+            .iter()
+            .any(|value| value.contains("inferred-scope:path-suffix")));
+        let stale = graph
+            .omissions
+            .iter()
+            .find(|omission| {
+                omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+                    && omission.detail == "inferred knowledge scope found no tracked path"
+            })
+            .expect("stale inferred scope omission");
+        assert_eq!(stale.count, 1);
+        assert_eq!(stale.examples.len(), 1);
+        assert!(report
+            .gotchas
+            .iter()
+            .any(|gotcha| gotcha.summary.starts_with("Stale:")));
+        assert!(report.gotchas.iter().any(|gotcha| gotcha
+            .scope
+            .contains(&"src/orchestrator/runtime.rs".to_string())));
+    }
+
+    #[test]
+    fn transient_declared_base_survives_expanded_hub_without_codegraph_topology() {
+        let root = knowledge_project(
+            "## Authentication rule\n**Scope**: `src/auth.rs`\nKeep authentication code consistent.\n",
+        );
+        let mut graph = TaskGraph::new(
+            vec![
+                task(
+                    "T1",
+                    NodeContract {
+                        inputs: vec!["file:src/auth.rs".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+                task(
+                    "T2",
+                    NodeContract {
+                        acceptance: vec!["src/auth.rs:10-20".to_string()],
+                        ..NodeContract::default()
+                    },
+                ),
+            ],
+            Vec::new(),
+        );
+        let declared = TouchCoverageReport::unavailable();
+        let original_declared = declared.clone();
+        let resolver = CandidateResolver {
+            coverage: declared.clone(),
+            candidates: BTreeSet::from(["src/auth.rs".to_string()]),
+        };
+        let config = enabled_config();
+        let selection = prepare_knowledge_candidate_selection(
+            &resolver,
+            std::path::Path::new("."),
+            None,
+            config,
+        );
+        let knowledge = build_knowledge_touch_coverage(
+            &graph,
+            &declared,
+            &selection,
+            config,
+        );
+
+        assert_eq!(
+            knowledge.declared_touches,
+            BTreeMap::from([(
+                "T1".to_string(),
+                BTreeSet::from(["src/auth.rs".to_string()]),
+            )])
+        );
+        assert_eq!(
+            knowledge.knowledge_attachment_touches,
+            BTreeMap::from([
+                (
+                    "T1".to_string(),
+                    BTreeSet::from(["src/auth.rs".to_string()]),
+                ),
+                (
+                    "T2".to_string(),
+                    BTreeSet::from(["src/auth.rs".to_string()]),
+                ),
+            ])
+        );
+
+        let report = derive_project_context_from_knowledge(
+            &mut graph,
+            root.path(),
+            None,
+            &declared,
+            &knowledge,
+            selection.path_resolver(),
+            config,
+        );
+
+        let knowledge_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Informs)
+            .collect();
+        assert_eq!(knowledge_edges.len(), 1);
+        assert_eq!(knowledge_edges[0].target, "T1");
+        assert_eq!(
+            knowledge_edges[0].rationale.as_deref(),
+            Some("knowledge attachment matched declared-scope")
+        );
+        assert_eq!(report.knowledge_edge_count, 1);
+        assert_eq!(report.hub_lints.len(), 1);
+        assert_eq!(report.hub_lints[0].linked_task_ids, vec!["T1", "T2"]);
+        assert_eq!(
+            report.hub_lints[0].detail,
+            "expanded knowledge coverage applies to a high fraction of tasks; base attachment edges were preserved and expanded knowledge edges were withheld"
+        );
+        assert_eq!(declared, original_declared);
+        assert!(graph.edges.iter().all(|edge| edge.kind != EdgeKind::Touches));
+        assert!(graph.nodes.iter().all(|node| {
+            node.expansion.as_ref().map(|expansion| expansion.template.as_str())
+                != Some(crate::orchestrator::work_graph::codegraph::CODEGRAPH_MODULE_TEMPLATE)
+        }));
+    }
+
+    #[test]
+    fn global_cross_reference_uses_contained_wiki_metadata_and_falls_back() {
+        let root = knowledge_project(
+            "## Local heading\n**Scope**: `src/main.rs`\n-> global: patterns/guide.md\n-> global: practices/heading.md\n",
+        );
+        let wiki = TempDir::new().expect("wiki tempdir");
+        fs::create_dir_all(wiki.path().join("patterns")).expect("wiki category");
+        fs::create_dir_all(wiki.path().join("practices")).expect("wiki category");
+        fs::write(
+            wiki.path().join("patterns/guide.md"),
+            "---\ntitle: Reliable planning\ndescription: Keep evidence attached to decisions.\n---\n# Ignored heading\n",
+        )
+        .expect("wiki page");
+        fs::write(
+            wiki.path().join("practices/heading.md"),
+            "---\ndescription: Use the first heading when title is absent.\n---\n# Heading fallback\n",
+        )
+        .expect("wiki page");
+        let coverage = TouchCoverageReport {
+            available: true,
+            artifact_languages: BTreeSet::new(),
+            touches: BTreeMap::new(),
+            unresolved_task_ids: Vec::new(),
+        };
+        let knowledge = KnowledgeTouchCoverage {
+            declared_touches: BTreeMap::new(),
+            knowledge_attachment_touches: BTreeMap::new(),
+            provenance_by_task: BTreeMap::new(),
+            resolution_omissions: Vec::new(),
+        };
+        let mut graph = TaskGraph::new(Vec::new(), Vec::new());
+        let report = derive_project_context_from_knowledge(
+            &mut graph,
+            root.path(),
+            Some(wiki.path()),
+            &coverage,
+            &knowledge,
+            None,
+            enabled_config(),
+        );
+        assert!(report.gotchas.iter().any(|gotcha| {
+            gotcha.source_ref == "global:patterns/guide.md"
+                && gotcha.summary
+                    == "Reliable planning: Keep evidence attached to decisions."
+        }));
+        assert!(report.gotchas.iter().any(|gotcha| {
+            gotcha.source_ref == "global:practices/heading.md"
+                && gotcha.summary
+                    == "Heading fallback: Use the first heading when title is absent."
+        }));
+
+        let mut fallback_graph = TaskGraph::new(Vec::new(), Vec::new());
+        let fallback = derive_project_context_from_knowledge(
+            &mut fallback_graph,
+            root.path(),
+            Some(&root.path().join("missing-wiki")),
+            &coverage,
+            &knowledge,
+            None,
+            enabled_config(),
+        );
+        assert!(fallback.gotchas.iter().any(|gotcha| {
+            gotcha.source_ref == "global:patterns/guide.md"
+                && gotcha.summary == "Local heading: institutional context"
+        }));
+    }
+
+    #[test]
+    fn knowledge_resolution_omissions_are_aggregated_by_stable_category() {
+        let graph = TaskGraph::new(
+            vec![task(
+                "T1",
+                NodeContract {
+                    inputs: vec!["file:missing-a.rs".to_string()],
+                    outputs: vec!["file:missing-b.rs".to_string()],
+                    acceptance: (0..6)
+                        .map(|index| format!("file:missing-{index}.rs"))
+                        .collect(),
+                },
+            )],
+            Vec::new(),
+        );
+        let coverage = TouchCoverageReport {
+            available: true,
+            artifact_languages: BTreeSet::new(),
+            touches: BTreeMap::new(),
+            unresolved_task_ids: Vec::new(),
+        };
+        let resolver = CandidateResolver {
+            coverage: coverage.clone(),
+            candidates: BTreeSet::new(),
+        };
+        let config = enabled_config();
+        let selection = prepare_knowledge_candidate_selection(
+            &resolver,
+            std::path::Path::new("."),
+            None,
+            config,
+        );
+        let knowledge = build_knowledge_touch_coverage(
+            &graph,
+            &coverage,
+            &selection,
+            config,
+        );
+        assert_eq!(knowledge.resolution_omissions.len(), 1);
+        assert_eq!(knowledge.resolution_omissions[0].count, 8);
+        assert_eq!(knowledge.resolution_omissions[0].examples.len(), 5);
+        assert_eq!(
+            knowledge.resolution_omissions[0].detail,
+            "knowledge path resolution found no tracked path"
+        );
+    }
+
+    fn enabled_config() -> KnowledgeAttachmentConfig {
+        KnowledgeAttachmentConfig {
+            per_intent: true,
+            contract_harvest: true,
+            exact: true,
+            unique_basename: true,
+            path_suffix: true,
+            parent_directory: true,
+            ambiguous: false,
+            resolution_omissions: true,
+            inferred_scope: true,
+            file_inventory_fallback: true,
+        }
+    }
+
+    fn task(id: &str, contract: NodeContract) -> WorkNode {
+        WorkNode::new(
+            id,
+            NodeKind::Task,
+            format!("Task {id}"),
+            contract,
+            BindingRef::Role("backend".to_string()),
+            NodeStatus::Ready,
+        )
+    }
+
+    fn knowledge_project(project_dna: &str) -> TempDir {
+        let root = TempDir::new().expect("project tempdir");
+        let ai_docs = root.path().join(".ai-docs");
+        fs::create_dir_all(&ai_docs).expect("knowledge dir");
+        fs::write(ai_docs.join("project-dna.md"), project_dna).expect("project DNA");
+        fs::write(ai_docs.join("bug-patterns.md"), "").expect("bug patterns");
+        fs::write(ai_docs.join("learnings.jsonl"), "").expect("learnings");
+        fs::write(
+            ai_docs.join("curation-state.json"),
+            "{\"last_curated_line\":0}",
+        )
+        .expect("curation state");
+        root
+    }
 }

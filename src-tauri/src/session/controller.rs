@@ -5435,6 +5435,7 @@ This roster is available implementation capacity, not a required task count. Des
 - A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
   `- [ ] T1: Stable root task (tier: medium) (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
   `- [ ] T2: Stable dependent task (deps: T1) (tier: medium) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  Name files inside `(inputs: ...)` and `(outputs: ...)` as `file:<repo-relative path>` entries, one path per entry and without line ranges; put line references in `(acceptance: ...)` or the evidence section.
   Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
   Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
   Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.
@@ -13518,7 +13519,7 @@ The backend composed and persisted the following authoritative skeleton before l
             TaskGraph, WorkGraphOmission, WorkGraphOmissionReason,
         };
 
-        let (project_path, ceiling_percent) = {
+        let (project_path, inventory_root, ceiling_percent) = {
             let sessions = self.sessions.read();
             let session = sessions
                 .get(session_id)
@@ -13529,8 +13530,18 @@ The backend composed and persisted the following authoritative skeleton before l
                     session.state
                 ));
             }
+            let inventory_root = if session.no_git {
+                session.project_path.clone()
+            } else {
+                session
+                    .worktree_path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| session.project_path.clone())
+            };
             (
                 session.project_path.clone(),
+                inventory_root,
                 session
                     .execution_policy
                     .tier_policy
@@ -13688,6 +13699,51 @@ The backend composed and persisted the following authoritative skeleton before l
             ) => {
                 return Err(error.to_string());
             }
+        }
+
+        let institutional_wiki_root = self.configured_institutional_wiki_root();
+        let context_report = if graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == crate::orchestrator::work_graph::NodeKind::Task)
+        {
+            let artifact_path = Self::planning_codegraph_artifact_path(&project_path, session_id);
+            match crate::orchestrator::work_graph::codegraph::ArtifactCodegraph::load(
+                &project_path,
+                &artifact_path,
+            ) {
+                Ok(resolver) => crate::orchestrator::work_graph::runtime::derive_plan_ready_knowledge_attachments(
+                    &mut graph,
+                    &project_path,
+                    institutional_wiki_root.as_deref(),
+                    &inventory_root,
+                    &resolver,
+                    None,
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        artifact_path = %artifact_path.display(),
+                        error = %error,
+                        "Planning codegraph artifact could not be loaded; knowledge attachment is degrading to an unavailable resolver"
+                    );
+                    crate::orchestrator::work_graph::runtime::derive_plan_ready_knowledge_attachments(
+                        &mut graph,
+                        &project_path,
+                        institutional_wiki_root.as_deref(),
+                        &inventory_root,
+                        &crate::orchestrator::work_graph::context::NoTouchesResolver,
+                        None,
+                    )
+                }
+            }
+        } else {
+            None
+        };
+        if let (Some(composition), Some(knowledge)) =
+            (reconciled_composition.as_mut(), context_report)
+        {
+            composition.context = knowledge.context;
         }
 
         if self.storage.is_none() {
@@ -16489,6 +16545,207 @@ mod tests {
     }
 
     #[test]
+    fn mark_plan_ready_attaches_declared_and_harvested_knowledge_without_codegraph_side_effects() {
+        const SESSION_ID: &str = "plan-ready-knowledge";
+        const TIER_SESSION_ID: &str = "plan-ready-tier-before-knowledge";
+        let temp = tempfile::tempdir().expect("temporary plan-ready knowledge fixture");
+        let project_path = temp.path().join("project");
+        let ai_docs = project_path.join(".ai-docs");
+        std::fs::create_dir_all(&ai_docs).unwrap();
+        std::fs::write(
+            ai_docs.join("project-dna.md"),
+            "## Declared rule\n**Scope**: `src/declared.rs`\nKeep declared work stable.\n\n## Harvested rule\n**Scope**: `src/harvested.rs`\nKeep harvested work stable.\n",
+        )
+        .unwrap();
+        std::fs::write(ai_docs.join("bug-patterns.md"), "").unwrap();
+        std::fs::write(ai_docs.join("learnings.jsonl"), "").unwrap();
+        std::fs::write(
+            ai_docs.join("curation-state.json"),
+            "{\"last_curated_line\":0}",
+        )
+        .unwrap();
+
+        let managed_worktree = temp.path().join("managed-worktree");
+        std::fs::create_dir_all(managed_worktree.join("src")).unwrap();
+        std::fs::write(managed_worktree.join("src/declared.rs"), "").unwrap();
+        std::fs::write(managed_worktree.join("src/harvested.rs"), "").unwrap();
+        for args in [
+            vec!["init"],
+            vec!["add", "src/declared.rs", "src/harvested.rs"],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&managed_worktree)
+                .output()
+                .expect("git must be available to materialize the managed worktree");
+            assert!(
+                output.status.success(),
+                "git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let project_session_dir = project_path.join(".hive-manager").join(SESSION_ID);
+        std::fs::create_dir_all(&project_session_dir).unwrap();
+        std::fs::write(
+            project_session_dir.join("plan.md"),
+            "# Knowledge plan\n\n## Tasks\n- [ ] T1: Attach task knowledge (tier: medium) (inputs: file:src/declared.rs, src/harvested.rs:10-20) (outputs: result) (acceptance: knowledge attached) -> P1\n- [ ] T2: Preserve undeclared task (tier: medium) (inputs: issue) (outputs: result) (acceptance: topology unchanged) -> P2\n",
+        )
+        .unwrap();
+
+        let storage = Arc::new(
+            SessionStorage::new_with_base(temp.path().join("storage"))
+                .expect("isolated session storage"),
+        );
+        storage
+            .create_session_dir(SESSION_ID)
+            .expect("session state directory");
+        storage
+            .create_session_dir(TIER_SESSION_ID)
+            .expect("tier session state directory");
+        let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+        controller.set_storage(Arc::clone(&storage));
+        let mut session =
+            test_completion_session(SESSION_ID, SessionState::Planning, Utc::now(), false);
+        session.session_type = SessionType::Hive { worker_count: 0 };
+        session.project_path = project_path.clone();
+        session.worktree_path = Some(managed_worktree.to_string_lossy().into_owned());
+        controller.insert_test_session(session);
+
+        let initial = controller
+            .prepare_initial_work_graph(
+                &project_path,
+                SESSION_ID,
+                Some("feature-build"),
+                &BTreeMap::from([("component".to_string(), "knowledge".to_string())]),
+            )
+            .unwrap()
+            .expect("archetype composition sidecar");
+        let state_manager = StateManager::new(storage.session_dir(SESSION_ID));
+        let non_knowledge_omission = WorkGraphOmission::new(
+            WorkGraphOmissionReason::SourceUnreadable,
+            1,
+            vec!["plan.md: retained source omission".to_string()],
+        );
+        let mut persisted = state_manager
+            .read_graph_composition_state()
+            .unwrap()
+            .unwrap();
+        let compose_undeclared = persisted
+            .graph
+            .omissions
+            .iter()
+            .find(|omission| {
+                omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
+                    && omission.detail == "explicit task touch intent was not declared"
+            })
+            .expect("archetype composition emits its own undeclared-task omission");
+        assert_eq!(compose_undeclared.count, 4);
+        persisted
+            .graph
+            .omissions
+            .push(non_knowledge_omission.clone());
+        state_manager
+            .write_graph_composition_state(&persisted)
+            .unwrap();
+        controller
+            .mark_plan_ready(SESSION_ID)
+            .expect("knowledge-only plan-ready derivation");
+
+        let authoritative = state_manager.read_work_graph().unwrap().unwrap();
+        let composition = state_manager
+            .read_graph_composition_state()
+            .unwrap()
+            .unwrap();
+        assert_eq!(composition.graph, authoritative);
+        assert_eq!(composition.codegraph, initial.codegraph);
+        assert_eq!(
+            composition.codegraph.unresolved_task_ids,
+            initial.codegraph.unresolved_task_ids
+        );
+        assert!(composition.context.knowledge_available);
+        let knowledge_edges: Vec<_> = authoritative
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == crate::orchestrator::work_graph::EdgeKind::Informs
+                    && edge.provenance
+                        == crate::orchestrator::work_graph::EdgeProvenance::Knowledge
+                    && edge.target == "T1"
+            })
+            .collect();
+        let undeclared_omissions: Vec<_> = authoritative
+            .omissions
+            .iter()
+            .filter(|omission| {
+                omission.reason
+                    == crate::orchestrator::work_graph::WorkGraphOmissionReason::ResolutionIncomplete
+                    && omission.detail == "explicit task touch intent was not declared"
+            })
+            .collect();
+        assert_eq!(
+            (knowledge_edges.len(), undeclared_omissions.len()),
+            (2, 1),
+            "the plan-ready entry must attach both declared and harvested knowledge and aggregate the undeclared task"
+        );
+        let mut rationales: Vec<_> = knowledge_edges
+            .iter()
+            .map(|edge| edge.rationale.as_deref().unwrap_or_default())
+            .collect();
+        rationales.sort_unstable();
+        assert_eq!(
+            rationales,
+            vec![
+                "knowledge attachment matched contract-path, fallback",
+                "knowledge attachment matched declared-scope, fallback",
+            ]
+        );
+        assert_eq!(undeclared_omissions[0].count, 5);
+        assert!(undeclared_omissions[0]
+            .examples
+            .iter()
+            .any(|example| example == "T2"));
+        assert!(undeclared_omissions[0].examples.len() <= 5);
+        assert!(authoritative.omissions.contains(&non_knowledge_omission));
+        assert!(authoritative
+            .edges
+            .iter()
+            .all(|edge| edge.kind != crate::orchestrator::work_graph::EdgeKind::Touches));
+        assert!(authoritative.nodes.iter().all(|node| {
+            node.expansion.as_ref().map(|expansion| expansion.template.as_str())
+                != Some(crate::orchestrator::work_graph::codegraph::CODEGRAPH_MODULE_TEMPLATE)
+        }));
+
+        let tier_session_dir = project_path
+            .join(".hive-manager")
+            .join(TIER_SESSION_ID);
+        std::fs::create_dir_all(&tier_session_dir).unwrap();
+        std::fs::write(
+            tier_session_dir.join("plan.md"),
+            "# Tier ceiling plan\n\n## Tasks\n- [ ] T1: High-tier task (tier: high) (inputs: file:src/declared.rs) -> P1\n- [ ] T2: Medium-tier task (tier: medium) (inputs: file:src/harvested.rs) -> P2\n",
+        )
+        .unwrap();
+        let mut tier_session =
+            test_completion_session(TIER_SESSION_ID, SessionState::Planning, Utc::now(), false);
+        tier_session.session_type = SessionType::Hive { worker_count: 0 };
+        tier_session.project_path = project_path;
+        tier_session.worktree_path = Some(managed_worktree.to_string_lossy().into_owned());
+        controller.insert_test_session(tier_session);
+
+        let error = controller
+            .mark_plan_ready(TIER_SESSION_ID)
+            .expect_err("planner tasks must exceed the tier ceiling before knowledge is derived");
+        assert!(
+            error.contains("1 of 2 planner-rated nodes exceed medium"),
+            "tier ceiling must be computed from planner tasks before readable knowledge adds context nodes: {error}"
+        );
+        assert_eq!(
+            controller.get_session(TIER_SESSION_ID).unwrap().state,
+            SessionState::Planning
+        );
+    }
+
+    #[test]
     fn heartbeat_activity_semantics_only_exempt_completed_status() {
         assert!(SessionController::status_counts_as_session_activity(
             "working"
@@ -17450,6 +17707,7 @@ This roster is available implementation capacity, not a required task count. Des
 - A `## Tasks` graph. Every schedulable task is exactly one checkbox line using this syntax:
   `- [ ] T1: Stable root task (tier: medium) (inputs: input) (outputs: output) (acceptance: observable criterion) -> P1`
   `- [ ] T2: Stable dependent task (deps: T1) (tier: medium) (inputs: T1 output) (outputs: result) (acceptance: observable criterion) -> P2`
+  Name files inside `(inputs: ...)` and `(outputs: ...)` as `file:<repo-relative path>` entries, one path per entry and without line ranges; put line references in `(acceptance: ...)` or the evidence section.
   Use unique stable `T<number>:` ids. Omit `(deps: ...)` for roots; otherwise list comma-separated prerequisite ids. `source` prerequisites run before the task. Keep inputs, outputs, and acceptance on the same line. The `deps:` declarations are the executable dependency source.
   Leading bracket tokens are optional and restricted to `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[MED]`, `[LOW]`, `[P1]`, `[P2]`, and `[P3]`; put free-form labels after `->`.
   Tier rubric: annotate effort with `(tier: low|medium|high|critical)`.

@@ -1,0 +1,836 @@
+{
+  "schema": "hive-retrieval-golden/v1",
+  "fixtures": {
+    "codegraph-unavailable": {
+      "entry": "compose",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::b9f3a48d381ca247",
+          "title": "Service Boundary: Keep service changes focused.",
+          "summary": "Service Boundary: Keep service changes focused.",
+          "scope": [
+            "src/service.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/service.rs",
+            "source_hash": "cbe40cfb780520ae",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Service Boundary: Keep service changes focused."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "tracked file inventory was unavailable",
+          "examples": [
+            "git ls-files"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "compose-omission-order": {
+      "entry": "compose",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Keep authentication changes focused.",
+          "summary": "Authentication Boundary: Keep authentication changes focused.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/auth.rs",
+            "source_hash": "ae81619fed74ea4d",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Keep authentication changes focused."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "codegraph artifact was available but did not cover or resolve declared language(s): rust",
+          "examples": [
+            "T1"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "knowledge path resolution found no tracked path",
+          "examples": [
+            "T1: zzz/missing.rs"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "one or more graph references could not be resolved",
+          "examples": [
+            "T1"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "declared-scope": {
+      "entry": "compose",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ],
+        "T2": [
+          "src",
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "task touches a module in this gotcha's scope"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Keep authentication changes explicit and reviewable.",
+          "summary": "Authentication Boundary: Keep authentication changes explicit and reviewable.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/auth.rs",
+            "source_hash": "7ea35a5e1db8aa57",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Keep authentication changes explicit and reviewable."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "codegraph artifact was available but did not cover or resolve declared language(s): rust",
+          "examples": [
+            "T2"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "one or more graph references could not be resolved",
+          "examples": [
+            "T2"
+          ]
+        }
+      ],
+      "hub_lints": [
+        {
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "linked_task_ids": [
+            "T1",
+            "T2"
+          ],
+          "reason": "expanded knowledge coverage applies to a high fraction of tasks; base attachment edges were preserved and expanded knowledge edges were withheld"
+        }
+      ]
+    },
+    "file-list-fallback": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched contract-path, fallback"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Use the tracked-file fallback when the artifact is unavailable.",
+          "summary": "Authentication Boundary: Use the tracked-file fallback when the artifact is unavailable.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/auth.rs",
+            "source_hash": "15661df1dad5de3c",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Use the tracked-file fallback when the artifact is unavailable."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "explicit task touch intent was not declared",
+          "examples": [
+            "T1"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "harvested-line-range": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/queue.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::add8f50084a9a0ab",
+          "rationale": "knowledge attachment matched contract-path"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::add8f50084a9a0ab",
+          "title": "Queue Completion: Keep completion transitions explicit.",
+          "summary": "Queue Completion: Keep completion transitions explicit.",
+          "scope": [
+            "src/queue.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/queue.rs",
+            "source_hash": "516b5fdd348281fb",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Queue Completion: Keep completion transitions explicit."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "explicit task touch intent was not declared",
+          "examples": [
+            "T1"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-ambiguous": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ],
+        "T2": [
+          "tests/auth.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ],
+        "T2": [
+          "tests/auth.rs"
+        ]
+      },
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "c25bdfd6cb3b7be5",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "inferred knowledge scope was ambiguous",
+          "examples": [
+            ".ai-docs/project-dna.md#L3: auth.rs"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-basename": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, inferred-scope:unique-basename"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "knowledge_provenance": "src/auth.rs=inferred-scope:unique-basename",
+            "scope": "src/auth.rs",
+            "source_hash": "c25bdfd6cb3b7be5",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [],
+      "hub_lints": []
+    },
+    "inferred-exact": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, inferred-scope:exact"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "knowledge_provenance": "src/auth.rs=inferred-scope:exact",
+            "scope": "src/auth.rs",
+            "source_hash": "906c529ef0800f14",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [],
+      "hub_lints": []
+    },
+    "inferred-stale": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::4c50460c7e505ef2",
+          "title": "Removed Authentication Boundary: The retired implementation at `src/missing.rs` should not attach.",
+          "summary": "Removed Authentication Boundary: The retired implementation at `src/missing.rs` should not attach.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "9769b09da4599d00",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Removed Authentication Boundary: The retired implementation at `src/missing.rs` should not attach."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "inferred knowledge scope found no tracked path",
+          "examples": [
+            ".ai-docs/project-dna.md#L3: src/missing.rs"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-suffix": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src-tauri/src/auth.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src-tauri/src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, inferred-scope:path-suffix"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "scope": [
+            "src-tauri/src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "knowledge_provenance": "src-tauri/src/auth.rs=inferred-scope:path-suffix",
+            "scope": "src-tauri/src/auth.rs",
+            "source_hash": "906c529ef0800f14",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [],
+      "hub_lints": []
+    },
+    "mixed-intent-failures": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T2": [
+          "src/pass.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T2": [
+          "src/pass.rs"
+        ],
+        "T3": [
+          "src/pass.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T2",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, fallback"
+        },
+        {
+          "task_id": "T3",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched contract-path, fallback"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Keep passing declared and harvested work attached.",
+          "summary": "Authentication Boundary: Keep passing declared and harvested work attached.",
+          "scope": [
+            "src/pass.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/pass.rs",
+            "source_hash": "55409074270f4647",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Keep passing declared and harvested work attached."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "explicit task touch intent was not declared",
+          "examples": [
+            "T3"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 3,
+          "detail": "knowledge path resolution found no tracked path",
+          "examples": [
+            "T1: missing/declared.rs:10-20",
+            "T1: missing/harvested.rs"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "knowledge path resolution was ambiguous",
+          "examples": [
+            "T4: auth.rs"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "partial-task": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched contract-path"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Keep partial resolution visible.",
+          "summary": "Authentication Boundary: Keep partial resolution visible.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/auth.rs",
+            "source_hash": "56739be6ece5c6da",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Keep partial resolution visible."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "explicit task touch intent was not declared",
+          "examples": [
+            "T1"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "knowledge path resolution found no tracked path",
+          "examples": [
+            "T1: missing.rs"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "path-token-rules": {
+      "entry": "plan-ready",
+      "parsed_note_count": 2,
+      "declared_touches": {
+        "T7": [
+          "src"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/auth.rs"
+        ],
+        "T2": [
+          "config.toml"
+        ],
+        "T7": [
+          "src"
+        ]
+      },
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::36d06b629d61f1bf",
+          "title": "First stale scope: Use `missing.rs:10-20` and retry `missing.rs:10-20`.",
+          "summary": "First stale scope: Use `missing.rs:10-20` and retry `missing.rs:10-20`.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "a4c4086015282174",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "First stale scope: Use `missing.rs:10-20` and retry `missing.rs:10-20`."
+          }
+        },
+        {
+          "id": "context::knowledge::cb3ee829fb4e3301",
+          "title": "Second stale scope: Use `missing.rs` and retry `missing.rs`.",
+          "summary": "Second stale scope: Use `missing.rs` and retry `missing.rs`.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "a4c4086015282174",
+            "source_ref": ".ai-docs/project-dna.md#L7",
+            "summary": "Second stale scope: Use `missing.rs` and retry `missing.rs`."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 2,
+          "detail": "explicit task touch intent was not declared",
+          "examples": [
+            "T1",
+            "T2"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 4,
+          "detail": "knowledge path resolution found no tracked path",
+          "examples": [
+            "T3: src//pass.rs",
+            "T4: src/./pass.rs",
+            "T5: /src/pass.rs",
+            "T6: C:src/pass.rs"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "one or more graph references could not be resolved",
+          "examples": [
+            ".ai-docs/curation-state.json:last_curated_line"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 2,
+          "detail": "inferred knowledge scope found no tracked path",
+          "examples": [
+            ".ai-docs/project-dna.md#L3: missing.rs"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 2,
+          "detail": "inferred knowledge scope found no tracked path",
+          "examples": [
+            ".ai-docs/project-dna.md#L7: missing.rs"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "star-hub": {
+      "entry": "compose",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "src/first.rs"
+        ],
+        "T2": [
+          "src/second.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "src/first.rs"
+        ],
+        "T2": [
+          "src/second.rs"
+        ]
+      },
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::279bb9facc4fa69f",
+          "title": "Repository Convention: Apply repository conventions consistently.",
+          "summary": "Repository Convention: Apply repository conventions consistently.",
+          "scope": [
+            "*"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "*",
+            "source_hash": "d08d5d7487595920",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Repository Convention: Apply repository conventions consistently."
+          }
+        }
+      ],
+      "omissions": [],
+      "hub_lints": [
+        {
+          "context_node_id": "context::knowledge::279bb9facc4fa69f",
+          "linked_task_ids": [
+            "T1",
+            "T2"
+          ],
+          "reason": "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope"
+        }
+      ]
+    },
+    "star-hub-unavailable": {
+      "entry": "compose",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::900448063f5b2bca",
+          "title": "Standing Guidance: This standing guidance must not produce a hub lint without coverage.",
+          "summary": "Standing Guidance: This standing guidance must not produce a hub lint without coverage.",
+          "scope": [
+            "*"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "*",
+            "source_hash": "04ad7f6e7a81e3f9",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Standing Guidance: This standing guidance must not produce a hub lint without coverage."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "tracked file inventory was unavailable",
+          "examples": [
+            "git ls-files"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "undeclared-no-candidates": {
+      "entry": "compose",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::b9f3a48d381ca247",
+          "title": "Service Boundary: Keep service changes focused.",
+          "summary": "Service Boundary: Keep service changes focused.",
+          "scope": [
+            "src/service.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/service.rs",
+            "source_hash": "cbe40cfb780520ae",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Service Boundary: Keep service changes focused."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "tracked file inventory was unavailable",
+          "examples": [
+            "git ls-files"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "explicit task touch intent was not declared",
+          "examples": [
+            "T1"
+          ]
+        }
+      ],
+      "hub_lints": []
+    }
+  }
+}

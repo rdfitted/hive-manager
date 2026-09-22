@@ -1,0 +1,7 @@
+{
+  "root": "<ROOT>",
+  "language": "rust",
+  "nodes": {
+    "auth": {"path": "src-tauri/src/auth.rs"}
+  }
+}
