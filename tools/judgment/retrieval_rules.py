@@ -229,10 +229,10 @@ def _path_is_excluded(path: str) -> bool:
     return any(component in excluded for component in path.split("/"))
 
 
-def _derive_codegraph(graph: TaskGraph, artifact: Optional[tuple[list[str], dict[str, set[str]], set[str]]]) -> tuple[dict[str, list[str]], list[str], bool]:
+def _derive_codegraph(graph: TaskGraph, artifact: Optional[tuple[list[str], dict[str, set[str]], set[str]]]) -> tuple[dict[str, list[str]], list[str], bool, set[str]]:
     if artifact is None:
         graph.omissions.append(_omission("codegraph_unavailable", 1, ["touches-resolver"]))
-        return {}, [], False
+        return {}, [], False, set()
     modules, aliases, covered_languages = artifact
     touches: dict[str, list[str]] = {}
     for node in graph.tasks:
@@ -287,7 +287,7 @@ def _derive_codegraph(graph: TaskGraph, artifact: Optional[tuple[list[str], dict
                 "provenance": "codegraph",
                 "rationale": f"explicit task intent resolved to module {module}",
             })
-    return touches, unresolved, True
+    return touches, unresolved, True, set(uncovered)
 
 
 def normalize_scope(scope: str) -> str:
@@ -504,9 +504,11 @@ def run_current(root: Path) -> dict[str, Any]:
     graph = task_graph_from_plan(plan)
     entry = _fixture_entry(root)
     if entry == "compose":
-        touches, unresolved, touches_available = _derive_codegraph(graph, _load_artifact(root))
+        touches, unresolved, touches_available, resolution_failures = _derive_codegraph(
+            graph, _load_artifact(root)
+        )
     else:
-        touches, unresolved, touches_available = {}, [], False
+        touches, unresolved, touches_available, resolution_failures = {}, [], False, set()
     gotchas, load_omissions, knowledge_available = _load_knowledge(root)
     graph.omissions.extend(load_omissions)
     hub_lints: list[dict[str, Any]] = []
@@ -574,6 +576,10 @@ def run_current(root: Path) -> dict[str, Any]:
         ],
         "omissions": unique_omissions,
         "hub_lints": hub_lints,
+        "_task_resolution_failures": {
+            task_id: ["codegraph-resolution"]
+            for task_id in sorted(resolution_failures)
+        },
     }
 
 
@@ -697,8 +703,9 @@ def _contract_intents(
             None,
         )
         if declared is not None:
-            if _ascii_lower(declared.strip()) != "none":
-                declared_intents.append((declared, "declared-scope"))
+            raw_declared = declared.strip()
+            if _ascii_lower(raw_declared) != "none":
+                declared_intents.append((raw_declared, "declared-scope"))
             continue
         if not include_harvested:
             continue
@@ -733,28 +740,80 @@ def _knowledge_touches(
     fallback: bool,
     *,
     include_harvested: bool = True,
+    include_declared: bool = True,
+    initial_provenance: Optional[dict[str, dict[str, set[str]]]] = None,
+    initial_failures: Optional[dict[str, dict[str, Any]]] = None,
+    initial_task_failures: Optional[dict[str, set[str]]] = None,
 ) -> tuple[
     dict[str, list[str]],
     dict[str, dict[str, set[str]]],
-    list[dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, set[str]],
 ]:
     touches = {task_id: paths[:] for task_id, paths in declared_touches.items()}
-    provenance: dict[str, dict[str, set[str]]] = {
-        task_id: {path: {"declared-scope"} for path in paths}
-        for task_id, paths in declared_touches.items()
-    }
-    failures: dict[str, set[str]] = {}
+    provenance: dict[str, dict[str, set[str]]] = (
+        {
+            task_id: {
+                path: set(labels) for path, labels in path_labels.items()
+            }
+            for task_id, path_labels in initial_provenance.items()
+        }
+        if initial_provenance is not None
+        else {
+            task_id: {path: {"declared-scope"} for path in paths}
+            for task_id, paths in declared_touches.items()
+        }
+    )
+    failures = (
+        {
+            detail: {
+                "count": int(failure["count"]),
+                "examples": set(failure["examples"]),
+            }
+            for detail, failure in initial_failures.items()
+        }
+        if initial_failures is not None
+        else {}
+    )
+    task_failures = (
+        {
+            task_id: set(details)
+            for task_id, details in initial_task_failures.items()
+        }
+        if initial_task_failures is not None
+        else {}
+    )
+
+    def record_failure(
+        task_id: str, detail: str, example: str, *, affects_status: bool
+    ) -> None:
+        failure = failures.setdefault(detail, {"count": 0, "examples": set()})
+        failure["count"] += 1
+        failure["examples"].add(example)
+        if affects_status:
+            task_failures.setdefault(task_id, set()).add(detail)
+
     for node in sorted(graph.tasks, key=lambda item: item.id):
         resolved = set(touches.get(node.id, []))
         path_labels = provenance.setdefault(node.id, {})
         declared_intents = _contract_intents(node, include_harvested=False)
-        if not declared_intents:
-            failures.setdefault(
-                "explicit task touch intent was not declared", set()
-            ).add(node.id)
-        for raw, source in _contract_intents(
-            node, include_harvested=include_harvested
-        ):
+        if include_declared and not declared_intents:
+            record_failure(
+                node.id,
+                "explicit task touch intent was not declared",
+                node.id,
+                affects_status=False,
+            )
+        intents = declared_intents[:] if include_declared else []
+        if include_harvested:
+            intents.extend(
+                (raw, source)
+                for raw, source in _contract_intents(
+                    node, include_harvested=True
+                )
+                if source == "contract-path"
+            )
+        for raw, source in intents:
             path, match_type, failure = resolve_path_intent(
                 raw, candidates, allow_parent=True
             )
@@ -764,13 +823,19 @@ def _knowledge_touches(
                     if failure == "ambiguous"
                     else TASK_PATH_UNRESOLVED_DETAIL
                 )
-                failures.setdefault(detail, set()).add(
-                    f"{node.id}: {_strip_path_decoration(raw)}"
+                record_failure(
+                    node.id,
+                    detail,
+                    f"{node.id}: {raw}",
+                    affects_status=True,
                 )
                 continue
             if path not in resolved and len(resolved) >= MAX_TOUCH_MODULES_PER_TASK:
-                failures.setdefault("knowledge touch limit was reached", set()).add(
-                    f"{node.id}: {_strip_path_decoration(raw)}"
+                record_failure(
+                    node.id,
+                    "knowledge touch limit was reached",
+                    f"{node.id}: {raw}",
+                    affects_status=True,
                 )
                 continue
             resolved.add(path)
@@ -784,17 +849,23 @@ def _knowledge_touches(
             touches[node.id] = sorted(resolved)
         elif not path_labels:
             provenance.pop(node.id, None)
+    return touches, provenance, failures, task_failures
+
+
+def _knowledge_omissions(
+    failures: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
     omissions = []
-    for detail, examples in sorted(failures.items()):
+    for detail, failure in sorted(failures.items()):
         omissions.append(
             _omission(
                 "resolution_incomplete",
-                len(examples),
-                sorted(examples)[:MAX_OMISSION_EXAMPLES],
+                int(failure["count"]),
+                sorted(failure["examples"])[:MAX_OMISSION_EXAMPLES],
                 detail,
             )
         )
-    return touches, provenance, omissions
+    return omissions
 
 
 def _inferred_scope_candidates(
@@ -919,16 +990,28 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
         for task_id, paths in base_touches.items()
     }
     additions: list[dict[str, Any]] = inventory_omissions[:]
+    knowledge_failures: dict[str, dict[str, Any]] = {}
+    task_failures: dict[str, set[str]] = {
+        task_id: set(details)
+        for task_id, details in result.get(
+            "_task_resolution_failures", {}
+        ).items()
+    }
     declared_coverage_unavailable = result["entry"] == "plan-ready" or fallback
     if candidates is not None and declared_coverage_unavailable:
-        base_touches, base_provenance, base_omissions = _knowledge_touches(
+        (
+            base_touches,
+            base_provenance,
+            knowledge_failures,
+            task_failures,
+        ) = _knowledge_touches(
             graph,
             result["declared_touches"],
             candidates,
             fallback,
             include_harvested=False,
+            initial_task_failures=task_failures,
         )
-        additions.extend(base_omissions)
         result["declared_touches"] = {
             task_id: base_touches[task_id] for task_id in sorted(base_touches)
         }
@@ -940,14 +1023,27 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
     if candidates is not None and (
         contract_paths or result["entry"] == "plan-ready"
     ):
-        knowledge_touches, task_provenance, touch_omissions = _knowledge_touches(
+        (
+            knowledge_touches,
+            task_provenance,
+            knowledge_failures,
+            task_failures,
+        ) = _knowledge_touches(
             graph,
             base_touches,
             candidates,
             fallback,
             include_harvested=contract_paths,
+            include_declared=not declared_coverage_unavailable,
+            initial_provenance=base_provenance,
+            initial_failures=knowledge_failures,
+            initial_task_failures=task_failures,
         )
-        additions.extend(touch_omissions)
+    additions.extend(_knowledge_omissions(knowledge_failures))
+    result["_task_resolution_failures"] = {
+        task_id: sorted(details)
+        for task_id, details in sorted(task_failures.items())
+    }
 
     gotchas, _load_omissions, _available = _load_knowledge(root)
     inferred_scopes: dict[str, list[str]] = {}
@@ -957,6 +1053,16 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
             root, candidates
         )
         additions.extend(scope_omissions)
+
+    if candidates is None:
+        result["knowledge_attachment_touches"] = {
+            task_id: knowledge_touches[task_id]
+            for task_id in sorted(knowledge_touches)
+        }
+        for omission in additions:
+            if omission not in result["omissions"]:
+                result["omissions"].append(omission)
+        return result
 
     effective_scopes: dict[str, list[str]] = {}
     dropped_scope_count = 0

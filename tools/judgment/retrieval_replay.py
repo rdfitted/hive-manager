@@ -368,18 +368,16 @@ def _path_relevance(context_node: dict, changed: Optional[set[str]]) -> Optional
 def _task_status(result: dict, task_id: str) -> str:
     declared = result["declared_touches"].get(task_id, [])
     knowledge = result["knowledge_attachment_touches"].get(task_id, [])
-    mentions = any(
-        example == task_id or example.startswith(f"{task_id}: ")
-        for omission in result["omissions"]
-        for example in omission.get("examples", [])
+    resolution_failed = bool(
+        result.get("_task_resolution_failures", {}).get(task_id)
     )
-    if declared and not mentions:
+    if declared and not resolution_failed:
         return "declared"
-    if knowledge and mentions:
+    if knowledge and resolution_failed:
         return "partial"
     if knowledge:
         return "contract-path"
-    if mentions:
+    if resolution_failed:
         return "unresolved"
     return "undeclared"
 
@@ -391,7 +389,7 @@ def _note_reason(result: dict, context_node: dict) -> str:
         return "no-scope"
     if any(lint["context_node_id"] == context_id for lint in result["hub_lints"]):
         return "hub-withheld"
-    if not result["knowledge_attachment_touches"]:
+    if not _tasks_with_non_empty_touches(result):
         if any(omission["reason"] == "codegraph_unavailable" for omission in result["omissions"]):
             return "codegraph-unavailable"
         return "no-task-touches"

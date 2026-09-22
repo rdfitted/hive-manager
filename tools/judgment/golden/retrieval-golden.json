@@ -415,6 +415,80 @@
       "omissions": [],
       "hub_lints": []
     },
+    "mixed-intent-failures": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T2": [
+          "src/pass.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T2": [
+          "src/pass.rs"
+        ],
+        "T3": [
+          "src/pass.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T2",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched declared-scope, fallback"
+        },
+        {
+          "task_id": "T3",
+          "context_node_id": "context::knowledge::452a054383c3acfe",
+          "rationale": "knowledge attachment matched contract-path, fallback"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Keep passing declared and harvested work attached.",
+          "summary": "Authentication Boundary: Keep passing declared and harvested work attached.",
+          "scope": [
+            "src/pass.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/pass.rs",
+            "source_hash": "55409074270f4647",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Keep passing declared and harvested work attached."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "explicit task touch intent was not declared",
+          "examples": [
+            "T3"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 3,
+          "detail": "knowledge path resolution found no tracked path",
+          "examples": [
+            "T1: missing/declared.rs:10-20",
+            "T1: missing/harvested.rs"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "knowledge path resolution was ambiguous",
+          "examples": [
+            "T4: auth.rs"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
     "partial-task": {
       "entry": "plan-ready",
       "parsed_note_count": 1,
@@ -516,6 +590,49 @@
           "reason": "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope"
         }
       ]
+    },
+    "star-hub-unavailable": {
+      "entry": "compose",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::900448063f5b2bca",
+          "title": "Standing Guidance: This standing guidance must not produce a hub lint without coverage.",
+          "summary": "Standing Guidance: This standing guidance must not produce a hub lint without coverage.",
+          "scope": [
+            "*"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "*",
+            "source_hash": "04ad7f6e7a81e3f9",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Standing Guidance: This standing guidance must not produce a hub lint without coverage."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        },
+        {
+          "reason": "resolution_incomplete",
+          "count": 1,
+          "detail": "tracked file inventory was unavailable",
+          "examples": [
+            "git ls-files"
+          ]
+        }
+      ],
+      "hub_lints": []
     }
   }
 }

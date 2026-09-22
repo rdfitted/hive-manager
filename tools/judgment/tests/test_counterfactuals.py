@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fixture_support import FIXTURES_ROOT, materialize_fixture  # noqa: E402
 from retrieval_rules import (  # noqa: E402
+    TASK_PATH_UNRESOLVED_DETAIL,
     TaskNode,
     _contract_intents,
     _match_strength,
@@ -209,6 +210,62 @@ class CounterfactualRuleTests(unittest.TestCase):
                         for item in result["omissions"]
                     )
                 )
+
+    def test_mixed_intent_failures_match_rust_event_counts_and_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture(
+                "mixed-intent-failures", Path(temporary)
+            )
+            result = run_ruleset("hv10+hv11", root)
+
+        self.assertEqual(
+            [
+                "explicit task touch intent was not declared",
+                TASK_PATH_UNRESOLVED_DETAIL,
+                "knowledge path resolution was ambiguous",
+            ],
+            [omission["detail"] for omission in result["omissions"]],
+        )
+        unresolved = next(
+            omission
+            for omission in result["omissions"]
+            if omission["detail"] == TASK_PATH_UNRESOLVED_DETAIL
+        )
+        self.assertEqual(3, unresolved["count"])
+        self.assertEqual(
+            [
+                "T1: missing/declared.rs:10-20",
+                "T1: missing/harvested.rs",
+            ],
+            unresolved["examples"],
+        )
+        self.assertEqual(
+            {"T2": ["src/pass.rs"]}, result["declared_touches"]
+        )
+        self.assertEqual(
+            {
+                "T2": ["src/pass.rs"],
+                "T3": ["src/pass.rs"],
+            },
+            result["knowledge_attachment_touches"],
+        )
+        self.assertEqual(
+            {
+                "T1": [TASK_PATH_UNRESOLVED_DETAIL],
+                "T4": ["knowledge path resolution was ambiguous"],
+            },
+            result["_task_resolution_failures"],
+        )
+
+    def test_unavailable_coverage_skips_star_hub_lint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture(
+                "star-hub-unavailable", Path(temporary)
+            )
+            result = run_ruleset("hv10+hv11", root)
+
+        self.assertEqual([], result["hub_lints"])
+        self.assertEqual([], result["knowledge_edges"])
 
     def test_expanded_hub_lint_requires_changed_linkage(self):
         with tempfile.TemporaryDirectory() as temporary:

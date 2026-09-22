@@ -282,6 +282,9 @@ class ReplayPlumbingTests(unittest.TestCase):
                 "T1": ["src/one.rs"],
                 "T12": ["src/twelve.rs"],
             },
+            "_task_resolution_failures": {
+                "T12": [retrieval_rules.TASK_PATH_UNRESOLVED_DETAIL],
+            },
             "omissions": [
                 {
                     "examples": ["T12: missing.rs"],
@@ -293,8 +296,68 @@ class ReplayPlumbingTests(unittest.TestCase):
             "contract-path", retrieval_replay._task_status(result, "T1")
         )
         self.assertEqual("partial", retrieval_replay._task_status(result, "T12"))
-        result["omissions"] = [{"examples": ["T1"]}]
+        result["_task_resolution_failures"] = {
+            "T1": [retrieval_rules.TASK_PATH_UNRESOLVED_DETAIL]
+        }
         self.assertEqual("partial", retrieval_replay._task_status(result, "T1"))
+
+    def test_task_status_uses_uncapped_failure_map_and_ignores_undeclared(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            ai_docs = root / ".ai-docs"
+            tasks = "".join(
+                f"- [ ] T{index}: Partial harvested task "
+                "(inputs: src/auth.rs, missing.rs)\n"
+                for index in range(1, 7)
+            )
+            tasks += (
+                "- [ ] T7: Fully resolved harvested task "
+                "(inputs: src/auth.rs)\n"
+            )
+            _write(root / "plan.md", f"# Status fixture\n\n## Tasks\n\n{tasks}")
+            _write(root / "entry.txt", "plan-ready\n")
+            _write(root / "files.txt", "src/auth.rs\n")
+            _write(root / "none", "Codegraph intentionally unavailable.\n")
+            _write(
+                ai_docs / "project-dna.md",
+                "# Project DNA\n\n## Authentication\n\n"
+                "- **Scope**: `src/auth.rs`\n"
+                "- Keep authentication work attached.\n",
+            )
+            _write(ai_docs / "bug-patterns.md", "# Bug Patterns\n\n## Bugs\n")
+            _write(ai_docs / "curation-state.json", '{"last_curated_line":0}\n')
+            _write(ai_docs / "learnings.jsonl", "")
+
+            result = retrieval_rules.run_ruleset("hv10+hv11", root)
+
+        undeclared = next(
+            omission
+            for omission in result["omissions"]
+            if omission["detail"]
+            == "explicit task touch intent was not declared"
+        )
+        self.assertEqual(7, undeclared["count"])
+        self.assertEqual(5, len(undeclared["examples"]))
+        for index in range(1, 7):
+            self.assertEqual(
+                "partial", retrieval_replay._task_status(result, f"T{index}")
+            )
+        self.assertEqual(
+            "contract-path", retrieval_replay._task_status(result, "T7")
+        )
+
+    def test_note_reason_ignores_empty_touch_lists(self):
+        result = {
+            "knowledge_attachment_touches": {"T1": []},
+            "hub_lints": [],
+            "omissions": [{"reason": "codegraph_unavailable"}],
+        }
+        context = {"id": "context::knowledge::one", "scope": ["src"]}
+
+        self.assertEqual(
+            "codegraph-unavailable",
+            retrieval_replay._note_reason(result, context),
+        )
 
     def test_touch_counts_ignore_tasks_with_empty_path_lists(self):
         with tempfile.TemporaryDirectory() as temporary:

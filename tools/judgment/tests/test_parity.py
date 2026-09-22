@@ -46,6 +46,7 @@ class RetrievalParityTests(unittest.TestCase):
             for fixture in fixture_dirs:
                 root = materialize_fixture(fixture.name, temporary_root)
                 result = _normalize_root(run_ruleset(RUST_RULESET, root), root)
+                result.pop("_task_resolution_failures", None)
                 self.assertGreater(result["parsed_note_count"], 0, fixture.name)
                 actual[fixture.name] = result
 

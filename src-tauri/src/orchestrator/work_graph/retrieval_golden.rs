@@ -18,7 +18,7 @@ use super::runtime::{
 };
 use super::{EdgeKind, EdgeProvenance, TaskGraph, TaskId, WorkGraphOmission};
 
-const FIXTURES: [&str; 11] = [
+const FIXTURES: [&str; 13] = [
     "declared-scope",
     "star-hub",
     "codegraph-unavailable",
@@ -29,7 +29,9 @@ const FIXTURES: [&str; 11] = [
     "inferred-exact",
     "inferred-stale",
     "inferred-suffix",
+    "mixed-intent-failures",
     "partial-task",
+    "star-hub-unavailable",
 ];
 const KNOWLEDGE_FILES: [&str; 4] = [
     "project-dna.md",
