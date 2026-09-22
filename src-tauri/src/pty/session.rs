@@ -1,9 +1,9 @@
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
 use std::borrow::Cow;
+use std::io::{Read, Write};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::adapters::{PtySubmitPolicy, PtySubmitResult};
@@ -12,14 +12,26 @@ use super::output_ring::{OutputRing, OutputSnapshot, RECENT_OUTPUT_VIEW_BYTES};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentRole {
-    MasterPlanner,  // Initial planning agent that generates plan.md
+    MasterPlanner, // Initial planning agent that generates plan.md
     Queen,
-    Planner { index: u8 },
-    Worker { index: u8, parent: Option<String> },
-    Fusion { variant: String },
-    Judge { session_id: String },
+    Planner {
+        index: u8,
+    },
+    Worker {
+        index: u8,
+        parent: Option<String>,
+    },
+    Fusion {
+        variant: String,
+    },
+    Judge {
+        session_id: String,
+    },
     Evaluator,
-    QaWorker { index: u8, parent: Option<String> },
+    QaWorker {
+        index: u8,
+        parent: Option<String>,
+    },
     /// Remediation authority — a peer to the Queen and Evaluator. Receives the QA
     /// team's findings and spawns its own fix team (regular `Worker`s parented to
     /// the Prince) to resolve them before the Queen pushes the PR.
@@ -47,9 +59,9 @@ pub struct RoleDefinitionRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerRole {
-    pub role_type: String,          // "backend", "frontend", "coherence", "simplify", or custom
-    pub label: String,              // Display name
-    pub default_cli: String,        // Default CLI for this role
+    pub role_type: String, // "backend", "frontend", "coherence", "simplify", or custom
+    pub label: String,     // Display name
+    pub default_cli: String, // Default CLI for this role
     pub prompt_template: Option<String>, // Path to template or inline prompt
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_definition: Option<RoleDefinitionRef>,
@@ -76,13 +88,13 @@ impl Default for WorkerRole {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentConfig {
     #[serde(default = "default_cli")]
-    pub cli: String,              // "claude", "codex", "opencode", "cursor", "droid", "qwen"
-    pub model: Option<String>,    // "opus", "gpt-5.6-sol", "gpt-5.6-terra", etc.
+    pub cli: String, // "claude", "codex", "opencode", "cursor", "droid", "qwen"
+    pub model: Option<String>, // "opus", "gpt-5.6-sol", "gpt-5.6-terra", etc.
     #[serde(default)]
-    pub flags: Vec<String>,       // Additional CLI flags
-    pub label: Option<String>,    // Display name
+    pub flags: Vec<String>, // Additional CLI flags
+    pub label: Option<String>, // Display name
     #[serde(default)]
-    pub name: Option<String>,     // Stable agent name
+    pub name: Option<String>, // Stable agent name
     #[serde(default)]
     pub description: Option<String>, // One-line task summary
     pub role: Option<WorkerRole>, // Worker role assignment
@@ -237,10 +249,7 @@ fn warn_rejected_submit_gap_override(override_value: SubmitGapOverride) {
     }
 }
 
-fn resolve_submit_gap(
-    policy: PtySubmitPolicy,
-    override_gap: Option<Duration>,
-) -> Duration {
+fn resolve_submit_gap(policy: PtySubmitPolicy, override_gap: Option<Duration>) -> Duration {
     override_gap.unwrap_or(policy.default_gap)
 }
 
@@ -349,7 +358,12 @@ impl PtySession {
     ) -> Result<Self, PtyError> {
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
-        tracing::info!("Creating PTY session: command={} args={:?} cwd={:?}", command, args, cwd);
+        tracing::info!(
+            "Creating PTY session: command={} args={:?} cwd={:?}",
+            command,
+            args,
+            cwd
+        );
 
         let pty_system = NativePtySystem::default();
 
@@ -369,7 +383,11 @@ impl PtySession {
             let batch_content = Self::create_batch_content(command, args);
             let batch_path = Self::write_temp_batch(&batch_content)?;
 
-            tracing::info!("Created batch file: {} with content:\n{}", batch_path.display(), batch_content);
+            tracing::info!(
+                "Created batch file: {} with content:\n{}",
+                batch_path.display(),
+                batch_content
+            );
 
             let mut cmd = CommandBuilder::new("cmd.exe");
             cmd.args(&["/c", &batch_path.to_string_lossy()]);
@@ -380,6 +398,9 @@ impl PtySession {
             cmd
         };
 
+        for key in ["HIVE_SESSION_ID", "HIVE_AGENT_ID", "HIVE_ROLE"] {
+            cmd.env_remove(key);
+        }
         for (key, value) in identity_env {
             cmd.env(key, value);
         }
@@ -450,7 +471,11 @@ impl PtySession {
     }
 
     pub fn write(&self, data: &[u8]) -> Result<(), PtyError> {
-        tracing::debug!("PTY write: {} bytes: {:?}", data.len(), String::from_utf8_lossy(data));
+        tracing::debug!(
+            "PTY write: {} bytes: {:?}",
+            data.len(),
+            String::from_utf8_lossy(data)
+        );
         let mut writer = self.writer.lock();
         if data == Self::SUBMIT_KEYSTROKE {
             Self::write_submit_keystroke_locked(&mut writer)?;
@@ -499,31 +524,28 @@ impl PtySession {
 
     /// Write `data` as one bracketed-paste envelope while the caller already holds the
     /// writer lock. Returns the sanitized payload byte count (framing markers excluded).
-    fn write_bracketed_locked(
-        writer: &mut SendWriter,
-        data: &[u8],
-    ) -> Result<usize, PtyError> {
+    fn write_bracketed_locked(writer: &mut SendWriter, data: &[u8]) -> Result<usize, PtyError> {
         let sanitized = sanitize_bracketed_paste(data);
 
         // Send bracketed paste start sequence
-        writer.0.write_all(BRACKETED_PASTE_START)
+        writer
+            .0
+            .write_all(BRACKETED_PASTE_START)
             .map_err(into_io_error)?;
-        writer.0.flush()
-            .map_err(into_io_error)?;
+        writer.0.flush().map_err(into_io_error)?;
 
         // Write data in chunks with flush between each
         for chunk in sanitized.as_ref().chunks(CHUNK_SIZE) {
-            writer.0.write_all(chunk)
-                .map_err(into_io_error)?;
-            writer.0.flush()
-                .map_err(into_io_error)?;
+            writer.0.write_all(chunk).map_err(into_io_error)?;
+            writer.0.flush().map_err(into_io_error)?;
         }
 
         // Send bracketed paste end sequence
-        writer.0.write_all(BRACKETED_PASTE_END)
+        writer
+            .0
+            .write_all(BRACKETED_PASTE_END)
             .map_err(into_io_error)?;
-        writer.0.flush()
-            .map_err(into_io_error)?;
+        writer.0.flush().map_err(into_io_error)?;
 
         Ok(sanitized.as_ref().len())
     }
@@ -639,7 +661,9 @@ impl PtySession {
 
     #[cfg(not(windows))]
     fn write_temp_batch(_content: &str) -> Result<std::path::PathBuf, PtyError> {
-        Err(PtyError::CreateError("Batch files only supported on Windows".to_string()))
+        Err(PtyError::CreateError(
+            "Batch files only supported on Windows".to_string(),
+        ))
     }
 }
 
@@ -650,7 +674,10 @@ impl Drop for PtySession {
 }
 
 // Helper function to read from SendReader
-pub fn read_from_reader(reader: &Arc<Mutex<SendReader>>, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+pub fn read_from_reader(
+    reader: &Arc<Mutex<SendReader>>,
+    buf: &mut [u8],
+) -> Result<usize, std::io::Error> {
     let mut r = reader.lock();
     r.0.read(buf)
 }
@@ -665,6 +692,9 @@ mod tests {
         let sanitized = sanitize_bracketed_paste(payload);
 
         assert_eq!(sanitized.as_ref(), b"helloworld!");
-        assert!(!sanitized.as_ref().windows(BRACKETED_PASTE_END.len()).any(|w| w == BRACKETED_PASTE_END));
+        assert!(!sanitized
+            .as_ref()
+            .windows(BRACKETED_PASTE_END.len())
+            .any(|w| w == BRACKETED_PASTE_END));
     }
 }
