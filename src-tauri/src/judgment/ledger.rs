@@ -330,6 +330,7 @@ fn append_record<T: Serialize>(ledger_path: &Path, record: &T) -> io::Result<()>
 
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path(ledger_path))?;
@@ -340,6 +341,7 @@ fn append_record<T: Serialize>(ledger_path: &Path, record: &T) -> io::Result<()>
         let line = scrub(&serialized);
         let mut ledger = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .append(true)
             .open(ledger_path)?;
         ledger.write_all(line.as_bytes())?;

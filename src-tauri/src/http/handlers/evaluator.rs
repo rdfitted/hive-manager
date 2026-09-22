@@ -1143,9 +1143,9 @@ fn persist_missing_verdict_id_omission(
     Ok(())
 }
 
-/// Production graph-verdict boundary called by `post_verdict`. It deliberately
-/// accepts only an explicit verdict id; session-wide QA must never select a
-/// review join by position, kind, or title.
+/// Test-facing graph-verdict boundary for exact-id routing. Session-wide QA
+/// must never select a review join by position, kind, or title.
+#[cfg(test)]
 pub(crate) fn apply_work_graph_verdict(
     state_manager: &StateManager,
     session_id: &str,
@@ -1801,6 +1801,8 @@ pub async fn force_fail(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
         apply_work_graph_verdict_for_agent, load_contract_context, map_add_qa_worker_error,
         persist_work_graph_verdict, qa_verdict_record_path, read_qa_verdict_record,
@@ -1975,13 +1977,16 @@ mod tests {
 
         let judgments = storage.path().join("judgments");
         let ledger_path = judgments.join("ledger.jsonl");
-        let decision_rows: Vec<serde_json::Value> = std::fs::read_to_string(&ledger_path)
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&ledger_path)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
+        let decision_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row["kind"] == "decision")
+            .collect();
         assert_eq!(decision_rows.len(), 2);
-        assert!(decision_rows.iter().all(|row| row["kind"] == "decision"));
         assert!(decision_rows
             .iter()
             .all(|row| row["judge"] == "incumbent-llm"));
@@ -1998,6 +2003,24 @@ mod tests {
             assert!(evidence.get("rationale").is_none());
             assert!(!evidence.to_string().contains("Typed criteria passed"));
         }
+        let downstream_outcomes: Vec<_> = rows
+            .iter()
+            .filter(|row| row["kind"] == "outcome" && row["source"] == "downstream")
+            .collect();
+        assert_eq!(downstream_outcomes.len(), 2);
+        assert!(downstream_outcomes
+            .iter()
+            .all(|row| row["label"] == "pass"));
+        let expected_decision_ids: BTreeSet<_> = verdict_record
+            .criteria
+            .iter()
+            .filter_map(|criterion| criterion.decision_id.as_deref())
+            .collect();
+        let downstream_decision_ids: BTreeSet<_> = downstream_outcomes
+            .iter()
+            .filter_map(|row| row["decision_id"].as_str())
+            .collect();
+        assert_eq!(downstream_decision_ids, expected_decision_ids);
 
         let override_response = app
             .oneshot(
@@ -2020,7 +2043,9 @@ mod tests {
             .collect();
         let outcomes: Vec<_> = rows
             .iter()
-            .filter(|row| row["kind"] == "outcome")
+            .filter(|row| {
+                row["kind"] == "outcome" && row["source"] == "operator-override"
+            })
             .collect();
         assert_eq!(outcomes.len(), 2);
         assert!(outcomes

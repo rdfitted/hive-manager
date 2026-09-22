@@ -326,7 +326,7 @@ pub async fn post_heartbeat(
         let controller = state.session_controller.read();
         controller
             .update_heartbeat(&session_id, &agent_id, &req.status, req.summary.as_deref())
-            .map_err(|e| ApiError::internal(e))?;
+            .map_err(ApiError::internal)?;
     }
 
     // #126: without an explicit fence, retain the legacy deterministic fallback.
