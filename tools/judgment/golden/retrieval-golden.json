@@ -2,6 +2,7 @@
   "schema": "hive-retrieval-golden/v1",
   "fixtures": {
     "codegraph-unavailable": {
+      "entry": "compose",
       "parsed_note_count": 1,
       "declared_touches": {},
       "knowledge_attachment_touches": {},
@@ -36,6 +37,7 @@
       "hub_lints": []
     },
     "declared-scope": {
+      "entry": "compose",
       "parsed_note_count": 1,
       "declared_touches": {
         "T1": [
@@ -91,7 +93,278 @@
       ],
       "hub_lints": []
     },
+    "file-list-fallback": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Use the tracked-file fallback when the artifact is unavailable.",
+          "summary": "Authentication Boundary: Use the tracked-file fallback when the artifact is unavailable.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/auth.rs",
+            "source_hash": "15661df1dad5de3c",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Use the tracked-file fallback when the artifact is unavailable."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "harvested-line-range": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::add8f50084a9a0ab",
+          "title": "Queue Completion: Keep completion transitions explicit.",
+          "summary": "Queue Completion: Keep completion transitions explicit.",
+          "scope": [
+            "src/queue.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/queue.rs",
+            "source_hash": "516b5fdd348281fb",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Queue Completion: Keep completion transitions explicit."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-ambiguous": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "c25bdfd6cb3b7be5",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-basename": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `auth.rs` require focused review.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "c25bdfd6cb3b7be5",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-exact": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "906c529ef0800f14",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-stale": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::4c50460c7e505ef2",
+          "title": "Removed Authentication Boundary: The retired implementation at `src/missing.rs` should not attach.",
+          "summary": "Removed Authentication Boundary: The retired implementation at `src/missing.rs` should not attach.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "9769b09da4599d00",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Removed Authentication Boundary: The retired implementation at `src/missing.rs` should not attach."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "inferred-suffix": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review.",
+          "scope": [],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "",
+            "source_hash": "906c529ef0800f14",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Changes to `src/auth.rs` require focused review."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
+    "partial-task": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {},
+      "knowledge_attachment_touches": {},
+      "knowledge_edges": [],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::452a054383c3acfe",
+          "title": "Authentication Boundary: Keep partial resolution visible.",
+          "summary": "Authentication Boundary: Keep partial resolution visible.",
+          "scope": [
+            "src/auth.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "src/auth.rs",
+            "source_hash": "56739be6ece5c6da",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Authentication Boundary: Keep partial resolution visible."
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "codegraph_unavailable",
+          "count": 1,
+          "detail": "codegraph output was unavailable, so repository relationships are incomplete",
+          "examples": [
+            "touches-resolver"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
     "star-hub": {
+      "entry": "compose",
       "parsed_note_count": 1,
       "declared_touches": {
         "T1": [

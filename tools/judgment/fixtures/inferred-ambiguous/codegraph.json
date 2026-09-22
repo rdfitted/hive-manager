@@ -1,0 +1,8 @@
+{
+  "root": "<ROOT>",
+  "language": "rust",
+  "nodes": {
+    "source-auth": {"path": "src/auth.rs"},
+    "test-auth": {"path": "tests/auth.rs"}
+  }
+}

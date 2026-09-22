@@ -8,11 +8,29 @@ use tempfile::TempDir;
 use crate::actions::coordination::parse_plan_markdown_with_diagnostics;
 
 use super::codegraph::ArtifactCodegraph;
+use super::context::{
+    build_knowledge_touch_coverage, ContextDerivationReport, KnowledgeAttachmentConfig,
+    TouchCoverageReport,
+};
 use super::plan_parse::task_graph_from_plan;
-use super::runtime::{compose_initial_work_graph, GraphCompositionState};
-use super::{EdgeKind, EdgeProvenance, TaskId, WorkGraphOmission};
+use super::runtime::{
+    compose_initial_work_graph, derive_plan_ready_knowledge_attachments,
+};
+use super::{EdgeKind, EdgeProvenance, TaskGraph, TaskId, WorkGraphOmission};
 
-const FIXTURES: [&str; 3] = ["declared-scope", "star-hub", "codegraph-unavailable"];
+const FIXTURES: [&str; 11] = [
+    "declared-scope",
+    "star-hub",
+    "codegraph-unavailable",
+    "file-list-fallback",
+    "harvested-line-range",
+    "inferred-ambiguous",
+    "inferred-basename",
+    "inferred-exact",
+    "inferred-stale",
+    "inferred-suffix",
+    "partial-task",
+];
 const KNOWLEDGE_FILES: [&str; 4] = [
     "project-dna.md",
     "bug-patterns.md",
@@ -29,6 +47,7 @@ struct RetrievalGolden {
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FixtureGolden {
+    entry: String,
     parsed_note_count: usize,
     declared_touches: BTreeMap<TaskId, Vec<String>>,
     knowledge_attachment_touches: BTreeMap<TaskId, Vec<String>>,
@@ -74,21 +93,71 @@ struct MaterializedFixture {
     root: PathBuf,
     plan: String,
     resolver: ArtifactCodegraph,
+    file_inventory: BTreeSet<String>,
+    entry: String,
+}
+
+struct PipelineOutput {
+    graph: TaskGraph,
+    context: ContextDerivationReport,
+    declared_touches: BTreeMap<TaskId, BTreeSet<String>>,
+    knowledge_attachment_touches: BTreeMap<TaskId, BTreeSet<String>>,
 }
 
 fn run_pipeline(
     plan_markdown: &str,
     root: &Path,
     resolver: &ArtifactCodegraph,
-) -> GraphCompositionState {
+    file_inventory: &BTreeSet<String>,
+    entry: &str,
+) -> PipelineOutput {
     let (plan, diagnostics) = parse_plan_markdown_with_diagnostics(plan_markdown);
     assert!(
         diagnostics.is_empty(),
         "synthetic plan must parse without diagnostics: {diagnostics:?}"
     );
-    let graph = task_graph_from_plan(&plan);
-    compose_initial_work_graph(graph, root, None, None, &BTreeMap::new(), resolver)
-        .expect("synthetic retrieval pipeline should compose")
+    let mut graph = task_graph_from_plan(&plan);
+    if entry == "compose" {
+        let state = compose_initial_work_graph(
+            graph,
+            root,
+            None,
+            None,
+            &BTreeMap::new(),
+            resolver,
+        )
+        .expect("synthetic compose-path retrieval pipeline should compose");
+        return PipelineOutput {
+            graph: state.graph,
+            context: state.context,
+            declared_touches: state.codegraph.touches.clone(),
+            knowledge_attachment_touches: state.codegraph.touches,
+        };
+    }
+    assert_eq!(entry, "plan-ready", "fixture entry must be compose or plan-ready");
+    let declared_coverage = TouchCoverageReport::unavailable();
+    let knowledge = build_knowledge_touch_coverage(
+        &graph,
+        resolver,
+        &declared_coverage,
+        Some(file_inventory),
+        KnowledgeAttachmentConfig::production(),
+    );
+    let context = derive_plan_ready_knowledge_attachments(
+        &mut graph,
+        root,
+        None,
+        root,
+        resolver,
+        Some(file_inventory),
+    )
+    .expect("synthetic plan contains task nodes");
+    PipelineOutput {
+        graph,
+        context,
+        declared_touches: declared_coverage.touches,
+        knowledge_attachment_touches: knowledge.knowledge_attachment_touches,
+    }
 }
 
 #[test]
@@ -126,8 +195,10 @@ fn build_golden() -> RetrievalGolden {
             &materialized.plan,
             &materialized.root,
             &materialized.resolver,
+            &materialized.file_inventory,
+            &materialized.entry,
         );
-        let fixture = fixture_golden(&state, &materialized.root);
+        let fixture = fixture_golden(&state, &materialized.root, &materialized.entry);
         assert!(
             fixture.parsed_note_count > 0,
             "fixture {name} must parse at least one knowledge note"
@@ -169,8 +240,8 @@ fn build_golden() -> RetrievalGolden {
     }
 }
 
-fn fixture_golden(state: &GraphCompositionState, root: &Path) -> FixtureGolden {
-    let declared_touches = touch_map(&state.codegraph.touches);
+fn fixture_golden(state: &PipelineOutput, root: &Path, entry: &str) -> FixtureGolden {
+    let declared_touches = touch_map(&state.declared_touches);
     let knowledge_edges = state
         .graph
         .edges
@@ -228,8 +299,9 @@ fn fixture_golden(state: &GraphCompositionState, root: &Path) -> FixtureGolden {
         .collect();
 
     FixtureGolden {
+        entry: entry.to_string(),
         parsed_note_count: state.context.gotchas.len(),
-        knowledge_attachment_touches: declared_touches.clone(),
+        knowledge_attachment_touches: touch_map(&state.knowledge_attachment_touches),
         declared_touches,
         knowledge_edges,
         context_nodes,
@@ -278,7 +350,19 @@ fn materialize_fixture(name: &str) -> MaterializedFixture {
     let plan = normalized_text(&source.join("plan.md"));
     fs::write(project.join("plan.md"), &plan).expect("materialized plan should be written");
     let files = normalized_text(&source.join("files.txt"));
-    fs::write(project.join("files.txt"), files).expect("materialized file list should be written");
+    fs::write(project.join("files.txt"), &files)
+        .expect("materialized file list should be written");
+    let file_inventory = files
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| path.replace('\\', "/"))
+        .collect();
+    let entry = normalized_text(&source.join("entry.txt")).trim().to_string();
+    assert!(
+        matches!(entry.as_str(), "compose" | "plan-ready"),
+        "fixture entry must be compose or plan-ready"
+    );
     for filename in KNOWLEDGE_FILES {
         let content = normalized_text(&source.join("ai-docs").join(filename));
         fs::write(ai_docs.join(filename), content)
@@ -317,6 +401,8 @@ fn materialize_fixture(name: &str) -> MaterializedFixture {
         root,
         plan,
         resolver,
+        file_inventory,
+        entry,
     }
 }
 
