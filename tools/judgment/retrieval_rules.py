@@ -638,11 +638,16 @@ def resolve_path_intent(
 
 
 def _candidate_inventory(
-    root: Path,
+    root: Path, entry: str,
 ) -> tuple[Optional[list[str]], bool, list[dict[str, Any]]]:
     artifact = _load_artifact(root)
     if artifact is not None:
         return artifact[0], False, []
+    if entry == "compose":
+        detail = "tracked file inventory was unavailable"
+        return None, True, [
+            _omission("resolution_incomplete", 1, ["git ls-files"], detail)
+        ]
     inventory_path = root / "files.txt"
     try:
         content = inventory_path.read_text(encoding="utf-8")
@@ -738,6 +743,11 @@ def _knowledge_touches(
     for node in sorted(graph.tasks, key=lambda item: item.id):
         resolved = set(touches.get(node.id, []))
         path_labels = provenance.setdefault(node.id, {})
+        declared_intents = _contract_intents(node, include_harvested=False)
+        if not declared_intents:
+            failures.setdefault(
+                "explicit task touch intent was not declared", set()
+            ).add(node.id)
         for raw, source in _contract_intents(
             node, include_harvested=include_harvested
         ):
@@ -885,7 +895,18 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
         (root / "plan.md").read_text(encoding="utf-8")
     )
     graph = task_graph_from_plan(plan)
-    candidates, fallback, inventory_omissions = _candidate_inventory(root)
+    candidates, fallback, inventory_omissions = _candidate_inventory(
+        root, result["entry"]
+    )
+    if candidates is not None:
+        result["omissions"] = [
+            omission
+            for omission in result["omissions"]
+            if not (
+                omission["reason"] == "codegraph_unavailable"
+                and omission["examples"] == ["touches-resolver"]
+            )
+        ]
     knowledge_touches = {
         task_id: paths[:] for task_id, paths in result["declared_touches"].items()
     }
@@ -974,7 +995,18 @@ def _counterfactual(root: Path, *, inferred: bool, contract_paths: bool) -> dict
         ]
         fraction = len(linked) / len(task_ids) if task_ids else 0.0
         if len(task_ids) >= ANTI_HUB_MIN_TASKS and fraction >= ANTI_HUB_TASK_FRACTION:
-            if any((context_id, task_id) not in base_edges for task_id in linked):
+            base_scope = [] if gotcha_id in inferred_scopes else gotcha.scope
+            base_linked = [
+                task_id
+                for task_id in task_ids
+                if task_id in result["declared_touches"]
+                and _scope_intersects(
+                    base_scope, result["declared_touches"][task_id]
+                )
+            ]
+            if "*" in gotcha.scope and len(task_ids) >= ANTI_HUB_MIN_TASKS:
+                base_linked = task_ids[:]
+            if linked != base_linked:
                 lint = {
                     "context_node_id": context_id,
                     "linked_task_ids": linked,

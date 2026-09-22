@@ -127,11 +127,19 @@ fn run_pipeline(
             resolver,
         )
         .expect("synthetic compose-path retrieval pipeline should compose");
+        let declared_coverage = state.codegraph.coverage();
+        let knowledge = build_knowledge_touch_coverage(
+            &state.graph,
+            resolver,
+            &declared_coverage,
+            None,
+            KnowledgeAttachmentConfig::production(),
+        );
         return PipelineOutput {
             graph: state.graph,
             context: state.context,
-            declared_touches: state.codegraph.touches.clone(),
-            knowledge_attachment_touches: state.codegraph.touches,
+            declared_touches: declared_coverage.touches,
+            knowledge_attachment_touches: knowledge.knowledge_attachment_touches,
         };
     }
     assert_eq!(entry, "plan-ready", "fixture entry must be compose or plan-ready");

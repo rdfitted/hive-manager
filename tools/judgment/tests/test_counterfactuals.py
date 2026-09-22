@@ -112,7 +112,10 @@ class CounterfactualRuleTests(unittest.TestCase):
 
     def test_hv11_uses_file_inventory_and_parent_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = materialize_fixture("codegraph-unavailable", Path(temporary))
+            root = materialize_fixture("file-list-fallback", Path(temporary))
+            (root / "files.txt").write_text(
+                "src/new/existing.rs\n", encoding="utf-8", newline="\n"
+            )
             (root / "plan.md").write_text(
                 "# New file\n\n## Tasks\n\n"
                 "- [ ] T1: Add service helper (inputs: src/new/helper.rs)\n",
@@ -120,10 +123,8 @@ class CounterfactualRuleTests(unittest.TestCase):
                 newline="\n",
             )
             result = run_ruleset("hv11", root)
-            self.assertEqual(["src"], result["knowledge_attachment_touches"]["T1"])
-            self.assertEqual(["T1"], [edge["task_id"] for edge in result["knowledge_edges"]])
-            self.assertIn("fallback", result["knowledge_edges"][0]["rationale"])
-            self.assertIn("parent-directory", result["knowledge_edges"][0]["rationale"])
+            self.assertEqual(["src/new"], result["knowledge_attachment_touches"]["T1"])
+            self.assertEqual([], result["knowledge_edges"])
 
     def test_t12_inferred_fixtures_pin_match_type_provenance(self):
         cases = {
@@ -190,6 +191,24 @@ class CounterfactualRuleTests(unittest.TestCase):
                 ["src/auth.rs"], fallback["knowledge_attachment_touches"]["T1"]
             )
             self.assertIn("fallback", fallback["knowledge_edges"][0]["rationale"])
+            for result in (harvested, partial, fallback):
+                self.assertFalse(
+                    any(
+                        item["reason"] == "codegraph_unavailable"
+                        and item["examples"] == ["touches-resolver"]
+                        for item in result["omissions"]
+                    )
+                )
+
+    def test_expanded_hub_lint_requires_changed_linkage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture("star-hub", Path(temporary))
+            result = run_ruleset("hv10+hv11", root)
+            self.assertEqual(1, len(result["hub_lints"]))
+            self.assertEqual(
+                "context applies to a high fraction of tasks; move standing guidance to the role prompt or narrow its scope",
+                result["hub_lints"][0]["reason"],
+            )
 
     def test_hv10_plain_files_marker_suppresses_inference_and_global_ref_inherits_it(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -228,7 +247,22 @@ class CounterfactualRuleTests(unittest.TestCase):
                     node["parameters"]["knowledge_provenance"],
                 )
 
-    def test_file_inventory_validation_fails_open_with_stable_omission(self):
+    def test_plan_ready_file_inventory_validation_fails_open(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = materialize_fixture("file-list-fallback", Path(temporary))
+            (root / "files.txt").write_text(
+                "/absolute/path.rs\n", encoding="utf-8", newline="\n"
+            )
+            result = run_ruleset("hv10+hv11", root)
+            self.assertTrue(
+                any(
+                    item["detail"] == "tracked file inventory contained an invalid path"
+                    and item["examples"] == ["git ls-files"]
+                    for item in result["omissions"]
+                )
+            )
+
+    def test_compose_without_artifact_ignores_files_and_fails_open(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = materialize_fixture("codegraph-unavailable", Path(temporary))
             (root / "files.txt").write_text(
@@ -238,8 +272,15 @@ class CounterfactualRuleTests(unittest.TestCase):
             self.assertEqual([], result["knowledge_edges"])
             self.assertTrue(
                 any(
-                    item["detail"] == "tracked file inventory contained an invalid path"
+                    item["detail"] == "tracked file inventory was unavailable"
                     and item["examples"] == ["git ls-files"]
+                    for item in result["omissions"]
+                )
+            )
+            self.assertTrue(
+                any(
+                    item["reason"] == "codegraph_unavailable"
+                    and item["examples"] == ["touches-resolver"]
                     for item in result["omissions"]
                 )
             )
