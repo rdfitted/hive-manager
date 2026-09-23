@@ -106,6 +106,7 @@ def replay(
     if sampling is not None and not isinstance(sampling, dict):
         raise ValueError("sampling must be a JSON object or None")
     sampling_json = ledger.canonical_json(sampling)
+    effective_model = model if model is not None else plugin_id
     existing, _ = retrieval_replay._existing_ledger_keys(ledger_path)
     written = 0
     for source in source_decisions(ledger_path):
@@ -114,7 +115,7 @@ def replay(
         request = request_bytes(observations)
         for repeat in range(runs):
             decision_id = retrieval_replay._decision_id(
-                "qa-replay", source_id, plugin_id, judge, model or "",
+                "qa-replay", source_id, plugin_id, judge, effective_model,
                 sampling_json, str(repeat),
             )
             if decision_id in existing:
@@ -135,7 +136,7 @@ def replay(
                 state_ref=source["state_ref"],
                 question_id=source.get("question_id"),
                 question_version=source.get("question_version"),
-                model=model if model is not None else plugin_id,
+                model=effective_model,
                 sampling=json.loads(sampling_json),
                 mode="shadow",
                 error=error,

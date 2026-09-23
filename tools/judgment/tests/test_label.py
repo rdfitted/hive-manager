@@ -115,6 +115,31 @@ class LabelSessionTests(unittest.TestCase):
             ))
             self.assertEqual(1, len(list(ledger.read_records([ledger_path]))))
 
+    def test_huge_scored_integer_reprompts_without_writing_a_row(self):
+        for next_answer, expected in (("pass", 1), ("skip", 0)):
+            with self.subTest(next_answer=next_answer), tempfile.TemporaryDirectory() as temporary:
+                ledger_path = Path(temporary) / "ledger.jsonl"
+                add_source(ledger_path, "source-a", "evidence")
+                answers = iter(("scored " + "9" * 400, next_answer))
+                prompts = 0
+
+                def answer(prompt):
+                    nonlocal prompts
+                    prompts += 1
+                    if prompts == 2:
+                        self.assertEqual(1, len(list(ledger.read_records([ledger_path]))))
+                    return next(answers)
+
+                output = io.StringIO()
+                self.assertEqual(expected, label.label_session(
+                    ledger_path, input_fn=answer, output=output,
+                ))
+                self.assertEqual(2, prompts)
+                self.assertIn("Invalid label", output.getvalue())
+                rows = [row for row in ledger.read_records([ledger_path])
+                        if row.get("source") == "human-label"]
+                self.assertEqual(expected, len(rows))
+
     def test_heldout_filter_uses_vendored_split(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger_path = Path(temporary) / "ledger.jsonl"

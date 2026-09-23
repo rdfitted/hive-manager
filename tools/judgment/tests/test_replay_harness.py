@@ -76,6 +76,31 @@ class ReplayHarnessTests(unittest.TestCase):
             self.assertTrue(all(row["model"] == "code-test" for row in replay_rows))
             self.assertTrue(all(row["plugin_id"] == "code-test" for row in replay_rows))
 
+    def test_default_model_and_explicit_plugin_model_share_decision_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger_path = Path(temporary) / "ledger.jsonl"
+            add_source(ledger_path, "source-a", "observation")
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(0, replay.main([
+                    "--ledger", str(ledger_path), "--runs", "1",
+                ]))
+                self.assertEqual(0, replay.main([
+                    "--ledger", str(ledger_path), "--runs", "1",
+                    "--model", "code-test",
+                ]))
+            self.assertIn("wrote 0 replay decisions", output.getvalue())
+            replay_rows = [row for row in ledger.read_records([ledger_path])
+                           if row.get("source_decision_id") == "source-a"]
+            self.assertEqual(1, len(replay_rows))
+            self.assertEqual("code-test", replay_rows[0]["model"])
+            self.assertEqual(
+                replay.retrieval_replay._decision_id(
+                    "qa-replay", "source-a", "code-test", "code", "code-test",
+                    '{"deterministic":true}', "0",
+                ),
+                replay_rows[0]["decision_id"],
+            )
+
     def test_plugins_on_same_bundle_have_distinct_model_and_plugin_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger_path = Path(temporary) / "ledger.jsonl"
@@ -95,7 +120,7 @@ class ReplayHarnessTests(unittest.TestCase):
             self.assertTrue(all(row["model"] == row["plugin_id"] for row in rows))
             self.assertEqual({
                 replay.retrieval_replay._decision_id(
-                    "qa-replay", "source-a", plugin_id, "code", "", "null", "0"
+                    "qa-replay", "source-a", plugin_id, "code", plugin_id, "null", "0"
                 )
                 for plugin_id in ("synthetic:one", "synthetic:two")
             }, {row["decision_id"] for row in rows})

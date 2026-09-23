@@ -28,8 +28,12 @@ def _criterion_result(value):
     if isinstance(value, dict) and len(value) == 1:
         key, number = next(iter(value.items()))
         if key in {"scored", "measured"} and isinstance(number, (int, float)) \
-                and not isinstance(number, bool) and math.isfinite(number):
-            return {key: number}
+                and not isinstance(number, bool):
+            try:
+                if math.isfinite(number):
+                    return {key: number}
+            except OverflowError:
+                pass
     raise ValueError("expected pass, fail, blocked, or a finite scored/measured value")
 
 
