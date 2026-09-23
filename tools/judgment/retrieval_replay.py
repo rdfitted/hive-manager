@@ -552,6 +552,9 @@ def _evaluate_spawn_ack(
         if acknowledgement is not None
         else []
     )
+    effective_acknowledgement = (
+        None if out_of_context_tags else acknowledgement
+    )
     sampled_spawn = {
         "cli": cli,
         "completed": completed,
@@ -570,9 +573,9 @@ def _evaluate_spawn_ack(
         if answer["disposition"] != "kept" or not isinstance(tag, str):
             continue
         tagged_references += 1
-        if acknowledgement is None:
+        if effective_acknowledgement is None:
             continue
-        used = tag in acknowledgement
+        used = tag in effective_acknowledgement
         used_references += int(used)
         mentioned = proxy_mentioned(
             excerpts.get(tag, ""), str(reference.get("pointer") or ""), corpus
@@ -613,13 +616,15 @@ def _evaluate_spawn_ack(
         "agent_id": agent_id,
         "cli": cli,
         "plan_task_id": context.get("plan_task_id") or "",
-        "ack_state": "decided",
-        "ack_tags": " ".join(sorted(acknowledgement or [])),
+        "ack_state": (
+            "undecided" if effective_acknowledgement is None else "decided"
+        ),
+        "ack_tags": " ".join(sorted(effective_acknowledgement or [])),
         "tagged_references": tagged_references,
         "used_references": used_references,
         "proxy_agreement": (
             agreement_count / tagged_references
-            if tagged_references
+            if tagged_references and effective_acknowledgement is not None
             else ""
         ),
         "human_used_tags": "",

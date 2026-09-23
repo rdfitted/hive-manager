@@ -563,15 +563,15 @@ class ReplayPlumbingTests(unittest.TestCase):
                 },
                 metrics["compliance_by_cli"]["codex"],
             )
-            self.assertEqual(2, metrics["precision"]["overall"]["shown"])
+            self.assertEqual(1, metrics["precision"]["overall"]["shown"])
             self.assertEqual(0, metrics["precision"]["overall"]["used"])
-            self.assertEqual(2, metrics["precision"]["by_cli"]["codex"]["shown"])
+            self.assertEqual(1, metrics["precision"]["by_cli"]["codex"]["shown"])
             self.assertEqual(1, metrics["miss_rate"]["shown"])
             self.assertFalse(metrics["miss_rate"]["enough_samples"])
             self.assertTrue(metrics["miss_rate"]["flagged_low_n"])
-            self.assertEqual(2, metrics["proxy_agreement"]["agree"])
-            self.assertEqual(3, metrics["proxy_agreement"]["total"])
-            self.assertAlmostEqual(2 / 3, metrics["proxy_agreement"]["rate"])
+            self.assertEqual(1, metrics["proxy_agreement"]["agree"])
+            self.assertEqual(2, metrics["proxy_agreement"]["total"])
+            self.assertAlmostEqual(1 / 2, metrics["proxy_agreement"]["rate"])
             self.assertEqual(
                 [
                     {
@@ -586,10 +586,10 @@ class ReplayPlumbingTests(unittest.TestCase):
 
             rows = list(ledger.read_records([ledger_path]))
             outcomes = [row for row in rows if row.get("kind") == "outcome"]
-            self.assertEqual(3, len(outcomes), "ack outcomes must be idempotent")
+            self.assertEqual(2, len(outcomes), "ack outcomes must be idempotent")
             self.assertTrue(all(row["label"] == "unused" for row in outcomes))
             self.assertEqual(
-                [False, False, True],
+                [False, True],
                 sorted(row["proxy_mentioned"] for row in outcomes),
             )
             absent_decision_ids = {
@@ -605,14 +605,35 @@ class ReplayPlumbingTests(unittest.TestCase):
                 ),
                 "an absent ack must remain undecided with no outcome row",
             )
+            invalid_decision_ids = {
+                row["decision_id"]
+                for row in rows
+                if row.get("surface") == "hive.retrieval.spawn"
+                and row["subject_ref"]["agent_id"] == agent_three
+            }
+            self.assertTrue(invalid_decision_ids)
+            self.assertTrue(
+                invalid_decision_ids.isdisjoint(
+                    {row["decision_id"] for row in outcomes}
+                ),
+                "an out-of-context ack must emit no model-ack outcome row",
+            )
             checked, errors = ledger.validate_file([ledger_path])
-            self.assertEqual(8, checked)
+            self.assertEqual(7, checked)
             self.assertEqual([], errors)
 
             with open(spot_check, encoding="utf-8", newline="") as handle:
                 spot_rows = list(csv.DictReader(handle))
             self.assertEqual(2, len(spot_rows))
-            self.assertTrue(all(row["ack_state"] == "decided" for row in spot_rows))
+            spot_rows_by_agent = {row["agent_id"]: row for row in spot_rows}
+            self.assertEqual("decided", spot_rows_by_agent[agent_one]["ack_state"])
+            self.assertEqual(
+                "undecided", spot_rows_by_agent[agent_three]["ack_state"]
+            )
+            self.assertEqual("", spot_rows_by_agent[agent_three]["ack_tags"])
+            self.assertEqual(
+                "", spot_rows_by_agent[agent_three]["proxy_agreement"]
+            )
             self.assertTrue(all(row["human_used_tags"] == "" for row in spot_rows))
 
     def test_spawn_sidecars_write_schema_valid_rows_and_delivery_coverage(self):
