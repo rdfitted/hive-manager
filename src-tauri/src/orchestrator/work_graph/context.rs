@@ -1252,7 +1252,7 @@ fn load_project_knowledge(
                     );
                 }
             }
-            Err(_error) => omissions.push(WorkGraphOmission::new(
+            Err(error) => omissions.push(WorkGraphOmission::new(
                 if error.kind() == std::io::ErrorKind::NotFound {
                     WorkGraphOmissionReason::ProjectKnowledgeUnavailable
                 } else {
