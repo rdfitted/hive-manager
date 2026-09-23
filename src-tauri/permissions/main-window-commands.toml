@@ -17,6 +17,7 @@ commands.allow = [
     "launch_swarm",
     "launch_solo",
     "launch_fusion",
+    "apply_fusion_winner",
     "launch_debate",
     "get_session",
     "get_qa_verdict",
