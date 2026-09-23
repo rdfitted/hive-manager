@@ -10,6 +10,9 @@
     label: string;
     passed: boolean;
     evidence: string | null;
+    advisory_status: 'pass' | 'fail' | 'undetermined';
+    advisory_threshold_disagreement: boolean;
+    unchanged_evidence_flip: boolean;
   }
 
   interface QaVerdict {
@@ -17,6 +20,10 @@
     milestone_id: string;
     iteration: number;
     passed: boolean;
+    advisory_verdict: 'pass' | 'fail' | 'undetermined';
+    advisory_disagrees: boolean;
+    advisory_threshold_disagreement: boolean;
+    advisory_flip: boolean;
     criteria: QaCriterion[];
     summary: string;
     timestamp: string;
@@ -67,6 +74,14 @@
   });
 
   const stateClass = $derived(verdict ? (verdict.passed ? 'passed' : 'failed') : '');
+
+  function advisoryLabel(status: QaVerdict['advisory_verdict']): string {
+    return status === 'pass' ? 'Pass' : status === 'fail' ? 'Fail' : 'Undetermined';
+  }
+
+  function criterionDisagrees(criterion: QaCriterion): boolean {
+    return criterion.advisory_status !== 'undetermined' && (criterion.advisory_status === 'pass') !== criterion.passed;
+  }
 </script>
 
 {#if verdict}
@@ -96,6 +111,40 @@
 
     {#if !collapsed}
       <div class="panel-content">
+        <div
+          class="verdict-comparison lattice-forced-colors-boundary"
+          class:disagreement={verdict.advisory_disagrees}
+          class:lattice-forced-colors-boundary--active={verdict.advisory_disagrees}
+          role="group"
+          aria-label="QA verdict comparison"
+        >
+          <div class="verdict-card" role="group" aria-label="Evaluator verdict">
+            <span class="verdict-source">Evaluator</span>
+            <span class="status-badge" class:status-success={verdict.passed} class:status-error={!verdict.passed}>
+              {verdict.passed ? 'Pass' : 'Fail'}
+            </span>
+          </div>
+          <div class="verdict-card" role="group" aria-label="Advisory verdict">
+            <span class="verdict-source">Advisory</span>
+            <span
+              class="status-badge"
+              class:status-success={verdict.advisory_verdict === 'pass'}
+              class:status-error={verdict.advisory_verdict === 'fail'}
+              class:status-queued={verdict.advisory_verdict === 'undetermined'}
+            >
+              {advisoryLabel(verdict.advisory_verdict)}
+            </span>
+          </div>
+          {#if verdict.advisory_disagrees}
+            <span class="disagreement-label">
+              {verdict.advisory_threshold_disagreement ? 'Threshold disagreement' : 'Verdicts disagree'}
+            </span>
+          {/if}
+          {#if verdict.advisory_flip}
+            <span class="flip-label">Unchanged evidence, changed result</span>
+          {/if}
+        </div>
+
         <div class="summary lattice-forced-colors-boundary">
           <p>{verdict.summary}</p>
         </div>
@@ -105,6 +154,8 @@
             <div
               class="criterion-item lattice-forced-colors-boundary"
               class:passed={criterion.passed}
+              class:disagreement={criterionDisagrees(criterion)}
+              class:lattice-forced-colors-boundary--active={criterionDisagrees(criterion)}
               role="listitem"
             >
               <div class="criterion-header">
@@ -119,6 +170,16 @@
                   <span class="criterion-number">Criterion {criterion.id}</span>
                   {criterion.label}
                 </span>
+              </div>
+              <div class="criterion-results">
+                <span>Evaluator: {criterion.passed ? 'Pass' : 'Fail'}</span>
+                <span>Advisory: {advisoryLabel(criterion.advisory_status)}</span>
+                {#if criterion.advisory_threshold_disagreement}
+                  <span class="criterion-flag">Threshold disagreement</span>
+                {/if}
+                {#if criterion.unchanged_evidence_flip}
+                  <span class="criterion-flag">Unchanged evidence, changed result</span>
+                {/if}
               </div>
               {#if criterion.evidence}
                 <p class="criterion-evidence">{criterion.evidence}</p>
@@ -193,6 +254,41 @@
     gap: 12px;
   }
 
+  .verdict-comparison {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 10px;
+    border-radius: var(--radius-sm);
+    box-shadow: var(--edge-seam);
+  }
+
+  .verdict-comparison.disagreement,
+  .criterion-item.disagreement {
+    box-shadow: inset 0 0 0 1px var(--status-warning);
+  }
+
+  .verdict-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .verdict-source {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .disagreement-label,
+  .flip-label {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: var(--status-warning);
+  }
+
   .summary {
     font-size: 12px;
     line-height: 1.5;
@@ -221,6 +317,19 @@
   .criterion-item.passed {
     background: color-mix(in srgb, var(--status-success) 5%, transparent);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-success) 10%, transparent);
+  }
+
+  .criterion-results {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding-left: 20px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .criterion-flag {
+    color: var(--status-warning);
   }
 
   .criterion-header {

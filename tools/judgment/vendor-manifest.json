@@ -10,6 +10,16 @@
       "source": "~/.claude/tools/judgment/ledger.py",
       "upstream_sha256": "536d9d616fb989c4854070931770122c2f9e0adedf986877863f4edd01a27549",
       "normalized_sha256": "23dae27ef23a814b3440cb71192a2cb62fbc0958d7adff78ac54e313f8916a4c"
+    },
+    "calibration.py": {
+      "source": "~/.claude/tools/judgment/calibration.py",
+      "upstream_sha256": "789139b9b6944ff57b3275ae42efb39606a7a8eb03f07854fbafd52b11a293b3",
+      "normalized_sha256": "1e7590b9cfdfefc7b4be5d899a023cb3c4fe2d3c1c09b684dfce3cd561680211"
+    },
+    "audit.py": {
+      "source": "~/.claude/tools/judgment/audit.py",
+      "upstream_sha256": "2235b39a10c0068e237222fd4e93f8dd56a01ff111f25208d4ee6bd36f1bf24b",
+      "normalized_sha256": "a862692ff0848facf2f7fd7ffaf1e06c8599a1167eb45c4ab5675e608cc6750c"
     }
   }
 }

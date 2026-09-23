@@ -21,6 +21,8 @@ from typing import Iterable, Iterator, Optional
 import ledger as judgment_ledger
 from plan_grammar import parse_plan_markdown_with_diagnostics
 from retrieval_rules import (
+    MAX_FILE_INVENTORY_ENTRIES,
+    MAX_FILE_INVENTORY_PATH_CHARS,
     STALE_SCOPE_OMISSION_DETAILS,
     TASK_PATH_UNRESOLVED_DETAIL,
     run_ruleset,
@@ -770,6 +772,21 @@ def _git(repo: Path, arguments: list[str]) -> subprocess.CompletedProcess[bytes]
     )
 
 
+def _read_capped_inventory(stream) -> Optional[bytes]:
+    """Read NUL-delimited paths without allowing git stdout to grow unbounded."""
+    max_bytes = MAX_FILE_INVENTORY_ENTRIES * (MAX_FILE_INVENTORY_PATH_CHARS * 4 + 1)
+    output = bytearray()
+    entries = 0
+    while chunk := stream.read(8192):
+        entries += chunk.count(b"\0")
+        if entries > MAX_FILE_INVENTORY_ENTRIES or len(output) + len(chunk) > max_bytes:
+            return None
+        output.extend(chunk)
+    if output and output[-1] != 0:
+        raise ValueError("tracked file inventory ended mid-path")
+    return bytes(output)
+
+
 def _local_ref(repo: Path, refs: Iterable[str]) -> Optional[str]:
     for reference in refs:
         result = _git(repo, ["show-ref", "--verify", "--quiet", reference])
@@ -861,13 +878,44 @@ def recover_changed_files(repo: Path, session_id: str) -> tuple[Optional[set[str
 
 
 def tracked_files(repo: Path) -> tuple[list[str], Optional[str]]:
-    result = _git(repo, ["ls-files", "-z"])
-    if result.returncode != 0:
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(repo), "ls-files", "-z"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
         return [], "tracked file inventory unavailable"
+    assert process.stdout is not None
+    try:
+        output = _read_capped_inventory(process.stdout)
+    except (OSError, ValueError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.wait()
+        return [], "tracked file inventory unavailable"
+    finally:
+        process.stdout.close()
+    if output is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.wait()
+        return [], "tracked file inventory exceeded the limit"
+    if process.wait() != 0:
+        return [], "tracked file inventory unavailable"
+    try:
+        decoded = output.decode("utf-8")
+    except UnicodeDecodeError:
+        return [], "tracked file inventory was not valid UTF-8"
     paths = sorted(
         {
             value.replace("\\", "/")
-            for value in result.stdout.decode("utf-8", errors="replace").split("\0")
+            for value in decoded.split("\0")
             if value and not value.startswith(".ai-docs/")
         }
     )

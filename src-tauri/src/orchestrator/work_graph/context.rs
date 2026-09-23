@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::actions::git::run_git_in_dir;
+use crate::actions::git::{run_git_ls_files_capped, CappedGitError};
 use crate::http::handlers::knowledge::{first_h1, frontmatter_field, split_frontmatter};
 
 use super::archetypes::{GotchaAttachment, GotchaAttachmentProvider};
@@ -58,7 +58,7 @@ const TRACKED_FILE_INVENTORY_UNAVAILABLE: &str = "tracked file inventory was una
 const TRACKED_FILE_INVENTORY_INVALID_UTF8: &str =
     "tracked file inventory was not valid UTF-8";
 const TRACKED_FILE_INVENTORY_LIMIT_REACHED: &str =
-    "tracked file inventory exceeded the entry limit";
+    "tracked file inventory exceeded the limit";
 const TRACKED_FILE_INVENTORY_INVALID_PATH: &str =
     "tracked file inventory contained an invalid path";
 const KNOWLEDGE_DERIVATION_OMISSION_DETAILS: &[&str] = &[
@@ -312,7 +312,9 @@ pub(crate) fn prepare_knowledge_candidate_selection<R: TouchesResolver>(
     let artifact_candidates = resolver.knowledge_candidates();
     let mut loaded_inventory = None;
     let mut inventory_omission = None;
-    if artifact_candidates.is_none()
+    let needs_candidates = config.per_intent || config.contract_harvest || config.inferred_scope;
+    if needs_candidates
+        && artifact_candidates.is_none()
         && file_inventory.is_none()
         && config.file_inventory_fallback
     {
@@ -458,21 +460,17 @@ pub(crate) fn load_tracked_file_inventory(
     let Some(root) = inventory_root.to_str() else {
         return Err(FILE_INVENTORY_ROOT_INVALID);
     };
-    let output = run_git_in_dir(&["ls-files", "-z"], root)
-        .map_err(|_| TRACKED_FILE_INVENTORY_UNAVAILABLE)?;
-    if output.contains('\u{fffd}') {
-        return Err(TRACKED_FILE_INVENTORY_INVALID_UTF8);
-    }
+    let max_bytes = MAX_FILE_INVENTORY_ENTRIES
+        .saturating_mul(MAX_FILE_INVENTORY_PATH_CHARS.saturating_mul(4).saturating_add(1));
+    let bytes = run_git_ls_files_capped(root, MAX_FILE_INVENTORY_ENTRIES, max_bytes)
+        .map_err(tracked_inventory_error_detail)?;
+    let output = String::from_utf8(bytes).map_err(|_| TRACKED_FILE_INVENTORY_INVALID_UTF8)?;
 
     let mut inventory = BTreeSet::new();
-    for (index, raw) in output
+    for raw in output
         .split('\0')
         .filter(|value| !value.is_empty())
-        .enumerate()
     {
-        if index >= MAX_FILE_INVENTORY_ENTRIES {
-            return Err(TRACKED_FILE_INVENTORY_LIMIT_REACHED);
-        }
         let slash_normalized = raw.replace('\\', "/");
         let normalized = normalize_scope(raw);
         if normalized.is_empty()
@@ -487,6 +485,13 @@ pub(crate) fn load_tracked_file_inventory(
         inventory.insert(normalized);
     }
     Ok(inventory)
+}
+
+fn tracked_inventory_error_detail(error: CappedGitError) -> &'static str {
+    match error {
+        CappedGitError::Unavailable => TRACKED_FILE_INVENTORY_UNAVAILABLE,
+        CappedGitError::LimitReached => TRACKED_FILE_INVENTORY_LIMIT_REACHED,
+    }
 }
 
 // Keep the independent resolution inputs visible at the mutation boundary.
@@ -736,6 +741,8 @@ fn is_path_like_token(value: &str) -> bool {
     value.rsplit_once('.').is_some_and(|(stem, extension)| {
         !stem.is_empty()
             && !extension.is_empty()
+            && extension.chars().any(|character| character.is_ascii_alphabetic())
+            && (extension.len() >= 2 || matches!(extension, "c" | "h" | "m" | "r"))
             && extension
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric())
@@ -1252,7 +1259,7 @@ fn load_project_knowledge(
                     WorkGraphOmissionReason::SourceUnreadable
                 },
                 1,
-                vec![format!("{}: {error}", path.display())],
+                vec![format!(".ai-docs/{filename}: read failed")],
             )),
         }
     }
@@ -1336,7 +1343,7 @@ fn load_curated_line_limit(
                     WorkGraphOmissionReason::SourceUnreadable
                 },
                 1,
-                vec![format!("{}: {error}", path.display())],
+                vec![".ai-docs/curation-state.json: read failed".to_string()],
             ));
             return None;
         }
@@ -1364,11 +1371,11 @@ fn load_curated_line_limit(
                 None
             }
         },
-        Err(error) => {
+        Err(_error) => {
             omissions.push(WorkGraphOmission::new(
                 WorkGraphOmissionReason::SourceUnreadable,
                 1,
-                vec![format!("{}: {error}", path.display())],
+                vec![".ai-docs/curation-state.json: invalid JSON".to_string()],
             ));
             None
         }
@@ -1684,11 +1691,11 @@ fn parse_learnings(
         }
         let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 omissions.push(WorkGraphOmission::new(
                     WorkGraphOmissionReason::SourceUnreadable,
                     1,
-                    vec![format!(".ai-docs/{filename}#L{}: {error}", index + 1)],
+                    vec![format!(".ai-docs/{filename}#L{}: invalid JSON", index + 1)],
                 ));
                 continue;
             }
@@ -1922,11 +1929,13 @@ fn expanded_edge_rationale(
 mod tests {
     use super::{
         build_knowledge_touch_coverage, derive_project_context_from_knowledge,
-        harvest_contract_path_intents, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
-        prepare_knowledge_candidate_selection, PathIntentResolver, PathMatchType,
-        PathResolution, PathResolutionFailure, TouchCoverageReport, TouchesResolver,
+        harvest_contract_path_intents, is_path_like_token, prepare_knowledge_candidate_selection,
+        tracked_inventory_error_detail, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
+        NoTouchesResolver, PathIntentResolver,
+        PathMatchType, PathResolution, PathResolutionFailure, TouchCoverageReport, TouchesResolver,
         MAX_KNOWLEDGE_TOUCHES_PER_TASK,
     };
+    use crate::actions::git::CappedGitError;
     use crate::orchestrator::work_graph::{
         BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
         WorkGraphOmissionReason, WorkNode,
@@ -1952,6 +1961,50 @@ mod tests {
         fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
             Some(self.candidates.clone())
         }
+    }
+
+    #[test]
+    fn dotted_prose_tokens_are_not_paths() {
+        assert!(!is_path_like_token("e.g"));
+        assert!(!is_path_like_token("0.51.0"));
+        assert!(is_path_like_token("foo.rs"));
+        assert!(is_path_like_token("foo.c"));
+    }
+
+    #[test]
+    fn capped_inventory_has_a_named_omission() {
+        assert_eq!(
+            tracked_inventory_error_detail(CappedGitError::LimitReached),
+            "tracked file inventory exceeded the limit"
+        );
+    }
+
+    #[test]
+    fn unused_fallback_does_not_run_git_inventory() {
+        let resolver = NoTouchesResolver;
+        let root = TempDir::new().expect("tempdir");
+        let missing = root.path().join("missing-inventory-root");
+        let mut config = enabled_config();
+        config.per_intent = false;
+        config.contract_harvest = false;
+        config.inferred_scope = false;
+        let selection = prepare_knowledge_candidate_selection(
+            &resolver,
+            &missing,
+            None,
+            config,
+        );
+        assert!(selection.inventory_omission().is_none());
+        let enabled = prepare_knowledge_candidate_selection(
+            &resolver,
+            &missing,
+            None,
+            enabled_config(),
+        );
+        assert_eq!(
+            enabled.inventory_omission(),
+            Some("tracked file inventory was unavailable")
+        );
     }
 
     #[test]

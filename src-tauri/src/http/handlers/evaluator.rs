@@ -15,8 +15,9 @@ use std::{
 use tempfile::NamedTempFile;
 
 use crate::coordination::{
-    parse_sprint_contract, CompareOp, ContractCriterion, CoordinationMessage, CriterionKind,
-    SprintContract, StateManager,
+    criterion_verdict, evaluate, parse_sprint_contract, CompareOp, ContractCriterion,
+    CoordinationMessage, CriterionKind, CriterionResult, CriterionValue, SprintContract,
+    StateManager, ThresholdPolicy, Verdict,
 };
 use crate::http::error::ApiError;
 use crate::http::state::AppState;
@@ -405,6 +406,25 @@ pub(crate) struct QaVerdictRecord {
     pub contract_typed: bool,
     pub omission: Option<String>,
     pub criteria: Vec<QaCriterionVerdictRecord>,
+    #[serde(default)]
+    pub advisory_verdict: Verdict,
+    #[serde(default)]
+    pub advisory_disagrees: bool,
+    #[serde(default)]
+    pub advisory_threshold_disagreement: bool,
+    #[serde(default)]
+    pub advisory_flip: bool,
+    #[serde(default)]
+    pub advisory_criteria: Vec<QaAdvisoryCriterionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct QaAdvisoryCriterionRecord {
+    pub number: u16,
+    pub status: Verdict,
+    pub threshold_disagreement: bool,
+    pub unchanged_evidence_flip: bool,
+    pub state_hash: Option<String>,
 }
 
 struct ContractContext {
@@ -846,6 +866,16 @@ fn criterion_passed(
     }
 }
 
+fn criterion_value(result: &CriterionSubmissionResult) -> CriterionValue {
+    match result {
+        CriterionSubmissionResult::Pass => CriterionValue::PassFail(true),
+        CriterionSubmissionResult::Fail => CriterionValue::PassFail(false),
+        CriterionSubmissionResult::Scored(value) => CriterionValue::Scored(*value),
+        CriterionSubmissionResult::Measured(value) => CriterionValue::Measured(*value),
+        CriterionSubmissionResult::Blocked => CriterionValue::Unspecified,
+    }
+}
+
 fn base_verdict_record(
     session_id: &str,
     verdict: &str,
@@ -872,6 +902,11 @@ fn base_verdict_record(
         contract_typed: context.contract.is_some(),
         omission: (verdict == "BLOCKED").then(|| BLOCKED_CRITERION_OMISSION.to_string()),
         criteria: Vec::new(),
+        advisory_verdict: Verdict::Undetermined,
+        advisory_disagrees: false,
+        advisory_threshold_disagreement: false,
+        advisory_flip: false,
+        advisory_criteria: Vec::new(),
     }
 }
 
@@ -897,8 +932,9 @@ fn record_typed_criteria(
     evaluator_model: &str,
     record: &mut QaVerdictRecord,
     criteria: Vec<(ContractCriterion, PostCriterionResult)>,
-) {
+) -> Vec<Option<String>> {
     let ledger = judgment_ledger(state);
+    let mut state_hashes = Vec::with_capacity(criteria.len());
     for (criterion, submitted) in criteria {
         let mut subject_ref = Map::new();
         subject_ref.insert("session_id".to_string(), json!(session_id));
@@ -938,6 +974,7 @@ fn record_typed_criteria(
             error: None,
             extra: Map::new(),
         });
+        state_hashes.push(decision.as_ref().and_then(|decision| decision.state_hash.clone()));
         record.criteria.push(QaCriterionVerdictRecord {
             number: criterion.number,
             label: criterion.description,
@@ -949,6 +986,7 @@ fn record_typed_criteria(
             decision_id: decision.map(|decision| decision.decision_id),
         });
     }
+    state_hashes
 }
 
 fn record_operator_override_outcomes(
@@ -1552,7 +1590,69 @@ pub async fn post_verdict(
         &contract_context,
     );
     if let Some(criteria) = typed_criteria {
-        record_typed_criteria(
+        let prior_record = match read_qa_verdict_record(&state.storage.session_dir(&session_id)) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(%session_id, %error, "Failed to read prior QA advisory record");
+                None
+            }
+        };
+        let results: Vec<CriterionResult> = criteria
+            .iter()
+            .map(|(criterion, submitted)| CriterionResult {
+                kind: criterion.kind.clone(),
+                value: criterion_value(&submitted.result),
+            })
+            .collect();
+        let policy = &contract_context
+            .contract
+            .as_ref()
+            .expect("typed criteria require a contract")
+            .threshold_policy;
+        verdict_record.advisory_verdict = evaluate(policy, &results);
+        verdict_record.advisory_disagrees = match verdict_record.advisory_verdict {
+            Verdict::Pass => verdict != "PASS",
+            Verdict::Fail => verdict != "FAIL",
+            Verdict::Undetermined => false,
+        };
+        let floor_enabled = matches!(
+            policy,
+            ThresholdPolicy::Rules {
+                fail_scored_below_floor: true,
+                ..
+            }
+        );
+        verdict_record.advisory_criteria = criteria
+            .iter()
+            .zip(&results)
+            .map(|((criterion, submitted), result)| {
+                let status = criterion_verdict(result);
+                let threshold_disagreement = matches!(
+                    (&criterion.kind, &submitted.result),
+                    (
+                        CriterionKind::Scored {
+                            min,
+                            floor: Some(floor),
+                            ..
+                        },
+                        CriterionSubmissionResult::Scored(value)
+                    ) if !floor_enabled
+                        && value.is_finite()
+                        && *value >= f64::from(*min)
+                        && *value < f64::from(*floor)
+                        && status == Verdict::Pass
+                        && !criterion_passed(&criterion.kind, &submitted.result)
+                );
+                QaAdvisoryCriterionRecord {
+                    number: criterion.number,
+                    status,
+                    threshold_disagreement,
+                    unchanged_evidence_flip: false,
+                    state_hash: None,
+                }
+            })
+            .collect();
+        let state_hashes = record_typed_criteria(
             &state,
             &session_id,
             verdict,
@@ -1561,6 +1661,103 @@ pub async fn post_verdict(
             &mut verdict_record,
             criteria,
         );
+        let mut flips = Vec::new();
+        for ((current, advisory), state_hash) in verdict_record
+            .criteria
+            .iter()
+            .zip(&mut verdict_record.advisory_criteria)
+            .zip(state_hashes)
+        {
+            advisory.state_hash = state_hash;
+            let prior = prior_record.as_ref().filter(|prior| {
+                prior.milestone_id == verdict_record.milestone_id
+                    && prior.iteration < verdict_record.iteration
+            });
+            let previous_criterion = prior.and_then(|prior| {
+                prior.criteria.iter().find(|item| item.number == current.number)
+            });
+            let previous_hash = prior.and_then(|prior| {
+                prior
+                    .advisory_criteria
+                    .iter()
+                    .find(|item| item.number == current.number)
+                    .and_then(|item| item.state_hash.as_ref())
+            });
+            if advisory.state_hash.is_some()
+                && advisory.state_hash.as_ref() == previous_hash
+                && previous_criterion.is_some_and(|item| item.result != current.result)
+            {
+                advisory.unchanged_evidence_flip = true;
+                flips.push(json!({
+                    "criterion_number": current.number,
+                    "prior_decision_id": previous_criterion.and_then(|item| item.decision_id.as_ref()),
+                    "current_decision_id": current.decision_id,
+                }));
+            }
+        }
+        verdict_record.advisory_flip = !flips.is_empty();
+        verdict_record.advisory_threshold_disagreement = verdict_record.advisory_disagrees
+            && verdict_record
+                .advisory_criteria
+                .iter()
+                .any(|item| item.threshold_disagreement)
+            && verdict_record
+                .criteria
+                .iter()
+                .zip(&verdict_record.advisory_criteria)
+                .all(|(display, advisory)| {
+                    advisory.status != Verdict::Undetermined
+                        && ((advisory.status == Verdict::Pass) == display.passed
+                            || advisory.threshold_disagreement)
+                });
+        if verdict_record.advisory_disagrees || verdict_record.advisory_flip {
+            let mut subject_ref = Map::new();
+            subject_ref.insert("session_id".to_string(), json!(session_id));
+            subject_ref.insert("milestone_id".to_string(), json!(verdict_record.milestone_id));
+            subject_ref.insert("iteration".to_string(), json!(iteration));
+            let mut extra = Map::new();
+            extra.insert(
+                "source_decision_ids".to_string(),
+                json!(verdict_record
+                    .criteria
+                    .iter()
+                    .filter_map(|item| item.decision_id.as_ref())
+                    .collect::<Vec<_>>()),
+            );
+            extra.insert("unchanged_evidence_flips".to_string(), json!(flips));
+            extra.insert(
+                "threshold_disagreement".to_string(),
+                json!(verdict_record.advisory_threshold_disagreement),
+            );
+            judgment_ledger(&state).record_decision(DecisionInput {
+                decision_id: None,
+                surface: "hive.qa.milestone".to_string(),
+                subject_ref,
+                observations: json!({
+                    "contract_path": verdict_record.contract_path,
+                    "criterion_numbers": verdict_record.criteria.iter().map(|item| item.number).collect::<Vec<_>>(),
+                }),
+                answer: json!({
+                    "evaluator_verdict": verdict,
+                    "advisory_verdict": verdict_record.advisory_verdict,
+                    "disagrees": verdict_record.advisory_disagrees,
+                }),
+                question_id: Some("hive.qa.milestone".to_string()),
+                question_version: None,
+                judge: Judge::Code,
+                model: None,
+                sampling: None,
+                mode: JudgmentMode::Advisory,
+                probabilities: None,
+                confidence: None,
+                threshold_id: Some(verdict_record.milestone_id.clone()),
+                routed: "advisory-shown".to_string(),
+                latency_ms: None,
+                cost_usd: None,
+                error: None,
+                extra,
+            });
+        }
     }
     persist_verdict_record_fail_open(&state, &session_id, &verdict_record);
 
@@ -1809,6 +2006,7 @@ mod tests {
     use super::{
         apply_work_graph_verdict_for_agent, load_contract_context, map_add_qa_worker_error,
         persist_work_graph_verdict, qa_verdict_record_path, read_qa_verdict_record,
+        CriterionSubmissionResult,
     };
     use axum::{
         body::Body,
@@ -2090,6 +2288,261 @@ mod tests {
         assert!(outcomes
             .iter()
             .all(|row| row["note"] == "Operator found a regression"));
+    }
+
+    #[tokio::test]
+    async fn typed_advisory_disagreement_writes_one_row_and_projects_to_panel() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("advisory-qa-{}", uuid::Uuid::new_v4());
+        install_typed_contract(project.path(), &session_id);
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(2) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let request = serde_json::json!({
+            "verdict": "PASS",
+            "criteria": [
+                {"number": 1, "result": "pass", "evidence": "stable evidence"},
+                {"number": 2, "result": {"scored": 2}, "evidence": "design score"}
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.advisory_verdict, crate::coordination::Verdict::Fail);
+        assert!(record.advisory_disagrees);
+        assert!(record.passed);
+        let panel = crate::qa_commands::load_qa_verdict(&session_storage, &session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(panel.advisory_verdict, crate::coordination::Verdict::Fail);
+        assert!(panel.advisory_disagrees);
+        assert!(panel.passed);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(
+            storage.path().join("judgments").join("ledger.jsonl"),
+        )
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+        let advisory: Vec<_> = rows
+            .iter()
+            .filter(|row| row["surface"] == "hive.qa.milestone")
+            .collect();
+        assert_eq!(advisory.len(), 1);
+        assert_eq!(advisory[0]["judge"], "code");
+        assert_eq!(advisory[0]["mode"], "advisory");
+        assert_eq!(advisory[0]["routed"], "advisory-shown");
+        assert_eq!(
+            advisory[0]["source_decision_ids"].as_array().unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn prose_threshold_is_undetermined_without_advisory_disagreement() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("prose-qa-{}", uuid::Uuid::new_v4());
+        let contracts = project
+            .path()
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("contracts");
+        std::fs::create_dir_all(&contracts).unwrap();
+        std::fs::write(
+            contracts.join("milestone-1.md"),
+            "# Sprint Contract: Prose Threshold\n\n\
+             ## Acceptance Criteria\n\
+             1. [FUNC] The endpoint records functional evidence\n\n\
+             ## Pass Threshold\n\
+             - Human judgment applies\n",
+        )
+        .unwrap();
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(1) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let request = serde_json::json!({
+            "verdict": "PASS",
+            "criteria": [
+                {"number": 1, "result": "pass", "evidence": "human-reviewed evidence"}
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.advisory_verdict, crate::coordination::Verdict::Undetermined);
+        assert!(!record.advisory_disagrees);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(
+            storage.path().join("judgments").join("ledger.jsonl"),
+        )
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+        assert!(rows.iter().all(|row| row["surface"] != "hive.qa.milestone"));
+        let criterion = rows
+            .iter()
+            .find(|row| row["surface"] == "hive.qa.criterion")
+            .unwrap();
+        assert_eq!(
+            record.advisory_criteria[0].state_hash.as_deref(),
+            criterion["state_hash"].as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_evidence_flip_is_flagged_without_replacing_current_result() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("flip-qa-{}", uuid::Uuid::new_v4());
+        install_typed_contract(project.path(), &session_id);
+
+        for (iteration, verdict, result) in [(2, "PASS", "pass"), (3, "FAIL", "fail")] {
+            let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+            session.state = SessionState::QaInProgress {
+                iteration: Some(iteration),
+            };
+            session.agents.push(evaluator_agent(&session_id));
+            controller.write().insert_test_session(session);
+            let request = serde_json::json!({
+                "verdict": verdict,
+                "criteria": [
+                    {"number": 1, "result": result, "evidence": "unchanged evidence"},
+                    {"number": 2, "result": {"scored": 8}, "evidence": "unchanged design evidence"}
+                ]
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.iteration, 3);
+        assert_eq!(record.criteria[0].result, CriterionSubmissionResult::Fail);
+        assert!(record.advisory_flip);
+        assert!(record.advisory_criteria[0].unchanged_evidence_flip);
+        assert!(!record.advisory_disagrees);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(
+            storage.path().join("judgments").join("ledger.jsonl"),
+        )
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+        let advisory: Vec<_> = rows
+            .iter()
+            .filter(|row| row["surface"] == "hive.qa.milestone")
+            .collect();
+        assert_eq!(advisory.len(), 1);
+        assert_eq!(
+            advisory[0]["unchanged_evidence_flips"][0]["criterion_number"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scored_floor_display_difference_is_labelled_as_threshold_disagreement() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("floor-qa-{}", uuid::Uuid::new_v4());
+        let contracts = project
+            .path()
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("contracts");
+        std::fs::create_dir_all(&contracts).unwrap();
+        std::fs::write(
+            contracts.join("milestone-1.md"),
+            "# Sprint Contract: Floor Display\n\n\
+             ## Acceptance Criteria\n\
+             1. [DESIGN 1-10 floor 5] The design is scored\n\n\
+             ## Pass Threshold\n\
+             - All pass/fail criteria must pass\n",
+        )
+        .unwrap();
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(1) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let request = serde_json::json!({
+            "verdict": "FAIL",
+            "criteria": [
+                {"number": 1, "result": {"scored": 3}, "evidence": "score is in range but below floor"}
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert!(!record.criteria[0].passed);
+        assert_eq!(record.advisory_criteria[0].status, crate::coordination::Verdict::Pass);
+        assert!(record.advisory_criteria[0].threshold_disagreement);
+        assert_eq!(record.advisory_verdict, crate::coordination::Verdict::Pass);
+        assert!(record.advisory_disagrees);
+        assert!(record.advisory_threshold_disagreement);
     }
 
     #[tokio::test]

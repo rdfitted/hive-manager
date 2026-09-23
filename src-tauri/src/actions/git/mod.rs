@@ -7,7 +7,8 @@
 //! `commands/git_commands.rs` re-exports the types and helper from this module.
 
 use std::path::Path;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
 
 use async_trait::async_trait;
 use schemars::schema::RootSchema;
@@ -66,6 +67,95 @@ pub fn run_git_in_dir(args: &[&str], project_path: &str) -> Result<String, Strin
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CappedGitError {
+    Unavailable,
+    LimitReached,
+}
+
+/// Stream tracked paths with a hard byte and entry cap; never buffer unbounded stdout.
+pub fn run_git_ls_files_capped(
+    project_path: &str,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CappedGitError> {
+    let path = Path::new(project_path);
+    if !path.exists() {
+        return Err(CappedGitError::Unavailable);
+    }
+    let mut cmd = Command::new("git");
+    cmd.args(["ls-files", "-z"])
+        .current_dir(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    crate::process::hide_std_console_window(&mut cmd);
+    let mut child = cmd.spawn().map_err(|_| CappedGitError::Unavailable)?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(CappedGitError::Unavailable);
+    };
+    let result = read_nul_delimited_capped(stdout, max_entries, max_bytes);
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|_| CappedGitError::Unavailable)?;
+    let output = result?;
+    if !status.success() {
+        return Err(CappedGitError::Unavailable);
+    }
+    Ok(output)
+}
+
+fn read_nul_delimited_capped(
+    mut source: impl Read,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CappedGitError> {
+    let mut output = Vec::new();
+    let mut entries = 0;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = source.read(&mut buffer).map_err(|_| CappedGitError::Unavailable)?;
+        if count == 0 {
+            if output.last().is_some_and(|byte| *byte != 0) {
+                return Err(CappedGitError::Unavailable);
+            }
+            return Ok(output);
+        }
+        entries += buffer[..count].iter().filter(|byte| **byte == 0).count();
+        if entries > max_entries || output.len().saturating_add(count) > max_bytes {
+            return Err(CappedGitError::LimitReached);
+        }
+        output.extend_from_slice(&buffer[..count]);
+    }
+}
+
+#[cfg(test)]
+mod capped_git_tests {
+    use super::{read_nul_delimited_capped, CappedGitError};
+
+    #[test]
+    fn tracked_output_stops_at_entry_and_byte_caps() {
+        assert_eq!(
+            read_nul_delimited_capped(&b"a.rs\0b.rs\0"[..], 1, 1024),
+            Err(CappedGitError::LimitReached)
+        );
+        assert_eq!(
+            read_nul_delimited_capped(&b"long-path.rs\0"[..], 10, 4),
+            Err(CappedGitError::LimitReached)
+        );
+        assert_eq!(
+            read_nul_delimited_capped(&b"a.rs\0"[..], 1, 5),
+            Ok(b"a.rs\0".to_vec())
+        );
+        assert_eq!(
+            read_nul_delimited_capped(&b"a.rs"[..], 1, 5),
+            Err(CappedGitError::Unavailable)
+        );
+    }
 }
 
 pub fn parse_worktree_list(output: &str) -> Result<Vec<WorktreeInfo>, String> {

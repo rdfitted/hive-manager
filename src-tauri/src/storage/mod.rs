@@ -859,7 +859,7 @@ impl SessionStorage {
                 command: "codex".to_string(),
                 auto_approve_flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
                 model_flag: Some("-m".to_string()),
-                default_model: "gpt-5.6-sol".to_string(),
+                default_model: "gpt-6-sol".to_string(),
                 env: None,
             },
         );
@@ -909,70 +909,70 @@ impl SessionStorage {
             "principal".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "backend".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "frontend".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "coherence".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "simplify".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "reviewer".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "reviewer-quick".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "resolver".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "tester".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "code-quality".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
@@ -986,14 +986,14 @@ impl SessionStorage {
             "qa-worker".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
         default_roles.insert(
             "general".to_string(),
             RoleDefaults {
                 cli: "codex".to_string(),
-                model: "gpt-5.6-sol".to_string(),
+                model: "gpt-6-sol".to_string(),
             },
         );
 
@@ -1910,8 +1910,8 @@ mod tests {
             let defaults = config.default_roles.get(role).unwrap();
             assert_eq!(defaults.cli, "codex", "role {role} should default to codex");
             assert_eq!(
-                defaults.model, "gpt-5.6-sol",
-                "role {role} should default to gpt-5.6-sol"
+                defaults.model, "gpt-6-sol",
+                "role {role} should default to gpt-6-sol"
             );
         }
 
@@ -1921,11 +1921,11 @@ mod tests {
 
         let principal = config.default_roles.get("principal").unwrap();
         assert_eq!(principal.cli, "codex");
-        assert_eq!(principal.model, "gpt-5.6-sol");
+        assert_eq!(principal.model, "gpt-6-sol");
 
         let frontend = config.default_roles.get("frontend").unwrap();
         assert_eq!(frontend.cli, "codex");
-        assert_eq!(frontend.model, "gpt-5.6-sol");
+        assert_eq!(frontend.model, "gpt-6-sol");
 
         let evaluator = config.default_roles.get("evaluator").unwrap();
         assert_eq!(evaluator.cli, "claude");
@@ -1933,9 +1933,81 @@ mod tests {
     }
 
     #[test]
+    fn test_rust_and_frontend_cli_and_role_defaults_match() {
+        fn quoted_field<'a>(line: &'a str, field: &str) -> &'a str {
+            line.split_once(field)
+                .and_then(|(_, suffix)| suffix.split_once('\''))
+                .and_then(|(_, suffix)| suffix.split_once('\''))
+                .map(|(value, _)| value)
+                .unwrap_or_else(|| panic!("missing {field} in frontend default: {line}"))
+        }
+
+        let config = SessionStorage::default_config();
+        let frontend_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src/lib/config/clis.ts");
+        let frontend_defaults = std::fs::read_to_string(frontend_path).unwrap();
+        let options = frontend_defaults
+            .split_once("export const cliOptions: CliOption[] = [")
+            .unwrap()
+            .1
+            .split_once("];")
+            .unwrap()
+            .0;
+        let frontend_clis: std::collections::HashMap<_, _> = options
+            .lines()
+            .filter(|line| line.contains("defaultModel:"))
+            .map(|line| {
+                (
+                    quoted_field(line, "value:"),
+                    quoted_field(line, "defaultModel:"),
+                )
+            })
+            .collect();
+        assert_eq!(frontend_clis.len(), config.clis.len());
+        for (cli, backend) in &config.clis {
+            assert_eq!(
+                frontend_clis.get(cli.as_str()).copied(),
+                Some(backend.default_model.as_str())
+            );
+            assert_eq!(
+                crate::cli::CliRegistry::default_model(cli),
+                Some(backend.default_model.as_str()),
+                "registry default drift for {cli}"
+            );
+        }
+
+        let roles = frontend_defaults
+            .split_once("export const defaultRoles: Record<string, RoleDefaults> = {")
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        let frontend_roles: std::collections::HashMap<_, _> = roles
+            .lines()
+            .filter(|line| line.contains("{ cli:") && line.contains("model:"))
+            .map(|line| {
+                let (role, _) = line.trim().split_once(':').unwrap();
+                (
+                    role.trim_matches('\''),
+                    (quoted_field(line, "cli:"), quoted_field(line, "model:")),
+                )
+            })
+            .collect();
+        assert_eq!(frontend_roles.len(), config.default_roles.len());
+        for (role, backend) in &config.default_roles {
+            assert_eq!(
+                frontend_roles.get(role.as_str()).copied(),
+                Some((backend.cli.as_str(), backend.model.as_str())),
+                "frontend role default drift for {role}"
+            );
+        }
+    }
+
+    #[test]
     fn test_default_config_excludes_removed_gemini_and_antigravity() {
-        // gemini and antigravity were removed as spawnable CLIs; GPT-5.6 work
-        // (sol/terra/luna) now routes through the codex entry.
+        // gemini and antigravity were removed as spawnable CLIs; GPT-6 work
+        // (astra/sol/luna) now routes through the codex entry.
         let config = SessionStorage::default_config();
 
         assert!(config.clis.get("gemini").is_none());
@@ -1943,7 +2015,22 @@ mod tests {
 
         let codex = config.clis.get("codex").expect("codex entry present");
         assert_eq!(codex.command, "codex");
-        assert_eq!(codex.default_model, "gpt-5.6-sol");
+        assert_eq!(codex.default_model, "gpt-6-sol");
+    }
+
+    #[test]
+    fn test_explicit_persisted_codex_5_6_default_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+        let mut config = storage.load_config().unwrap();
+        config.clis.get_mut("codex").unwrap().default_model = "gpt-5.6-sol".to_string();
+        config.default_roles.get_mut("principal").unwrap().model = "gpt-5.6-sol".to_string();
+        storage.save_config(&config).unwrap();
+
+        let reopened = SessionStorage::new_with_base(temp.path().to_path_buf()).unwrap();
+        let restored = reopened.load_config().unwrap();
+        assert_eq!(restored.clis["codex"].default_model, "gpt-5.6-sol");
+        assert_eq!(restored.default_roles["principal"].model, "gpt-5.6-sol");
     }
 
     fn sample_persisted_session(session_id: &str) -> PersistedSession {

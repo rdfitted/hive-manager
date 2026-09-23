@@ -911,7 +911,7 @@ mod tests {
             {
               "tier_ladder": {
                 "codex": {
-                  "low": "codex-gpt-5-6-sol-medium"
+                  "low": "codex-gpt-6-sol-medium"
                 }
               }
             }
@@ -942,7 +942,7 @@ mod tests {
             .iter()
             .find(|cell| cell["provider"] == "codex" && cell["tier"] == "low")
             .expect("codex low preview");
-        assert_eq!(codex_low["model"], "gpt-5.6-sol");
+        assert_eq!(codex_low["model"], "gpt-6-sol");
         assert_eq!(
             codex_low["flags"],
             serde_json::json!(["-c", "model_reasoning_effort=\"medium\""])

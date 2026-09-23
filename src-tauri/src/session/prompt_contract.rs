@@ -355,7 +355,7 @@ mod tests {
     fn codex_config() -> AgentConfig {
         AgentConfig {
             cli: "codex".to_string(),
-            model: Some("gpt-5.6-sol".to_string()),
+            model: Some("gpt-6-sol".to_string()),
             ..AgentConfig::default()
         }
     }
@@ -391,7 +391,7 @@ mod tests {
         );
 
         assert!(card.contains("Harness: `codex`"));
-        assert!(card.contains("Model: `gpt-5.6-sol`"));
+        assert!(card.contains("Model: `gpt-6-sol`"));
         assert!(card.contains("Flags: `[]`"));
         assert!(card.contains("adapter profile, not a runtime probe"));
         assert!(card.contains("Native delegation authorized: yes"));
@@ -420,7 +420,7 @@ mod tests {
 
         assert_eq!(
             card,
-            "## Capability Card\n\n- Role: Coding Principal\n- Harness: `codex`\n- Model: `gpt-5.6-sol`\n- Flags: `[]`\n- Native delegation support (adapter profile, not a runtime probe): supported\n- Operator policy: encouraged\n- Native delegation authorized: yes\n- Native child guidance: max children 4; max depth 2\n- Workspace: shared Hive Cell worktree; native children inherit the parent workspace and assignment\n- Visibility: native children are harness-managed; they are not Hive Manager Workers, Cells, queue rows, or separate worktrees"
+            "## Capability Card\n\n- Role: Coding Principal\n- Harness: `codex`\n- Model: `gpt-6-sol`\n- Flags: `[]`\n- Native delegation support (adapter profile, not a runtime probe): supported\n- Operator policy: encouraged\n- Native delegation authorized: yes\n- Native child guidance: max children 4; max depth 2\n- Workspace: shared Hive Cell worktree; native children inherit the parent workspace and assignment\n- Visibility: native children are harness-managed; they are not Hive Manager Workers, Cells, queue rows, or separate worktrees"
         );
         assert!(!card.contains("## Tier"));
     }
@@ -438,10 +438,10 @@ mod tests {
         assert!(section.contains("Current tier: `high`"));
         assert!(section.contains("resolved from this spawn's dispatch context"));
         assert!(section.contains("routing via `spawn_agent`"));
-        assert!(section.contains("`low`: model `gpt-5.6-terra`"));
+        assert!(section.contains("`low`: model `gpt-6-luna`"));
         assert!(section.contains(r#"model_reasoning_effort="medium""#));
         assert!(section
-            .contains(r#"`high`: model `gpt-5.6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
+            .contains(r#"`high`: model `gpt-6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
         assert!(section.contains("you may spawn `low`, `medium`, or `high` work"));
     }
 

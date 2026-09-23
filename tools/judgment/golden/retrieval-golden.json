@@ -165,6 +165,62 @@
         }
       ]
     },
+    "dotted-token-grammar": {
+      "entry": "plan-ready",
+      "parsed_note_count": 1,
+      "declared_touches": {
+        "T1": [
+          "foo.rs"
+        ],
+        "T2": [
+          "other.rs"
+        ]
+      },
+      "knowledge_attachment_touches": {
+        "T1": [
+          "foo.rs"
+        ],
+        "T2": [
+          "other.rs"
+        ]
+      },
+      "knowledge_edges": [
+        {
+          "task_id": "T1",
+          "context_node_id": "context::knowledge::9a9f073a800dfd73",
+          "rationale": "knowledge attachment matched declared-scope, fallback, inferred-scope:exact"
+        }
+      ],
+      "context_nodes": [
+        {
+          "id": "context::knowledge::9a9f073a800dfd73",
+          "title": "Parser guidance: The prose mentions `e.g` and version `0.51.0`; inspect `foo.rs` for the implementation.",
+          "summary": "Parser guidance: The prose mentions `e.g` and version `0.51.0`; inspect `foo.rs` for the implementation.",
+          "scope": [
+            "foo.rs"
+          ],
+          "parameters": {
+            "fingerprint_ref": ".ai-docs/project-dna.md",
+            "scope": "foo.rs",
+            "source_hash": "80254a501103a2f1",
+            "source_ref": ".ai-docs/project-dna.md#L3",
+            "summary": "Parser guidance: The prose mentions `e.g` and version `0.51.0`; inspect `foo.rs` for the implementation.",
+            "knowledge_provenance": "foo.rs=inferred-scope:exact"
+          }
+        }
+      ],
+      "omissions": [
+        {
+          "reason": "source_unreadable",
+          "count": 1,
+          "detail": "a graph source could not be read, so derived relationships are incomplete",
+          "examples": [
+            ".ai-docs/learnings.jsonl#L1: invalid JSON"
+          ]
+        }
+      ],
+      "hub_lints": []
+    },
     "file-list-fallback": {
       "entry": "plan-ready",
       "parsed_note_count": 1,

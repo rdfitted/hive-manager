@@ -3,6 +3,9 @@ mod commands;
 #[cfg(test)]
 #[path = "commands/qa_commands.rs"]
 mod qa_commands;
+#[cfg(test)]
+#[path = "commands/fusion_commands.rs"]
+mod fusion_commands;
 #[cfg(test)] mod acl_parity;
 pub mod actions;
 pub mod adapters;
@@ -48,7 +51,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(not(test))]
 use commands::{
-    add_worker_to_session, assign_task, close_session, continue_after_planning, create_pty,
+    add_worker_to_session, apply_fusion_winner, assign_task, close_session,
+    continue_after_planning, create_pty,
     get_app_config, get_coordination_log, get_current_branch, get_current_directory,
     get_pty_snapshot, get_pty_status, get_qa_verdict, get_run_journal, get_session, get_session_plan,
     get_session_storage_path,
@@ -626,6 +630,7 @@ pub fn run() {
             launch_swarm,
             launch_solo,
             launch_fusion,
+            apply_fusion_winner,
             launch_debate,
             get_session,
             get_qa_verdict,

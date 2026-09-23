@@ -106,7 +106,7 @@ pub fn is_valid_cli(cli: &str) -> bool {
 pub struct AgentLaunchSpec {
     /// CLI name (e.g., "claude", "codex")
     pub cli: String,
-    /// Canonical model identifier (e.g., "opus", "gpt-5.6-sol"). Ignored by adapters whose
+    /// Canonical model identifier (e.g., "opus", "gpt-6-sol"). Ignored by adapters whose
     /// CLI does not accept a model flag.
     pub model: Option<String>,
     /// Additional CLI flags
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_get_adapter_rejects_removed_gemini_and_antigravity() {
         // gemini and antigravity were removed as spawnable CLIs; workflows now
-        // run GPT-5.6 tiers (sol/terra/luna) through the codex adapter.
+        // run GPT-6 tiers (astra/sol/luna) through the codex adapter.
         assert!(get_adapter("gemini").is_err());
         assert!(get_adapter("antigravity").is_err());
     }
