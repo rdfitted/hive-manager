@@ -23,7 +23,12 @@ class VendorVerificationTests(unittest.TestCase):
 
     def test_checked_in_vendor_is_verified(self):
         self.assertEqual(
-            ["ledger-schema.json: OK", "ledger.py: OK"],
+            [
+                "audit.py: OK",
+                "calibration.py: OK",
+                "ledger-schema.json: OK",
+                "ledger.py: OK",
+            ],
             verify_vendor.verify(JUDGMENT_ROOT),
         )
 
