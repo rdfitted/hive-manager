@@ -167,7 +167,13 @@ pub(super) fn record_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::HiveExecutionPolicy;
+    use crate::pty::PtyManager;
+    use crate::session::{AuthStrategy, Session, SessionController, SessionState, SessionType};
+    use chrono::Utc;
+    use parking_lot::RwLock;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn candidates<'a>() -> [FusionCandidate<'a>; 2] {
@@ -251,6 +257,70 @@ mod tests {
         assert_eq!(after[1]["decision_id"], before[0]["decision_id"]);
         assert_eq!(after[1]["label"], "Careful Pass");
         assert_eq!(after[1]["source"], "downstream");
+    }
+
+    #[test]
+    fn second_selection_after_merge_started_rejects_without_outcome() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(tmp.path().join("storage")).unwrap());
+        let variants = candidates();
+        record_decision(
+            Some(&storage),
+            "fusion-repeated",
+            "Implement feature",
+            &variants,
+            "## Recommendation\nWinner: Fast Path",
+            "codex",
+            None,
+        );
+
+        let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(Session {
+            id: "fusion-repeated".to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Fusion {
+                variants: vec!["Fast Path".to_string(), "Careful Pass".to_string()],
+            },
+            project_path: tmp.path().join("project"),
+            state: SessionState::MergingWinner,
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents: Vec::new(),
+            default_cli: "codex".to_string(),
+            default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
+            no_git: false,
+            resume_report: None,
+        });
+
+        let error = SessionController::select_fusion_winner(
+            &controller,
+            "fusion-repeated",
+            "Fast Path",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("not awaiting Fusion verdict selection"),
+            "{error}"
+        );
+        assert_eq!(
+            controller.get_session("fusion-repeated").unwrap().state,
+            SessionState::MergingWinner
+        );
+        let recorded = rows(&storage);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["kind"], "decision");
     }
 
     #[test]

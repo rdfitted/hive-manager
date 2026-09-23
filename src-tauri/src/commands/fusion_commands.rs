@@ -18,7 +18,7 @@ pub async fn apply_fusion_winner(
     session_id: String,
     variant_name: String,
 ) -> Result<(), String> {
-    let controller = state.0.read();
+    let controller = state.0.write();
     apply_with(&session_id, &variant_name, |session_id, variant_name| {
         controller.select_fusion_winner(session_id, variant_name)
     })

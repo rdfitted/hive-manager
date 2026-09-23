@@ -13594,6 +13594,13 @@ The backend composed and persisted the following authoritative skeleton before l
             return Err(format!("Session {} is not a Fusion session", session_id));
         }
 
+        if session.state != SessionState::AwaitingVerdictSelection {
+            return Err(format!(
+                "Session {} is not awaiting Fusion verdict selection",
+                session_id
+            ));
+        }
+
         let requested = variant_name.trim();
         if requested.is_empty() {
             return Err("Winner variant name cannot be empty".to_string());
