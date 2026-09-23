@@ -18,11 +18,12 @@ use super::runtime::{
 };
 use super::{EdgeKind, EdgeProvenance, TaskGraph, TaskId, WorkGraphOmission};
 
-const FIXTURES: [&str; 16] = [
+const FIXTURES: [&str; 17] = [
     "compose-omission-order",
     "declared-scope",
     "star-hub",
     "codegraph-unavailable",
+    "dotted-token-grammar",
     "file-list-fallback",
     "harvested-line-range",
     "inferred-ambiguous",

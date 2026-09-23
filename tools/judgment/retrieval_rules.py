@@ -417,7 +417,7 @@ def _load_knowledge(
         curation_content = curation_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         reason = "project_knowledge_unavailable" if isinstance(error, FileNotFoundError) else "source_unreadable"
-        omissions.append(_omission(reason, 1, [f"{curation_path}: {error}"]))
+        omissions.append(_omission(reason, 1, [".ai-docs/curation-state.json: read failed"]))
     else:
         try:
             value = json.loads(curation_content)
@@ -430,8 +430,8 @@ def _load_knowledge(
                 curated_line_limit = line
             else:
                 omissions.append(_omission("resolution_incomplete", 1, [".ai-docs/curation-state.json:last_curated_line"]))
-        except json.JSONDecodeError as error:
-            omissions.append(_omission("source_unreadable", 1, [f"{curation_path}: {error}"]))
+        except json.JSONDecodeError:
+            omissions.append(_omission("source_unreadable", 1, [".ai-docs/curation-state.json: invalid JSON"]))
 
     for filename in ("project-dna.md", "bug-patterns.md", "learnings.jsonl"):
         path = ai_docs / filename
@@ -439,7 +439,7 @@ def _load_knowledge(
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             reason = "project_knowledge_unavailable" if isinstance(error, FileNotFoundError) else "source_unreadable"
-            omissions.append(_omission(reason, 1, [f"{path}: {error}"]))
+            omissions.append(_omission(reason, 1, [f".ai-docs/{filename}: read failed"]))
             continue
         source_hash = stable_hash(content.encode())
         if not filename.endswith(".jsonl"):
@@ -453,8 +453,8 @@ def _load_knowledge(
                     continue
                 try:
                     value = json.loads(line)
-                except json.JSONDecodeError as error:
-                    omissions.append(_omission("source_unreadable", 1, [f".ai-docs/{filename}#L{index + 1}: {error}"]))
+                except json.JSONDecodeError:
+                    omissions.append(_omission("source_unreadable", 1, [f".ai-docs/{filename}#L{index + 1}: invalid JSON"]))
                     continue
                 if not isinstance(value, dict):
                     continue
@@ -639,6 +639,8 @@ def _is_path_like_token(value: str) -> bool:
     return bool(
         stem
         and extension
+        and any(character.isascii() and character.isalpha() for character in extension)
+        and (len(extension) >= 2 or extension in {"c", "h", "m", "r"})
         and all(character.isascii() and character.isalnum() for character in extension)
     )
 
@@ -733,7 +735,7 @@ def _candidate_inventory(
     inventory: set[str] = set()
     for index, raw in enumerate(rust_lines(content)):
         if index >= MAX_FILE_INVENTORY_ENTRIES:
-            detail = "tracked file inventory exceeded the entry limit"
+            detail = "tracked file inventory exceeded the limit"
             return None, True, [_omission("resolution_incomplete", 1, ["git ls-files"], detail)]
         slash_normalized = raw.replace("\\", "/")
         normalized = normalize_scope(raw)
