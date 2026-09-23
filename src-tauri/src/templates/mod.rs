@@ -161,7 +161,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
         SessionTemplate {
             id: "bug-fix-hive".to_string(),
             name: "Bug-fix Hive".to_string(),
-            description: "Opus Queen with GPT-5.6 backend and frontend coding principals."
+            description: "Opus Queen with GPT-6 backend and frontend coding principals."
                 .to_string(),
             mode: SessionMode::Hive,
             cells: vec![
@@ -175,14 +175,14 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.6-sol".to_string()),
+                    model: Some("gpt-6-sol".to_string()),
                     prompt_template: "roles/backend".to_string(),
                     ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.6-sol".to_string()),
+                    model: Some("gpt-6-sol".to_string()),
                     prompt_template: "roles/frontend".to_string(),
                     ..CellTemplate::default()
                 },
@@ -203,7 +203,7 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
             id: "feature-build-hive".to_string(),
             name: "Feature-build Hive".to_string(),
             description:
-                "Opus Queen plus GPT-5.6 backend/frontend coding principals and a Droid coherence specialist."
+                "Opus Queen plus GPT-6 backend/frontend coding principals and a Droid coherence specialist."
                     .to_string(),
             mode: SessionMode::Hive,
             cells: vec![
@@ -217,14 +217,14 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "backend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.6-sol".to_string()),
+                    model: Some("gpt-6-sol".to_string()),
                     prompt_template: "roles/backend".to_string(),
                     ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "frontend".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.6-sol".to_string()),
+                    model: Some("gpt-6-sol".to_string()),
                     prompt_template: "roles/frontend".to_string(),
                     ..CellTemplate::default()
                 },
@@ -251,16 +251,16 @@ pub fn builtin_session_templates() -> Vec<SessionTemplate> {
                 CellTemplate {
                     role: "candidate-a".to_string(),
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.6-sol".to_string()),
+                    model: Some("gpt-6-sol".to_string()),
                     prompt_template: "fusion-worker".to_string(),
                     ..CellTemplate::default()
                 },
                 CellTemplate {
                     role: "candidate-b".to_string(),
-                    // Formerly antigravity (agy). Reassigned to the balanced
-                    // GPT-5.6 tier so the two candidates still diverge.
+                    // Formerly antigravity (agy). Reassigned to the fast
+                    // GPT-6 tier so the two candidates still diverge.
                     cli: "codex".to_string(),
-                    model: Some("gpt-5.6-terra".to_string()),
+                    model: Some("gpt-6-luna".to_string()),
                     prompt_template: "fusion-worker".to_string(),
                     ..CellTemplate::default()
                 },
@@ -299,7 +299,7 @@ pub fn builtin_role_packs() -> Vec<RolePack> {
             roles: vec![CellTemplate {
                 role: "backend".to_string(),
                 cli: "codex".to_string(),
-                model: Some("gpt-5.6-sol".to_string()),
+                model: Some("gpt-6-sol".to_string()),
                 prompt_template: "roles/backend".to_string(),
                 ..CellTemplate::default()
             }],
@@ -2290,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_hives_use_opus_queens_and_gpt56_coding_principals() {
+    fn builtin_hives_use_opus_queens_and_gpt6_coding_principals() {
         let templates = builtin_session_templates();
 
         for template in templates.iter().filter(|template| {
@@ -2313,7 +2313,7 @@ mod tests {
                 assert_eq!(principal.cli, "codex", "{role} CLI drifted");
                 assert_eq!(
                     principal.model.as_deref(),
-                    Some("gpt-5.6-sol"),
+                    Some("gpt-6-sol"),
                     "{role} model drifted"
                 );
             }
@@ -2325,7 +2325,7 @@ mod tests {
             .expect("implementer role pack must remain available");
         assert_eq!(implementer.name, "Coding Principal");
         assert_eq!(implementer.roles[0].cli, "codex");
-        assert_eq!(implementer.roles[0].model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(implementer.roles[0].model.as_deref(), Some("gpt-6-sol"));
     }
 
     #[test]

@@ -77,7 +77,7 @@ impl Default for WorkerRole {
 pub struct AgentConfig {
     #[serde(default = "default_cli")]
     pub cli: String,              // "claude", "codex", "opencode", "cursor", "droid", "qwen"
-    pub model: Option<String>,    // "opus", "gpt-5.6-sol", "gpt-5.6-terra", etc.
+    pub model: Option<String>,    // "opus", "gpt-6-sol", "gpt-6-luna", etc.
     #[serde(default)]
     pub flags: Vec<String>,       // Additional CLI flags
     pub label: Option<String>,    // Display name

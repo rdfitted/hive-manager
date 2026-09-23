@@ -7,6 +7,9 @@ const presets = [
   { provider: 'claude', id: 'fable-high', label: 'Fable 5 (High effort)', model: 'fable', flags: ['--settings', '{"effortLevel":"high"}'] },
   { provider: 'claude', id: 'fable-max', label: 'Fable 5 (Max effort)', model: 'fable', flags: ['--settings', '{"effortLevel":"max"}'] },
   { provider: 'claude', id: 'fable', label: 'Fable 5', model: 'fable', flags: [] },
+  { provider: 'codex', id: 'codex-gpt-6-sol', label: 'GPT-6 Sol', model: 'gpt-6-sol', flags: [] },
+  { provider: 'codex', id: 'codex-gpt-6-sol-medium', label: 'GPT-6 Sol (Medium effort)', model: 'gpt-6-sol', flags: ['-c', 'model_reasoning_effort="medium"'] },
+  { provider: 'codex', id: 'codex-gpt-6-sol-high', label: 'GPT-6 Sol (High effort)', model: 'gpt-6-sol', flags: ['-c', 'model_reasoning_effort="high"'] },
   { provider: 'codex', id: 'codex-gpt-5-6-sol', label: 'GPT-5.6 Sol', model: 'gpt-5.6-sol', flags: [] },
   { provider: 'codex', id: 'codex-gpt-5-6-sol-medium', label: 'GPT-5.6 Sol (Medium effort)', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="medium"'] },
   { provider: 'codex', id: 'codex-gpt-5-6-sol-high', label: 'GPT-5.6 Sol (High effort)', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="high"'] },
@@ -37,21 +40,38 @@ afterEach(() => {
 });
 
 describe('AgentConfigEditor', () => {
-  it('recognizes the canonical model-only GPT-5.6 Sol default', async () => {
+  it('recognizes the canonical model-only GPT-6 Sol default', async () => {
     const { getByLabelText } = render(AgentConfigEditorHarness, {
       props: {
         idPrefix: 'principal-default',
         config: {
           cli: 'codex',
-          model: 'gpt-5.6-sol',
+          model: 'gpt-6-sol',
           flags: [],
         },
       },
     });
 
     const preset = getByLabelText('Model & Effort') as HTMLSelectElement;
-    await waitFor(() => expect(preset.value).toBe('codex-gpt-5-6-sol'));
-    expect(preset.selectedOptions[0]?.textContent).toBe('GPT-5.6 Sol');
+    await waitFor(() => expect(preset.value).toBe('codex-gpt-6-sol'));
+    expect(preset.selectedOptions[0]?.textContent).toBe('GPT-6 Sol');
+  });
+
+  it('recognizes the GPT-6 alias and shows the canonical Sol model', async () => {
+    const { getByLabelText, getByText } = render(AgentConfigEditorHarness, {
+      props: {
+        idPrefix: 'principal-gpt-6-alias',
+        config: {
+          cli: 'codex',
+          model: 'gpt-6',
+          flags: ['-c', 'model_reasoning_effort="medium"'],
+        },
+      },
+    });
+
+    const preset = getByLabelText('Model & Effort') as HTMLSelectElement;
+    await waitFor(() => expect(preset.value).toBe('codex-gpt-6-sol-medium'));
+    expect(getByText('Effective: gpt-6-sol · medium effort')).toBeTruthy();
   });
 
   it('recognizes the legacy GPT-5.6 alias and shows the canonical Sol model', async () => {
@@ -155,7 +175,16 @@ describe('AgentConfigEditor', () => {
     });
   });
 
-  it('round-trips a Codex preset from the server catalogue', async () => {
+  it('round-trips a GPT-6 Codex preset from the server catalogue', async () => {
+    await expectServerPresetRoundTrip({
+      cli: 'codex',
+      presetId: 'codex-gpt-6-sol-high',
+      model: 'gpt-6-sol',
+      flags: ['-c', 'model_reasoning_effort="high"'],
+    });
+  });
+
+  it('round-trips a legacy Codex preset from the server catalogue', async () => {
     await expectServerPresetRoundTrip({
       cli: 'codex',
       presetId: 'codex-gpt-5-6-sol-high',

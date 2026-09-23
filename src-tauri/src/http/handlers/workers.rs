@@ -1585,7 +1585,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.executed_as.tier, TaskTier::Low);
-        assert_eq!(resolved.executed_as.model, "gpt-5.6-terra");
+        assert_eq!(resolved.executed_as.model, "gpt-6-luna");
         assert_eq!(
             resolved.executed_as.flags,
             ["-c", "model_reasoning_effort=\"medium\""]
@@ -1721,7 +1721,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.executed_as.tier, TaskTier::High);
-        assert_eq!(resolved.executed_as.model, "gpt-5.6-sol");
+        assert_eq!(resolved.executed_as.model, "gpt-6-sol");
         assert_eq!(
             resolved.executed_as.flags,
             ["-c", "model_reasoning_effort=\"xhigh\""]

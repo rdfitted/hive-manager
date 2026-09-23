@@ -25,10 +25,10 @@ const ladderCells = [
   { provider: 'claude', tier: 'medium', model: 'sonnet', flags: [] },
   { provider: 'claude', tier: 'high', model: 'opus', flags: [] },
   { provider: 'claude', tier: 'critical', model: 'opus', flags: ['--settings', '{"effortLevel":"max"}'] },
-  { provider: 'codex', tier: 'low', model: 'gpt-5.6-terra', flags: [] },
-  { provider: 'codex', tier: 'medium', model: 'gpt-5.6-sol', flags: [] },
-  { provider: 'codex', tier: 'high', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="high"'] },
-  { provider: 'codex', tier: 'critical', model: 'gpt-5.6-sol', flags: ['-c', 'model_reasoning_effort="ultra"'] },
+  { provider: 'codex', tier: 'low', model: 'gpt-6-luna', flags: ['-c', 'model_reasoning_effort="medium"'] },
+  { provider: 'codex', tier: 'medium', model: 'gpt-6-sol', flags: ['-c', 'model_reasoning_effort="medium"'] },
+  { provider: 'codex', tier: 'high', model: 'gpt-6-sol', flags: ['-c', 'model_reasoning_effort="xhigh"'] },
+  { provider: 'codex', tier: 'critical', model: 'gpt-6-astra', flags: ['-c', 'model_reasoning_effort="max"'] },
 ];
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -81,7 +81,11 @@ describe('LaunchDialog tier routing', () => {
       expect(view.getByRole('heading', { name: 'Codex ladder' })).toBeTruthy();
     });
     expect(view.getByLabelText('Claude tier ladder').textContent).toContain('haiku');
-    expect(view.getByLabelText('Codex tier ladder').textContent).toContain('gpt-5.6-sol');
+    const codexLadder = view.getByLabelText('Codex tier ladder').textContent;
+    expect(codexLadder).toContain('gpt-6-luna');
+    expect(codexLadder).toContain('gpt-6-sol');
+    expect(codexLadder).toContain('gpt-6-astra');
+    expect(codexLadder).toContain('model_reasoning_effort="xhigh"');
     expect(fetch).toHaveBeenCalledWith(expect.stringMatching(
       /\/api\/tier-ladder\?project_path=C%3A%2Fcode%2Fproject$/,
     ));
