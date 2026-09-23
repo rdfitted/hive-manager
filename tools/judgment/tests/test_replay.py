@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import io
 import json
@@ -158,11 +159,47 @@ class ReplayEndToEndTests(unittest.TestCase):
             hashes_before = _tree_hashes(ai_docs)
             ledger_path = base / "output" / "ledger.jsonl"
             stale_report = base / "output" / "stale-scopes.json"
+            session_store = base / "session-store"
+            _write(
+                session_store
+                / SESSION_IDS["parseable"]
+                / "state"
+                / "work-graph.json",
+                json.dumps(
+                    {
+                        "nodes": [],
+                        "edges": [
+                            {
+                                "source": "context::knowledge::one",
+                                "target": "T1",
+                                "kind": "informs",
+                                "provenance": "knowledge",
+                            },
+                            {
+                                "source": "context::knowledge::two",
+                                "target": "T1",
+                                "kind": "informs",
+                                "provenance": "knowledge",
+                            },
+                            {
+                                "source": "T1",
+                                "target": "observation::one",
+                                "kind": "informs",
+                                "provenance": "runtime",
+                            },
+                        ],
+                        "omissions": [],
+                    }
+                )
+                + "\n",
+            )
             arguments = [
                 "--sessions",
                 str(sessions),
                 "--ledger",
                 str(ledger_path),
+                "--session-store",
+                str(session_store),
                 "--stale-report",
                 str(stale_report),
             ]
@@ -191,7 +228,7 @@ class ReplayEndToEndTests(unittest.TestCase):
 
             report = json.loads(first_stdout.getvalue())
             self.assertEqual(report, json.loads(second_stdout.getvalue()))
-            self.assertEqual(0, report["production_attached"])
+            self.assertEqual(2, report["production_attached"])
             self.assertEqual(
                 {
                     "current": "compose",
@@ -209,6 +246,7 @@ class ReplayEndToEndTests(unittest.TestCase):
             self.assertEqual(1, repository["parseable_sessions"])
             self.assertEqual(1, repository["pre_grammar_sessions"])
             self.assertEqual(1, repository["unparseable_sessions"])
+            self.assertEqual(2, repository["production_attached"])
             named = {row["session_id"]: row["reason"] for row in report["named_sessions"]}
             self.assertEqual(
                 "no planning retrieval possible",
@@ -217,7 +255,7 @@ class ReplayEndToEndTests(unittest.TestCase):
             self.assertIn("unterminated", named[SESSION_IDS["unparseable"]])
             for ruleset in retrieval_replay.RULESET_ORDER:
                 score = repository["scorecards"][ruleset]
-                self.assertEqual(0, score["production_attached"])
+                self.assertEqual(2, score["production_attached"])
                 self.assertIn("touch_coverage", score)
                 self.assertIn("zero_knowledge_tasks", score)
                 self.assertIn("attachable_share", score)
@@ -263,18 +301,544 @@ class ReplayEndToEndTests(unittest.TestCase):
                     [sessions],
                     ledger_path=outside,
                     stale_report=repo / "stale.json",
+                    session_store_root=base / "session-store",
                 )
             with self.assertRaisesRegex(ValueError, "judgment ledger"):
                 retrieval_replay.run_replay(
                     [sessions],
                     ledger_path=repo / "ledger.jsonl",
                     stale_report=outside,
+                    session_store_root=base / "session-store",
                 )
             self.assertFalse((repo / "stale.json").exists())
             self.assertFalse((repo / "ledger.jsonl").exists())
 
 
 class ReplayPlumbingTests(unittest.TestCase):
+    def test_wilson_interval_matches_known_binomial_values(self):
+        self.assertEqual((None, None), retrieval_replay.wilson_interval(0, 0))
+        low, high = retrieval_replay.wilson_interval(5, 10)
+        self.assertAlmostEqual(0.2366, low, places=4)
+        self.assertAlmostEqual(0.7634, high, places=4)
+
+    def test_ack_join_keeps_absent_undecided_and_emits_metrics_and_spot_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            session_id = SESSION_IDS["parseable"]
+            session = sessions / session_id
+            session_store = base / "session-store"
+            agent_one = f"{session_id}-worker-1"
+            agent_two = f"{session_id}-worker-2"
+            agent_three = f"{session_id}-worker-3"
+            agent_four = f"{session_id}-worker-4"
+            common = {
+                "schema_version": "hive.spawn-context/v1",
+                "session_id": session_id,
+                "plan_task_id": "T1",
+                "role_definition_id": "backend",
+                "budget": {
+                    "role_chars": 4096,
+                    "task_chars": 4096,
+                    "conversation_chars": 4096,
+                },
+                "dropped": [],
+                "sampled": True,
+                "sample_rate": 0.33,
+                "question_version": 1,
+            }
+            _write(
+                session / "prompts" / f"{agent_one}-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": agent_one,
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "task",
+                                "source": "project",
+                                "pointer": ".ai-docs/project-dna.md",
+                                "priority": 80,
+                                "chars": 123,
+                            },
+                            {
+                                "tag": "k2",
+                                "position": 2,
+                                "origin": "role",
+                                "source": "institutional",
+                                "pointer": "engineering/backend-contracts.md",
+                                "priority": 60,
+                                "chars": 45,
+                            },
+                        ],
+                        "miss_sample_references": ["k2"],
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session / "prompts" / f"{agent_two}-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": agent_two,
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "role_and_task",
+                                "source": "project",
+                                "pointer": ".ai-docs/bug-patterns.md",
+                                "priority": 70,
+                                "chars": 90,
+                            }
+                        ],
+                        "miss_sample_references": [],
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session / "prompts" / f"{agent_three}-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": agent_three,
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "task",
+                                "source": "project",
+                                "pointer": ".ai-docs/learnings.jsonl",
+                                "priority": 65,
+                                "chars": 80,
+                            }
+                        ],
+                        "miss_sample_references": [],
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session / "prompts" / f"{agent_four}-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": agent_four,
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "role",
+                                "source": "institutional",
+                                "pointer": "testing.md",
+                                "priority": 55,
+                                "chars": 70,
+                            }
+                        ],
+                        "miss_sample_references": [],
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session / "prompts" / f"{agent_one}-prompt.md",
+                "- [k1] Durable authentication boundary guidance\n"
+                "- [k2] Conservative database transaction handling\n",
+            )
+            _write(
+                session / "tasks" / "worker-1-task.md",
+                "## Result\nReviewed project-dna while implementing the task.\n",
+            )
+            _write(
+                session_store / session_id / "session.json",
+                json.dumps(
+                    {
+                        "agents": [
+                            {"id": agent_one, "config": {"cli": "codex"}},
+                            {"id": agent_two, "config": {"cli": "codex"}},
+                            {"id": agent_three, "config": {"cli": "codex"}},
+                            {"id": agent_four, "config": {"cli": "codex"}},
+                        ]
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session_store
+                / session_id
+                / "state"
+                / "work-graph-completions.jsonl",
+                json.dumps(
+                    {
+                        "id": "synthetic-completion",
+                        "task_id": "T1",
+                        "agent_id": agent_two,
+                        "provenance": "heartbeat",
+                        "completed_at": "2026-09-22T00:02:00Z",
+                        "executed_as": None,
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session_store / session_id / "state" / "knowledge-acks.jsonl",
+                json.dumps(
+                    {
+                        "schema_version": "hive.knowledge-ack/v1",
+                        "session_id": session_id,
+                        "agent_id": agent_one,
+                        "knowledge_ack": [],
+                        "recorded_at": "2026-09-22T00:00:00Z",
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "schema_version": "hive.knowledge-ack/v1",
+                        "session_id": session_id,
+                        "agent_id": agent_three,
+                        "knowledge_ack": ["k9"],
+                        "recorded_at": "2026-09-22T00:01:00Z",
+                    }
+                )
+                + "\n",
+            )
+            result = {
+                "declared_touches": {},
+                "knowledge_attachment_touches": {},
+                "knowledge_edges": [],
+                "context_nodes": [],
+                "omissions": [],
+                "hub_lints": [],
+            }
+            matrix = {
+                ruleset: result for ruleset in retrieval_replay.RULESET_ORDER
+            }
+            comparisons = {
+                ruleset: (result, result)
+                for ruleset in retrieval_replay.RULESET_ORDER[1:]
+            }
+            ledger_path = base / "output" / "ledger.jsonl"
+            spot_check = base / "output" / "spot-check.csv"
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ), patch.object(
+                retrieval_replay,
+                "evaluate_replay_session",
+                return_value=(matrix, comparisons),
+            ):
+                report = retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=session_store,
+                    spot_check_csv=spot_check,
+                )
+                retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=session_store,
+                    spot_check_csv=spot_check,
+                )
+
+            metrics = report["knowledge_ack_metrics"]
+            self.assertEqual(
+                {
+                    "sampled_completions": 3,
+                    "acknowledged": 1,
+                    "compliance": 1 / 3,
+                    "reliable": False,
+                },
+                metrics["compliance_by_cli"]["codex"],
+            )
+            self.assertEqual(1, metrics["precision"]["overall"]["shown"])
+            self.assertEqual(0, metrics["precision"]["overall"]["used"])
+            self.assertEqual(1, metrics["precision"]["by_cli"]["codex"]["shown"])
+            self.assertEqual(1, metrics["miss_rate"]["shown"])
+            self.assertFalse(metrics["miss_rate"]["enough_samples"])
+            self.assertTrue(metrics["miss_rate"]["flagged_low_n"])
+            self.assertEqual(1, metrics["proxy_agreement"]["agree"])
+            self.assertEqual(2, metrics["proxy_agreement"]["total"])
+            self.assertAlmostEqual(1 / 2, metrics["proxy_agreement"]["rate"])
+            self.assertEqual(
+                [
+                    {
+                        "repo": repo.name,
+                        "session_id": session_id,
+                        "agent_id": agent_three,
+                        "tag": "k9",
+                    }
+                ],
+                report["out_of_context_ack_tags"],
+            )
+
+            rows = list(ledger.read_records([ledger_path]))
+            outcomes = [row for row in rows if row.get("kind") == "outcome"]
+            self.assertEqual(2, len(outcomes), "ack outcomes must be idempotent")
+            self.assertTrue(all(row["label"] == "unused" for row in outcomes))
+            self.assertEqual(
+                [False, True],
+                sorted(row["proxy_mentioned"] for row in outcomes),
+            )
+            absent_decision_ids = {
+                row["decision_id"]
+                for row in rows
+                if row.get("surface") == "hive.retrieval.spawn"
+                and row["subject_ref"]["agent_id"] == agent_two
+            }
+            self.assertTrue(absent_decision_ids)
+            self.assertTrue(
+                absent_decision_ids.isdisjoint(
+                    {row["decision_id"] for row in outcomes}
+                ),
+                "an absent ack must remain undecided with no outcome row",
+            )
+            invalid_decision_ids = {
+                row["decision_id"]
+                for row in rows
+                if row.get("surface") == "hive.retrieval.spawn"
+                and row["subject_ref"]["agent_id"] == agent_three
+            }
+            self.assertTrue(invalid_decision_ids)
+            self.assertTrue(
+                invalid_decision_ids.isdisjoint(
+                    {row["decision_id"] for row in outcomes}
+                ),
+                "an out-of-context ack must emit no model-ack outcome row",
+            )
+            checked, errors = ledger.validate_file([ledger_path])
+            self.assertEqual(7, checked)
+            self.assertEqual([], errors)
+
+            with open(spot_check, encoding="utf-8", newline="") as handle:
+                spot_rows = list(csv.DictReader(handle))
+            self.assertEqual(2, len(spot_rows))
+            spot_rows_by_agent = {row["agent_id"]: row for row in spot_rows}
+            self.assertEqual("decided", spot_rows_by_agent[agent_one]["ack_state"])
+            self.assertEqual(
+                "undecided", spot_rows_by_agent[agent_three]["ack_state"]
+            )
+            self.assertEqual("", spot_rows_by_agent[agent_three]["ack_tags"])
+            self.assertEqual(
+                "", spot_rows_by_agent[agent_three]["proxy_agreement"]
+            )
+            self.assertTrue(all(row["human_used_tags"] == "" for row in spot_rows))
+
+    def test_spawn_sidecars_write_schema_valid_rows_and_delivery_coverage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            session = sessions / SESSION_IDS["parseable"]
+            common = {
+                "schema_version": "hive.spawn-context/v1",
+                "session_id": SESSION_IDS["parseable"],
+                "role_definition_id": "backend",
+                "budget": {
+                    "role_chars": 4096,
+                    "task_chars": 4096,
+                    "conversation_chars": 4096,
+                },
+                "sampled": True,
+                "sample_rate": 0.33,
+                "question_version": 1,
+                "miss_sample_references": ["k2"],
+            }
+            _write(
+                session / "prompts" / "worker-1-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": f'{SESSION_IDS["parseable"]}-worker-1',
+                        "plan_task_id": "T1",
+                        "kept": [
+                            {
+                                "tag": "k1",
+                                "position": 1,
+                                "origin": "task",
+                                "source": "project",
+                                "pointer": ".ai-docs/project-dna.md",
+                                "priority": 80,
+                                "chars": 123,
+                            },
+                            {
+                                "tag": "k2",
+                                "position": 2,
+                                "origin": "role",
+                                "source": "institutional",
+                                "pointer": "testing.md",
+                                "priority": 60,
+                                "chars": 45,
+                            },
+                        ],
+                        "dropped": [
+                            {
+                                "pointer": ".ai-docs/bug-patterns.md",
+                                "origin": "role_and_task",
+                                "reason": "task_budget_exceeded",
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+            )
+            _write(
+                session / "prompts" / "worker-2-context.json",
+                json.dumps(
+                    {
+                        **common,
+                        "agent_id": f'{SESSION_IDS["parseable"]}-worker-2',
+                        "plan_task_id": None,
+                        "role_definition_id": None,
+                        "sampled": False,
+                        "kept": [],
+                        "dropped": [],
+                        "miss_sample_references": [],
+                    }
+                )
+                + "\n",
+            )
+            result = {
+                "declared_touches": {},
+                "knowledge_attachment_touches": {},
+                "knowledge_edges": [],
+                "context_nodes": [],
+                "omissions": [],
+                "hub_lints": [],
+            }
+            matrix = {
+                ruleset: result for ruleset in retrieval_replay.RULESET_ORDER
+            }
+            comparisons = {
+                ruleset: (result, result)
+                for ruleset in retrieval_replay.RULESET_ORDER[1:]
+            }
+            ledger_path = base / "output" / "ledger.jsonl"
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ), patch.object(
+                retrieval_replay,
+                "evaluate_replay_session",
+                return_value=(matrix, comparisons),
+            ):
+                report = retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=base / "session-store",
+                )
+                retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=ledger_path,
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=base / "session-store",
+                )
+
+            self.assertEqual(
+                {
+                    "worker_spawns": 2,
+                    "spawns_with_plan_task_id": 1,
+                    "share": 0.5,
+                },
+                report["delivery_coverage"],
+            )
+            self.assertEqual(
+                report["delivery_coverage"],
+                report["repositories"][repo.name]["delivery_coverage"],
+            )
+            rows = list(ledger.read_records([ledger_path]))
+            spawn_rows = [
+                row for row in rows if row.get("surface") == "hive.retrieval.spawn"
+            ]
+            self.assertEqual(3, len(spawn_rows), "replay must be idempotent")
+            self.assertEqual(
+                ["kept", "kept", "dropped"],
+                [row["answer"]["disposition"] for row in spawn_rows],
+            )
+            self.assertEqual(
+                {
+                    "disposition": "dropped",
+                    "reason": "task_budget_exceeded",
+                    "position": None,
+                    "origin": "role_and_task",
+                    "provenance": None,
+                    "priority": None,
+                    "cost": None,
+                    "miss_sample": False,
+                },
+                spawn_rows[2]["answer"],
+            )
+            self.assertTrue(spawn_rows[1]["answer"]["miss_sample"])
+            self.assertEqual((3, []), ledger.validate_file([ledger_path]))
+
+    def test_replay_names_parseable_session_without_a_persisted_work_graph(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            repo, sessions = _make_fake_repo(base)
+            result = {
+                "declared_touches": {},
+                "knowledge_attachment_touches": {},
+                "knowledge_edges": [],
+                "context_nodes": [],
+                "omissions": [],
+                "hub_lints": [],
+            }
+            matrix = {
+                ruleset: result for ruleset in retrieval_replay.RULESET_ORDER
+            }
+            comparisons = {
+                ruleset: (result, result)
+                for ruleset in retrieval_replay.RULESET_ORDER[1:]
+            }
+
+            with patch.object(
+                retrieval_replay,
+                "tracked_files",
+                return_value=(["src/auth.rs"], None),
+            ), patch.object(
+                retrieval_replay,
+                "recover_changed_files",
+                return_value=({"src/auth.rs"}, "recovered from local ref"),
+            ), patch.object(
+                retrieval_replay,
+                "evaluate_replay_session",
+                return_value=(matrix, comparisons),
+            ):
+                report = retrieval_replay.run_replay(
+                    [sessions],
+                    ledger_path=base / "output" / "ledger.jsonl",
+                    stale_report=base / "output" / "stale-scopes.json",
+                    session_store_root=base / "session-store",
+                )
+
+        self.assertIn(
+            {
+                "repo": repo.name,
+                "session_id": SESSION_IDS["parseable"],
+                "reason": "production work graph missing",
+            },
+            report["named_sessions"],
+        )
+        self.assertEqual(0, report["production_attached"])
+
     def test_replay_reports_missing_edge_context_clearly(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -322,6 +886,7 @@ class ReplayPlumbingTests(unittest.TestCase):
                         [sessions],
                         ledger_path=base / "output" / "ledger.jsonl",
                         stale_report=base / "output" / "stale-scopes.json",
+                        session_store_root=base / "session-store",
                     )
 
     def test_task_status_matches_exact_task_token(self):
@@ -456,6 +1021,7 @@ class ReplayPlumbingTests(unittest.TestCase):
                     [sessions],
                     ledger_path=ledger_path,
                     stale_report=stale_report,
+                    session_store_root=base / "session-store",
                 )
 
         scorecards = report["repositories"][repo.name]["scorecards"]
@@ -497,6 +1063,7 @@ class ReplayPlumbingTests(unittest.TestCase):
                     [sessions],
                     ledger_path=ledger_path,
                     stale_report=stale_report,
+                    session_store_root=base / "session-store",
                 )
 
             stale = json.loads(stale_report.read_text(encoding="utf-8"))
@@ -533,6 +1100,28 @@ class ReplayPlumbingTests(unittest.TestCase):
                     appdata / "hive-manager" / "judgments" / "ledger.jsonl",
                     retrieval_replay.resolve_ledger_path(),
                 )
+
+    def test_session_store_resolution_matches_session_storage_on_each_platform(self):
+        self.assertEqual(
+            Path("C:/Users/operator/AppData/Roaming")
+            / "hive-manager"
+            / "sessions",
+            retrieval_replay.resolve_session_store_root(
+                platform="nt",
+                environment={"APPDATA": "C:/Users/operator/AppData/Roaming"},
+            ),
+        )
+        self.assertEqual(
+            Path("/c/Users/RDuff/.config/hive-manager/sessions"),
+            retrieval_replay.resolve_session_store_root(
+                platform="posix",
+                environment={"HOME": "/c/Users/RDuff"},
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "HOME not set"):
+            retrieval_replay.resolve_session_store_root(
+                platform="posix", environment={}
+            )
 
     def test_changed_files_use_only_local_refs_and_merge_base(self):
         calls: list[list[str]] = []

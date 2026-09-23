@@ -340,6 +340,7 @@ impl PtySession {
         role: AgentRole,
         command: &str,
         submit_policy: PtySubmitPolicy,
+        identity_env: &[(String, String)],
         args: &[&str],
         cwd: Option<&str>,
         cols: u16,
@@ -378,6 +379,13 @@ impl PtySession {
             cmd.args(args);
             cmd
         };
+
+        for key in ["HIVE_SESSION_ID", "HIVE_AGENT_ID", "HIVE_ROLE"] {
+            cmd.env_remove(key);
+        }
+        for (key, value) in identity_env {
+            cmd.env(key, value);
+        }
 
         if let Some(dir) = cwd {
             cmd.cwd(dir);

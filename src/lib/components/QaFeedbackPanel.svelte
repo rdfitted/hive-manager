@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { activeSession, serdeEnumVariantName } from '$lib/stores/sessions';
+  import { activeSession } from '$lib/stores/sessions';
 
   interface QaCriterion {
     id: string;
@@ -100,9 +100,13 @@
           <p>{verdict.summary}</p>
         </div>
 
-        <div class="criteria-list">
+        <div class="criteria-list" role="list" aria-label="QA criteria">
           {#each verdict.criteria as criterion}
-            <div class="criterion-item lattice-forced-colors-boundary" class:passed={criterion.passed}>
+            <div
+              class="criterion-item lattice-forced-colors-boundary"
+              class:passed={criterion.passed}
+              role="listitem"
+            >
               <div class="criterion-header">
                 <span class="criterion-icon">
                   {#if criterion.passed}
@@ -111,7 +115,10 @@
                     <X size={12} weight="fill" />
                   {/if}
                 </span>
-                <span class="criterion-label">{criterion.label}</span>
+                <span class="criterion-label">
+                  <span class="criterion-number">Criterion {criterion.id}</span>
+                  {criterion.label}
+                </span>
               </div>
               {#if criterion.evidence}
                 <p class="criterion-evidence">{criterion.evidence}</p>
@@ -241,6 +248,12 @@
     font-size: 12px;
     font-weight: 500;
     color: var(--text-primary);
+  }
+
+  .criterion-number {
+    margin-right: 6px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
   }
 
   .criterion-evidence {

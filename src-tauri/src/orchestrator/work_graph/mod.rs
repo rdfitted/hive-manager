@@ -6,6 +6,7 @@ pub mod codegraph;
 pub mod completion_ledger;
 pub mod context;
 pub mod divergence;
+pub mod knowledge_ack;
 pub mod plan_parse;
 pub mod retro;
 pub mod review;

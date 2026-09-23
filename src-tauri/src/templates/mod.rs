@@ -623,6 +623,11 @@ REQUIRED_FIXES:
 - [required follow-up or `none`]
 ```
 
+For a typed contract, submit the same complete criterion set in the HTTP body:
+`"criteria":[{"number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]}]`.
+Use `"pass"`, `"fail"`, `{"scored":6}`, `{"measured":82.5}`, or `"blocked"` for `result`.
+For an untyped contract, omit `criteria` and send the bare verdict body.
+
 ## QA State Machine HTTP Surface
 
 The QA state machine exposes HTTP endpoints for verdict submission and session completion:
@@ -631,11 +636,12 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 ```bash
 curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
   -H "Content-Type: application/json" \
-  -d '{"verdict":"PASS","commit_sha":"<git-sha-if-any>","rationale":"<optional explanation>"}'
+  -d '{"verdict":"PASS","commit_sha":"<git-sha-if-any>","rationale":"<optional explanation>","criteria":[{"number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]}]}'
 ```
 - `verdict`: Required. Either `"PASS"` or `"FAIL"`.
 - `commit_sha`: Optional. Include if your QA work produced a commit.
 - `rationale`: Optional. Brief explanation for the verdict.
+- `criteria`: Required for a typed contract and omitted for an untyped contract. Include every numbered criterion exactly once.
 
 ### Override Endpoints (Operator Use)
 These are destructive overrides and require an explicit confirmation body.
@@ -661,7 +667,7 @@ curl -sS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/force-pass" \
    ```bash
    curl -fsS -X POST "{{api_base_url}}/api/sessions/{{session_id}}/qa/verdict" \
      -H "Content-Type: application/json" \
-     -d '{"verdict":"<PASS|FAIL>","commit_sha":"<sha>","rationale":"<one-line rationale based on contract criteria>"}'
+     -d '{"verdict":"<PASS|FAIL>","commit_sha":"<sha>","rationale":"<one-line rationale based on contract criteria>","criteria":[{"number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]}]}'
    ```
 2. If a pass-criterion cannot be exercised because the required UI/host is not running, OR a QA worker could not report over HTTP, you MUST POST `{"verdict":"BLOCKED","blocked_reason":"ui-unavailable"|"http-failure","blocked_detail":"<which criterion/worker>"}` to the same `/qa/verdict` endpoint instead of guessing or stalling.
 3. After the POST, you MUST confirm that `.hive-manager/{{session_id}}/peer/qa-verdict.json` appears within a bounded interval:
@@ -1448,7 +1454,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 
 ### Verdict Endpoints
 - **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
-  - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
+  - Typed body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>","criteria":[{"number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]}]}`; omit `criteria` only for an untyped contract
 - **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
   - Body (required): `{"confirm":true,"rationale":"<why>"}` — a bodyless POST is refused with 400
 - **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
@@ -1695,7 +1701,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 
 ### Verdict Endpoints
 - **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
-  - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
+  - Typed body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>","criteria":[{"number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]}]}`; omit `criteria` only for an untyped contract
 - **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
   - Body (required): `{"confirm":true,"rationale":"<why>"}` — a bodyless POST is refused with 400
 - **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override
@@ -1803,7 +1809,7 @@ The QA state machine exposes HTTP endpoints for verdict submission and session c
 
 ### Verdict Endpoints
 - **Canonical**: `POST /api/sessions/{{session_id}}/qa/verdict` — Evaluator submits verdict
-  - Body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>"}`
+  - Typed body: `{"verdict":"PASS|FAIL","commit_sha":"<optional>","rationale":"<optional>","criteria":[{"number":1,"result":"pass","evidence":"<observation>","evidence_refs":["<worker/report reference>"]}]}`; omit `criteria` only for an untyped contract
 - **Force Pass**: `POST /api/sessions/{{session_id}}/qa/force-pass` — Operator override
   - Body (required): `{"confirm":true,"rationale":"<why>"}` — a bodyless POST is refused with 400
 - **Force Fail**: `POST /api/sessions/{{session_id}}/qa/force-fail` — Operator override

@@ -13,6 +13,45 @@ use crate::adapters::{pty_submit_policy, PtySubmitResult};
 use crate::cli::agent_store;
 use crate::tauri_shim::{AppHandle, Emitter};
 
+/// Environment exported to managed agent processes.
+///
+/// Agent ids are namespaced by their session UUID. Scratch PTYs and malformed ids
+/// deliberately receive no partial or guessed identity.
+fn agent_identity_env(id: &str, role: &AgentRole) -> Vec<(String, String)> {
+    if id.starts_with("scratch:") {
+        return Vec::new();
+    }
+
+    let Some(session_id) = id.get(..36) else {
+        return Vec::new();
+    };
+    if id.as_bytes().get(36) != Some(&b'-')
+        || id.get(37..).is_none_or(str::is_empty)
+        || uuid::Uuid::parse_str(session_id).is_err()
+    {
+        return Vec::new();
+    }
+
+    let role = match role {
+        AgentRole::MasterPlanner => "master-planner",
+        AgentRole::Queen => "queen",
+        AgentRole::Planner { .. } => "planner",
+        AgentRole::Worker { .. } => "worker",
+        AgentRole::Fusion { .. } => "fusion",
+        AgentRole::Judge { .. } => "judge",
+        AgentRole::Evaluator => "evaluator",
+        AgentRole::QaWorker { .. } => "qa-worker",
+        AgentRole::Prince => "prince",
+        AgentRole::ScratchShell => "scratch-shell",
+    };
+
+    vec![
+        ("HIVE_SESSION_ID".to_string(), session_id.to_string()),
+        ("HIVE_AGENT_ID".to_string(), id.to_string()),
+        ("HIVE_ROLE".to_string(), role.to_string()),
+    ]
+}
+
 /// One coalesced run of child output, delivered on the agent's own event name (#289).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PtyOutput {
@@ -417,11 +456,13 @@ impl PtyManager {
             .chain(args.iter().copied())
             .collect();
 
+        let identity_env = agent_identity_env(&id, &role);
         let session = Arc::new(PtySession::new(
             id.clone(),
             role,
             command,
             pty_submit_policy(command),
+            &identity_env,
             &effective_args,
             cwd,
             cols,
@@ -624,6 +665,20 @@ impl PtyManager {
     }
 
     #[cfg(all(test, windows))]
+    pub fn spawn_env_for_test(&self, id: &str) -> Option<Vec<(String, String)>> {
+        let sessions = self.sessions.read();
+        sessions.get(id).map(|session| session.env().to_vec())
+    }
+
+    #[cfg(all(test, windows))]
+    pub fn removed_spawn_env_for_test(&self, id: &str) -> Option<Vec<String>> {
+        let sessions = self.sessions.read();
+        sessions
+            .get(id)
+            .map(|session| session.env_removed().to_vec())
+    }
+
+    #[cfg(all(test, windows))]
     pub fn write_records_for_test(&self, id: &str) -> Option<Vec<Vec<u8>>> {
         let sessions = self.sessions.read();
         sessions.get(id).map(|session| session.write_records())
@@ -678,6 +733,153 @@ mod tests {
             index: 1,
             parent: None,
         }
+    }
+
+    const SESSION_ID: &str = "3dc17391-88d6-46c7-93ba-037f37d36894";
+
+    #[test]
+    fn identity_env_uses_stable_labels_for_every_agent_role() {
+        let roles = [
+            (AgentRole::MasterPlanner, "master-planner"),
+            (AgentRole::Queen, "queen"),
+            (AgentRole::Planner { index: 1 }, "planner"),
+            (
+                AgentRole::Worker {
+                    index: 1,
+                    parent: None,
+                },
+                "worker",
+            ),
+            (
+                AgentRole::Fusion {
+                    variant: "alpha".to_string(),
+                },
+                "fusion",
+            ),
+            (
+                AgentRole::Judge {
+                    session_id: SESSION_ID.to_string(),
+                },
+                "judge",
+            ),
+            (AgentRole::Evaluator, "evaluator"),
+            (
+                AgentRole::QaWorker {
+                    index: 1,
+                    parent: None,
+                },
+                "qa-worker",
+            ),
+            (AgentRole::Prince, "prince"),
+            (AgentRole::ScratchShell, "scratch-shell"),
+        ];
+
+        for (index, (role, expected_role)) in roles.into_iter().enumerate() {
+            let id = format!("{SESSION_ID}-test-{index}");
+            assert_eq!(
+                agent_identity_env(&id, &role),
+                vec![
+                    ("HIVE_SESSION_ID".to_string(), SESSION_ID.to_string()),
+                    ("HIVE_AGENT_ID".to_string(), id),
+                    ("HIVE_ROLE".to_string(), expected_role.to_string()),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn identity_env_accepts_every_production_suffix_shape() {
+        for suffix in [
+            "master-planner",
+            "queen",
+            "planner-1",
+            "worker-1",
+            "fusion-1",
+            "debate-1-r2",
+            "judge",
+            "evaluator",
+            "retro-evaluator",
+            "qa-worker-1",
+            "prince",
+        ] {
+            let id = format!("{SESSION_ID}-{suffix}");
+            let env = agent_identity_env(&id, &AgentRole::Queen);
+            assert_eq!(env[0].1, SESSION_ID, "suffix: {suffix}");
+            assert_eq!(env[1].1, id, "suffix: {suffix}");
+        }
+    }
+
+    #[test]
+    fn identity_env_fails_open_for_scratch_and_malformed_ids() {
+        let invalid_ids = [
+            format!("scratch:{SESSION_ID}:terminal"),
+            "not-a-uuid-worker".to_string(),
+            SESSION_ID.to_string(),
+            format!("{SESSION_ID}-"),
+            "éééééééééééééééééééééééééééééééééééé-worker".to_string(),
+        ];
+        for id in invalid_ids {
+            assert!(
+                agent_identity_env(&id, &AgentRole::ScratchShell).is_empty(),
+                "id: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_session_applies_identity_env_at_the_pty_choke_point() {
+        let manager = PtyManager::new();
+        let id = format!("{SESSION_ID}-worker-7");
+        manager
+            .create_session(
+                id.clone(),
+                AgentRole::Worker {
+                    index: 7,
+                    parent: Some(format!("{SESSION_ID}-queen")),
+                },
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        assert_eq!(
+            manager.spawn_env_for_test(&id).unwrap(),
+            vec![
+                ("HIVE_SESSION_ID".to_string(), SESSION_ID.to_string()),
+                ("HIVE_AGENT_ID".to_string(), id),
+                ("HIVE_ROLE".to_string(), "worker".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn scratch_session_removes_inherited_identity_env_at_the_pty_choke_point() {
+        let manager = PtyManager::new();
+        let id = format!("scratch:{SESSION_ID}:terminal");
+        manager
+            .create_session(
+                id.clone(),
+                AgentRole::ScratchShell,
+                "claude",
+                &[],
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+
+        assert!(manager.spawn_env_for_test(&id).unwrap().is_empty());
+        assert_eq!(
+            manager.removed_spawn_env_for_test(&id).unwrap(),
+            vec![
+                "HIVE_SESSION_ID".to_string(),
+                "HIVE_AGENT_ID".to_string(),
+                "HIVE_ROLE".to_string(),
+            ]
+        );
     }
 
     fn public_struct_fields(source: &str, struct_name: &str) -> Vec<String> {

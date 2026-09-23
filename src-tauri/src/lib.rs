@@ -1,5 +1,8 @@
 #[cfg(not(test))]
 mod commands;
+#[cfg(test)]
+#[path = "commands/qa_commands.rs"]
+mod qa_commands;
 #[cfg(test)] mod acl_parity;
 pub mod actions;
 pub mod adapters;
@@ -9,6 +12,7 @@ mod coordination;
 pub mod domain;
 pub mod events;
 mod http;
+mod judgment;
 pub mod orchestrator;
 mod preview;
 mod process;
@@ -46,7 +50,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use commands::{
     add_worker_to_session, assign_task, close_session, continue_after_planning, create_pty,
     get_app_config, get_coordination_log, get_current_branch, get_current_directory,
-    get_pty_snapshot, get_pty_status, get_run_journal, get_session, get_session_plan,
+    get_pty_snapshot, get_pty_status, get_qa_verdict, get_run_journal, get_session, get_session_plan,
     get_session_storage_path,
     get_workers_state, git_fetch, git_pull, git_push, git_worktree_add, git_worktree_list,
     git_worktree_prune, git_worktree_remove, inject_to_pty, kill_pty, launch_debate, launch_fusion,
@@ -624,6 +628,7 @@ pub fn run() {
             launch_fusion,
             launch_debate,
             get_session,
+            get_qa_verdict,
             list_sessions,
             stop_session,
             close_session,

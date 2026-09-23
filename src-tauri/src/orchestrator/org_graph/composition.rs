@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::boundary::{includes_artifact_context, includes_spawner_conversation};
 use super::definitions::{MAX_KNOWLEDGE_POINTER_CHARS, MAX_KNOWLEDGE_SUMMARY_CHARS};
@@ -13,6 +14,11 @@ use crate::orchestrator::work_graph::context::{
     ANTI_HUB_MIN_TASKS, ANTI_HUB_TASK_FRACTION,
 };
 use crate::orchestrator::work_graph::{EdgeKind, EdgeProvenance, TaskGraph};
+
+pub const ACK_SAMPLE_RATE: f64 = 0.33;
+pub const ACK_QUESTION_VERSION: u32 = 1;
+pub const ACK_MISS_SAMPLE_MAX: usize = 1;
+pub const ACK_INSTRUCTION: &str = "When you send your completed heartbeat, include \"knowledge_ack\":[\"k2\",...] listing the references that were relevant to your work, or \"knowledge_ack\":[] if none were relevant.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +131,12 @@ pub struct ComposedContext {
     pub dropped: Vec<DroppedContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionResult {
+    pub context: ComposedContext,
+    pub remaining: ContextBudget,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleKnowledgeHubLint {
     pub source: KnowledgeSource,
@@ -150,6 +162,15 @@ pub fn compose_context(
     role: Option<&RoleDefinition>,
     spawn: &SpawnContext,
 ) -> ComposedContext {
+    compose_context_with_remaining(role, spawn).context
+}
+
+/// Compose context while retaining the exact remaining character budgets used
+/// for optional post-composition sampling.
+pub fn compose_context_with_remaining(
+    role: Option<&RoleDefinition>,
+    spawn: &SpawnContext,
+) -> CompositionResult {
     let mut composed = ComposedContext::default();
     let mut role_remaining = spawn.budget.role_chars;
     let mut task_remaining = spawn.budget.task_chars;
@@ -216,7 +237,7 @@ pub fn compose_context(
             }
         }
 
-        let cost = knowledge_record_cost(&record.reference);
+        let cost = knowledge_reference_chars(&record.reference);
         let (remaining, reason) = match record.origin {
             ContextOrigin::Role | ContextOrigin::RoleAndTask => {
                 (&mut role_remaining, ContextDropReason::RoleBudgetExceeded)
@@ -242,7 +263,7 @@ pub fn compose_context(
 
     let boundary = role
         .map(|definition| definition.context_boundary)
-        .unwrap_or_else(ContextBoundary::default);
+        .unwrap_or_default();
     admit_conversation_context(
         &spawn.conversation,
         boundary,
@@ -261,7 +282,14 @@ pub fn compose_context(
             .then(left.pointer.cmp(&right.pointer))
             .then(drop_reason_rank(left.reason).cmp(&drop_reason_rank(right.reason)))
     });
-    composed
+    CompositionResult {
+        context: composed,
+        remaining: ContextBudget {
+            role_chars: role_remaining,
+            task_chars: task_remaining,
+            conversation_chars: conversation_remaining,
+        },
+    }
 }
 
 /// Convert the authoritative knowledge edges for one explicitly identified
@@ -284,37 +312,7 @@ pub fn spawn_context_from_work_graph_task(
                 && edge.provenance == EdgeProvenance::Knowledge
         })
         .filter_map(|edge| graph.nodes.iter().find(|node| node.id == edge.source))
-        .filter_map(|source_node| source_node.expansion.as_ref())
-        .filter_map(|expansion| {
-            let source_ref = expansion.parameters.get("source_ref")?.trim();
-            if source_ref.is_empty() {
-                return None;
-            }
-            let summary = expansion
-                .parameters
-                .get("summary")
-                .map(|summary| bound_context_text(summary, MAX_KNOWLEDGE_SUMMARY_CHARS))
-                .filter(|summary| !summary.is_empty());
-            let (source, pointer) = if let Some(pointer) = source_ref
-                .strip_prefix("institutional:")
-                .or_else(|| source_ref.strip_prefix("global:"))
-            {
-                (KnowledgeSource::Institutional, pointer.trim())
-            } else {
-                (KnowledgeSource::Project, source_ref)
-            };
-            let priority = expansion
-                .parameters
-                .get("priority")
-                .and_then(|priority| priority.parse().ok())
-                .unwrap_or_default();
-            Some(KnowledgeRef {
-                source,
-                pointer: pointer.to_string(),
-                summary,
-                priority,
-            })
-        })
+        .filter_map(knowledge_ref_from_work_node)
         .collect();
 
     SpawnContext {
@@ -326,6 +324,52 @@ pub fn spawn_context_from_work_graph_task(
         .filter(|summary| !summary.is_empty()),
         ..SpawnContext::default()
     }
+}
+
+/// Collect every bounded knowledge reference represented in a work graph. The
+/// caller decides which of these unattached/dropped references are eligible for
+/// miss sampling; this function does not infer a task.
+pub fn knowledge_refs_from_work_graph(graph: &TaskGraph) -> Vec<KnowledgeRef> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == crate::orchestrator::work_graph::NodeKind::Context)
+        .filter_map(knowledge_ref_from_work_node)
+        .collect()
+}
+
+fn knowledge_ref_from_work_node(
+    source_node: &crate::orchestrator::work_graph::WorkNode,
+) -> Option<KnowledgeRef> {
+    let expansion = source_node.expansion.as_ref()?;
+    let source_ref = expansion.parameters.get("source_ref")?.trim();
+    if source_ref.is_empty() {
+        return None;
+    }
+    let summary = expansion
+        .parameters
+        .get("summary")
+        .map(|summary| bound_context_text(summary, MAX_KNOWLEDGE_SUMMARY_CHARS))
+        .filter(|summary| !summary.is_empty());
+    let (source, pointer) = if let Some(pointer) = source_ref
+        .strip_prefix("institutional:")
+        .or_else(|| source_ref.strip_prefix("global:"))
+    {
+        (KnowledgeSource::Institutional, pointer.trim())
+    } else {
+        (KnowledgeSource::Project, source_ref)
+    };
+    let priority = expansion
+        .parameters
+        .get("priority")
+        .and_then(|priority| priority.parse().ok())
+        .unwrap_or_default();
+    Some(KnowledgeRef {
+        source,
+        pointer: pointer.to_string(),
+        summary,
+        priority,
+    })
 }
 
 /// Render one stable prompt section. An empty input produces zero bytes so
@@ -407,6 +451,111 @@ pub fn render_composed_context(context: &ComposedContext) -> String {
         rendered.push('\n');
     }
     rendered
+}
+
+/// Render acknowledgement tags without changing the legacy renderer used by
+/// composition-sidecar and unsampled spawns.
+pub fn render_composed_context_with_ack_tags(context: &ComposedContext) -> Option<String> {
+    if context.knowledge.is_empty() {
+        return None;
+    }
+
+    tag_rendered_knowledge(context, render_composed_context(context))
+}
+
+fn tag_rendered_knowledge(
+    context: &ComposedContext,
+    mut rendered: String,
+) -> Option<String> {
+    let marker = "### Knowledge References\n\n";
+    let mut search_start = rendered.find(marker).map(|index| index + marker.len())?;
+
+    for (index, item) in context.knowledge.iter().enumerate() {
+        let summary = item
+            .reference
+            .summary
+            .as_deref()
+            .map(|summary| format!(": {summary}"))
+            .unwrap_or_default();
+        let legacy_line = format!(
+            "- [{}] `{}` (priority {}){}\n",
+            origin_label(item.origin),
+            display_reference(&item.reference),
+            item.reference.priority,
+            summary
+        );
+        let tagged_line = format!(
+            "- [k{}] [{}] `{}` (priority {}){}\n",
+            index + 1,
+            origin_label(item.origin),
+            display_reference(&item.reference),
+            item.reference.priority,
+            summary
+        );
+        let offset = rendered[search_start..].find(&legacy_line)?;
+        let line_start = search_start + offset;
+        let line_end = line_start + legacy_line.len();
+        rendered.replace_range(line_start..line_end, &tagged_line);
+        search_start = line_start + tagged_line.len();
+    }
+    rendered.insert_str(search_start, &format!("\n{ACK_INSTRUCTION}\n"));
+    Some(rendered)
+}
+
+/// Stable, replayable acknowledgement draw keyed only on the full agent id.
+pub fn is_ack_sampled(agent_id: &str) -> bool {
+    let namespace = Uuid::from_u128(0x7af0b20a_83df_4bc3_a2b6_138881df6757);
+    let draw = Uuid::new_v5(&namespace, agent_id.as_bytes());
+    let mut leading = [0_u8; 8];
+    leading.copy_from_slice(&draw.as_bytes()[..8]);
+    u64::from_be_bytes(leading) % 10_000 < 3_300
+}
+
+/// Admit at most one deterministic miss reference after ordinary composition.
+/// Candidates are filtered against the exact remaining task budget first, so a
+/// miss can never displace a normal kept reference.
+pub fn admit_ack_miss_sample(
+    context: &mut ComposedContext,
+    remaining: &mut ContextBudget,
+    candidates: &[KnowledgeRef],
+    agent_id: &str,
+) -> Option<usize> {
+    if ACK_MISS_SAMPLE_MAX == 0 {
+        return None;
+    }
+
+    let kept = context
+        .knowledge
+        .iter()
+        .map(|item| knowledge_key(&item.reference))
+        .collect::<BTreeSet<_>>();
+    let mut eligible = BTreeMap::<String, KnowledgeRef>::new();
+    for candidate in candidates {
+        let key = knowledge_key(candidate);
+        if !within_source_bounds(candidate)
+            || kept.contains(&key)
+            || knowledge_reference_chars(candidate) > remaining.task_chars
+        {
+            continue;
+        }
+        eligible.entry(key).or_insert_with(|| candidate.clone());
+    }
+    if eligible.is_empty() {
+        return None;
+    }
+
+    let namespace = Uuid::from_u128(0x0a799f91_70df_4613_8740_1a0ab670c773);
+    let draw = Uuid::new_v5(&namespace, agent_id.as_bytes());
+    let mut leading = [0_u8; 8];
+    leading.copy_from_slice(&draw.as_bytes()[..8]);
+    let selected = u64::from_be_bytes(leading) as usize % eligible.len();
+    let reference = eligible.into_values().nth(selected)?;
+    remaining.task_chars -= knowledge_reference_chars(&reference);
+    context.knowledge.push(ComposedKnowledgeRef {
+        reference,
+        origin: ContextOrigin::Task,
+    });
+    Some(context.knowledge.len() - 1)
 }
 
 /// Fraction-based anti-hub lint for declarations that name an entire knowledge
@@ -610,7 +759,7 @@ fn within_source_bounds(reference: &KnowledgeRef) -> bool {
         && reference
             .summary
             .as_deref()
-            .map_or(true, |summary| {
+            .is_none_or(|summary| {
                 summary.chars().count() <= MAX_KNOWLEDGE_SUMMARY_CHARS
             })
 }
@@ -693,7 +842,7 @@ fn drop_reason_rank(reason: ContextDropReason) -> u8 {
     }
 }
 
-fn knowledge_record_cost(reference: &KnowledgeRef) -> usize {
+pub fn knowledge_reference_chars(reference: &KnowledgeRef) -> usize {
     text_record_cost(
         &display_reference(reference),
         reference.summary.as_deref().unwrap_or_default(),
@@ -726,5 +875,138 @@ fn bounded_pointer_label(pointer: &str) -> String {
         "<empty-pointer>".to_string()
     } else {
         bounded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reference(pointer: &str) -> KnowledgeRef {
+        KnowledgeRef {
+            source: KnowledgeSource::Project,
+            pointer: pointer.to_string(),
+            summary: Some(format!("Guidance for {pointer}")),
+            priority: 80,
+        }
+    }
+
+    #[test]
+    fn sampled_renderer_tags_each_reference_and_adds_one_relevance_instruction() {
+        let mut multiline = reference("second.md");
+        multiline.summary = Some("First line\n\nSecond line".to_string());
+        let context = ComposedContext {
+            knowledge: vec![
+                ComposedKnowledgeRef {
+                    reference: reference("first.md"),
+                    origin: ContextOrigin::Task,
+                },
+                ComposedKnowledgeRef {
+                    reference: multiline,
+                    origin: ContextOrigin::RoleAndTask,
+                },
+            ],
+            task_summary: Some("Task details remain after the tagged section".to_string()),
+            ..ComposedContext::default()
+        };
+
+        let rendered = render_composed_context_with_ack_tags(&context).expect("tagged context");
+        assert!(rendered.contains("- [k1] [task] `project:first.md`"));
+        assert!(rendered.contains("- [k2] [role+task] `project:second.md`"));
+        assert!(rendered.contains("First line\n\nSecond line"));
+        assert!(rendered.contains("### Task Summary\n\nTask details remain"));
+        assert_eq!(rendered.matches("knowledge_ack").count(), 2);
+        assert_eq!(rendered.matches(ACK_INSTRUCTION).count(), 1);
+        assert!(!ACK_INSTRUCTION.contains("caus"));
+        assert!(ACK_INSTRUCTION.contains("relevant"));
+    }
+
+    #[test]
+    fn sampled_renderer_reports_fallback_when_legacy_knowledge_cannot_be_tagged() {
+        let context = ComposedContext {
+            knowledge: vec![ComposedKnowledgeRef {
+                reference: reference("expected.md"),
+                origin: ContextOrigin::Task,
+            }],
+            ..ComposedContext::default()
+        };
+
+        assert_eq!(
+            tag_rendered_knowledge(
+                &context,
+                "## Composed Role and Task Context\n\n### Task Summary\n\nNo knowledge section\n"
+                    .to_string(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn acknowledgement_sampling_is_stable_across_calls() {
+        let sampled = (0..1000)
+            .map(|index| format!("stable-agent-{index}"))
+            .find(|id| is_ack_sampled(id))
+            .expect("sampled fixture id");
+        let unsampled = (0..1000)
+            .map(|index| format!("stable-agent-{index}"))
+            .find(|id| !is_ack_sampled(id))
+            .expect("unsampled fixture id");
+
+        for _ in 0..10 {
+            assert!(is_ack_sampled(&sampled));
+            assert!(!is_ack_sampled(&unsampled));
+        }
+    }
+
+    #[test]
+    fn miss_sample_uses_only_leftover_budget_without_displacing_kept_references() {
+        let kept = reference("kept.md");
+        let miss = reference("miss.md");
+        let kept_cost = knowledge_reference_chars(&kept);
+        let miss_cost = knowledge_reference_chars(&miss);
+        let spawn = SpawnContext {
+            task_scope: vec![kept.clone()],
+            budget: ContextBudget {
+                role_chars: 0,
+                task_chars: kept_cost + miss_cost,
+                conversation_chars: 0,
+            },
+            ..SpawnContext::default()
+        };
+        let mut result = compose_context_with_remaining(None, &spawn);
+        let ordinary = result.context.knowledge.clone();
+
+        let admitted = admit_ack_miss_sample(
+            &mut result.context,
+            &mut result.remaining,
+            &[kept, miss.clone()],
+            "miss-sample-agent",
+        );
+        assert_eq!(admitted, Some(1));
+        assert_eq!(&result.context.knowledge[..1], ordinary.as_slice());
+        assert_eq!(result.context.knowledge[1].reference, miss);
+        assert_eq!(result.remaining.task_chars, 0);
+
+        let tight_spawn = SpawnContext {
+            task_scope: vec![reference("kept.md")],
+            budget: ContextBudget {
+                role_chars: 0,
+                task_chars: kept_cost + miss_cost - 1,
+                conversation_chars: 0,
+            },
+            ..SpawnContext::default()
+        };
+        let mut tight = compose_context_with_remaining(None, &tight_spawn);
+        let before = tight.context.clone();
+        assert_eq!(
+            admit_ack_miss_sample(
+                &mut tight.context,
+                &mut tight.remaining,
+                &[reference("miss.md")],
+                "miss-sample-agent",
+            ),
+            None
+        );
+        assert_eq!(tight.context, before);
     }
 }

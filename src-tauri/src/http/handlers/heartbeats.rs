@@ -15,6 +15,9 @@ use crate::http::state::AppState;
 use crate::orchestrator::work_graph::completion_ledger::{
     NodeCompletionFact, NodeCompletionProvenance,
 };
+use crate::orchestrator::work_graph::knowledge_ack::{
+    append_knowledge_ack, is_valid_knowledge_ack_tag,
+};
 use crate::orchestrator::work_graph::BindingRef;
 
 use super::workers::ExecutedAs;
@@ -55,6 +58,10 @@ pub struct PostHeartbeatRequest {
     /// Exact work-graph node ids completed by this heartbeat's resolved agent.
     #[serde(default)]
     pub(crate) completed_nodes: Vec<CompletedNodeEntry>,
+    /// Explicit relevance acknowledgement for tagged knowledge references in this spawn.
+    /// `None` is undecided; `Some([])` is a decided answer that none were relevant.
+    #[serde(default)]
+    pub knowledge_ack: Option<Vec<String>>,
 }
 
 /// Response for POST heartbeat
@@ -112,6 +119,22 @@ pub async fn post_heartbeat(
             "assignment_id must be a positive server-issued identity",
         ));
     }
+    let knowledge_ack = match req.knowledge_ack.as_ref() {
+        None => None,
+        Some(tags) => {
+            if req.status != "completed" {
+                return Err(ApiError::bad_request(
+                    "knowledge_ack may only be supplied with status completed",
+                ));
+            }
+            if let Some(invalid) = tags.iter().find(|tag| !is_valid_knowledge_ack_tag(tag)) {
+                return Err(ApiError::bad_request(format!(
+                    "Invalid knowledge_ack tag {invalid:?}; expected ^k[1-9][0-9]*$"
+                )));
+            }
+            Some(tags.clone())
+        }
+    };
 
     // #175(f): reject heartbeats for agents that are not part of this session.
     // A ghost id previously returned 200 and, worse, could finalize a durable
@@ -303,7 +326,7 @@ pub async fn post_heartbeat(
         let controller = state.session_controller.read();
         controller
             .update_heartbeat(&session_id, &agent_id, &req.status, req.summary.as_deref())
-            .map_err(|e| ApiError::internal(e))?;
+            .map_err(ApiError::internal)?;
     }
 
     // #126: without an explicit fence, retain the legacy deterministic fallback.
@@ -344,6 +367,21 @@ pub async fn post_heartbeat(
                     "Failed to publish durable heartbeat completion event: {error}"
                 );
             }
+        }
+    }
+
+    if let Some(knowledge_ack) = knowledge_ack {
+        if let Err(error) = append_knowledge_ack(
+            &state.storage.session_dir(&session_id),
+            &session_id,
+            &agent_id,
+            &knowledge_ack,
+        ) {
+            tracing::warn!(
+                session_id = %session_id,
+                agent_id = %agent_id,
+                "Failed to persist knowledge_ack after heartbeat effects committed: {error}"
+            );
         }
     }
 
@@ -414,6 +452,9 @@ mod tests {
     use crate::coordination::{HierarchyNode, InjectionManager, QueueManager};
     use crate::domain::HiveExecutionPolicy;
     use crate::events::EventBus;
+    use crate::orchestrator::work_graph::knowledge_ack::{
+        knowledge_ack_path, KnowledgeAckRecord, KNOWLEDGE_ACK_SCHEMA_VERSION,
+    };
     use crate::orchestrator::work_graph::{
         NodeContract, NodeKind, NodeStatus, TaskGraph, WorkNode,
     };
@@ -594,9 +635,40 @@ mod tests {
                 summary: Some(format!("{status} from handler test")),
                 assignment_id,
                 completed_nodes,
+                knowledge_ack: None,
             }),
         )
         .await
+    }
+
+    async fn heartbeat_with_knowledge_ack(
+        state: Arc<AppState>,
+        agent_id: &str,
+        status: &str,
+        knowledge_ack: Option<Vec<String>>,
+    ) -> Result<(StatusCode, Json<PostHeartbeatResponse>), ApiError> {
+        post_heartbeat(
+            State(state),
+            Path(SESSION_ID.to_string()),
+            Json(PostHeartbeatRequest {
+                agent_id: agent_id.to_string(),
+                status: status.to_string(),
+                summary: Some(format!("{status} knowledge acknowledgement")),
+                assignment_id: None,
+                completed_nodes: Vec::new(),
+                knowledge_ack,
+            }),
+        )
+        .await
+    }
+
+    fn stored_knowledge_acks(fixture: &HeartbeatFixture) -> Vec<KnowledgeAckRecord> {
+        let path = knowledge_ack_path(&fixture.state.storage.session_dir(SESSION_ID));
+        std::fs::read_to_string(path)
+            .expect("knowledge acknowledgement store")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("knowledge acknowledgement row"))
+            .collect()
     }
 
     fn work_node(id: &str, principal: &str) -> WorkNode {
@@ -639,6 +711,148 @@ mod tests {
             Ok(response) => response,
             Err(error) => panic!("{context}: {} ({})", error.message, error.status),
         }
+    }
+
+    #[tokio::test]
+    async fn knowledge_ack_requires_completed_without_persisting_or_mutating_heartbeat() {
+        let fixture = fixture();
+        let path = knowledge_ack_path(&fixture.state.storage.session_dir(SESSION_ID));
+
+        let result = heartbeat_with_knowledge_ack(
+            Arc::clone(&fixture.state),
+            WORKER_ID,
+            "working",
+            Some(vec!["k1".to_string()]),
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok((status, _)) => panic!("non-completed knowledge_ack must fail: got {status}"),
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(!path.exists());
+        assert!(fixture
+            .state
+            .session_controller
+            .read()
+            .get_heartbeat_info(SESSION_ID)
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_knowledge_ack_tag_is_rejected_before_persistence() {
+        let fixture = fixture();
+        let path = knowledge_ack_path(&fixture.state.storage.session_dir(SESSION_ID));
+
+        let result = heartbeat_with_knowledge_ack(
+            Arc::clone(&fixture.state),
+            WORKER_ID,
+            "completed",
+            Some(vec!["k0".to_string()]),
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok((status, _)) => panic!("invalid knowledge_ack tag must fail: got {status}"),
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("k0"));
+        assert!(!path.exists());
+        assert!(fixture
+            .state
+            .session_controller
+            .read()
+            .get_heartbeat_info(SESSION_ID)
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn absent_knowledge_ack_is_distinct_from_an_explicit_empty_ack_on_disk() {
+        let fixture = fixture();
+        let session_dir = fixture.state.storage.session_dir(SESSION_ID);
+        let path = knowledge_ack_path(&session_dir);
+
+        let (status, _) = expect_success(
+            heartbeat(Arc::clone(&fixture.state), WORKER_ID, "completed", None).await,
+            "completed heartbeat without knowledge_ack",
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(!path.exists(), "absent knowledge_ack must write no row");
+
+        let (status, _) = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&fixture.state),
+                WORKER_ID,
+                "completed",
+                Some(Vec::new()),
+            )
+            .await,
+            "completed heartbeat with explicit empty knowledge_ack",
+        );
+        assert_eq!(status, StatusCode::OK);
+        let records = stored_knowledge_acks(&fixture);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].schema_version, KNOWLEDGE_ACK_SCHEMA_VERSION);
+        assert_eq!(records[0].session_id, SESSION_ID);
+        assert_eq!(records[0].agent_id, WORKER_ID);
+        assert!(records[0].knowledge_ack.is_empty());
+
+        assert!(path.starts_with(fixture.state.storage.base_dir()));
+        assert!(
+            SessionStorage::new().is_err(),
+            "tests must not resolve the production app-data storage base"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_alias_knowledge_ack_is_persisted_under_the_canonical_agent_id() {
+        let fixture = fixture();
+
+        let (status, _) = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&fixture.state),
+                "worker-1",
+                "completed",
+                Some(vec!["k1".to_string(), "k12".to_string()]),
+            )
+            .await,
+            "completed heartbeat with bare worker alias",
+        );
+        assert_eq!(status, StatusCode::OK);
+
+        let records = stored_knowledge_acks(&fixture);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].agent_id, WORKER_ID);
+        assert_eq!(records[0].knowledge_ack, ["k1", "k12"]);
+    }
+
+    #[tokio::test]
+    async fn knowledge_ack_append_failure_is_fail_open_after_heartbeat_commit() {
+        let fixture = fixture();
+        let path = knowledge_ack_path(&fixture.state.storage.session_dir(SESSION_ID));
+        std::fs::create_dir_all(&path).expect("directory occupying ack ledger path");
+
+        let response = expect_success(
+            heartbeat_with_knowledge_ack(
+                Arc::clone(&fixture.state),
+                WORKER_ID,
+                "completed",
+                Some(vec!["k1".to_string()]),
+            )
+            .await,
+            "ack persistence failure after heartbeat commit",
+        );
+
+        assert_eq!(response.0, StatusCode::OK);
+        let heartbeats = fixture
+            .state
+            .session_controller
+            .read()
+            .get_heartbeat_info(SESSION_ID);
+        assert_eq!(heartbeats[WORKER_ID].status, "completed");
+        assert!(path.is_dir(), "failed append must not replace the obstacle");
     }
 
     #[tokio::test]

@@ -15,13 +15,19 @@ use crate::coordination::queue_manager::{heartbeat_cadence_label, STUCK_CUTOFF_S
 use crate::coordination::{HierarchyNode, StateManager, WorkerStateInfo};
 use crate::domain::{ArtifactBundle, HiveExecutionPolicy, HiveLaunchKind, WorkspaceStrategy};
 use crate::events::{EventBus, EventEmitter};
+use crate::http::handlers::evaluator::read_qa_verdict_record;
+use crate::judgment::ledger::{JudgmentLedger, OutcomeInput, OutcomeSource};
 use crate::orchestrator::org_graph::composition::{
-    compose_context, render_composed_context, spawn_context_from_work_graph_task, SpawnContext,
+    admit_ack_miss_sample, compose_context_with_remaining, is_ack_sampled,
+    knowledge_reference_chars, knowledge_refs_from_work_graph, render_composed_context,
+    render_composed_context_with_ack_tags, spawn_context_from_work_graph_task, ComposedContext,
+    ContextBudget, ContextOrigin, DroppedContext, SpawnContext, ACK_QUESTION_VERSION,
+    ACK_SAMPLE_RATE,
 };
 use crate::orchestrator::org_graph::definitions::{
     resolve_role_definition, role_prompt_template, ResolvedRoleDefinition,
 };
-use crate::orchestrator::org_graph::RoleDefinition;
+use crate::orchestrator::org_graph::{KnowledgeRef, KnowledgeSource, RoleDefinition};
 use crate::orchestrator::session_orchestrator::SessionOrchestrator;
 use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::pty::{AgentConfig, AgentRole, AgentStatus, PtyManager, RoleDefinitionRef, WorkerRole};
@@ -58,6 +64,113 @@ const QUEEN_QUALITY_RECONCILIATION_LOG_LINES_NO_EVALUATOR: &str = r#"[TIMESTAMP]
 [TIMESTAMP] QUEEN: Spawned Reconciler — awaiting unified fix list
 [TIMESTAMP] QUEEN: Reconciliation complete — N fixes assigned
 [TIMESTAMP] QUEEN: Quality loop complete - session marked completed"#;
+
+const SPAWN_CONTEXT_SCHEMA_VERSION: &str = "hive.spawn-context/v1";
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedSpawnContext {
+    context: SpawnContext,
+    ack_eligible: bool,
+    miss_candidates: Vec<KnowledgeRef>,
+}
+
+#[derive(Debug, Clone)]
+struct BuiltWorkerPrompt {
+    prompt: String,
+    context: ComposedContext,
+    budget: ContextBudget,
+    sampled: bool,
+    miss_sample_positions: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SpawnContextSidecar {
+    schema_version: String,
+    agent_id: String,
+    session_id: String,
+    plan_task_id: Option<String>,
+    role_definition_id: Option<String>,
+    budget: ContextBudget,
+    kept: Vec<SpawnKeptReference>,
+    dropped: Vec<DroppedContext>,
+    sampled: bool,
+    sample_rate: f64,
+    question_version: u32,
+    miss_sample_references: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SpawnKeptReference {
+    tag: Option<String>,
+    position: usize,
+    origin: ContextOrigin,
+    source: KnowledgeSource,
+    pointer: String,
+    priority: u16,
+    chars: usize,
+}
+
+impl BuiltWorkerPrompt {
+    fn sidecar(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        plan_task_id: Option<&str>,
+        role_definition_id: Option<&str>,
+    ) -> SpawnContextSidecar {
+        let kept = self
+            .context
+            .knowledge
+            .iter()
+            .enumerate()
+            .map(|(index, item)| SpawnKeptReference {
+                tag: self.sampled.then(|| format!("k{}", index + 1)),
+                position: index + 1,
+                origin: item.origin,
+                source: item.reference.source,
+                pointer: item.reference.pointer.clone(),
+                priority: item.reference.priority,
+                chars: knowledge_reference_chars(&item.reference),
+            })
+            .collect();
+        let miss_sample_references = self
+            .miss_sample_positions
+            .iter()
+            .filter(|_| self.sampled)
+            .map(|index| format!("k{}", index + 1))
+            .collect();
+        SpawnContextSidecar {
+            schema_version: SPAWN_CONTEXT_SCHEMA_VERSION.to_string(),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            plan_task_id: plan_task_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            role_definition_id: role_definition_id.map(str::to_string),
+            budget: self.budget,
+            kept,
+            dropped: self.context.dropped.clone(),
+            sampled: self.sampled,
+            sample_rate: ACK_SAMPLE_RATE,
+            question_version: ACK_QUESTION_VERSION,
+            miss_sample_references,
+        }
+    }
+}
+
+impl SpawnContextSidecar {
+    fn composition_free(agent_id: &str, session_id: &str) -> Self {
+        BuiltWorkerPrompt {
+            prompt: String::new(),
+            context: ComposedContext::default(),
+            budget: ContextBudget::default(),
+            sampled: false,
+            miss_sample_positions: Vec::new(),
+        }
+        .sidecar(agent_id, session_id, None, None)
+    }
+}
 
 fn extract_model_arg(args: &[&str]) -> Option<String> {
     let mut iter = args.iter();
@@ -5245,17 +5358,20 @@ Read tool docs in `.hive-manager/{session_id}/tools/` for:
 
 When ALL {completion_scope} have completed, you MUST signal the existing Evaluator:
 
-1. You MUST create or update the contract FIRST. For smoke tests, use this contract:
+1. You MUST create or update the contract FIRST. Use `# Sprint Contract: <milestone>`, `## Acceptance Criteria` with typed kind brackets such as `[FUNC]`, `[DESIGN 1-10 floor 5]`, or `[PERF lighthouse >= 80]`, and `## Pass Threshold`. For smoke tests, use this contract:
    ```bash
    mkdir -p "{contracts_dir}"
    cat > "{contract_path}" << 'CONTRACT_EOF'
-   # Smoke Test Contract
+   # Sprint Contract: Smoke Test
 
-   ## Criteria
-   1. All workers spawned and ran successfully
-   2. Heartbeat API exercised by all workers
-   3. Conversation API exercised (queen inbox + shared channel)
-   4. All task files transitioned to COMPLETED status
+   ## Acceptance Criteria
+   1. [FUNC] All workers spawned and ran successfully
+   2. [FUNC] Heartbeat API exercised by all workers
+   3. [FUNC] Conversation API exercised (queen inbox + shared channel)
+   4. [FUNC] All task files transitioned to COMPLETED status
+
+   ## Pass Threshold
+   - All pass/fail criteria must PASS
    CONTRACT_EOF
    ```
 
@@ -6653,6 +6769,7 @@ When the objective and every configured gate are complete, send this `completed`
     }
 
     /// Build a worker's role prompt
+    #[cfg(test)]
     pub(crate) fn build_worker_prompt(
         index: u8,
         config: &AgentConfig,
@@ -6678,6 +6795,7 @@ When the objective and every configured gate are complete, send this `completed`
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn build_worker_prompt_with_tier(
         index: u8,
@@ -6691,6 +6809,38 @@ When the objective and every configured gate are complete, send this `completed`
         workspace_path: &Path,
         execution_policy: &HiveExecutionPolicy,
     ) -> String {
+        Self::build_worker_prompt_artifact_with_tier(
+            index,
+            config,
+            resolved_role,
+            spawn_context,
+            false,
+            &[],
+            actor_tier,
+            queen_id,
+            session_id,
+            project_path,
+            workspace_path,
+            execution_policy,
+        )
+        .prompt
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_worker_prompt_artifact_with_tier(
+        index: u8,
+        config: &AgentConfig,
+        resolved_role: &ResolvedRoleDefinition,
+        spawn_context: &SpawnContext,
+        ack_eligible: bool,
+        miss_candidates: &[KnowledgeRef],
+        actor_tier: Option<TaskTier>,
+        queen_id: &str,
+        session_id: &str,
+        project_path: &Path,
+        workspace_path: &Path,
+        execution_policy: &HiveExecutionPolicy,
+    ) -> BuiltWorkerPrompt {
         let role_name = config
             .role
             .as_ref()
@@ -6829,12 +6979,39 @@ When the objective and every configured gate are complete, send this `completed`
             },
             stop_conditions: &stop_conditions,
         });
-        let composed_context = render_composed_context(&compose_context(
-            resolved_role.definition.as_ref(),
-            spawn_context,
-        ));
-
         let agent_id = format!("{session_id}-worker-{index}");
+        let mut composition =
+            compose_context_with_remaining(resolved_role.definition.as_ref(), spawn_context);
+        let drawn = ack_eligible && is_ack_sampled(&agent_id);
+        let mut miss_sample_positions = if drawn {
+            admit_ack_miss_sample(
+                &mut composition.context,
+                &mut composition.remaining,
+                miss_candidates,
+                &agent_id,
+            )
+            .into_iter()
+            .collect()
+        } else {
+            Vec::new()
+        };
+        let sample_requested = drawn && !composition.context.knowledge.is_empty();
+        let (sampled, composed_context) = if sample_requested {
+            match render_composed_context_with_ack_tags(&composition.context) {
+                Some(rendered) => (true, rendered),
+                None => {
+                    tracing::warn!(
+                        session_id,
+                        agent_id,
+                        "Failed to tag sampled knowledge; rendering unsampled context"
+                    );
+                    miss_sample_positions.clear();
+                    (false, render_composed_context(&composition.context))
+                }
+            }
+        } else {
+            (false, render_composed_context(&composition.context))
+        };
         let activation_wait_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
@@ -6952,7 +7129,7 @@ Before marking the task COMPLETED, POST one durable learning record to /api/sess
             )
         };
 
-        format!(
+        let prompt = format!(
             r#"# Managed Principal {index} - {role_name}
 
 {role_kernel}
@@ -7037,8 +7214,16 @@ treated as stuck and requeued.
             stuck_cutoff_secs = STUCK_CUTOFF_SECS,
             learnings_section = learnings_section,
             project_context = project_context,
-        )
+        );
+        BuiltWorkerPrompt {
+            prompt,
+            context: composition.context,
+            budget: spawn_context.budget,
+            sampled,
+            miss_sample_positions,
+        }
     }
+
     /// Build a planner's prompt with HTTP API for spawning workers sequentially
     fn build_planner_prompt_with_http(
         project_path: &PathBuf,
@@ -7472,6 +7657,70 @@ Log each iteration to `.hive-manager/{session_id}/coordination.log`:
         })?;
 
         Ok(file_path)
+    }
+
+    /// Persist durable spawn artifacts without turning observability failures
+    /// into agent-spawn failures. The worktree prompt remains the authoritative,
+    /// fail-closed CLI input.
+    fn write_spawn_artifacts_fail_open(
+        project_path: &PathBuf,
+        session_id: &str,
+        agent_id: &str,
+        prompt: &str,
+        sidecar: &SpawnContextSidecar,
+    ) {
+        let prompt_filename = format!("{agent_id}-prompt.md");
+        let prompt_path = project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("prompts")
+            .join(&prompt_filename);
+        if let Err(error) = Self::write_prompt_file(
+            project_path,
+            session_id,
+            &prompt_filename,
+            prompt,
+        ) {
+            tracing::warn!(
+                session_id,
+                agent_id,
+                filename = %prompt_filename,
+                path = %prompt_path.display(),
+                "Failed to save durable worker prompt; spawn will continue: {error}"
+            );
+        }
+
+        let context_filename = format!("{agent_id}-context.json");
+        let context_path = project_path
+            .join(".hive-manager")
+            .join(session_id)
+            .join("prompts")
+            .join(&context_filename);
+        match serde_json::to_string_pretty(sidecar) {
+            Ok(context) => {
+                if let Err(error) = Self::write_prompt_file(
+                    project_path,
+                    session_id,
+                    &context_filename,
+                    &context,
+                ) {
+                    tracing::warn!(
+                        session_id,
+                        agent_id,
+                        filename = %context_filename,
+                        path = %context_path.display(),
+                        "Failed to save worker context sidecar; spawn will continue: {error}"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                session_id,
+                agent_id,
+                filename = %context_filename,
+                path = %context_path.display(),
+                "Failed to serialize worker context sidecar; spawn will continue: {error}"
+            ),
+        }
     }
 
     /// Write a tool documentation file to the session's tools directory
@@ -8836,11 +9085,14 @@ Last updated: {timestamp}
             }
 
             // Write worker prompt to file and pass to CLI
-            let worker_prompt = Self::build_worker_prompt(
+            let worker_build = Self::build_worker_prompt_artifact_with_tier(
                 index,
                 &worker_config,
                 &resolved_role,
                 &SpawnContext::default(),
+                false,
+                &[],
+                None,
                 &queen_id,
                 &session_id,
                 &project_path,
@@ -8852,7 +9104,7 @@ Last updated: {timestamp}
                 Path::new(&worker_cwd),
                 index,
                 &filename,
-                &worker_prompt,
+                &worker_build.prompt,
             ) {
                 Ok(prompt_file) => prompt_file,
                 Err(err) => {
@@ -8865,6 +9117,19 @@ Last updated: {timestamp}
                     return Err(err);
                 }
             };
+            let sidecar = worker_build.sidecar(
+                &worker_id,
+                &session_id,
+                None,
+                resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+            );
+            Self::write_spawn_artifacts_fail_open(
+                &project_path,
+                &session_id,
+                &worker_id,
+                &worker_build.prompt,
+                &sidecar,
+            );
             let prompt_path = prompt_file.to_string_lossy().to_string();
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -9339,6 +9604,14 @@ phases and do EXACTLY this, then stop:
                 &prompt_filename,
                 &worker_prompt,
             )?;
+            let sidecar = SpawnContextSidecar::composition_free(&variant.agent_id, &session_id);
+            Self::write_spawn_artifacts_fail_open(
+                &project_path,
+                &session_id,
+                &variant.agent_id,
+                &worker_prompt,
+                &sidecar,
+            );
             let prompt_path = prompt_file.to_string_lossy().to_string();
 
             let (cmd, mut args) = Self::build_command(&variant_agent_config);
@@ -9768,19 +10041,27 @@ phases and do EXACTLY this, then stop:
             );
             let prompt_filename =
                 format!("debate-debater-{}-round-{}-prompt.md", debater.index, round);
+            let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
             let prompt_file = Self::write_worker_prompt_file(
                 &worktree_path,
                 debater.index,
                 &prompt_filename,
                 &prompt,
             )?;
+            let sidecar = SpawnContextSidecar::composition_free(&agent_id, session_id);
+            Self::write_spawn_artifacts_fail_open(
+                &session.project_path,
+                session_id,
+                &agent_id,
+                &prompt,
+                &sidecar,
+            );
             let prompt_path = prompt_file.to_string_lossy().to_string();
 
             let agent_config = debater.config.clone();
             let (cmd, mut args) = Self::build_command(&agent_config);
             Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
-            let agent_id = Self::debate_round_agent_id(session_id, debater.index, round);
             {
                 let pty_manager = self.pty_manager.read();
                 pty_manager
@@ -9899,40 +10180,52 @@ phases and do EXACTLY this, then stop:
         &self,
         session_id: &str,
         plan_task_id: Option<&str>,
-    ) -> SpawnContext {
+    ) -> ResolvedSpawnContext {
         let Some(plan_task_id) = plan_task_id.map(str::trim).filter(|id| !id.is_empty()) else {
-            return SpawnContext::default();
+            return ResolvedSpawnContext::default();
         };
         let Some(storage) = self.storage.as_ref() else {
-            return SpawnContext::default();
+            return ResolvedSpawnContext::default();
         };
         let state_manager = StateManager::new(storage.session_dir(session_id));
-        let composition = match state_manager.read_graph_composition_state() {
-            Ok(Some(composition)) => composition,
-            Ok(None) => return SpawnContext::default(),
+        let (graph, ack_eligible) = match state_manager.read_graph_composition_state() {
+            Ok(Some(composition)) => (composition.graph, false),
+            Ok(None) => match state_manager.read_work_graph() {
+                Ok(Some(graph)) => (graph, true),
+                Ok(None) => return ResolvedSpawnContext::default(),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        plan_task_id,
+                        "Failed to read persisted work graph for worker context: {error}"
+                    );
+                    return ResolvedSpawnContext::default();
+                }
+            },
             Err(error) => {
                 tracing::warn!(
                     session_id,
                     plan_task_id,
                     "Failed to read task-scoped work-graph context: {error}"
                 );
-                return SpawnContext::default();
+                return ResolvedSpawnContext::default();
             }
         };
-        if !composition
-            .graph
-            .nodes
-            .iter()
-            .any(|node| node.id == plan_task_id)
-        {
+        if !graph.nodes.iter().any(|node| node.id == plan_task_id) {
             tracing::warn!(
                 session_id,
                 plan_task_id,
                 "Plan task was absent while composing worker context"
             );
-            return SpawnContext::default();
+            return ResolvedSpawnContext::default();
         }
-        spawn_context_from_work_graph_task(&composition.graph, plan_task_id)
+        ResolvedSpawnContext {
+            context: spawn_context_from_work_graph_task(&graph, plan_task_id),
+            ack_eligible,
+            miss_candidates: ack_eligible
+                .then(|| knowledge_refs_from_work_graph(&graph))
+                .unwrap_or_default(),
+        }
     }
 
     fn principal_binding_for_plan_task(
@@ -10933,6 +11226,14 @@ The backend composed and persisted the following authoritative skeleton before l
                 &prompt_filename,
                 &worker_prompt,
             )?;
+            let sidecar = SpawnContextSidecar::composition_free(&variant.agent_id, session_id);
+            Self::write_spawn_artifacts_fail_open(
+                &session.project_path,
+                session_id,
+                &variant.agent_id,
+                &worker_prompt,
+                &sidecar,
+            );
             let prompt_path = prompt_file.to_string_lossy().to_string();
 
             let (cmd, mut args) = Self::build_command(&variant_agent_config);
@@ -11470,11 +11771,14 @@ The backend composed and persisted the following authoritative skeleton before l
         })?;
 
         // 3. Write worker prompt to file
-        let worker_prompt = Self::build_worker_prompt(
+        let worker_build = Self::build_worker_prompt_artifact_with_tier(
             index,
             &worker_config,
             &resolved_role,
             &SpawnContext::default(),
+            false,
+            &[],
+            None,
             queen_id,
             session_id,
             &session.project_path,
@@ -11485,7 +11789,7 @@ The backend composed and persisted the following authoritative skeleton before l
             Path::new(&worker_cwd),
             index,
             &filename,
-            &worker_prompt,
+            &worker_build.prompt,
         )
         .map_err(|err| {
             Self::rollback_worker_launch_artifacts(
@@ -11499,6 +11803,19 @@ The backend composed and persisted the following authoritative skeleton before l
             self.restore_session_state_after_worker_spawn_failure(session_id, &previous_state);
             SessionError::ConfigError(err)
         })?;
+        let sidecar = worker_build.sidecar(
+            &worker_id,
+            session_id,
+            None,
+            resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+        );
+        Self::write_spawn_artifacts_fail_open(
+            &session.project_path,
+            session_id,
+            &worker_id,
+            &worker_build.prompt,
+            &sidecar,
+        );
         let prompt_path = prompt_file.to_string_lossy().to_string();
 
         // 4. Build command with prompt
@@ -11725,6 +12042,99 @@ The backend composed and persisted the following authoritative skeleton before l
         }
     }
 
+    /// PrinceRemediation has no iteration payload, so its persisted evaluator
+    /// verdict record is the authoritative source for the iteration being remediated.
+    fn qa_verdict_iteration_for_prince(&self, session_id: &str) -> Option<u8> {
+        let storage = self.storage.as_ref()?;
+        match read_qa_verdict_record(&storage.session_dir(session_id)) {
+            Ok(Some(record)) => Some(record.iteration),
+            Ok(None) => {
+                tracing::warn!(
+                    session_id,
+                    "Prince cleared QA without a persisted evaluator verdict record"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    %error,
+                    "Failed to read evaluator verdict before Prince clearance"
+                );
+                None
+            }
+        }
+    }
+
+    fn record_terminal_qa_outcomes(
+        &self,
+        session_id: &str,
+        label: &str,
+        expected_iteration: u8,
+        accepted_verdicts: &[&str],
+    ) {
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+        let record = match read_qa_verdict_record(&storage.session_dir(session_id)) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                tracing::warn!(
+                    session_id,
+                    "QA reached a terminal state without a persisted verdict record"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    %error,
+                    "Failed to read QA verdict record for downstream outcomes"
+                );
+                return;
+            }
+        };
+        if record.iteration != expected_iteration
+            || !accepted_verdicts
+                .iter()
+                .any(|verdict| record.verdict.eq_ignore_ascii_case(verdict))
+        {
+            tracing::warn!(
+                session_id,
+                expected_iteration,
+                actual_iteration = record.iteration,
+                expected_verdicts = ?accepted_verdicts,
+                actual_verdict = %record.verdict,
+                "Skipping downstream outcomes for a stale or mismatched QA verdict record"
+            );
+            return;
+        }
+        let ledger = JudgmentLedger::new(
+            storage
+                .base_dir()
+                .join("judgments")
+                .join("ledger.jsonl"),
+        );
+        for criterion in record.criteria {
+            let Some(decision_id) = criterion.decision_id else {
+                continue;
+            };
+            let mut extra = serde_json::Map::new();
+            extra.insert("session_id".to_string(), serde_json::json!(session_id));
+            extra.insert(
+                "criterion_number".to_string(),
+                serde_json::json!(criterion.number),
+            );
+            let _ = ledger.record_outcome(OutcomeInput {
+                decision_id,
+                label: serde_json::json!(label),
+                source: OutcomeSource::Downstream,
+                note: None,
+                extra,
+            });
+        }
+    }
+
     fn apply_qa_verdict_to_session(
         &self,
         session: &mut Session,
@@ -11732,7 +12142,11 @@ The backend composed and persisted the following authoritative skeleton before l
         evaluator_id: Option<&str>,
         commit_sha: Option<&str>,
         route_to_prince: bool,
-    ) -> (SessionState, Vec<(String, String, String)>) {
+    ) -> (
+        SessionState,
+        Vec<(String, String, String)>,
+        Option<&'static str>,
+    ) {
         if let Some(evaluator_id) = evaluator_id {
             if let Some(agent) = session
                 .agents
@@ -11751,13 +12165,13 @@ The backend composed and persisted the following authoritative skeleton before l
         if route_to_prince {
             let changes =
                 self.set_session_state_with_events(session, SessionState::PrinceRemediation);
-            return (SessionState::PrinceRemediation, changes);
+            return (SessionState::PrinceRemediation, changes, None);
         }
 
         match normalized_verdict {
             "PASS" | "QA_VERDICT: PASS" => {
                 let changes = self.set_session_state_with_events(session, SessionState::QaPassed);
-                (SessionState::QaPassed, changes)
+                (SessionState::QaPassed, changes, Some("pass"))
             }
             "FAIL" | "QA_VERDICT: FAIL" => {
                 let next_iteration = next_qa_failure_iteration(&session.state);
@@ -11771,13 +12185,13 @@ The backend composed and persisted the following authoritative skeleton before l
                     let changes = self
                         .set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded);
                     session.auth_strategy = AuthStrategy::None;
-                    (SessionState::QaMaxRetriesExceeded, changes)
+                    (SessionState::QaMaxRetriesExceeded, changes, Some("fail"))
                 } else {
                     let next_state = SessionState::QaFailed {
                         iteration: next_iteration,
                     };
                     let changes = self.set_session_state_with_events(session, next_state.clone());
-                    (next_state, changes)
+                    (next_state, changes, None)
                 }
             }
             _ => unreachable!("unsupported verdict already validated"),
@@ -11799,7 +12213,14 @@ The backend composed and persisted the following authoritative skeleton before l
             return Err(format!("Unsupported QA verdict '{}'", verdict));
         }
 
-        let (previous_session, updated_session, changes, new_state) = {
+        let (
+            previous_session,
+            updated_session,
+            changes,
+            new_state,
+            outcome_label,
+            expected_iteration,
+        ) = {
             let mut sessions = self.sessions.write();
             let session = sessions
                 .get_mut(session_id)
@@ -11814,6 +12235,10 @@ The backend composed and persisted the following authoritative skeleton before l
                     session.state
                 ));
             }
+            let expected_iteration = match session.state {
+                SessionState::QaInProgress { iteration } => iteration.unwrap_or(1),
+                _ => unreachable!("QA state checked above"),
+            };
             let previous_session = session.clone();
             let now = Utc::now();
             if now > session.last_activity_at {
@@ -11823,14 +12248,21 @@ The backend composed and persisted the following authoritative skeleton before l
                 .agents
                 .iter()
                 .any(|agent| matches!(agent.role, AgentRole::Prince));
-            let (new_state, changes) = self.apply_qa_verdict_to_session(
+            let (new_state, changes, outcome_label) = self.apply_qa_verdict_to_session(
                 session,
                 normalized.as_str(),
                 Some(evaluator_id),
                 commit_sha,
                 has_prince,
             );
-            (previous_session, session.clone(), changes, new_state)
+            (
+                previous_session,
+                session.clone(),
+                changes,
+                new_state,
+                outcome_label,
+                expected_iteration,
+            )
         };
 
         if let Some(storage) = self.storage.as_ref() {
@@ -11850,6 +12282,16 @@ The backend composed and persisted the following authoritative skeleton before l
                 }
                 return Err(err);
             }
+        }
+
+        if let Some(label) = outcome_label {
+            let expected_verdict = if label == "pass" { "PASS" } else { "FAIL" };
+            self.record_terminal_qa_outcomes(
+                session_id,
+                label,
+                expected_iteration,
+                &[expected_verdict],
+            );
         }
 
         self.cancel_qa_timeout(session_id);
@@ -11996,6 +12438,11 @@ The backend composed and persisted the following authoritative skeleton before l
             "BLOCKED" | "FAIL" | "ESCALATE" => SessionState::QaInconclusive,
             other => return Err(format!("Unsupported Prince verdict '{}'", other)),
         };
+        let expected_iteration = if matches!(&target_state, SessionState::QaPassed) {
+            self.qa_verdict_iteration_for_prince(session_id)
+        } else {
+            None
+        };
 
         let (previous_session, updated_session, changes) = {
             let mut sessions = self.sessions.write();
@@ -12033,6 +12480,17 @@ The backend composed and persisted the following authoritative skeleton before l
                     );
                 }
                 return Err(err);
+            }
+        }
+
+        if matches!(&target_state, SessionState::QaPassed) {
+            if let Some(expected_iteration) = expected_iteration {
+                self.record_terminal_qa_outcomes(
+                    session_id,
+                    "pass",
+                    expected_iteration,
+                    &["PASS", "FAIL"],
+                );
             }
         }
 
@@ -12324,13 +12782,15 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         self.cancel_qa_timeout(session_id);
-        let (new_state, changes) = {
+        let (new_state, changes, _outcome_label) = {
             let mut sessions = self.sessions.write();
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
             // Operator overrides (force-pass / force-fail) and the legacy timeout path
             // are explicit decisions to resolve QA directly — they bypass the Prince.
+            // The evaluator handler records operator-override outcomes, so this path
+            // intentionally discards the downstream outcome label.
             self.apply_qa_verdict_to_session(session, normalized.as_str(), None, None, false)
         };
 
@@ -14981,11 +15441,13 @@ The backend composed and persisted the following authoritative skeleton before l
 
         // Write worker prompt to file and add to args
         let spawn_context = self.spawn_context_for_plan_task(session_id, plan_task_id);
-        let worker_prompt = Self::build_worker_prompt_with_tier(
+        let worker_build = Self::build_worker_prompt_artifact_with_tier(
             worker_index,
             &config_with_role,
             &resolved_role,
-            &spawn_context,
+            &spawn_context.context,
+            spawn_context.ack_eligible,
+            &spawn_context.miss_candidates,
             dispatch_tiers.map(|(_, child_tier)| child_tier),
             &actual_parent_id,
             session_id,
@@ -14998,7 +15460,7 @@ The backend composed and persisted the following authoritative skeleton before l
             Path::new(&worker_cwd),
             worker_index,
             &filename,
-            &worker_prompt,
+            &worker_build.prompt,
         ) {
             Ok(prompt_file) => prompt_file,
             Err(err) => {
@@ -15013,6 +15475,19 @@ The backend composed and persisted the following authoritative skeleton before l
                 return Err(err);
             }
         };
+        let sidecar = worker_build.sidecar(
+            &worker_id,
+            session_id,
+            plan_task_id,
+            resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+        );
+        Self::write_spawn_artifacts_fail_open(
+            &session.project_path,
+            session_id,
+            &worker_id,
+            &worker_build.prompt,
+            &sidecar,
+        );
         let prompt_path = prompt_file.to_string_lossy().to_string();
         Self::add_prompt_to_args(&cmd, &mut args, &prompt_path);
 
@@ -16257,30 +16732,131 @@ fn include_in_worker_roster(role: &AgentRole) -> bool {
 mod tests {
     use super::{
         extract_model_arg, parse_persisted_session_state, serialize_session_state, AgentConfig,
-        AgentInfo, AuthStrategy, CompletionError, DebateDebaterMetadata, DebateSessionMetadata,
-        FusionVariantMetadata, HiveLaunchConfig, QaWorkerConfig, Session, SessionController,
-        SessionError, SessionState, SessionType,
+        AgentInfo, AuthStrategy, BuiltWorkerPrompt, CompletionError, DebateDebaterMetadata,
+        DebateSessionMetadata, FusionVariantMetadata, HiveLaunchConfig, QaWorkerConfig, Session,
+        SessionController, SessionError, SessionState, SessionType, SpawnContextSidecar,
     };
     use super::{heartbeat_cadence_label, CliBehavior, CliRegistry};
-    use crate::coordination::StateManager;
+    use crate::coordination::{parse_sprint_contract, CriterionKind, StateManager};
     use crate::domain::{ArtifactBundle, HiveExecutionPolicy, WorkspaceStrategy};
-    use crate::orchestrator::org_graph::composition::SpawnContext;
+    use crate::orchestrator::org_graph::composition::{
+        is_ack_sampled, ComposedContext, ComposedKnowledgeRef, ContextBudget, ContextDropReason,
+        ContextOrigin, DroppedContext, SpawnContext, ACK_INSTRUCTION,
+    };
+    use crate::orchestrator::org_graph::{KnowledgeRef, KnowledgeSource};
+    use crate::orchestrator::work_graph::codegraph::CodegraphDerivationReport;
+    use crate::orchestrator::work_graph::context::ContextDerivationReport;
+    use crate::orchestrator::work_graph::review::ReviewExpansionSidecar;
+    use crate::orchestrator::work_graph::runtime::GraphCompositionState;
     use crate::orchestrator::work_graph::schema::TaskTier;
     use crate::orchestrator::work_graph::{
-        BindingRef, NodeContract, NodeKind, NodeStatus, TaskGraph, WorkGraphOmission,
-        WorkGraphOmissionReason, WorkNode,
+        BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
+        NodeStatus, TaskGraph, WorkEdge, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
     };
     use crate::pty::{AgentRole, AgentStatus, PtyManager, WorkerRole};
     use crate::storage::SessionStorage;
     use crate::workspace::git::current_head;
     use chrono::{Duration, Utc};
     use parking_lot::RwLock;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn test_knowledge_node(id: &str, pointer: &str) -> WorkNode {
+        let mut node = WorkNode::new(
+            id,
+            NodeKind::Context,
+            format!("Knowledge {id}"),
+            NodeContract::default(),
+            BindingRef::Role("context".to_string()),
+            NodeStatus::Ready,
+        );
+        node.expansion = Some(CompositeExpansion {
+            template: "knowledge".to_string(),
+            parameters: BTreeMap::from([
+                ("source_ref".to_string(), pointer.to_string()),
+                ("summary".to_string(), format!("Guidance from {pointer}")),
+                ("priority".to_string(), "80".to_string()),
+            ]),
+        });
+        node
+    }
+
+    fn test_task_graph(pointer: &str) -> TaskGraph {
+        TaskGraph::new(
+            vec![
+                WorkNode::new(
+                    "T1",
+                    NodeKind::Task,
+                    "Principal-owned task",
+                    NodeContract::default(),
+                    BindingRef::Role("P1".to_string()),
+                    NodeStatus::Ready,
+                ),
+                test_knowledge_node("K1", pointer),
+            ],
+            vec![WorkEdge::new(
+                "K1",
+                "T1",
+                EdgeKind::Informs,
+                EdgeProvenance::Knowledge,
+            )],
+        )
+    }
+
+    fn test_graph_composition(pointer: &str) -> GraphCompositionState {
+        GraphCompositionState {
+            graph: test_task_graph(pointer),
+            lineage: None,
+            codegraph: CodegraphDerivationReport {
+                available: false,
+                artifact_languages: BTreeSet::new(),
+                touches: BTreeMap::new(),
+                unresolved_task_ids: Vec::new(),
+                module_node_count: 0,
+                touch_edge_count: 0,
+            },
+            context: ContextDerivationReport {
+                gotchas: Vec::new(),
+                hub_lints: Vec::new(),
+                source_fingerprints: Vec::new(),
+                knowledge_available: true,
+                touches_available: false,
+                knowledge_edge_count: 1,
+            },
+            reviews: ReviewExpansionSidecar::default(),
+        }
+    }
+
+    #[test]
+    fn qa_milestone_handoff_smoke_contract_parses_as_typed() {
+        let handoff = SessionController::build_qa_milestone_handoff(
+            "typed-contract-test",
+            Path::new("/tmp/typed-contract-test"),
+            "workers",
+        );
+        let contract_start = handoff
+            .rfind("# Sprint Contract:")
+            .expect("rendered smoke contract title");
+        let contract_end = handoff[contract_start..]
+            .find("\n   CONTRACT_EOF")
+            .map(|offset| contract_start + offset)
+            .expect("rendered smoke contract heredoc terminator");
+        let contract_markdown = &handoff[contract_start..contract_end];
+
+        let contract = parse_sprint_contract(contract_markdown)
+            .expect("rendered smoke contract must use the typed Sprint Contract format");
+
+        assert_eq!(contract.milestone_name, "Smoke Test");
+        assert_eq!(contract.acceptance_criteria.len(), 4);
+        assert!(contract
+            .acceptance_criteria
+            .iter()
+            .all(|criterion| !matches!(criterion.kind, CriterionKind::Unspecified)));
+    }
 
     #[test]
     fn legacy_hive_launch_config_omits_work_graph_selection_exactly() {
@@ -16365,17 +16941,7 @@ mod tests {
             .create_session_dir(SESSION_ID)
             .expect("session state directory");
         StateManager::new(session_dir.clone())
-            .write_work_graph(&TaskGraph::new(
-                vec![WorkNode::new(
-                    "T1",
-                    NodeKind::Task,
-                    "Principal-owned task",
-                    NodeContract::default(),
-                    BindingRef::Role("P1".to_string()),
-                    NodeStatus::Ready,
-                )],
-                Vec::new(),
-            ))
+            .write_work_graph(&test_task_graph("guides/fallback.md"))
             .unwrap();
 
         let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
@@ -16465,6 +17031,248 @@ mod tests {
             .iter()
             .filter(|node| node.id != spawned.id)
             .all(|node| node.principal.is_none()));
+
+        let worktree_prompt = std::fs::read_to_string(
+            project_path
+                .join(".hive-manager")
+                .join("prompts")
+                .join("worker-3-prompt.md"),
+        )
+        .expect("worktree prompt");
+        assert!(
+            worktree_prompt.contains("project:guides/fallback.md"),
+            "persisted work-graph fallback must render task knowledge"
+        );
+        let durable_dir = project_path
+            .join(".hive-manager")
+            .join(SESSION_ID)
+            .join("prompts");
+        let durable_prompt = std::fs::read_to_string(
+            durable_dir.join(format!("{}-prompt.md", spawned.id)),
+        )
+        .expect("durable prompt");
+        assert_eq!(durable_prompt, worktree_prompt);
+        let sidecar: SpawnContextSidecar = serde_json::from_str(
+            &std::fs::read_to_string(
+                durable_dir.join(format!("{}-context.json", spawned.id)),
+            )
+            .expect("durable context sidecar"),
+        )
+        .expect("valid context sidecar");
+        assert_eq!(sidecar.plan_task_id.as_deref(), Some("T1"));
+        assert!(sidecar
+            .kept
+            .iter()
+            .any(|reference| reference.pointer == "guides/fallback.md"));
+    }
+
+    #[test]
+    fn composition_sidecar_and_unsampled_builds_preserve_legacy_prompt_bytes() {
+        const SESSION_ID: &str = "composition";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let session_dir = storage.create_session_dir(SESSION_ID).unwrap();
+        let state_manager = StateManager::new(session_dir);
+        state_manager
+            .write_work_graph(&test_task_graph("guides/fallback-must-not-win.md"))
+            .unwrap();
+        state_manager
+            .write_graph_composition_state(&test_graph_composition("guides/composition.md"))
+            .unwrap();
+        let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+        controller.set_storage(storage);
+        let resolved_context = controller.spawn_context_for_plan_task(SESSION_ID, Some("T1"));
+        assert!(!resolved_context.ack_eligible);
+        assert_eq!(resolved_context.context.task_scope.len(), 1);
+        assert_eq!(
+            resolved_context.context.task_scope[0].pointer,
+            "guides/composition.md"
+        );
+
+        let principal = codex_principal();
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            Path::new("/repo"),
+            None,
+            "backend",
+        );
+        let policy = tiered_meta_harness_policy();
+        let context = resolved_context.context;
+
+        let composition_build = SessionController::build_worker_prompt_artifact_with_tier(
+            1,
+            &principal,
+            &resolved,
+            &context,
+            false,
+            &[],
+            Some(TaskTier::High),
+            "composition-queen",
+            "composition",
+            Path::new("/repo"),
+            Path::new("/repo/worktree"),
+            &policy,
+        );
+        let legacy = SessionController::build_worker_prompt_with_tier(
+            1,
+            &principal,
+            &resolved,
+            &context,
+            Some(TaskTier::High),
+            "composition-queen",
+            "composition",
+            Path::new("/repo"),
+            Path::new("/repo/worktree"),
+            &policy,
+        );
+        assert_eq!(composition_build.prompt, legacy);
+        assert!(!composition_build.sampled);
+
+        let unsampled_session = (0..1_000)
+            .map(|index| format!("unsampled-{index}"))
+            .find(|session_id| !is_ack_sampled(&format!("{session_id}-worker-1")))
+            .expect("unsampled session fixture");
+        let unsampled_build = SessionController::build_worker_prompt_artifact_with_tier(
+            1,
+            &principal,
+            &resolved,
+            &context,
+            true,
+            &[],
+            Some(TaskTier::High),
+            &format!("{unsampled_session}-queen"),
+            &unsampled_session,
+            Path::new("/repo"),
+            Path::new("/repo/worktree"),
+            &policy,
+        );
+        let unsampled_legacy = SessionController::build_worker_prompt_with_tier(
+            1,
+            &principal,
+            &resolved,
+            &context,
+            Some(TaskTier::High),
+            &format!("{unsampled_session}-queen"),
+            &unsampled_session,
+            Path::new("/repo"),
+            Path::new("/repo/worktree"),
+            &policy,
+        );
+        assert_eq!(unsampled_build.prompt, unsampled_legacy);
+        assert!(!unsampled_build.sampled);
+        assert!(!unsampled_build.prompt.contains(ACK_INSTRUCTION));
+    }
+
+    #[test]
+    fn sidecar_round_trip_is_exact_projection_of_rendered_context() {
+        let context = ComposedContext {
+            knowledge: vec![ComposedKnowledgeRef {
+                reference: KnowledgeRef {
+                    source: KnowledgeSource::Institutional,
+                    pointer: "roles/backend.md".to_string(),
+                    summary: Some("Backend role guidance".to_string()),
+                    priority: 90,
+                },
+                origin: ContextOrigin::RoleAndTask,
+            }],
+            dropped: vec![DroppedContext {
+                pointer: "project:guides/dropped.md".to_string(),
+                origin: ContextOrigin::Task,
+                reason: ContextDropReason::TaskBudgetExceeded,
+            }],
+            ..ComposedContext::default()
+        };
+        let build = BuiltWorkerPrompt {
+            prompt: "rendered prompt".to_string(),
+            context: context.clone(),
+            budget: ContextBudget::default(),
+            sampled: true,
+            miss_sample_positions: vec![0],
+        };
+        let sidecar = build.sidecar(
+            "sidecar-worker-1",
+            "sidecar",
+            Some("T1"),
+            Some("backend"),
+        );
+        let encoded = serde_json::to_string_pretty(&sidecar).unwrap();
+        let decoded: SpawnContextSidecar = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, sidecar);
+        assert_eq!(decoded.kept.len(), context.knowledge.len());
+        assert_eq!(decoded.kept[0].tag.as_deref(), Some("k1"));
+        assert_eq!(decoded.kept[0].position, 1);
+        assert_eq!(decoded.kept[0].origin, context.knowledge[0].origin);
+        assert_eq!(decoded.kept[0].source, context.knowledge[0].reference.source);
+        assert_eq!(decoded.kept[0].pointer, context.knowledge[0].reference.pointer);
+        assert_eq!(decoded.kept[0].priority, context.knowledge[0].reference.priority);
+        assert_eq!(decoded.dropped, context.dropped);
+        assert_eq!(decoded.miss_sample_references, vec!["k1"]);
+
+        let composition_free = serde_json::to_value(SpawnContextSidecar::composition_free(
+            "fusion-1",
+            "sidecar",
+        ))
+        .unwrap();
+        assert!(composition_free["plan_task_id"].is_null());
+        assert!(composition_free["role_definition_id"].is_null());
+        assert_eq!(composition_free["kept"], serde_json::json!([]));
+        assert_eq!(composition_free["dropped"], serde_json::json!([]));
+        assert_eq!(composition_free["sampled"], false);
+        assert_eq!(composition_free["miss_sample_references"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn durable_spawn_artifact_failures_do_not_change_or_abort_spawn_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_project_path = temp.path().join("project-is-a-file");
+        std::fs::write(&blocked_project_path, "not a directory").unwrap();
+        let prompt = "prompt stays authoritative".to_string();
+        let sidecar = SpawnContextSidecar::composition_free("fail-open-worker-1", "fail-open");
+
+        SessionController::write_spawn_artifacts_fail_open(
+            &blocked_project_path,
+            "fail-open",
+            "fail-open-worker-1",
+            &prompt,
+            &sidecar,
+        );
+
+        assert_eq!(prompt, "prompt stays authoritative");
+        assert!(blocked_project_path.is_file());
+    }
+
+    #[test]
+    fn sampled_draw_with_zero_knowledge_emits_no_ack_request() {
+        let sampled_session = (0..1_000)
+            .map(|index| format!("empty-sampled-{index}"))
+            .find(|session_id| is_ack_sampled(&format!("{session_id}-worker-1")))
+            .expect("sampled session fixture");
+        let principal = codex_principal();
+        let resolved = crate::orchestrator::org_graph::definitions::resolve_role_definition(
+            Path::new("/repo"),
+            None,
+            "no-such-role",
+        );
+        let build = SessionController::build_worker_prompt_artifact_with_tier(
+            1,
+            &principal,
+            &resolved,
+            &SpawnContext::default(),
+            true,
+            &[],
+            None,
+            &format!("{sampled_session}-queen"),
+            &sampled_session,
+            Path::new("/repo"),
+            Path::new("/repo/worktree"),
+            &tiered_meta_harness_policy(),
+        );
+
+        assert!(!build.sampled);
+        assert!(!build.prompt.contains(ACK_INSTRUCTION));
+        assert!(!build
+            .sidecar("empty-sampled-worker-1", &sampled_session, Some("T1"), None)
+            .sampled);
     }
 
     #[test]
@@ -19057,6 +19865,331 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         }
     }
 
+    fn write_test_qa_verdict_record(
+        storage: &SessionStorage,
+        session_id: &str,
+        iteration: u8,
+        verdict: &str,
+        decision_ids: &[&str],
+    ) {
+        let state_dir = storage.session_dir(session_id).join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let criteria = decision_ids
+            .iter()
+            .enumerate()
+            .map(|(index, decision_id)| {
+                serde_json::json!({
+                    "number": index + 1,
+                    "label": format!("Criterion {}", index + 1),
+                    "kind": "PassFail",
+                    "result": "pass",
+                    "passed": true,
+                    "evidence": "Observed",
+                    "evidence_refs": [format!("qa#{}", index + 1)],
+                    "decision_id": decision_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "milestone_id": "milestone-1",
+            "iteration": iteration,
+            "verdict": verdict,
+            "passed": verdict == "PASS",
+            "summary": "Typed verdict fixture",
+            "timestamp": "2026-09-22T22:00:00.000Z",
+            "contract_path": null,
+            "contract_typed": true,
+            "omission": null,
+            "criteria": criteria,
+        });
+        std::fs::write(
+            state_dir.join("qa-verdict.json"),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn read_test_outcomes(storage: &SessionStorage) -> Vec<serde_json::Value> {
+        let path = storage
+            .base_dir()
+            .join("judgments")
+            .join("ledger.jsonl");
+        match std::fs::read_to_string(path) {
+            Ok(content) => content
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read test judgment ledger: {error}"),
+        }
+    }
+
+    #[test]
+    fn qa_pass_records_one_downstream_outcome_per_criterion() {
+        const SESSION_ID: &str = "qa-outcome-pass";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["decision-1", "decision-2"],
+        );
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        let session = qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("project"),
+            false,
+        );
+        controller.insert_test_session(session);
+
+        let new_state = controller
+            .record_http_qa_verdict(SESSION_ID, "qa-outcome-pass-evaluator", "PASS", None)
+            .unwrap();
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        assert_eq!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::QaPassed
+        );
+        let outcomes = read_test_outcomes(&storage);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|row| row["decision_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["decision-1", "decision-2"]
+        );
+        assert!(outcomes.iter().all(|row| {
+            row["kind"] == "outcome"
+                && row["label"] == "pass"
+                && row["source"] == "downstream"
+        }));
+    }
+
+    #[test]
+    fn qa_failure_records_outcomes_only_after_retry_exhaustion() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+
+        const RETRY_SESSION: &str = "qa-outcome-retry";
+        storage.create_session_dir(RETRY_SESSION).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            RETRY_SESSION,
+            1,
+            "FAIL",
+            &["retry-decision"],
+        );
+        let retry_session = qa_session_with(
+            RETRY_SESSION,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("retry-project"),
+            false,
+        );
+        controller.insert_test_session(retry_session);
+        let retry_state = controller
+            .record_http_qa_verdict(RETRY_SESSION, "retry-evaluator", "FAIL", None)
+            .unwrap();
+        assert_eq!(retry_state, SessionState::QaFailed { iteration: 2 });
+        assert!(read_test_outcomes(&storage).is_empty());
+
+        const TERMINAL_SESSION: &str = "qa-outcome-terminal-fail";
+        storage.create_session_dir(TERMINAL_SESSION).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            TERMINAL_SESSION,
+            3,
+            "FAIL",
+            &["terminal-decision-1", "terminal-decision-2"],
+        );
+        let terminal_session = qa_session_with(
+            TERMINAL_SESSION,
+            SessionState::QaInProgress { iteration: Some(3) },
+            temp.path().join("terminal-project"),
+            false,
+        );
+        controller.insert_test_session(terminal_session);
+        let terminal_state = controller
+            .record_http_qa_verdict(TERMINAL_SESSION, "terminal-evaluator", "FAIL", None)
+            .unwrap();
+        assert_eq!(terminal_state, SessionState::QaMaxRetriesExceeded);
+        assert_eq!(
+            controller.get_session(TERMINAL_SESSION).unwrap().state,
+            SessionState::QaMaxRetriesExceeded
+        );
+        let outcomes = read_test_outcomes(&storage);
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|row| {
+            row["label"] == "fail" && row["source"] == "downstream"
+        }));
+    }
+
+    #[test]
+    fn downstream_outcome_write_failure_does_not_change_qa_transition() {
+        const SESSION_ID: &str = "qa-outcome-fail-open";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["decision-unwritable"],
+        );
+        std::fs::write(storage.base_dir().join("judgments"), "blocks ledger directory").unwrap();
+        let mut controller = test_controller();
+        controller.set_storage(storage);
+        let session = qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("project"),
+            false,
+        );
+        controller.insert_test_session(session);
+
+        let new_state = controller
+            .record_http_qa_verdict(SESSION_ID, "qa-outcome-fail-open-evaluator", "PASS", None)
+            .unwrap();
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        assert_eq!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::QaPassed
+        );
+    }
+
+    #[test]
+    fn qa_persist_failure_does_not_record_downstream_outcomes() {
+        const SESSION_ID: &str = "qa-outcome-persist-failure";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["decision-not-persisted"],
+        );
+        std::fs::create_dir(storage.session_dir(SESSION_ID).join("session.json")).unwrap();
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().join("project"),
+            false,
+        ));
+
+        let error = controller
+            .record_http_qa_verdict(SESSION_ID, "persist-failure-evaluator", "PASS", None)
+            .unwrap_err();
+
+        assert!(error.contains("Failed to update session metadata"));
+        assert!(matches!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::QaInProgress { iteration: Some(1) }
+        ));
+        assert!(read_test_outcomes(&storage).is_empty());
+    }
+
+    #[test]
+    fn stale_qa_verdict_iteration_does_not_record_downstream_outcomes() {
+        const SESSION_ID: &str = "qa-outcome-stale-iteration";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["stale-decision"],
+        );
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(2) },
+            temp.path().join("project"),
+            false,
+        ));
+
+        let new_state = controller
+            .record_http_qa_verdict(SESSION_ID, "stale-iteration-evaluator", "PASS", None)
+            .unwrap();
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        assert!(read_test_outcomes(&storage).is_empty());
+    }
+
+    #[test]
+    fn operator_overrides_do_not_record_downstream_outcomes() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+
+        const FORCE_PASS_SESSION: &str = "qa-override-force-pass";
+        storage.create_session_dir(FORCE_PASS_SESSION).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            FORCE_PASS_SESSION,
+            1,
+            "PASS",
+            &["force-pass-decision"],
+        );
+        controller.insert_test_session(qa_session_with(
+            FORCE_PASS_SESSION,
+            SessionState::QaFailed { iteration: 1 },
+            temp.path().join("force-pass-project"),
+            false,
+        ));
+        assert_eq!(
+            controller
+                .on_qa_verdict(FORCE_PASS_SESSION, "QA_VERDICT: PASS")
+                .unwrap(),
+            SessionState::QaPassed
+        );
+
+        const FORCE_FAIL_SESSION: &str = "qa-override-force-fail";
+        storage.create_session_dir(FORCE_FAIL_SESSION).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            FORCE_FAIL_SESSION,
+            1,
+            "PASS",
+            &["force-fail-decision"],
+        );
+        let mut force_fail_session = qa_session_with(
+            FORCE_FAIL_SESSION,
+            SessionState::QaPassed,
+            temp.path().join("force-fail-project"),
+            false,
+        );
+        force_fail_session.max_qa_iterations = 0;
+        controller.insert_test_session(force_fail_session);
+        assert_eq!(
+            controller
+                .on_qa_verdict(FORCE_FAIL_SESSION, "QA_VERDICT: FAIL")
+                .unwrap(),
+            SessionState::QaMaxRetriesExceeded
+        );
+
+        assert!(read_test_outcomes(&storage).is_empty());
+    }
+
     #[test]
     fn qa_verdict_routes_to_prince_when_prince_present() {
         let controller = test_controller();
@@ -19101,6 +20234,82 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             .record_prince_verdict("prince-clear", "PASS")
             .expect("prince verdict recorded");
         assert_eq!(new_state, SessionState::QaPassed);
+    }
+
+    #[test]
+    fn prince_pass_records_outcomes_for_current_evaluator_verdict() {
+        const SESSION_ID: &str = "prince-outcome-pass";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            2,
+            "FAIL",
+            &["prince-decision-1", "prince-decision-2"],
+        );
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::PrinceRemediation,
+            temp.path().join("project"),
+            true,
+        ));
+
+        let new_state = controller.record_prince_verdict(SESSION_ID, "PASS").unwrap();
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        let outcomes = read_test_outcomes(&storage);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|row| row["decision_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["prince-decision-1", "prince-decision-2"]
+        );
+        assert!(outcomes.iter().all(|row| {
+            row["kind"] == "outcome"
+                && row["label"] == "pass"
+                && row["source"] == "downstream"
+        }));
+    }
+
+    #[test]
+    fn prince_persist_failure_does_not_record_downstream_outcomes() {
+        const SESSION_ID: &str = "prince-outcome-persist-failure";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["prince-unpersisted-decision"],
+        );
+        std::fs::create_dir(storage.session_dir(SESSION_ID).join("session.json")).unwrap();
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::PrinceRemediation,
+            temp.path().join("project"),
+            true,
+        ));
+
+        let error = controller
+            .record_prince_verdict(SESSION_ID, "PASS")
+            .unwrap_err();
+
+        assert!(error.contains("Failed to update session metadata"));
+        assert_eq!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::PrinceRemediation
+        );
+        assert!(read_test_outcomes(&storage).is_empty());
     }
 
     #[test]
