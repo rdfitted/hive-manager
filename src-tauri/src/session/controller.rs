@@ -13611,7 +13611,8 @@ The backend composed and persisted the following authoritative skeleton before l
         let winner = metadata
             .variants
             .iter()
-            .find(|v| v.name == requested || v.slug == requested_slug)
+            .find(|v| v.name == requested)
+            .or_else(|| metadata.variants.iter().find(|v| v.slug == requested_slug))
             .ok_or_else(|| {
                 format!(
                     "Variant '{}' not found for session {}",

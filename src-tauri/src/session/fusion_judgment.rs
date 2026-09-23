@@ -71,7 +71,8 @@ pub(super) fn parse_winner<'a>(
         let requested_slug = slugify_variant_name(requested);
         return variants
             .iter()
-            .find(|variant| variant.name == requested || variant.slug == requested_slug)
+            .find(|variant| variant.name == requested)
+            .or_else(|| variants.iter().find(|variant| variant.slug == requested_slug))
             .map(|variant| variant.name)
             .ok_or_else(|| format!("Fusion recommendation names unknown winner: {requested}"));
     }
@@ -168,11 +169,12 @@ pub(super) fn record_outcome(
 mod tests {
     use super::*;
     use crate::domain::HiveExecutionPolicy;
-    use crate::pty::PtyManager;
+    use crate::pty::{AgentConfig, PtyManager};
     use crate::session::{AuthStrategy, Session, SessionController, SessionState, SessionType};
     use chrono::Utc;
     use parking_lot::RwLock;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -223,6 +225,24 @@ mod tests {
         .is_err());
         assert!(parse_winner("## Recommendation\nWinner: \nWinner: Fast Path", &variants)
             .is_err());
+    }
+
+    #[test]
+    fn exact_winner_name_precedes_colliding_slug() {
+        let variants = [
+            FusionCandidate {
+                name: "A B",
+                slug: "a-b",
+            },
+            FusionCandidate {
+                name: "A-B",
+                slug: "a-b-2",
+            },
+        ];
+        assert_eq!(
+            parse_winner("## Recommendation\nWinner: A-B", &variants),
+            Ok("A-B")
+        );
     }
 
     #[test]
@@ -321,6 +341,98 @@ mod tests {
         let recorded = rows(&storage);
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0]["kind"], "decision");
+    }
+
+    #[test]
+    fn controller_exact_winner_name_precedes_colliding_slug() {
+        let project = TempDir::new().unwrap();
+        let project_path = project.path().to_path_buf();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&project_path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(project_path.join("initial.txt"), "initial").unwrap();
+        git(&["add", "initial.txt"]);
+        git(&["commit", "-q", "-m", "initial"]);
+        let session_id = "fusion-colliding-names";
+        let metadata_dir = project_path.join(".hive-manager").join(session_id);
+        std::fs::create_dir_all(&metadata_dir).unwrap();
+        let metadata = json!({
+            "base_branch": "main",
+            "variants": [
+                {
+                    "index": 1,
+                    "name": "A B",
+                    "slug": "a-b",
+                    "branch": "slug-first-branch",
+                    "worktree_path": "",
+                    "task_file": "",
+                    "agent_id": "variant-1"
+                },
+                {
+                    "index": 2,
+                    "name": "A-B",
+                    "slug": "a-b-2",
+                    "branch": "exact-name-branch",
+                    "worktree_path": "",
+                    "task_file": "",
+                    "agent_id": "variant-2"
+                }
+            ],
+            "judge_config": AgentConfig::default(),
+            "task_description": "Resolve name collision",
+            "decision_file": ""
+        });
+        std::fs::write(
+            metadata_dir.join("fusion-config.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
+        controller.insert_test_session(Session {
+            id: session_id.to_string(),
+            name: None,
+            color: None,
+            session_type: SessionType::Fusion {
+                variants: vec!["A B".to_string(), "A-B".to_string()],
+            },
+            project_path,
+            state: SessionState::AwaitingVerdictSelection,
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            agents: Vec::new(),
+            default_cli: "codex".to_string(),
+            default_model: None,
+            default_principal_cli: None,
+            default_principal_model: None,
+            default_principal_flags: Vec::new(),
+            execution_policy: HiveExecutionPolicy::default(),
+            qa_workers: Vec::new(),
+            max_qa_iterations: 3,
+            qa_timeout_secs: 300,
+            auth_strategy: AuthStrategy::default(),
+            worktree_path: None,
+            worktree_branch: None,
+            no_git: false,
+            resume_report: None,
+        });
+
+        let error = SessionController::select_fusion_winner(&controller, session_id, "A-B")
+            .unwrap_err();
+        assert!(error.contains("exact-name-branch"), "{error}");
+        assert!(!error.contains("slug-first-branch"), "{error}");
     }
 
     #[test]
