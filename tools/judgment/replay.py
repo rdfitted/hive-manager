@@ -28,7 +28,7 @@ SOURCE_SURFACE = "hive.qa.criterion"
 def code_test_judge(request: bytes, *, sampling: dict | None) -> dict:
     """A deterministic test double; it makes no claim about QA correctness."""
     observations = json.loads(request)
-    return {"result": "Pass" if observations.get("evidence") else "Fail"}
+    return {"result": "pass" if observations.get("evidence") else "fail"}
 
 
 def load_plugin(spec: str) -> JudgePlugin:
@@ -135,13 +135,13 @@ def replay(
                 state_ref=source["state_ref"],
                 question_id=source.get("question_id"),
                 question_version=source.get("question_version"),
-                model=model,
+                model=model if model is not None else plugin_id,
                 sampling=json.loads(sampling_json),
                 mode="shadow",
                 error=error,
                 decision_id=decision_id,
                 ledger=ledger_path,
-                **{"source_decision_id": source_id},
+                **{"source_decision_id": source_id, "plugin_id": plugin_id},
             )
             if row is None:
                 raise RuntimeError(f"replay row was not recorded for {source_id}")

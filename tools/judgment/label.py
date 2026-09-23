@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -20,11 +22,33 @@ import replay
 import retrieval_replay
 
 
+def _criterion_result(value):
+    if isinstance(value, str) and value in {"pass", "fail", "blocked"}:
+        return value
+    if isinstance(value, dict) and len(value) == 1:
+        key, number = next(iter(value.items()))
+        if key in {"scored", "measured"} and isinstance(number, (int, float)) \
+                and not isinstance(number, bool) and math.isfinite(number):
+            return {key: number}
+    raise ValueError("expected pass, fail, blocked, or a finite scored/measured value")
+
+
 def _label_value(text: str):
+    if text.lower() in {"pass", "fail", "blocked"}:
+        return {"result": text.lower()}
+    scored = re.fullmatch(r"scored\s+(.+)", text, flags=re.IGNORECASE)
+    if scored:
+        try:
+            return {"result": _criterion_result({"scored": json.loads(scored.group(1))})}
+        except json.JSONDecodeError as exc:
+            raise ValueError("scored requires a JSON number") from exc
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return text
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid criterion result") from exc
+    if isinstance(value, dict) and set(value) == {"result"}:
+        value = value["result"]
+    return {"result": _criterion_result(value)}
 
 
 def label_session(
@@ -61,17 +85,28 @@ def label_session(
             continue
         print(f"\n{source_id} [{item_split}]", file=output)
         print(replay.request_bytes(observations).decode("utf-8"), file=output)
-        try:
-            response = input_fn("label (JSON or text; skip/quit): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if response.lower() in {"quit", "q"}:
+        while True:
+            try:
+                response = input_fn("label (pass/fail/blocked, scored N, or JSON; skip/quit): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return written
+            if response.lower() in {"quit", "q"}:
+                return written
+            if response.lower() in {"skip", "s", ""}:
+                break
+            try:
+                value = _label_value(response)
+            except ValueError as exc:
+                print(f"Invalid label: {exc}", file=output)
+                if clock() >= deadline:
+                    return written
+                continue
             break
         if response.lower() in {"skip", "s", ""}:
             continue
         saved = ledger.record_outcome(
             source_id,
-            _label_value(response),
+            value,
             "human-label",
             ledger=ledger_path,
         )

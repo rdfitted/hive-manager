@@ -59,7 +59,61 @@ class LabelSessionTests(unittest.TestCase):
             self.assertEqual({"source-a", "source-b"}, {
                 row["decision_id"] for row in human_rows
             })
-            self.assertEqual({"pass", "fail"}, {row["label"] for row in human_rows})
+            self.assertEqual({"pass", "fail"}, {row["label"]["result"] for row in human_rows})
+
+    def test_qa_inputs_are_normalized_to_criterion_result_shape(self):
+        cases = (
+            ("Pass", {"result": "pass"}),
+            ("pass", {"result": "pass"}),
+            ("FAIL", {"result": "fail"}),
+            ("blocked", {"result": "blocked"}),
+            ("scored 7.5", {"result": {"scored": 7.5}}),
+            ('{"measured": 42}', {"result": {"measured": 42}}),
+            ('{"result": {"scored": 8}}', {"result": {"scored": 8}}),
+        )
+        for response, expected in cases:
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as temporary:
+                ledger_path = Path(temporary) / "ledger.jsonl"
+                add_source(ledger_path, "source-a", "evidence")
+                self.assertEqual(1, label.label_session(
+                    ledger_path, input_fn=lambda prompt: response, output=io.StringIO(),
+                ))
+                rows = [row for row in ledger.read_records([ledger_path])
+                        if row.get("source") == "human-label"]
+                self.assertEqual([expected], [row["label"] for row in rows])
+
+    def test_invalid_input_reprompts_without_writing_a_row(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger_path = Path(temporary) / "ledger.jsonl"
+            add_source(ledger_path, "source-a", "evidence")
+            prompts = []
+
+            def answer(prompt):
+                prompts.append(prompt)
+                if len(prompts) == 1:
+                    return "garbage"
+                self.assertEqual(1, len(list(ledger.read_records([ledger_path]))))
+                return "Pass"
+
+            output = io.StringIO()
+            self.assertEqual(1, label.label_session(
+                ledger_path, input_fn=answer, output=output,
+            ))
+            self.assertEqual(2, len(prompts))
+            self.assertIn("Invalid label", output.getvalue())
+            rows = [row for row in ledger.read_records([ledger_path])
+                    if row.get("source") == "human-label"]
+            self.assertEqual([{"result": "pass"}], [row["label"] for row in rows])
+
+    def test_invalid_json_criterion_result_can_be_skipped_without_a_row(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger_path = Path(temporary) / "ledger.jsonl"
+            add_source(ledger_path, "source-a", "evidence")
+            answers = iter(('true', '{"scored": false}', "skip"))
+            self.assertEqual(0, label.label_session(
+                ledger_path, input_fn=lambda prompt: next(answers), output=io.StringIO(),
+            ))
+            self.assertEqual(1, len(list(ledger.read_records([ledger_path]))))
 
     def test_heldout_filter_uses_vendored_split(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -77,7 +131,7 @@ class LabelSessionTests(unittest.TestCase):
                     break
             self.assertEqual({"heldout", "tune"}, set(hashes))
             self.assertEqual(1, label.label_session(
-                ledger_path, split="heldout", input_fn=lambda prompt: "true",
+                ledger_path, split="heldout", input_fn=lambda prompt: "pass",
                 output=io.StringIO(),
             ))
             human_rows = [
@@ -85,7 +139,7 @@ class LabelSessionTests(unittest.TestCase):
                 if row.get("kind") == "outcome" and row.get("source") == "human-label"
             ]
             self.assertEqual(["source-heldout"], [row["decision_id"] for row in human_rows])
-            self.assertIs(True, human_rows[0]["label"])
+            self.assertEqual({"result": "pass"}, human_rows[0]["label"])
 
     def test_ten_minute_deadline_stops_before_next_prompt(self):
         with tempfile.TemporaryDirectory() as temporary:

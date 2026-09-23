@@ -55,6 +55,10 @@ class ReplayHarnessTests(unittest.TestCase):
             self.assertEqual(1, len(replay.source_decisions(ledger_path)))
             self.assertEqual(0, replay.replay(ledger_path, **kwargs))
             self.assertEqual(3, len(list(ledger.read_records([ledger_path]))))
+            replay_rows = [row for row in ledger.read_records([ledger_path])
+                           if row.get("source_decision_id") == "source-a"]
+            self.assertTrue(all(row["model"] == "synthetic-model" for row in replay_rows))
+            self.assertTrue(all(row["plugin_id"] == "synthetic:incumbent" for row in replay_rows))
 
     def test_cli_uses_explicit_temp_ledger_and_builtin_code_judge(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -66,7 +70,35 @@ class ReplayHarnessTests(unittest.TestCase):
                 ]))
             self.assertIn("wrote 2 replay decisions", output.getvalue())
             rows = list(ledger.read_records([ledger_path]))
-            self.assertEqual(2, sum(row.get("judge") == "code" for row in rows))
+            replay_rows = [row for row in rows if row.get("judge") == "code"]
+            self.assertEqual(2, len(replay_rows))
+            self.assertTrue(all(row["answer"] == {"result": "pass"} for row in replay_rows))
+            self.assertTrue(all(row["model"] == "code-test" for row in replay_rows))
+            self.assertTrue(all(row["plugin_id"] == "code-test" for row in replay_rows))
+
+    def test_plugins_on_same_bundle_have_distinct_model_and_plugin_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger_path = Path(temporary) / "ledger.jsonl"
+            add_source(ledger_path, "source-a", "observation")
+            for plugin_id in ("synthetic:one", "synthetic:two"):
+                self.assertEqual(1, replay.replay(
+                    ledger_path,
+                    plugin=lambda request, *, sampling: {"result": "pass"},
+                    plugin_id=plugin_id, judge="code", runs=1, sampling=None,
+                ))
+            rows = [row for row in ledger.read_records([ledger_path])
+                    if row.get("source_decision_id") == "source-a"]
+            self.assertEqual({"synthetic:one", "synthetic:two"},
+                             {row["model"] for row in rows})
+            self.assertEqual({"synthetic:one", "synthetic:two"},
+                             {row["plugin_id"] for row in rows})
+            self.assertTrue(all(row["model"] == row["plugin_id"] for row in rows))
+            self.assertEqual({
+                replay.retrieval_replay._decision_id(
+                    "qa-replay", "source-a", plugin_id, "code", "", "null", "0"
+                )
+                for plugin_id in ("synthetic:one", "synthetic:two")
+            }, {row["decision_id"] for row in rows})
 
     def test_replays_every_bundle_n_times_with_linked_conformant_rows(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -108,6 +140,8 @@ class ReplayHarnessTests(unittest.TestCase):
             })
             self.assertTrue(all(row["mode"] == "shadow" for row in replay_rows))
             self.assertTrue(all(row["sampling"] == {"deterministic": True} for row in replay_rows))
+            self.assertTrue(all(row["plugin_id"] == "synthetic:judge" for row in replay_rows))
+            self.assertTrue(all(row["model"] == "synthetic:judge" for row in replay_rows))
             self.assertTrue(all(row["answer"] == {"result": "Pass"} for row in replay_rows))
             self.assertEqual((8, []), ledger.validate_file([ledger_path]))
 
