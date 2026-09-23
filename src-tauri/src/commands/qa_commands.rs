@@ -2,6 +2,7 @@ use serde::Serialize;
 #[cfg(not(test))]
 use tauri::State;
 
+use crate::coordination::Verdict;
 use crate::http::handlers::evaluator::read_qa_verdict_record;
 use crate::storage::SessionStorage;
 
@@ -14,6 +15,9 @@ pub struct QaCriterion {
     pub label: String,
     pub passed: bool,
     pub evidence: Option<String>,
+    pub advisory_status: Verdict,
+    pub advisory_threshold_disagreement: bool,
+    pub unchanged_evidence_flip: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -25,6 +29,10 @@ pub struct QaVerdict {
     pub criteria: Vec<QaCriterion>,
     pub summary: String,
     pub timestamp: String,
+    pub advisory_verdict: Verdict,
+    pub advisory_disagrees: bool,
+    pub advisory_threshold_disagreement: bool,
+    pub advisory_flip: bool,
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
@@ -49,6 +57,7 @@ pub(crate) fn load_qa_verdict(
         return Ok(None);
     };
 
+    let advisory_criteria = record.advisory_criteria;
     Ok(Some(QaVerdict {
         session_id: record.session_id,
         milestone_id: record.milestone_id,
@@ -57,15 +66,29 @@ pub(crate) fn load_qa_verdict(
         criteria: record
             .criteria
             .into_iter()
-            .map(|criterion| QaCriterion {
-                id: criterion.number.to_string(),
-                label: criterion.label,
-                passed: criterion.passed,
-                evidence: (!criterion.evidence.trim().is_empty()).then_some(criterion.evidence),
+            .map(|criterion| {
+                let advisory = advisory_criteria
+                    .iter()
+                    .find(|item| item.number == criterion.number);
+                QaCriterion {
+                    id: criterion.number.to_string(),
+                    label: criterion.label,
+                    passed: criterion.passed,
+                    evidence: (!criterion.evidence.trim().is_empty()).then_some(criterion.evidence),
+                    advisory_status: advisory.map_or(Verdict::Undetermined, |item| item.status),
+                    advisory_threshold_disagreement: advisory
+                        .is_some_and(|item| item.threshold_disagreement),
+                    unchanged_evidence_flip: advisory
+                        .is_some_and(|item| item.unchanged_evidence_flip),
+                }
             })
             .collect(),
         summary: record.summary,
         timestamp: record.timestamp,
+        advisory_verdict: record.advisory_verdict,
+        advisory_disagrees: record.advisory_disagrees,
+        advisory_threshold_disagreement: record.advisory_threshold_disagreement,
+        advisory_flip: record.advisory_flip,
     }))
 }
 
@@ -136,6 +159,11 @@ mod tests {
                     decision_id: Some("decision-2".to_string()),
                 },
             ],
+            advisory_verdict: crate::coordination::Verdict::Fail,
+            advisory_disagrees: false,
+            advisory_threshold_disagreement: false,
+            advisory_flip: false,
+            advisory_criteria: Vec::new(),
         };
         write_qa_verdict_record(&storage.session_dir(session_id), &record).unwrap();
 
@@ -146,6 +174,8 @@ mod tests {
         assert_eq!(verdict.iteration, 2);
         assert!(!verdict.passed);
         assert_eq!(verdict.summary, "One criterion needs work");
+        assert_eq!(verdict.advisory_verdict, crate::coordination::Verdict::Fail);
+        assert!(!verdict.advisory_disagrees);
         assert_eq!(verdict.criteria.len(), 2);
         assert_eq!(verdict.criteria[0].id, "1");
         assert_eq!(
@@ -154,5 +184,27 @@ mod tests {
         );
         assert_eq!(verdict.criteria[1].id, "2");
         assert_eq!(verdict.criteria[1].evidence, None);
+    }
+
+    #[test]
+    fn legacy_record_without_advisory_fields_deserializes() {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "session_id": "legacy",
+            "milestone_id": "Legacy",
+            "iteration": 1,
+            "verdict": "PASS",
+            "passed": true,
+            "summary": "Legacy result",
+            "timestamp": "2026-09-22T22:00:00.000Z",
+            "contract_path": null,
+            "contract_typed": false,
+            "omission": null,
+            "criteria": []
+        });
+        let record: QaVerdictRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(record.advisory_verdict, crate::coordination::Verdict::Undetermined);
+        assert!(!record.advisory_disagrees);
+        assert!(record.advisory_criteria.is_empty());
     }
 }

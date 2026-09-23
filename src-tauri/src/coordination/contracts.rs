@@ -70,16 +70,12 @@ pub struct ScoredMeanThreshold {
     pub scale: f64,
 }
 
-// The evaluator is intentionally unwired until #296.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct CriterionResult {
     pub kind: CriterionKind,
     pub value: CriterionValue,
 }
 
-// The evaluator is intentionally unwired until #296.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CriterionValue {
     PassFail(bool),
@@ -88,12 +84,12 @@ pub enum CriterionValue {
     Unspecified,
 }
 
-// The evaluator is intentionally unwired until #296.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Pass,
     Fail,
+    #[default]
     Undetermined,
 }
 
@@ -410,7 +406,7 @@ fn parse_scored_mean_threshold(line: &str) -> Option<ScoredMeanThreshold> {
     }
 }
 
-fn criterion_verdict(result: &CriterionResult) -> Verdict {
+pub fn criterion_verdict(result: &CriterionResult) -> Verdict {
     match (&result.kind, result.value) {
         (CriterionKind::PassFail, CriterionValue::PassFail(passed)) => {
             if passed {
@@ -445,14 +441,12 @@ fn criterion_verdict(result: &CriterionResult) -> Verdict {
     }
 }
 
-/// Pure typed-contract evaluation, intentionally unwired until #296.
+/// Pure typed-contract evaluation.
 ///
 /// Measured criteria gate even when `require_all_pass_fail` is false. An
 /// unspecified criterion, a missing result, or a scored value outside its
 /// declared `min..=max` range produces [`Verdict::Undetermined`] unless another
 /// result already makes the policy fail.
-// The evaluator and its result types remain dormant until that issue connects the verdict path.
-#[allow(dead_code)]
 pub fn evaluate(policy: &ThresholdPolicy, results: &[CriterionResult]) -> Verdict {
     let ThresholdPolicy::Rules {
         require_all_pass_fail,
@@ -463,6 +457,13 @@ pub fn evaluate(policy: &ThresholdPolicy, results: &[CriterionResult]) -> Verdic
         return Verdict::Undetermined;
     };
     if results.is_empty() {
+        return Verdict::Undetermined;
+    }
+    if scored_mean.is_some_and(|threshold| {
+        !threshold.minimum.is_finite()
+            || !threshold.scale.is_finite()
+            || threshold.scale <= 0.0
+    }) {
         return Verdict::Undetermined;
     }
 
@@ -759,6 +760,38 @@ mod tests {
             ),
             Verdict::Undetermined
         );
+    }
+
+    #[test]
+    fn invalid_scored_mean_scale_or_minimum_is_undetermined() {
+        let scored = [CriterionResult {
+            kind: CriterionKind::Scored {
+                min: 0,
+                max: 10,
+                floor: None,
+            },
+            value: CriterionValue::Scored(10.0),
+        }];
+        for (minimum, scale) in [
+            (0.0, 0.0),
+            (0.0, -1.0),
+            (0.0, f64::NAN),
+            (f64::NAN, 10.0),
+            (f64::INFINITY, 10.0),
+        ] {
+            assert_eq!(
+                evaluate(
+                    &ThresholdPolicy::Rules {
+                        require_all_pass_fail: false,
+                        scored_mean: Some(ScoredMeanThreshold { minimum, scale }),
+                        fail_scored_below_floor: false,
+                    },
+                    &scored,
+                ),
+                Verdict::Undetermined,
+                "minimum={minimum}, scale={scale}"
+            );
+        }
     }
 
     #[test]
