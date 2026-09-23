@@ -463,10 +463,7 @@ pub(crate) fn load_tracked_file_inventory(
     let max_bytes = MAX_FILE_INVENTORY_ENTRIES
         .saturating_mul(MAX_FILE_INVENTORY_PATH_CHARS.saturating_mul(4).saturating_add(1));
     let bytes = run_git_ls_files_capped(root, MAX_FILE_INVENTORY_ENTRIES, max_bytes)
-        .map_err(|error| match error {
-            CappedGitError::Unavailable => TRACKED_FILE_INVENTORY_UNAVAILABLE,
-            CappedGitError::LimitReached => TRACKED_FILE_INVENTORY_LIMIT_REACHED,
-        })?;
+        .map_err(tracked_inventory_error_detail)?;
     let output = String::from_utf8(bytes).map_err(|_| TRACKED_FILE_INVENTORY_INVALID_UTF8)?;
 
     let mut inventory = BTreeSet::new();
@@ -488,6 +485,13 @@ pub(crate) fn load_tracked_file_inventory(
         inventory.insert(normalized);
     }
     Ok(inventory)
+}
+
+fn tracked_inventory_error_detail(error: CappedGitError) -> &'static str {
+    match error {
+        CappedGitError::Unavailable => TRACKED_FILE_INVENTORY_UNAVAILABLE,
+        CappedGitError::LimitReached => TRACKED_FILE_INVENTORY_LIMIT_REACHED,
+    }
 }
 
 // Keep the independent resolution inputs visible at the mutation boundary.
@@ -1926,10 +1930,12 @@ mod tests {
     use super::{
         build_knowledge_touch_coverage, derive_project_context_from_knowledge,
         harvest_contract_path_intents, is_path_like_token, prepare_knowledge_candidate_selection,
-        KnowledgeAttachmentConfig, KnowledgeTouchCoverage, NoTouchesResolver, PathIntentResolver,
+        tracked_inventory_error_detail, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
+        NoTouchesResolver, PathIntentResolver,
         PathMatchType, PathResolution, PathResolutionFailure, TouchCoverageReport, TouchesResolver,
         MAX_KNOWLEDGE_TOUCHES_PER_TASK,
     };
+    use crate::actions::git::CappedGitError;
     use crate::orchestrator::work_graph::{
         BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
         WorkGraphOmissionReason, WorkNode,
@@ -1963,6 +1969,14 @@ mod tests {
         assert!(!is_path_like_token("0.51.0"));
         assert!(is_path_like_token("foo.rs"));
         assert!(is_path_like_token("foo.c"));
+    }
+
+    #[test]
+    fn capped_inventory_has_a_named_omission() {
+        assert_eq!(
+            tracked_inventory_error_detail(CappedGitError::LimitReached),
+            "tracked file inventory exceeded the limit"
+        );
     }
 
     #[test]
