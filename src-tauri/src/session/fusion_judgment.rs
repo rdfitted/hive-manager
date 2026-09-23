@@ -44,6 +44,23 @@ fn slugify_variant_name(name: &str) -> String {
     }
 }
 
+pub(super) fn resolve_variant_by_name_or_slug<'a, T>(
+    variants: &'a [T],
+    requested: &str,
+    name: impl for<'b> Fn(&'b T) -> &'b str,
+    slug: impl for<'b> Fn(&'b T) -> &'b str,
+) -> Option<&'a T> {
+    variants
+        .iter()
+        .find(|variant| name(variant) == requested)
+        .or_else(|| {
+            let requested_slug = slugify_variant_name(requested);
+            variants
+                .iter()
+                .find(|variant| slug(variant) == requested_slug)
+        })
+}
+
 pub(super) fn parse_winner<'a>(
     report: &str,
     variants: &'a [FusionCandidate<'a>],
@@ -68,13 +85,14 @@ pub(super) fn parse_winner<'a>(
         if requested.is_empty() {
             return Err("Fusion recommendation has an empty Winner: value".to_string());
         }
-        let requested_slug = slugify_variant_name(requested);
-        return variants
-            .iter()
-            .find(|variant| variant.name == requested)
-            .or_else(|| variants.iter().find(|variant| variant.slug == requested_slug))
-            .map(|variant| variant.name)
-            .ok_or_else(|| format!("Fusion recommendation names unknown winner: {requested}"));
+        return resolve_variant_by_name_or_slug(
+            variants,
+            requested,
+            |variant| variant.name,
+            |variant| variant.slug,
+        )
+        .map(|variant| variant.name)
+        .ok_or_else(|| format!("Fusion recommendation names unknown winner: {requested}"));
     }
     Err("Fusion recommendation is missing Winner: under ## Recommendation".to_string())
 }

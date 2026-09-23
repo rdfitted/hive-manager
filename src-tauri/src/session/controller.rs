@@ -13607,18 +13607,18 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         let metadata = Self::read_fusion_metadata(&session.project_path, session_id)?;
-        let requested_slug = Self::slugify_variant_name(requested);
-        let winner = metadata
-            .variants
-            .iter()
-            .find(|v| v.name == requested)
-            .or_else(|| metadata.variants.iter().find(|v| v.slug == requested_slug))
-            .ok_or_else(|| {
-                format!(
-                    "Variant '{}' not found for session {}",
-                    requested, session_id
-                )
-            })?;
+        let winner = super::fusion_judgment::resolve_variant_by_name_or_slug(
+            &metadata.variants,
+            requested,
+            |variant| variant.name.as_str(),
+            |variant| variant.slug.as_str(),
+        )
+        .ok_or_else(|| {
+            format!(
+                "Variant '{}' not found for session {}",
+                requested, session_id
+            )
+        })?;
 
         let merging_changes = {
             let mut sessions = self.sessions.write();
