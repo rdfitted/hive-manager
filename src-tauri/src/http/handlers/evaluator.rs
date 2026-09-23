@@ -932,8 +932,9 @@ fn record_typed_criteria(
     evaluator_model: &str,
     record: &mut QaVerdictRecord,
     criteria: Vec<(ContractCriterion, PostCriterionResult)>,
-) {
+) -> Vec<Option<String>> {
     let ledger = judgment_ledger(state);
+    let mut state_hashes = Vec::with_capacity(criteria.len());
     for (criterion, submitted) in criteria {
         let mut subject_ref = Map::new();
         subject_ref.insert("session_id".to_string(), json!(session_id));
@@ -973,6 +974,7 @@ fn record_typed_criteria(
             error: None,
             extra: Map::new(),
         });
+        state_hashes.push(decision.as_ref().and_then(|decision| decision.state_hash.clone()));
         record.criteria.push(QaCriterionVerdictRecord {
             number: criterion.number,
             label: criterion.description,
@@ -984,6 +986,7 @@ fn record_typed_criteria(
             decision_id: decision.map(|decision| decision.decision_id),
         });
     }
+    state_hashes
 }
 
 fn record_operator_override_outcomes(
@@ -1610,7 +1613,7 @@ pub async fn post_verdict(
         verdict_record.advisory_disagrees = match verdict_record.advisory_verdict {
             Verdict::Pass => verdict != "PASS",
             Verdict::Fail => verdict != "FAIL",
-            Verdict::Undetermined => true,
+            Verdict::Undetermined => false,
         };
         let floor_enabled = matches!(
             policy,
@@ -1649,7 +1652,7 @@ pub async fn post_verdict(
                 }
             })
             .collect();
-        record_typed_criteria(
+        let state_hashes = record_typed_criteria(
             &state,
             &session_id,
             verdict,
@@ -1658,34 +1661,14 @@ pub async fn post_verdict(
             &mut verdict_record,
             criteria,
         );
-        let ledger_path = state.storage.base_dir().join("judgments").join("ledger.jsonl");
-        let mut hashes = HashMap::new();
-        match fs::read_to_string(&ledger_path) {
-            Ok(contents) => {
-                for line in contents.lines() {
-                    if let Ok(row) = serde_json::from_str::<Value>(line) {
-                        if let (Some(id), Some(hash)) = (
-                            row.get("decision_id").and_then(Value::as_str),
-                            row.get("state_hash").and_then(Value::as_str),
-                        ) {
-                            hashes.insert(id.to_string(), hash.to_string());
-                        }
-                    }
-                }
-            }
-            Err(error) => tracing::warn!(%session_id, %error, "Failed to read QA decision hashes"),
-        }
         let mut flips = Vec::new();
-        for (current, advisory) in verdict_record
+        for ((current, advisory), state_hash) in verdict_record
             .criteria
             .iter()
             .zip(&mut verdict_record.advisory_criteria)
+            .zip(state_hashes)
         {
-            advisory.state_hash = current
-                .decision_id
-                .as_ref()
-                .and_then(|id| hashes.get(id))
-                .cloned();
+            advisory.state_hash = state_hash;
             let prior = prior_record.as_ref().filter(|prior| {
                 prior.milestone_id == verdict_record.milestone_id
                     && prior.iteration < verdict_record.iteration
@@ -2370,6 +2353,75 @@ mod tests {
         assert_eq!(
             advisory[0]["source_decision_ids"].as_array().unwrap().len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn prose_threshold_is_undetermined_without_advisory_disagreement() {
+        let storage = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let (app, controller, session_storage) =
+            setup_test_app_with_controller_at(storage.path().to_path_buf()).await;
+        let session_id = format!("prose-qa-{}", uuid::Uuid::new_v4());
+        let contracts = project
+            .path()
+            .join(".hive-manager")
+            .join(&session_id)
+            .join("contracts");
+        std::fs::create_dir_all(&contracts).unwrap();
+        std::fs::write(
+            contracts.join("milestone-1.md"),
+            "# Sprint Contract: Prose Threshold\n\n\
+             ## Acceptance Criteria\n\
+             1. [FUNC] The endpoint records functional evidence\n\n\
+             ## Pass Threshold\n\
+             - Human judgment applies\n",
+        )
+        .unwrap();
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = SessionState::QaInProgress { iteration: Some(1) };
+        session.agents.push(evaluator_agent(&session_id));
+        controller.write().insert_test_session(session);
+
+        let request = serde_json::json!({
+            "verdict": "PASS",
+            "criteria": [
+                {"number": 1, "result": "pass", "evidence": "human-reviewed evidence"}
+            ]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let record = read_qa_verdict_record(&session_storage.session_dir(&session_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.advisory_verdict, crate::coordination::Verdict::Undetermined);
+        assert!(!record.advisory_disagrees);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(
+            storage.path().join("judgments").join("ledger.jsonl"),
+        )
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+        assert!(rows.iter().all(|row| row["surface"] != "hive.qa.milestone"));
+        let criterion = rows
+            .iter()
+            .find(|row| row["surface"] == "hive.qa.criterion")
+            .unwrap();
+        assert_eq!(
+            record.advisory_criteria[0].state_hash.as_deref(),
+            criterion["state_hash"].as_str()
         );
     }
 
