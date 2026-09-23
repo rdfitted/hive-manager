@@ -13228,6 +13228,38 @@ The backend composed and persisted the following authoritative skeleton before l
                 }
             };
             if let Some(changes) = awaiting_changes {
+                let variants = metadata
+                    .variants
+                    .iter()
+                    .map(|variant| super::fusion_judgment::FusionCandidate {
+                        name: &variant.name,
+                        slug: &variant.slug,
+                    })
+                    .collect::<Vec<_>>();
+                let judge_config = session
+                    .agents
+                    .iter()
+                    .find(|agent| matches!(&agent.role, AgentRole::Judge { .. }))
+                    .map(|agent| &agent.config)
+                    .unwrap_or(&metadata.judge_config);
+                let judge_cli = if judge_config.cli.trim().is_empty() {
+                    &session.default_cli
+                } else {
+                    &judge_config.cli
+                };
+                let judge_model = judge_config
+                    .model
+                    .as_deref()
+                    .or(session.default_model.as_deref());
+                super::fusion_judgment::record_decision(
+                    self.storage.as_deref(),
+                    session_id,
+                    &metadata.task_description,
+                    &variants,
+                    report.as_deref().unwrap_or_default(),
+                    judge_cli,
+                    judge_model,
+                );
                 self.emit_session_update(session_id);
                 self.update_session_storage(session_id);
                 self.emit_cell_status_changes(session_id, changes);
@@ -13608,6 +13640,12 @@ The backend composed and persisted the following authoritative skeleton before l
                 &format!("Merge fusion winner: {}", winner.name),
             ],
         )?;
+
+        super::fusion_judgment::record_outcome(
+            self.storage.as_deref(),
+            session_id,
+            &winner.name,
+        );
 
         for variant in &metadata.variants {
             let pty_manager = self.pty_manager.read();

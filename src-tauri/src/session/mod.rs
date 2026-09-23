@@ -1,5 +1,6 @@
 pub(crate) mod cell_status;
 mod controller;
+mod fusion_judgment;
 mod polling_intervals;
 mod prompt_contract;
 pub mod transitions;
