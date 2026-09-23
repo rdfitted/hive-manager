@@ -3144,7 +3144,7 @@ impl SessionController {
 
         (
             Some("codex".to_string()),
-            Some("gpt-5.6-sol".to_string()),
+            CliRegistry::default_model("codex").map(ToString::to_string),
             Vec::new(),
         )
     }
@@ -7786,7 +7786,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | role_type | string | Yes | Worker role: backend, frontend, coherence, simplify, reviewer, resolver, tester, code-quality, researcher |
 | cli | string | No | CLI override: codex, opencode, cursor, droid, qwen, or claude. Omit to inherit the session principal CLI (`{default_cli}`). |
-| model | string | No | Model override (for example gpt-5.6-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
+| model | string | No | Model override (for example gpt-6-sol for Codex or fable/opus for Claude). Omit to inherit the principal model. |
 | flags | string[] | No | CLI flag override. Omit to inherit principal flags; send `[]` to clear them. |
 | name | string | No | Stable worker name; defaults to `Worker N (Role)` |
 | description | string | No | One-line task summary used for deterministic labels |
@@ -8025,7 +8025,7 @@ Content-Type: application/json
 | agent_id | string | Yes | Exact full agent ID from the roster or worker API, such as `{session_id}-worker-2` or `{session_id}-fusion-1` |
 | status | string | Yes | `working` = doing work or holding the session open; `idle` = alive and blocked on another actor; `completed` = this actor is finished |
 | summary | string | No | Concise evidence-backed status summary |
-| completed_nodes | (string \| object)[] | No | Exact work-graph completions; valid only with `status: completed`. Bare node-ID strings remain valid for legacy agents and reporting-parent execution. Native-child work should use `{{"node_id":"<exact-work-graph-node-id>","executed_as":{{"provider":"codex","tier":"low","model":"gpt-5.6-terra","flags":["-c","model_reasoning_effort=\"medium\""],"channel":"native","source":"node"}}}}`. `source` is `node`, `fallback`, or `override` and must reflect the actual selection. Keep `agent_id` at the top level; do not add it per entry. Omit when no node binding is known. |
+| completed_nodes | (string \| object)[] | No | Exact work-graph completions; valid only with `status: completed`. Bare node-ID strings remain valid for legacy agents and reporting-parent execution. Native-child work should use `{{"node_id":"<exact-work-graph-node-id>","executed_as":{{"provider":"codex","tier":"low","model":"gpt-6-luna","flags":["-c","model_reasoning_effort=\"medium\""],"channel":"native","source":"node"}}}}`. `source` is `node`, `fallback`, or `override` and must reflect the actual selection. Keep `agent_id` at the top level; do not add it per entry. Omit when no node binding is known. |
 
 ## Mark a Verified Completion
 
@@ -8222,7 +8222,7 @@ Content-Type: application/json
 |-----------|------|----------|-------------|
 | domain | string | Yes | Domain for this planner: backend, frontend, testing, infra, etc. |
 | cli | string | No | CLI to use: {default_cli} (default), codex, opencode, cursor, droid, qwen |
-| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-5.6-sol`, `gpt-5.6-terra`, `glm-5.1`, `qwen3-coder`) |
+| model | string | No | Raw model identifier passed to the selected CLI's model flag (e.g., `opus`, `fable`, `gpt-6-sol`, `gpt-6-luna`, `glm-5.1`, `qwen3-coder`) |
 | label | string | No | Custom label for the planner |
 | worker_count | number | No | Number of workers this planner will manage (default: 1) |
 | workers | array | No | Pre-defined worker configurations |
@@ -18332,7 +18332,7 @@ mod tests {
             .join("spawn-worker.md");
         let worker_content =
             std::fs::read_to_string(worker_tool_path).expect("read worker tool doc");
-        assert!(worker_content.contains("gpt-5.6-sol for Codex or fable/opus for Claude"));
+        assert!(worker_content.contains("gpt-6-sol for Codex or fable/opus for Claude"));
         assert!(worker_content.contains("Omit to inherit the session principal CLI (`claude`)"));
         assert!(worker_content.contains("| flags | string[] | No |"));
         assert!(worker_content.contains("Omit to inherit principal flags; send `[]` to clear them"));
@@ -18540,7 +18540,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     fn codex_principal() -> AgentConfig {
         AgentConfig {
             cli: "codex".to_string(),
-            model: Some("gpt-5.6-sol".to_string()),
+            model: Some("gpt-6-sol".to_string()),
             flags: vec![
                 "--config".to_string(),
                 "model_reasoning_effort=\"high\"".to_string(),
@@ -18578,7 +18578,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(
             prompt.contains("Runtime CWD: `/repo/.hive-manager/worktrees/session-modern/primary`")
         );
-        assert!(prompt.contains("`codex` | `gpt-5.6-sol`"));
+        assert!(prompt.contains("`codex` | `gpt-6-sol`"));
         assert!(prompt.contains(r#"["--config","model_reasoning_effort=\"high\""]"#));
         assert!(prompt.contains("not a required task count"));
         assert!(prompt.contains(
@@ -18617,7 +18617,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(
             prompt.contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary")
         );
-        assert!(prompt.contains("codex | gpt-5.6-sol"));
+        assert!(prompt.contains("codex | gpt-6-sol"));
         assert!(prompt.contains(r#"["--config","model_reasoning_effort=\"high\""]"#));
         assert!(prompt.contains("supported; encouraged (authorized)"));
         assert!(prompt.contains("do not drop effort or reasoning settings"));
@@ -18695,16 +18695,16 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
 
         assert!(shared_prompt.contains("Harness: `codex`"));
-        assert!(shared_prompt.contains("Model: `gpt-5.6-sol`"));
+        assert!(shared_prompt.contains("Model: `gpt-6-sol`"));
         assert!(
             shared_prompt.contains(r#"Flags: `["--config","model_reasoning_effort=\"high\""]`"#)
         );
         assert!(shared_prompt.contains("Native delegation authorized: yes"));
         assert!(shared_prompt.contains("## Tier"));
         assert!(shared_prompt.contains("Current tier: `high`"));
-        assert!(shared_prompt.contains("`low`: model `gpt-5.6-terra`"));
+        assert!(shared_prompt.contains("`low`: model `gpt-6-luna`"));
         assert!(shared_prompt
-            .contains(r#"`high`: model `gpt-5.6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
+            .contains(r#"`high`: model `gpt-6-sol`; flags `-c model_reasoning_effort="xhigh"`"#));
         assert!(shared_prompt.contains("you may spawn `low`, `medium`, or `high` work"));
         assert!(shared_prompt
             .contains("Runtime CWD: /repo/.hive-manager/worktrees/session-modern/primary"));
@@ -18836,10 +18836,10 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             Path::new("/repo"),
         );
 
-        assert!(prompt.contains("Codex gpt-5.6-terra / low"));
-        assert!(prompt.contains(r#"-m gpt-5.6-terra -c model_reasoning_effort="medium""#));
-        assert!(prompt.contains("Codex gpt-5.6-sol / medium"));
-        assert!(prompt.contains(r#"-m gpt-5.6-sol -c model_reasoning_effort="medium""#));
+        assert!(prompt.contains("Codex gpt-6-luna / low"));
+        assert!(prompt.contains(r#"-m gpt-6-luna -c model_reasoning_effort="medium""#));
+        assert!(prompt.contains("Codex gpt-6-sol / medium"));
+        assert!(prompt.contains(r#"-m gpt-6-sol -c model_reasoning_effort="medium""#));
         assert!(!prompt.contains("gpt-5.5"));
         assert!(!prompt.contains(r#"model_reasoning_effort="low""#));
     }
@@ -20749,7 +20749,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(explicit_args
             .windows(2)
             .any(|pair| { pair == ["-m".to_string(), "operator-selected-model".to_string()] }));
-        assert!(!explicit_args.iter().any(|arg| arg == "gpt-5.6-sol"));
+        assert!(!explicit_args.iter().any(|arg| arg == "gpt-6-sol"));
 
         let (_, default_args) = SessionController::build_command(&AgentConfig {
             cli: "codex".to_string(),
@@ -20758,7 +20758,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         });
         assert!(default_args
             .windows(2)
-            .any(|pair| pair == ["-m".to_string(), "gpt-5.6-sol".to_string()]));
+            .any(|pair| pair == ["-m".to_string(), "gpt-6-sol".to_string()]));
 
         let legacy_config = AgentConfig {
             cli: "codex".to_string(),
@@ -20818,7 +20818,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
         assert!(shared.contains(r#""cli":"codex""#));
         assert!(shared.contains(r#""parent_id":"session-prince""#));
-        assert!(shared.contains(r#""model": "gpt-5.6-sol""#));
+        assert!(shared.contains(r#""model": "gpt-6-sol""#));
         assert!(shared.contains("model_reasoning_effort"));
         assert!(shared.contains("do not merge or cherry-pick fixer branches"));
         assert!(shared.contains(workspace));
