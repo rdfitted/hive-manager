@@ -12042,7 +12042,37 @@ The backend composed and persisted the following authoritative skeleton before l
         }
     }
 
-    fn record_terminal_qa_outcomes(&self, session_id: &str, label: &str) {
+    /// PrinceRemediation has no iteration payload, so its persisted evaluator
+    /// verdict record is the authoritative source for the iteration being remediated.
+    fn qa_verdict_iteration_for_prince(&self, session_id: &str) -> Option<u8> {
+        let storage = self.storage.as_ref()?;
+        match read_qa_verdict_record(&storage.session_dir(session_id)) {
+            Ok(Some(record)) => Some(record.iteration),
+            Ok(None) => {
+                tracing::warn!(
+                    session_id,
+                    "Prince cleared QA without a persisted evaluator verdict record"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    %error,
+                    "Failed to read evaluator verdict before Prince clearance"
+                );
+                None
+            }
+        }
+    }
+
+    fn record_terminal_qa_outcomes(
+        &self,
+        session_id: &str,
+        label: &str,
+        expected_iteration: u8,
+        accepted_verdicts: &[&str],
+    ) {
         let Some(storage) = self.storage.as_ref() else {
             return;
         };
@@ -12064,6 +12094,21 @@ The backend composed and persisted the following authoritative skeleton before l
                 return;
             }
         };
+        if record.iteration != expected_iteration
+            || !accepted_verdicts
+                .iter()
+                .any(|verdict| record.verdict.eq_ignore_ascii_case(verdict))
+        {
+            tracing::warn!(
+                session_id,
+                expected_iteration,
+                actual_iteration = record.iteration,
+                expected_verdicts = ?accepted_verdicts,
+                actual_verdict = %record.verdict,
+                "Skipping downstream outcomes for a stale or mismatched QA verdict record"
+            );
+            return;
+        }
         let ledger = JudgmentLedger::new(
             storage
                 .base_dir()
@@ -12168,7 +12213,14 @@ The backend composed and persisted the following authoritative skeleton before l
             return Err(format!("Unsupported QA verdict '{}'", verdict));
         }
 
-        let (previous_session, updated_session, changes, new_state, outcome_label) = {
+        let (
+            previous_session,
+            updated_session,
+            changes,
+            new_state,
+            outcome_label,
+            expected_iteration,
+        ) = {
             let mut sessions = self.sessions.write();
             let session = sessions
                 .get_mut(session_id)
@@ -12183,6 +12235,10 @@ The backend composed and persisted the following authoritative skeleton before l
                     session.state
                 ));
             }
+            let expected_iteration = match session.state {
+                SessionState::QaInProgress { iteration } => iteration.unwrap_or(1),
+                _ => unreachable!("QA state checked above"),
+            };
             let previous_session = session.clone();
             let now = Utc::now();
             if now > session.last_activity_at {
@@ -12205,6 +12261,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 changes,
                 new_state,
                 outcome_label,
+                expected_iteration,
             )
         };
 
@@ -12228,7 +12285,13 @@ The backend composed and persisted the following authoritative skeleton before l
         }
 
         if let Some(label) = outcome_label {
-            self.record_terminal_qa_outcomes(session_id, label);
+            let expected_verdict = if label == "pass" { "PASS" } else { "FAIL" };
+            self.record_terminal_qa_outcomes(
+                session_id,
+                label,
+                expected_iteration,
+                &[expected_verdict],
+            );
         }
 
         self.cancel_qa_timeout(session_id);
@@ -12375,6 +12438,11 @@ The backend composed and persisted the following authoritative skeleton before l
             "BLOCKED" | "FAIL" | "ESCALATE" => SessionState::QaInconclusive,
             other => return Err(format!("Unsupported Prince verdict '{}'", other)),
         };
+        let expected_iteration = if matches!(&target_state, SessionState::QaPassed) {
+            self.qa_verdict_iteration_for_prince(session_id)
+        } else {
+            None
+        };
 
         let (previous_session, updated_session, changes) = {
             let mut sessions = self.sessions.write();
@@ -12412,6 +12480,17 @@ The backend composed and persisted the following authoritative skeleton before l
                     );
                 }
                 return Err(err);
+            }
+        }
+
+        if matches!(&target_state, SessionState::QaPassed) {
+            if let Some(expected_iteration) = expected_iteration {
+                self.record_terminal_qa_outcomes(
+                    session_id,
+                    "pass",
+                    expected_iteration,
+                    &["PASS", "FAIL"],
+                );
             }
         }
 
@@ -19789,6 +19868,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     fn write_test_qa_verdict_record(
         storage: &SessionStorage,
         session_id: &str,
+        iteration: u8,
+        verdict: &str,
         decision_ids: &[&str],
     ) {
         let state_dir = storage.session_dir(session_id).join("state");
@@ -19813,9 +19894,9 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             "schema_version": 1,
             "session_id": session_id,
             "milestone_id": "milestone-1",
-            "iteration": 1,
-            "verdict": "PASS",
-            "passed": true,
+            "iteration": iteration,
+            "verdict": verdict,
+            "passed": verdict == "PASS",
             "summary": "Typed verdict fixture",
             "timestamp": "2026-09-22T22:00:00.000Z",
             "contract_path": null,
@@ -19851,7 +19932,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
         storage.create_session_dir(SESSION_ID).unwrap();
-        write_test_qa_verdict_record(&storage, SESSION_ID, &["decision-1", "decision-2"]);
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["decision-1", "decision-2"],
+        );
         let mut controller = test_controller();
         controller.set_storage(Arc::clone(&storage));
         let session = qa_session_with(
@@ -19896,7 +19983,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
         const RETRY_SESSION: &str = "qa-outcome-retry";
         storage.create_session_dir(RETRY_SESSION).unwrap();
-        write_test_qa_verdict_record(&storage, RETRY_SESSION, &["retry-decision"]);
+        write_test_qa_verdict_record(
+            &storage,
+            RETRY_SESSION,
+            1,
+            "FAIL",
+            &["retry-decision"],
+        );
         let retry_session = qa_session_with(
             RETRY_SESSION,
             SessionState::QaInProgress { iteration: Some(1) },
@@ -19915,6 +20008,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         write_test_qa_verdict_record(
             &storage,
             TERMINAL_SESSION,
+            3,
+            "FAIL",
             &["terminal-decision-1", "terminal-decision-2"],
         );
         let terminal_session = qa_session_with(
@@ -19945,7 +20040,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
         storage.create_session_dir(SESSION_ID).unwrap();
-        write_test_qa_verdict_record(&storage, SESSION_ID, &["decision-unwritable"]);
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["decision-unwritable"],
+        );
         std::fs::write(storage.base_dir().join("judgments"), "blocks ledger directory").unwrap();
         let mut controller = test_controller();
         controller.set_storage(storage);
@@ -19974,7 +20075,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
         storage.create_session_dir(SESSION_ID).unwrap();
-        write_test_qa_verdict_record(&storage, SESSION_ID, &["decision-not-persisted"]);
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["decision-not-persisted"],
+        );
         std::fs::create_dir(storage.session_dir(SESSION_ID).join("session.json")).unwrap();
         let mut controller = test_controller();
         controller.set_storage(Arc::clone(&storage));
@@ -19998,6 +20105,36 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     }
 
     #[test]
+    fn stale_qa_verdict_iteration_does_not_record_downstream_outcomes() {
+        const SESSION_ID: &str = "qa-outcome-stale-iteration";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["stale-decision"],
+        );
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::QaInProgress { iteration: Some(2) },
+            temp.path().join("project"),
+            false,
+        ));
+
+        let new_state = controller
+            .record_http_qa_verdict(SESSION_ID, "stale-iteration-evaluator", "PASS", None)
+            .unwrap();
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        assert!(read_test_outcomes(&storage).is_empty());
+    }
+
+    #[test]
     fn operator_overrides_do_not_record_downstream_outcomes() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
@@ -20006,7 +20143,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
         const FORCE_PASS_SESSION: &str = "qa-override-force-pass";
         storage.create_session_dir(FORCE_PASS_SESSION).unwrap();
-        write_test_qa_verdict_record(&storage, FORCE_PASS_SESSION, &["force-pass-decision"]);
+        write_test_qa_verdict_record(
+            &storage,
+            FORCE_PASS_SESSION,
+            1,
+            "PASS",
+            &["force-pass-decision"],
+        );
         controller.insert_test_session(qa_session_with(
             FORCE_PASS_SESSION,
             SessionState::QaFailed { iteration: 1 },
@@ -20022,7 +20165,13 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
 
         const FORCE_FAIL_SESSION: &str = "qa-override-force-fail";
         storage.create_session_dir(FORCE_FAIL_SESSION).unwrap();
-        write_test_qa_verdict_record(&storage, FORCE_FAIL_SESSION, &["force-fail-decision"]);
+        write_test_qa_verdict_record(
+            &storage,
+            FORCE_FAIL_SESSION,
+            1,
+            "PASS",
+            &["force-fail-decision"],
+        );
         let mut force_fail_session = qa_session_with(
             FORCE_FAIL_SESSION,
             SessionState::QaPassed,
@@ -20085,6 +20234,82 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             .record_prince_verdict("prince-clear", "PASS")
             .expect("prince verdict recorded");
         assert_eq!(new_state, SessionState::QaPassed);
+    }
+
+    #[test]
+    fn prince_pass_records_outcomes_for_current_evaluator_verdict() {
+        const SESSION_ID: &str = "prince-outcome-pass";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            2,
+            "FAIL",
+            &["prince-decision-1", "prince-decision-2"],
+        );
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::PrinceRemediation,
+            temp.path().join("project"),
+            true,
+        ));
+
+        let new_state = controller.record_prince_verdict(SESSION_ID, "PASS").unwrap();
+
+        assert_eq!(new_state, SessionState::QaPassed);
+        let outcomes = read_test_outcomes(&storage);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|row| row["decision_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["prince-decision-1", "prince-decision-2"]
+        );
+        assert!(outcomes.iter().all(|row| {
+            row["kind"] == "outcome"
+                && row["label"] == "pass"
+                && row["source"] == "downstream"
+        }));
+    }
+
+    #[test]
+    fn prince_persist_failure_does_not_record_downstream_outcomes() {
+        const SESSION_ID: &str = "prince-outcome-persist-failure";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SessionStorage::new_with_base(temp.path().join("storage")).unwrap());
+        storage.create_session_dir(SESSION_ID).unwrap();
+        write_test_qa_verdict_record(
+            &storage,
+            SESSION_ID,
+            1,
+            "PASS",
+            &["prince-unpersisted-decision"],
+        );
+        std::fs::create_dir(storage.session_dir(SESSION_ID).join("session.json")).unwrap();
+        let mut controller = test_controller();
+        controller.set_storage(Arc::clone(&storage));
+        controller.insert_test_session(qa_session_with(
+            SESSION_ID,
+            SessionState::PrinceRemediation,
+            temp.path().join("project"),
+            true,
+        ));
+
+        let error = controller
+            .record_prince_verdict(SESSION_ID, "PASS")
+            .unwrap_err();
+
+        assert!(error.contains("Failed to update session metadata"));
+        assert_eq!(
+            controller.get_session(SESSION_ID).unwrap().state,
+            SessionState::PrinceRemediation
+        );
+        assert!(read_test_outcomes(&storage).is_empty());
     }
 
     #[test]
