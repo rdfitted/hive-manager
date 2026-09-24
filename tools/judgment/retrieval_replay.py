@@ -557,7 +557,7 @@ def _record_spawn_context(
     context: dict,
 ) -> None:
     agent_id = context["agent_id"]
-    for reference_index, reference, answer in _spawn_reference_rows(context):
+    for reference_index, reference, features in _spawn_reference_rows(context):
         decision_id = _spawn_decision_id(
             repo_name, session_id, agent_id, reference_index
         )
@@ -572,18 +572,20 @@ def _record_spawn_context(
             "tag": reference.get("tag"),
             "pointer": reference.get("pointer"),
         }
-        judgment_ledger.record_decision(
+        row = judgment_ledger.record_decision(
             "hive.retrieval.spawn",
             subject,
             "code",
-            answer,
+            {"result": "used" if features["disposition"] == "kept" else "unused"},
             question_id="knowledge_ack",
             question_version=str(context.get("question_version", "")) or None,
             mode="shadow",
             decision_id=decision_id,
             ledger=ledger_path,
+            retrieval_features=features,
         )
-        existing_decisions.add(decision_id)
+        if row is not None:
+            existing_decisions.add(decision_id)
 
 
 def _evaluate_spawn_ack(
@@ -645,10 +647,10 @@ def _evaluate_spawn_ack(
         decision_id = _spawn_decision_id(
             repo_name, session_id, agent_id, reference_index
         )
-        label = "used" if used else "unused"
-        outcome_key = (decision_id, label, "model-ack")
+        label = {"result": "used" if used else "unused"}
+        outcome_key = _outcome_key(decision_id, label, "model-ack")
         if outcome_key not in existing_outcomes:
-            judgment_ledger.record_outcome(
+            row = judgment_ledger.record_outcome(
                 decision_id,
                 label,
                 "model-ack",
@@ -659,7 +661,8 @@ def _evaluate_spawn_ack(
                 tag=tag,
                 proxy_mentioned=mentioned,
             )
-            existing_outcomes.add(outcome_key)
+            if row is not None:
+                existing_outcomes.add(outcome_key)
         observations.append(
             {
                 "used": used,
@@ -1135,6 +1138,10 @@ def _decision_id(*parts: str) -> str:
     return str(uuid.uuid5(DECISION_NAMESPACE, name))
 
 
+def _outcome_key(decision_id: str, label: object, source: str) -> tuple[str, str, str]:
+    return decision_id, judgment_ledger.canonical_json(label), source
+
+
 def _existing_ledger_keys(ledger_path: Path) -> tuple[set[str], set[tuple[str, str, str]]]:
     decisions: set[str] = set()
     outcomes: set[tuple[str, str, str]] = set()
@@ -1142,9 +1149,9 @@ def _existing_ledger_keys(ledger_path: Path) -> tuple[set[str], set[tuple[str, s
         if row.get("kind") == "decision":
             decisions.add(str(row.get("decision_id")))
         elif row.get("kind") == "outcome":
-            outcomes.add(
-                (str(row.get("decision_id")), str(row.get("label")), str(row.get("source")))
-            )
+            outcomes.add(_outcome_key(
+                str(row.get("decision_id")), row.get("label"), str(row.get("source"))
+            ))
     return decisions, outcomes
 
 
@@ -1208,7 +1215,7 @@ def _record_pair(
     if path_relevant is None:
         return
     label = "path-relevant" if path_relevant else "path-miss"
-    outcome_key = (note_id, label, "downstream")
+    outcome_key = _outcome_key(note_id, label, "downstream")
     if outcome_key not in existing_outcomes:
         judgment_ledger.record_outcome(
             note_id,

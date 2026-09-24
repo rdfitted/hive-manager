@@ -1,0 +1,82 @@
+[
+  {
+    "answer": {
+      "result": "used"
+    },
+    "decision_id": "35dc989f-e5f5-584e-acac-d2e9172c8ac2",
+    "subject_ref": {
+      "agent_id": "55555555-5555-4555-8555-555555555555-worker-1",
+      "plan_task_id": "T1",
+      "pointer": ".ai-docs/one.md",
+      "reference_index": 0,
+      "repo": "synthetic-repo",
+      "session_id": "55555555-5555-4555-8555-555555555555",
+      "tag": "k1"
+    },
+    "surface": "hive.retrieval.spawn"
+  },
+  {
+    "answer": {
+      "result": "used"
+    },
+    "decision_id": "9c880386-8e4c-5c18-a955-47055f71bf45",
+    "subject_ref": {
+      "agent_id": "55555555-5555-4555-8555-555555555555-worker-1",
+      "plan_task_id": "T1",
+      "pointer": "patterns/two.md",
+      "reference_index": 1,
+      "repo": "synthetic-repo",
+      "session_id": "55555555-5555-4555-8555-555555555555",
+      "tag": "k2"
+    },
+    "surface": "hive.retrieval.spawn"
+  },
+  {
+    "answer": {
+      "result": "unused"
+    },
+    "decision_id": "78bcb012-d197-5065-b921-997ed4bc7987",
+    "subject_ref": {
+      "agent_id": "55555555-5555-4555-8555-555555555555-worker-1",
+      "plan_task_id": "T1",
+      "pointer": ".ai-docs/three.md",
+      "reference_index": 2,
+      "repo": "synthetic-repo",
+      "session_id": "55555555-5555-4555-8555-555555555555",
+      "tag": null
+    },
+    "surface": "hive.retrieval.spawn"
+  },
+  {
+    "answer": {
+      "result": "used"
+    },
+    "decision_id": "c46811d2-1765-56ba-8696-0a6b39be36eb",
+    "subject_ref": {
+      "agent_id": "55555555-5555-4555-8555-555555555555-worker-2",
+      "plan_task_id": "T2",
+      "pointer": "engineering/guide.md",
+      "reference_index": 0,
+      "repo": "synthetic-repo",
+      "session_id": "55555555-5555-4555-8555-555555555555",
+      "tag": null
+    },
+    "surface": "hive.retrieval.spawn"
+  },
+  {
+    "answer": {
+      "result": "unused"
+    },
+    "decision_id": "c17a2463-ab25-5cc1-8639-39ad77680b6c",
+    "subject_ref": {
+      "agent_id": "55555555-5555-4555-8555-555555555555-worker-2",
+      "plan_task_id": "T2",
+      "pointer": ".ai-docs/four.md",
+      "reference_index": 1,
+      "repo": "synthetic-repo",
+      "session_id": "55555555-5555-4555-8555-555555555555",
+      "tag": null
+    },
+    "surface": "hive.retrieval.spawn"
+  }
+]
