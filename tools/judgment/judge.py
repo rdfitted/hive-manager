@@ -163,10 +163,10 @@ def _answer(surface: str, response: Any, question_id: str) -> tuple[dict, dict]:
 def _result(status: str, decision_id: str, *, sent: bool = False,
             answer: Any = None, model: str | None = None,
             latency_ms: int | None = None, usage: Any = None,
-            error: str | None = None) -> dict:
+            error: str | None = None, redaction: dict | None = None) -> dict:
     return {"status": status, "decision_id": decision_id, "sent": sent,
             "answer": answer, "model": model, "latency_ms": latency_ms,
-            "usage": usage, "error": error}
+            "usage": usage, "error": error, "redaction": redaction}
 
 
 def _emit(value: dict, exit_code: int) -> int:
@@ -194,6 +194,7 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
     status, exit_code = "recorded", 0
     answer, model, latency_ms, usage = raw_answer, getattr(args, "model", None), None, None
     sent, project, redact_mode, safe_state, diagnostics = False, None, None, None, {}
+    redaction_report = None
     if ask:
         status, exit_code = "egress-denied", 3
         policy = _policy(args.policy)
@@ -215,6 +216,7 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
                 clean, report = redaction.redact(payload, redact_mode, dictionary)
                 if clean is None or report["blocked"]:
                     status, exit_code = "redaction-blocked", 3
+                    redaction_report = report
                 else:
                     request_bytes = _json_bytes(clean)
                     safe_state = clean["state"]
@@ -247,6 +249,7 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
         error=status if status != "recorded" else None,
         decision_id=decision_id, ledger=ledger_path,
         redact_mode=redact_mode, sent=sent, usage=usage, project=project,
+        redaction=redaction_report,
         source_decision_id=getattr(args, "source_decision_id", None),
         **diagnostics,
     )
@@ -254,7 +257,8 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
         return _emit(_result("ledger-error", decision_id, sent=sent, error="ledger-error"), 5)
     return _emit(_result(status, decision_id, sent=sent, answer=answer,
                          model=model, latency_ms=latency_ms, usage=usage,
-                         error=status if status != "recorded" else None), exit_code)
+                         error=status if status != "recorded" else None,
+                         redaction=redaction_report), exit_code)
 
 
 def _outcome(args: argparse.Namespace, ledger_path: Path) -> int:

@@ -96,10 +96,27 @@ class JudgeTests(unittest.TestCase):
         send.assert_not_called()
         self.assertIsNone(self._rows()[-1]["state_ref"])
         self.assertNotIn("Zebulon", self.ledger.read_text(encoding="utf-8"))
+        self.assertEqual({"hit_count": 1, "blocked": True,
+                          "reason_classes": ["dictionary"]}, result["redaction"])
+        self.assertEqual(result["redaction"], self._rows()[-1]["redaction"])
         observations = self._file("email.json", {"observed": "bot@example.invalid"})
         code, result, send = self._run(self._args(observations=observations))
         self.assertEqual((3, "redaction-blocked"), (code, result["status"]))
         send.assert_not_called()
+
+    def test_blocked_redaction_reports_classes_without_matched_text(self):
+        observations = self._file("reason-observations.json", {
+            "observed": "Zebulon Quartermaine used bot@example.invalid"
+        })
+        code, result, send = self._run(self._args(observations=observations))
+        self.assertEqual(3, code)
+        send.assert_not_called()
+        self.assertEqual(["dictionary", "email"], result["redaction"]["reason_classes"])
+        self.assertGreaterEqual(result["redaction"]["hit_count"], 2)
+        self.assertEqual(result["redaction"], self._rows()[-1]["redaction"])
+        for forbidden in ("Zebulon", "Quartermaine", "bot@example.invalid"):
+            self.assertNotIn(forbidden, json.dumps(result))
+            self.assertNotIn(forbidden, self.ledger.read_text(encoding="utf-8"))
 
     def test_blind_payload_rejects_answer_rationale_severity_verdict_and_measured(self):
         expected = {"state": {"observed": "Synthetic evidence confirms behavior."},
@@ -135,6 +152,8 @@ class JudgeTests(unittest.TestCase):
         code, result, send = self._run(self._args())
         self.assertEqual((3, "redaction-blocked"), (code, result["status"]))
         send.assert_not_called()
+        self.assertEqual(["dictionary-unavailable"], result["redaction"]["reason_classes"])
+        self.assertEqual(result["redaction"], self._rows()[-1]["redaction"])
         self.assertEqual(4, len(self._rows()))
 
     def test_provider_mapping_and_outcome_audit_join(self):

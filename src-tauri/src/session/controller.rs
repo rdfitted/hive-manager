@@ -7514,6 +7514,7 @@ Tool documentation is in `.hive-manager/{session_id}/tools/`. Read these files f
 | Spawn Worker | `spawn-worker.md` | Reference only - Planners use this to spawn workers |
 | List Workers | `list-workers.md` | Get list of all workers and their status |
 | Mark Worker Status | `mark-worker-status.md` | Mark each independently verified worker complete |
+| Judge | `judge.md` | Record and compare blind shadow judgments with the gated Jev CLI |
 | Submit Learning | `submit-learning.md` | Record a learning via HTTP API |
 | List Learnings | `list-learnings.md` | Get all learnings for this session |
 | Delete Learning | `delete-learning.md` | Remove a learning by ID |
@@ -8075,6 +8076,58 @@ For a Fusion variant or another agent type, keep the request identical and use t
             "mark-worker-status.md",
             &mark_worker_status_tool,
         )?;
+
+        let judge_tool = r#"# Judge Tool
+
+Run `python tools/judgment/judge.py` from the session worktree. This is an on-demand shadow comparison tool. **A Jev answer never gates any hive action.** `record` and `outcome` write local rows; only `ask` can send to Jev.
+
+## Blind inputs
+
+Build observations from the finding text and cited code at the reviewed SHA, or from observed QA evidence. Never pass an answer, rationale, severity, verdict, result, or measured value in observations or question data. Structured fields with those names are rejected at any depth. Do not use an adjudication note as evidence. The subject reference is local and is never sent automatically.
+
+Use JSON files for `--subject-ref`, `--observations`, `--answer`, `--question`, and `--label`. Global path overrides (`--ledger`, `--tables`, `--policy`, `--redact-dictionary`) precede the subcommand; `JUDGMENT_LEDGER`, `JUDGMENT_TABLES`, `JUDGMENT_EGRESS_POLICY`, and `JUDGMENT_REDACT_DICTIONARY` are equivalents. A name dictionary is required for any send: use `--redact-dictionary <file>` or `JUDGMENT_REDACT_DICTIONARY`. A dictionary hit, email, missing dictionary, or incomplete scan blocks egress.
+
+## Review finding example
+
+Prepare these synthetic files from the reviewed SHA:
+
+```text
+review-subject.json       {"finding_id":"F1","reviewed_sha":"0123456"}
+review-observations.json  {"finding_text":"The validation branch is missing.","cited_code":"if valid { proceed(); }"}
+incumbent-answer.json     {"result":"ACCEPT"}
+review-question.json      {"type":"choice","instructions":"Classify whether the cited code supports this finding.","criteria":{"ACCEPT":"The finding is supported.","PARTIAL":"Only part is supported.","DECLINE":"The finding is unsupported."}}
+final-label.json          {"result":"ACCEPT"}
+```
+
+```bash
+python tools/judgment/judge.py record --surface hive.review.finding --subject-ref review-subject.json --observations review-observations.json --answer incumbent-answer.json --question-id review-finding --model incumbent-model
+# Copy the decision_id from the record result into --source-decision-id:
+python tools/judgment/judge.py --redact-dictionary names.json ask --surface hive.review.finding --subject-ref review-subject.json --observations review-observations.json --question-id review-finding --question review-question.json --source-decision-id <incumbent-decision-id>
+# Copy the decision_id from the ask result to attach a final local outcome:
+python tools/judgment/judge.py outcome --decision-id <jev-decision-id> --label final-label.json --source human-label
+```
+
+For a dry run, add `--dry-run` after `ask`. It performs all gates and writes a row, with zero transport calls.
+
+## QA criterion example
+
+Use a subject such as `{"milestone_id":"M1","criterion_id":"C1","reviewed_sha":"0123456"}` and blind observations such as `{"observed":"The cited test returned the expected value."}`. A noul question file can contain:
+
+```json
+{"type":"noul","instructions":"Does the observed evidence satisfy criterion C1?","criteria":{"true":"Evidence satisfies C1.","false":"Evidence does not satisfy C1."}}
+```
+
+```bash
+python tools/judgment/judge.py --redact-dictionary names.json ask --surface hive.qa.criterion --subject-ref qa-subject.json --observations qa-observations.json --question-id qa-C1 --question qa-question.json --dry-run
+```
+
+## Egress and results
+
+Live egress is limited to the git-origin project `rdfitted/hive-manager` and allowlisted `hive.review.finding` and `hive.qa.criterion` surfaces. A live send needs `TYPESAFE_API_KEY`; without it, `ask` records `no-key` and sends nothing. Redaction and policy checks still run for dry runs and no-key calls. The request is capped at 32 KiB.
+
+Every command prints one JSON object with `status`, `decision_id`, `sent`, `answer`, `model`, `latency_ms`, `usage`, `error`, and `redaction` (counts and reason classes only when blocked). Exit `0` means a row was written, including `dry-run` or `no-key`; exit `2` means invalid input; exit `3` means policy, redaction, or size blocked after a row; exit `4` means transport failed after a row; exit `5` means the ledger write failed. Treat a Jev result only as shadow evidence for later audit.
+"#;
+        Self::write_tool_file(project_path, session_id, "judge.md", judge_tool)?;
 
         // Submit Learning tool
         let submit_learning_tool = r#"# Submit Learning Tool
@@ -18643,6 +18696,16 @@ mod tests {
             "keeps agent liveness fresh for stall detection but does not extend the session's 10-minute quiescence window"
         ));
 
+        let judge_tool_path = temp_dir
+            .path()
+            .join(".hive-manager")
+            .join("session-123")
+            .join("tools")
+            .join("judge.md");
+        let judge_content = std::fs::read_to_string(judge_tool_path).expect("read judge tool doc");
+        assert!(judge_content.contains("python tools/judgment/judge.py"));
+        assert!(judge_content.contains("A Jev answer never gates any hive action"));
+
         let learning_tool_path = temp_dir
             .path()
             .join(".hive-manager")
@@ -19449,6 +19512,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
 
         assert!(hardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
+        assert!(hardened_queen_prompt.contains("| Judge | `judge.md` |"));
         assert!(!unhardened_queen_prompt.contains("WARNING: CRITICAL ROLE CONSTRAINTS"));
     }
 
