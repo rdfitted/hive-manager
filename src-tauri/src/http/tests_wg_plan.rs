@@ -47,6 +47,7 @@ fn planning_session(session_id: &str, project_path: &Path) -> Session {
         qa_workers: Vec::new(),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,

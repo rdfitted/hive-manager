@@ -205,6 +205,7 @@ fn role_test_session(id: &str, project_path: PathBuf) -> Session {
         qa_workers: Vec::new(),
         max_qa_iterations: DEFAULT_MAX_QA_ITERATIONS,
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: Some(shared_workspace),
         worktree_branch: Some(format!("hive/{id}/primary")),

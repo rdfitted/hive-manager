@@ -557,6 +557,10 @@ pub fn run() {
                         tracing::warn!("Invalid milestone-ready payload: {}", payload);
                         return;
                     }
+                    let Some(path) = json.get("path").and_then(|value| value.as_str()) else {
+                        tracing::warn!("Milestone-ready payload has no file path: {}", payload);
+                        return;
+                    };
 
                     tracing::info!(
                         "Milestone-ready signal observed for session {}, checking evaluator launch/respawn",
@@ -565,9 +569,12 @@ pub fn run() {
 
                     let controller = milestone_controller_clone.clone();
                     let session_id_clone = session_id.to_string();
+                    let milestone_path = std::path::PathBuf::from(path);
                     tauri::async_runtime::spawn_blocking(move || {
                         let controller_read = controller.read();
-                        if let Err(err) = controller_read.on_milestone_ready(&session_id_clone) {
+                        if let Err(err) = controller_read
+                            .on_milestone_ready_from_file(&session_id_clone, &milestone_path)
+                        {
                             tracing::error!(
                                 "Failed to handle milestone-ready signal for {}: {}",
                                 session_id_clone,

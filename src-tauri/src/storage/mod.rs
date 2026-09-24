@@ -212,6 +212,14 @@ pub struct SessionSummary {
     pub state: String,
 }
 
+/// The QA generation that last became inconclusive. Kept with its iteration so
+/// a restart cannot reset the retry ceiling before a fresh milestone arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct QaInconclusiveCheckpoint {
+    pub at: DateTime<Utc>,
+    pub prior_iteration: Option<u8>,
+}
+
 /// Persisted session metadata
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistedSession {
@@ -247,6 +255,8 @@ pub struct PersistedSession {
     pub max_qa_iterations: u8,
     #[serde(default = "default_qa_timeout_secs")]
     pub qa_timeout_secs: u64,
+    #[serde(default)]
+    pub qa_inconclusive_at: Option<QaInconclusiveCheckpoint>,
     #[serde(default)]
     pub auth_strategy: String,
     #[serde(default)]
@@ -2071,6 +2081,7 @@ mod tests {
             qa_workers: vec![],
             max_qa_iterations: default_max_qa_iterations(),
             qa_timeout_secs: default_qa_timeout_secs(),
+            qa_inconclusive_at: None,
             auth_strategy: String::new(),
             worktree_path: None,
             worktree_branch: None,

@@ -165,6 +165,7 @@ fn session_from_persisted(persisted: PersistedSession) -> Session {
         qa_workers: persisted.qa_workers,
         max_qa_iterations: persisted.max_qa_iterations,
         qa_timeout_secs: persisted.qa_timeout_secs,
+        qa_inconclusive_at: persisted.qa_inconclusive_at.clone(),
         auth_strategy: AuthStrategy::default(),
         worktree_path: persisted.worktree_path,
         worktree_branch: persisted.worktree_branch,
