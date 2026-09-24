@@ -29,7 +29,7 @@ use super::codegraph::{derive_codegraph_touches, CodegraphDerivationReport};
 use super::completion_ledger::NodeCompletionFact;
 use super::context::{
     build_knowledge_touch_coverage, derive_project_context_from_knowledge,
-    is_knowledge_derivation_omission, prepare_knowledge_candidate_selection,
+    is_stale_knowledge_omission, prepare_knowledge_candidate_selection,
     ContextDerivationReport, KnowledgeAttachmentConfig, KnowledgeTouchCoverage,
     TouchCoverageReport, TouchesResolver,
 };
@@ -41,7 +41,7 @@ use super::review::{
 };
 use super::schema::{
     BindingRef, EdgeKind, EdgeProvenance, NodeContract, NodeKind, NodeStatus, TaskGraph, TaskId,
-    WorkEdge, WorkGraph, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
+    OmissionProducer, WorkEdge, WorkGraph, WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
 };
 
 pub const RUNTIME_OBSERVATION_PREFIX: &str = "runtime:";
@@ -256,7 +256,7 @@ fn derive_knowledge_attachments_with_config_result<R: TouchesResolver>(
 ) -> KnowledgeAttachmentDerivation {
     graph
         .omissions
-        .retain(|omission| !is_knowledge_derivation_omission(omission));
+        .retain(|omission| !is_stale_knowledge_omission(omission));
     let selection = prepare_knowledge_candidate_selection(
         resolver,
         inventory_root,
@@ -270,6 +270,7 @@ fn derive_knowledge_attachments_with_config_result<R: TouchesResolver>(
             vec!["git ls-files".to_string()],
         );
         omission.detail = detail.to_string();
+        omission.producer = Some(OmissionProducer::KnowledgeDerivation);
         graph.omissions.push(omission);
     }
     let knowledge = build_knowledge_touch_coverage(
@@ -1788,18 +1789,187 @@ fn project_outcome_statuses(
 
 #[cfg(test)]
 mod knowledge_attachment_tests {
-    use super::derive_knowledge_attachments_with_config;
+    use super::{
+        compose_initial_work_graph, dedupe_graph_omissions,
+        derive_knowledge_attachments_with_config, derive_plan_ready_knowledge_attachments,
+    };
     use crate::actions::git::run_git_in_dir;
+    use crate::orchestrator::work_graph::archetypes::{
+        RepoShapeFacts, RepoShapeFactsProvider,
+    };
     use crate::orchestrator::work_graph::codegraph::CODEGRAPH_MODULE_TEMPLATE;
     use crate::orchestrator::work_graph::context::{
-        KnowledgeAttachmentConfig, NoTouchesResolver, TouchCoverageReport,
+        KnowledgeAttachmentConfig, NoTouchesResolver, TouchCoverageReport, TouchesResolver,
     };
+    use crate::orchestrator::work_graph::schema::OmissionProducer;
     use crate::orchestrator::work_graph::{
         BindingRef, EdgeKind, NodeContract, NodeKind, NodeStatus, TaskGraph,
-        WorkGraphOmissionReason, WorkNode,
+        WorkGraphOmission, WorkGraphOmissionReason, WorkNode,
     };
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
+
+    struct FixedResolver {
+        coverage: TouchCoverageReport,
+        candidates: Option<BTreeSet<String>>,
+    }
+
+    impl TouchesResolver for FixedResolver {
+        fn resolve_touches(&self, _graph: &TaskGraph) -> Result<TouchCoverageReport, String> {
+            Ok(self.coverage.clone())
+        }
+
+        fn knowledge_candidates(&self) -> Option<BTreeSet<String>> {
+            self.candidates.clone()
+        }
+    }
+
+    impl RepoShapeFactsProvider for FixedResolver {
+        fn facts(&self, _project_path: &Path) -> Result<Option<RepoShapeFacts>, String> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn compose_to_plan_ready_replaces_only_knowledge_provenance() {
+        let root = knowledge_project();
+        let resolver = FixedResolver {
+            coverage: TouchCoverageReport {
+                available: true,
+                artifact_languages: BTreeSet::new(),
+                touches: BTreeMap::new(),
+                unresolved_task_ids: vec!["T1".to_string()],
+            },
+            candidates: Some(BTreeSet::new()),
+        };
+        let composed = compose_initial_work_graph(
+            graph_with_undeclared_tasks(&["T1"]),
+            root.path(),
+            None,
+            None,
+            &BTreeMap::new(),
+            &resolver,
+        )
+        .expect("compose graph");
+        let mut graph = composed.graph;
+        let stale_missing = graph
+            .omissions
+            .iter()
+            .find(|omission| {
+                omission.producer == Some(OmissionProducer::KnowledgeDerivation)
+                    && omission.detail == WorkGraphOmissionReason::ResolutionIncomplete.detail()
+                    && omission.examples == vec!["T1".to_string()]
+            })
+            .expect("compose missing-task omission");
+        assert_eq!(stale_missing.count, 1);
+        graph.nodes.extend(graph_with_undeclared_tasks(&["T2"]).nodes);
+
+        let retained = WorkGraphOmission::new(
+            WorkGraphOmissionReason::SourceUnreadable,
+            1,
+            vec!["plan.md: retained source omission".to_string()],
+        );
+        graph.omissions.push(retained.clone());
+        let legacy = WorkGraphOmission::new(
+            WorkGraphOmissionReason::SourceUnreadable,
+            1,
+            vec![".ai-docs/learnings.jsonl#L1: invalid JSON".to_string()],
+        );
+        graph.omissions.push(legacy.clone());
+
+        derive_plan_ready_knowledge_attachments(
+            &mut graph,
+            root.path(),
+            None,
+            root.path(),
+            &resolver,
+            None,
+        )
+        .expect("plan-ready knowledge attachment");
+        dedupe_graph_omissions(&mut graph);
+
+        assert!(!graph.omissions.contains(&legacy));
+        assert!(graph.omissions.contains(&retained));
+        assert!(!graph.omissions.iter().any(|omission| {
+            omission.detail == WorkGraphOmissionReason::ResolutionIncomplete.detail()
+                && omission.examples == vec!["T1".to_string()]
+        }));
+        let undeclared: Vec<_> = graph
+            .omissions
+            .iter()
+            .filter(|omission| omission.detail == "explicit task touch intent was not declared")
+            .collect();
+        assert_eq!(undeclared.len(), 1, "old count must be replaced");
+        assert_eq!(undeclared[0].count, 2);
+
+        let unavailable = FixedResolver {
+            coverage: TouchCoverageReport::unavailable(),
+            candidates: None,
+        };
+        let mut unavailable_graph = compose_initial_work_graph(
+            graph_with_undeclared_tasks(&["T1"]),
+            root.path(),
+            None,
+            None,
+            &BTreeMap::new(),
+            &unavailable,
+        )
+        .expect("compose unavailable resolver")
+        .graph;
+        assert_eq!(touches_resolver_count(&unavailable_graph), 1);
+        derive_plan_ready_knowledge_attachments(
+            &mut unavailable_graph,
+            root.path(),
+            None,
+            root.path(),
+            &unavailable,
+            None,
+        )
+        .expect("plan-ready unavailable resolver");
+        dedupe_graph_omissions(&mut unavailable_graph);
+        assert_eq!(touches_resolver_count(&unavailable_graph), 1);
+    }
+
+    #[test]
+    fn legacy_work_graph_omission_without_producer_deserializes() {
+        let json = r#"{"nodes":[],"edges":[],"omissions":[{"reason":"source_unreadable","count":1,"detail":"source read failed","examples":["plan.md"]}]}"#;
+        let graph: TaskGraph = serde_json::from_str(json).expect("old work-graph.json");
+        assert_eq!(graph.omissions[0].producer, None);
+        let roundtrip = serde_json::to_value(&graph).expect("serialize graph");
+        assert!(roundtrip["omissions"][0].get("producer").is_none());
+    }
+
+    fn touches_resolver_count(graph: &TaskGraph) -> usize {
+        graph
+            .omissions
+            .iter()
+            .filter(|omission| {
+                omission.reason == WorkGraphOmissionReason::CodegraphUnavailable
+                    && omission.examples == vec!["touches-resolver".to_string()]
+            })
+            .count()
+    }
+
+    fn graph_with_undeclared_tasks(task_ids: &[&str]) -> TaskGraph {
+        TaskGraph::new(
+            task_ids
+                .iter()
+                .map(|task_id| {
+                    WorkNode::new(
+                        *task_id,
+                        NodeKind::Task,
+                        format!("Task {task_id}"),
+                        NodeContract::default(),
+                        BindingRef::Role("backend".to_string()),
+                        NodeStatus::Ready,
+                    )
+                })
+                .collect(),
+            Vec::new(),
+        )
+    }
 
     #[test]
     fn production_file_inventory_fallback_attaches_and_fails_open() {
