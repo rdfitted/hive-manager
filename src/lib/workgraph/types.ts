@@ -150,6 +150,7 @@ export interface WorkGraphOmission {
   count: number;
   detail: string;
   examples: string[];
+  producer?: 'knowledge_derivation' | 'knowledge_load';
 }
 
 export interface WorkGraphResponse {

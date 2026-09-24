@@ -13,7 +13,9 @@ use crate::session::{
     AgentInfo, AuthStrategy, Session, SessionController, SessionState, SessionType,
     DEFAULT_MAX_QA_ITERATIONS,
 };
-use crate::storage::{ConversationMessage, PersistedSession, SessionStorage, SessionTypeInfo};
+use crate::storage::{
+    ConversationMessage, PersistedSession, QaInconclusiveCheckpoint, SessionStorage, SessionTypeInfo,
+};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -396,6 +398,7 @@ pub(super) fn make_test_session(id: &str, project_path: &str) -> Session {
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,
@@ -443,6 +446,7 @@ pub(super) fn make_test_session_with_agents(id: &str, project_path: &str, agent_
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,
@@ -1055,6 +1059,7 @@ async fn test_patch_session_omitted_field_preserves_existing_value() {
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,
@@ -1113,6 +1118,7 @@ async fn test_patch_session_null_clears_field() {
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,
@@ -1277,6 +1283,7 @@ async fn test_patch_session_updates_persisted_session_not_loaded_in_memory() {
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: String::new(),
         worktree_path: None,
         worktree_branch: None,
@@ -4407,6 +4414,7 @@ fn test_persisted_session_serializes_default_cli() {
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: String::new(),
         worktree_path: None,
         worktree_branch: None,
@@ -5337,44 +5345,554 @@ async fn force_pass_still_rejected_for_a_running_session_without_an_evaluator() 
     );
 }
 
-/// #175(b). A milestone-ready arriving while QA is inconclusive is still
-/// dropped, but it must be recorded rather than silently discarded.
-#[tokio::test]
-async fn milestone_ready_on_an_inconclusive_session_is_logged_not_silent() {
-    let storage_dir = TempDir::new().unwrap();
-    let (app, controller, storage, _state) =
-        setup_test_app_full(storage_dir.path().to_path_buf()).await;
-    let session_id = format!("drop-log-{}", uuid::Uuid::new_v4());
-    let temp_dir = TempDir::new().unwrap();
-
-    let mut session = make_test_session(&session_id, temp_dir.path().to_str().unwrap());
+fn make_inconclusive_qa_session(
+    session_id: &str,
+    project_path: &Path,
+    prior_iteration: Option<u8>,
+) -> Session {
+    let mut session = make_test_session(session_id, project_path.to_str().unwrap());
     session.state = SessionState::QaInconclusive;
-    controller.write().insert_test_session(session);
+    session.qa_inconclusive_at = Some(QaInconclusiveCheckpoint {
+        at: chrono::Utc::now() - chrono::Duration::minutes(1),
+        prior_iteration,
+    });
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    session
+}
 
-    let res = app
+async fn post_qa_reentry_milestone(app: &axum::Router, session_id: &str) -> axum::response::Response {
+    app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/sessions/{}/milestone-ready", session_id))
+                .uri(format!("/api/sessions/{session_id}/milestone-ready"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
+        .unwrap()
+}
 
-    // State is deliberately unchanged (re-entry is a separate follow-up)...
+/// #179: a live HTTP milestone after inconclusive must reopen QA and report the
+/// new state to the Queen. The fixture deliberately has no checkpoint, covering
+/// the legacy-session rule as well.
+#[tokio::test]
+async fn milestone_ready_on_an_inconclusive_session_is_logged_not_silent() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-reentry-legacy-{}", uuid::Uuid::new_v4());
+    let temp_dir = TempDir::new().unwrap();
+
+    let mut session = make_inconclusive_qa_session(&session_id, temp_dir.path(), Some(1));
+    session.qa_inconclusive_at = None;
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    let res = post_qa_reentry_milestone(&app, &session_id).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["action"], "milestone-ready");
+    assert_eq!(body["new_state"], "QaInProgress { iteration: Some(1) }");
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(1) }
+    );
+    assert!(
+        controller.read().qa_timeout_armed(&session_id),
+        "legacy HTTP re-entry must arm the QA clock"
+    );
+}
+
+#[tokio::test]
+async fn inconclusive_http_milestone_advances_iteration_and_arms_clock() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-reentry-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(2) };
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    controller.read().on_qa_timeout(&session_id).unwrap();
+    let timed_out = controller.read().get_session(&session_id).unwrap();
+    assert_eq!(timed_out.state, SessionState::QaInconclusive);
+    assert_eq!(
+        timed_out.qa_inconclusive_at.unwrap().prior_iteration,
+        Some(2)
+    );
+    assert!(!controller.read().qa_timeout_armed(&session_id));
+    let response = post_qa_reentry_milestone(&app, &session_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(3) }
+    );
+    assert!(controller.read().qa_timeout_armed(&session_id));
+}
+
+/// G-stale-milestone: the real watcher entry must reject an unchanged file. A
+/// checkpoint one second after its mtime makes the ordering deterministic on
+/// filesystems with coarse timestamp precision.
+#[tokio::test]
+async fn inconclusive_watcher_refire_of_unchanged_file_stays_inconclusive() {
+    let storage_dir = TempDir::new().unwrap();
+    let (_app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-stale-file-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let signal = project
+        .path()
+        .join(".hive-manager")
+        .join(&session_id)
+        .join("peer")
+        .join("milestone-ready.json");
+    std::fs::create_dir_all(signal.parent().unwrap()).unwrap();
+    std::fs::write(&signal, b"same milestone").unwrap();
+    let file_mtime = chrono::DateTime::<chrono::Utc>::from(
+        std::fs::metadata(&signal).unwrap().modified().unwrap(),
+    );
+    let mut session = make_inconclusive_qa_session(&session_id, project.path(), Some(1));
+    session.qa_inconclusive_at = Some(QaInconclusiveCheckpoint {
+        at: file_mtime + chrono::Duration::seconds(1),
+        prior_iteration: Some(1),
+    });
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    for _ in 0..2 {
+        controller
+            .read()
+            .on_milestone_ready_from_file(&session_id, &signal)
+            .unwrap();
+        assert_eq!(
+            controller.read().get_session(&session_id).unwrap().state,
+            SessionState::QaInconclusive
+        );
+        assert!(!controller.read().qa_timeout_armed(&session_id));
+    }
+}
+
+#[tokio::test]
+async fn inconclusive_watcher_without_legacy_checkpoint_stays_inconclusive() {
+    let storage_dir = TempDir::new().unwrap();
+    let (_app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-legacy-file-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let signal = project.path().join("milestone-ready.json");
+    std::fs::write(&signal, b"legacy milestone").unwrap();
+    let mut session = make_inconclusive_qa_session(&session_id, project.path(), Some(1));
+    session.qa_inconclusive_at = None;
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    controller
+        .read()
+        .on_milestone_ready_from_file(&session_id, &signal)
+        .unwrap();
     assert_eq!(
         controller.read().get_session(&session_id).unwrap().state,
         SessionState::QaInconclusive
     );
-    // ...but the drop must be visible to the operator.
-    let log = storage.read_coordination_log(&session_id, None).unwrap();
-    assert!(
-        log.iter().any(|m| m.content.contains("milestone-ready")
-            && m.content.contains("force-pass")),
-        "the dropped signal must be recorded with the recovery path, got {:?}",
-        log.iter().map(|m| &m.content).collect::<Vec<_>>()
+    assert!(!controller.read().qa_timeout_armed(&session_id));
+}
+
+#[tokio::test]
+async fn inconclusive_http_reentry_stops_at_qa_iteration_ceiling() {
+    use crate::session::{SessionStateKind, TransitionTrigger};
+
+    assert!(crate::session::transitions::has_rule(
+        SessionStateKind::QaInconclusive,
+        SessionStateKind::QaMaxRetriesExceeded,
+        TransitionTrigger::MilestoneReady,
+    ));
+    assert_eq!(
+        crate::session::transitions::trigger_for(
+            SessionStateKind::QaInconclusive,
+            SessionStateKind::QaMaxRetriesExceeded,
+        ),
+        Some(TransitionTrigger::MilestoneReady),
+        "the controller derives the first rule's trigger for this state pair",
+    );
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-reentry-ceiling-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    controller.write().insert_test_session(make_inconclusive_qa_session(
+        &session_id,
+        project.path(),
+        Some(DEFAULT_MAX_QA_ITERATIONS),
+    ));
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    let response = post_qa_reentry_milestone(&app, &session_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaMaxRetriesExceeded
+    );
+    assert!(!controller.read().qa_timeout_armed(&session_id));
+}
+
+#[tokio::test]
+async fn milestone_ready_keeps_prince_and_terminal_qa_states_pinned() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let project = TempDir::new().unwrap();
+
+    for (index, pinned_state) in [
+        SessionState::PrinceRemediation,
+        SessionState::QaPassed,
+        SessionState::QaMaxRetriesExceeded,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session_id = format!("qa-pinned-{index}-{}", uuid::Uuid::new_v4());
+        let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+        session.state = pinned_state.clone();
+        controller.write().insert_test_session(session);
+
+        let response = post_qa_reentry_milestone(&app, &session_id).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            controller.read().get_session(&session_id).unwrap().state,
+            pinned_state
+        );
+        assert!(!controller.read().qa_timeout_armed(&session_id));
+    }
+}
+
+#[tokio::test]
+async fn inconclusive_reentry_rotates_old_qa_verdict_before_new_window() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-reentry-rotation-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let peer_dir = project.path().join(".hive-manager").join(&session_id).join("peer");
+    std::fs::create_dir_all(&peer_dir).unwrap();
+    let old_verdict = peer_dir.join("qa-verdict.json");
+    std::fs::write(&old_verdict, b"old BLOCKED verdict").unwrap();
+    controller.write().insert_test_session(make_inconclusive_qa_session(
+        &session_id,
+        project.path(),
+        Some(1),
+    ));
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) }
+    );
+    assert!(!old_verdict.exists(), "old verdict must leave the active path");
+    let rotated: Vec<_> = std::fs::read_dir(&peer_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("qa-verdict.inconclusive-")
+        })
+        .collect();
+    assert_eq!(rotated.len(), 1);
+    assert_eq!(std::fs::read(&rotated[0]).unwrap(), b"old BLOCKED verdict");
+}
+
+#[tokio::test]
+async fn first_qa_inconclusive_checkpoint_enforces_one_iteration_ceiling() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-first-ceiling-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: None };
+    session.max_qa_iterations = 1;
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    controller.read().on_qa_timeout(&session_id).unwrap();
+    let inconclusive = controller.read().get_session(&session_id).unwrap();
+    assert_eq!(inconclusive.state, SessionState::QaInconclusive);
+    assert_eq!(
+        inconclusive.qa_inconclusive_at.unwrap().prior_iteration,
+        Some(1)
+    );
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaMaxRetriesExceeded
+    );
+    assert!(!controller.read().qa_timeout_armed(&session_id));
+}
+
+#[tokio::test]
+async fn first_qa_timer_checkpoint_reenters_at_iteration_two() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-first-timer-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: None };
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+    controller.read().start_qa_timeout(&session_id, 0);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if controller.read().get_session(&session_id).unwrap().state
+                == SessionState::QaInconclusive
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the armed QA timer must fire");
+    assert_eq!(
+        controller
+            .read()
+            .get_session(&session_id)
+            .unwrap()
+            .qa_inconclusive_at
+            .unwrap()
+            .prior_iteration,
+        Some(1)
+    );
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) }
+    );
+}
+
+#[tokio::test]
+async fn inconclusive_reentry_archives_blocked_prince_verdict() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-prince-rotation-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let peer_dir = project.path().join(".hive-manager").join(&session_id).join("peer");
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    session.agents.push(make_test_agent(&format!("{session_id}-prince"), AgentRole::Prince));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    let qa_fail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"FAIL","rationale":"needs remediation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(qa_fail.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::PrinceRemediation
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/prince/verdict"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"BLOCKED","rationale":"needs remediation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInconclusive
+    );
+    let prince_verdict = peer_dir.join("prince-verdict.json");
+    assert!(prince_verdict.exists(), "Prince must have written the old verdict");
+    let old_prince_content = std::fs::read(&prince_verdict).unwrap();
+    let qa_verdict = peer_dir.join("qa-verdict.json");
+    assert!(qa_verdict.exists(), "Evaluator must have written the old verdict");
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) }
+    );
+    assert!(!qa_verdict.exists(), "old QA verdict must leave the live path");
+    assert!(!prince_verdict.exists(), "old Prince verdict must leave the live path");
+    let archived_prince: Vec<_> = std::fs::read_dir(&peer_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("prince-verdict.inconclusive-")
+        })
+        .collect();
+    assert_eq!(archived_prince.len(), 1);
+    assert_eq!(std::fs::read(&archived_prince[0]).unwrap(), old_prince_content);
+}
+
+#[tokio::test]
+async fn inconclusive_respawn_rotates_verdicts_before_failed_launch() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-dead-evaluator-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let peer_dir = project.path().join(".hive-manager").join(&session_id).join("peer");
+    std::fs::create_dir_all(&peer_dir).unwrap();
+    let qa_verdict = peer_dir.join("qa-verdict.json");
+    let prince_verdict = peer_dir.join("prince-verdict.json");
+    std::fs::write(&qa_verdict, b"old QA verdict").unwrap();
+    std::fs::write(&prince_verdict, b"old Prince verdict").unwrap();
+    let prompt_file = project
+        .path()
+        .join(".hive-manager")
+        .join(&session_id)
+        .join("prompts")
+        .join("evaluator-prompt.md");
+    std::fs::create_dir_all(&prompt_file).unwrap();
+    controller.write().insert_test_session(make_inconclusive_qa_session(
+        &session_id,
+        project.path(),
+        Some(1),
+    ));
+
+    assert_eq!(
+        post_qa_reentry_milestone(&app, &session_id).await.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the prompt path occupied by a directory must fail the replacement launch"
+    );
+    assert!(!qa_verdict.exists(), "the old QA verdict must rotate before launch");
+    assert!(!prince_verdict.exists(), "the old Prince verdict must rotate before launch");
+    let archives: Vec<_> = std::fs::read_dir(&peer_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.contains(".inconclusive-"))
+        .collect();
+    assert_eq!(archives.len(), 2);
+}
+
+/// G-prince-reachable: use the HTTP handlers for BLOCKED, the next milestone,
+/// FAIL, and the Prince verdict, with a rostered live Prince peer.
+#[tokio::test]
+async fn inconclusive_http_reentry_makes_prince_verdict_reachable() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-prince-reentry-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    session.agents.push(make_test_agent(&format!("{session_id}-prince"), AgentRole::Prince));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+    register_live_pty(&state, &format!("{session_id}-prince"), AgentRole::Prince);
+
+    let blocked = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"BLOCKED","blocked_reason":"needs evidence"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::OK);
+    let inconclusive = controller.read().get_session(&session_id).unwrap();
+    assert_eq!(inconclusive.state, SessionState::QaInconclusive);
+    assert_eq!(
+        inconclusive.qa_inconclusive_at.unwrap().prior_iteration,
+        Some(1)
+    );
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) }
+    );
+    let fail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"FAIL","rationale":"still failing"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fail.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::PrinceRemediation
+    );
+    let prince = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/prince/verdict"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"PASS","rationale":"resolved"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prince.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaPassed
     );
 }
 
@@ -7014,6 +7532,7 @@ async fn test_list_artifacts_uses_persisted_session_fallback() {
             qa_workers: Vec::new(),
             max_qa_iterations: test_default_max_qa_iterations(),
             qa_timeout_secs: 300,
+            qa_inconclusive_at: None,
             auth_strategy: String::new(),
             worktree_path: None,
             worktree_branch: None,
@@ -8425,6 +8944,7 @@ fn make_fusion_session(id: &str, project_path: &str) -> Session {
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,

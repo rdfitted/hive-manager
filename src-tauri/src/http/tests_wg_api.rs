@@ -195,6 +195,7 @@ fn running_session_with_agent(session_id: &str, agent_id: &str) -> Session {
         qa_workers: Vec::new(),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,

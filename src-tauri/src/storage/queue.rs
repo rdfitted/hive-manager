@@ -15,11 +15,13 @@
 //! `running` row with a stale (or absent) heartbeat as claimable, which is the
 //! reclaim-after-cutoff guarantee folded into the same statement. Dependency readiness is
 //! part of that SAME `UPDATE`: a correlated `NOT EXISTS` rejects a row until every recorded
-//! prerequisite has a finalized queue row. There is deliberately no check-then-claim pre-read.
+//! prerequisite has a finalized queue row or a validated external completion. There is
+//! deliberately no check-then-claim pre-read.
 //!
 //! The queue table is the SOURCE OF TRUTH for sub-agent runs; the in-memory
 //! `Session.agents` Vec is a UI cache that is reconciled against this table on resume.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -298,6 +300,16 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_run_queue_external_completions (
+            session_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            completed_at INTEGER NOT NULL,
+            PRIMARY KEY (session_id, task_id)
+        )",
+        [],
+    )?;
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_run_queue_blocks (
             queue_id           TEXT PRIMARY KEY,
             blocked_by_task_id TEXT,
@@ -371,6 +383,52 @@ impl QueueRepo {
     /// Run [`ensure_schema`] against the shared connection (idempotent startup step).
     pub fn ensure_schema(&self) -> Result<(), StorageError> {
         self.db.with_conn(ensure_schema)
+    }
+
+    /// Persist validated heartbeat completions for plan nodes without queue rows.
+    /// Existing queue rows continue to use their finalized status as the readiness source.
+    pub fn record_external_completions(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        task_ids: &[String],
+        completed_at: i64,
+    ) -> Result<(), StorageError> {
+        self.db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            for task_id in task_ids {
+                tx.execute(
+                    "INSERT OR IGNORE INTO agent_run_queue_external_completions
+                        (session_id, task_id, agent_id, completed_at)
+                     SELECT ?1, ?2, ?3, ?4
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM agent_run_queue
+                         WHERE session_id = ?1 AND task_id = ?2
+                     )",
+                    params![session_id, task_id, agent_id, completed_at],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Task IDs backed by validated row-less completion declarations for one session.
+    /// Callers must still prefer any queue row for the same task ID.
+    pub fn external_completion_task_ids(
+        &self,
+        session_id: &str,
+    ) -> Result<BTreeSet<String>, StorageError> {
+        self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT task_id FROM agent_run_queue_external_completions
+                 WHERE session_id = ?1 ORDER BY task_id",
+            )?;
+            let task_ids = stmt
+                .query_map(params![session_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            Ok(task_ids)
+        })
     }
 
     /// Insert a freshly-queued run. Idempotent on the primary key `id`: re-enqueuing the
@@ -740,6 +798,17 @@ impl QueueRepo {
                                AND prerequisite.task_id = dependency.prerequisite_task_id
                                AND prerequisite.status = 'finalized'
                          )
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM agent_run_queue_external_completions AS external
+                             WHERE external.session_id = dependency.session_id
+                               AND external.task_id = dependency.prerequisite_task_id
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM agent_run_queue AS queued_prerequisite
+                                   WHERE queued_prerequisite.session_id = dependency.session_id
+                                     AND queued_prerequisite.task_id = dependency.prerequisite_task_id
+                               )
+                         )
                    )
                    AND NOT EXISTS (
                        SELECT 1
@@ -795,6 +864,17 @@ impl QueueRepo {
                        WHERE prerequisite.session_id = dependency.session_id
                          AND prerequisite.task_id = dependency.prerequisite_task_id
                          AND prerequisite.status = 'finalized'
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM agent_run_queue_external_completions AS external
+                       WHERE external.session_id = dependency.session_id
+                         AND external.task_id = dependency.prerequisite_task_id
+                         AND NOT EXISTS (
+                             SELECT 1 FROM agent_run_queue AS queued_prerequisite
+                             WHERE queued_prerequisite.session_id = dependency.session_id
+                               AND queued_prerequisite.task_id = dependency.prerequisite_task_id
+                         )
                    )
                  ORDER BY dependency.prerequisite_task_id",
             )?;

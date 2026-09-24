@@ -38,6 +38,7 @@ fn persisted(id: &str, project_path: &str) -> PersistedSession {
         qa_workers: Vec::new(),
         max_qa_iterations: test_default_max_qa_iterations(),
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: String::new(),
         worktree_path: None,
         worktree_branch: None,

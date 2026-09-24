@@ -212,14 +212,27 @@ pub enum EdgeProvenance {
 
 /// One stated reason that graph construction could not observe all relevant
 /// inputs. Consumers receive counts and examples, never an ambiguous bool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkGraphOmission {
     pub reason: WorkGraphOmissionReason,
     pub count: usize,
     pub detail: String,
     #[serde(default)]
     pub examples: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<OmissionProducer>,
 }
+
+impl PartialEq for WorkGraphOmission {
+    fn eq(&self, other: &Self) -> bool {
+        self.reason == other.reason
+            && self.count == other.count
+            && self.detail == other.detail
+            && self.examples == other.examples
+    }
+}
+
+impl Eq for WorkGraphOmission {}
 
 impl WorkGraphOmission {
     pub fn new(reason: WorkGraphOmissionReason, count: usize, examples: Vec<String>) -> Self {
@@ -228,8 +241,21 @@ impl WorkGraphOmission {
             count,
             detail: reason.detail().to_string(),
             examples,
+            producer: None,
         }
     }
+
+    pub fn with_producer(mut self, producer: OmissionProducer) -> Self {
+        self.producer = Some(producer);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OmissionProducer {
+    KnowledgeDerivation,
+    KnowledgeLoad,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Vendored from ~/.claude/tools/judgment/audit.py; source SHA-256 2235b39a10c0068e237222fd4e93f8dd56a01ff111f25208d4ee6bd36f1bf24b
+# Vendored from ~/.claude/tools/judgment/audit.py; source SHA-256 b417a484ebd5edd9512de53ce5c622aaaf40d875b9ad9f04f5cb41837bf97f06
 """The scorecard — success rates for every judgment surface, one report.
 
 Reads every judgment-ledger/v1 stream (docket, hive, and the wiki retrieval
@@ -181,8 +181,8 @@ def prediction(row: dict, qtype: str, tau: float) -> tuple[Any, float | None]:
         if isinstance(a, bool):
             return a, None
         if isinstance(a, (int, float)):
-            yes, conf = C.noul_to_pick(float(a), 0.5)
-            return float(a) >= tau, conf
+            yes, conf = C.noul_to_pick(float(a), tau)
+            return yes, conf
         return str(a) == "admitted", None
     if qtype == "scored":
         probs = row.get("probabilities") or {}

@@ -200,8 +200,8 @@ pub async fn post_heartbeat(
     // Validate the whole declared set before the queue or controller is mutated. Exact ids are
     // deliberate: aliases and labels are not node identity, and a mixed valid/invalid request
     // must apply none of its declarations.
-    let completed_nodes = if req.completed_nodes.is_empty() {
-        Vec::new()
+    let (completed_nodes, external_completion_ids) = if req.completed_nodes.is_empty() {
+        (Vec::new(), Vec::new())
     } else {
         if req.status != "completed" {
             return Err(ApiError::bad_request(
@@ -292,7 +292,32 @@ pub async fn post_heartbeat(
                 )));
             }
         }
-        normalized.into_iter().collect::<Vec<_>>()
+        // A missing principal remains valid for legacy completion facts, but cannot
+        // authorize a queue prerequisite that has no row of its own.
+        let external_principal = hierarchy
+            .iter()
+            .find(|node| node.id == agent_id)
+            .and_then(|node| {
+                node.principal
+                    .as_deref()
+                    .or_else(|| (node.role == "Queen").then_some("Queen"))
+            })
+            .map(str::trim)
+            .filter(|principal| !principal.is_empty());
+        let external_completion_ids = graph
+            .as_ref()
+            .into_iter()
+            .flat_map(|graph| graph.nodes.iter())
+            .filter(|node| normalized.contains_key(&node.id))
+            .filter(|node| {
+                let node_principal = match &node.binding {
+                    BindingRef::Role(principal) | BindingRef::Zone(principal) => principal.trim(),
+                };
+                external_principal.is_some_and(|principal| principal == node_principal)
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        (normalized.into_iter().collect::<Vec<_>>(), external_completion_ids)
     };
 
     // A supplied assignment identity is an exact durable fence. Check it before
@@ -358,6 +383,14 @@ pub async fn post_heartbeat(
             .append_node_completion_facts(&facts)
             .map_err(|error| {
                 ApiError::internal(format!("Failed to persist completed_nodes: {error}"))
+            })?;
+        state
+            .queue_manager
+            .record_external_completions(&session_id, &agent_id, &external_completion_ids)
+            .map_err(|error| {
+                ApiError::internal(format!(
+                    "Failed to persist external completed_nodes: {error}"
+                ))
             })?;
         for fact in facts {
             if let Err(error) = state.event_bus.publish(fact.event(&session_id)).await {
@@ -558,6 +591,7 @@ mod tests {
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
+            qa_inconclusive_at: None,
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,

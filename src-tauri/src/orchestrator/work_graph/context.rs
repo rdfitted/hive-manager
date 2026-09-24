@@ -10,10 +10,11 @@ use crate::actions::git::{run_git_ls_files_capped, CappedGitError};
 use crate::http::handlers::knowledge::{first_h1, frontmatter_field, split_frontmatter};
 
 use super::archetypes::{GotchaAttachment, GotchaAttachmentProvider};
+use super::schema::OmissionProducer;
 use super::{
     BindingRef, CompositeExpansion, EdgeKind, EdgeProvenance, NodeContract, NodeKind,
-    NodeStatus, TaskGraph, TaskId, WorkEdge, WorkGraphOmission, WorkGraphOmissionReason,
-    WorkNode,
+    NodeStatus, TaskGraph, TaskId, WorkEdge, WorkGraphOmission,
+    WorkGraphOmissionReason, WorkNode,
 };
 
 pub const MAX_CONTEXT_SUMMARY_CHARS: usize = 240;
@@ -419,7 +420,10 @@ pub(crate) fn build_knowledge_touch_coverage(
         declared_touches,
         knowledge_attachment_touches,
         provenance_by_task,
-        resolution_omissions: aggregate_resolution_omissions(resolution_omissions),
+        resolution_omissions: aggregate_resolution_omissions(resolution_omissions)
+            .into_iter()
+            .map(|omission| omission.with_producer(OmissionProducer::KnowledgeDerivation))
+            .collect(),
     }
 }
 
@@ -446,9 +450,30 @@ fn aggregate_resolution_omissions(
         .collect()
 }
 
-pub(crate) fn is_knowledge_derivation_omission(omission: &WorkGraphOmission) -> bool {
-    omission.reason == WorkGraphOmissionReason::ResolutionIncomplete
-        && KNOWLEDGE_DERIVATION_OMISSION_DETAILS.contains(&omission.detail.as_str())
+pub(crate) fn is_stale_knowledge_omission(omission: &WorkGraphOmission) -> bool {
+    if omission.producer.is_some() {
+        return matches!(
+            omission.producer,
+            Some(OmissionProducer::KnowledgeDerivation | OmissionProducer::KnowledgeLoad)
+        );
+    }
+
+    if omission.reason == WorkGraphOmissionReason::ResolutionIncomplete {
+        return KNOWLEDGE_DERIVATION_OMISSION_DETAILS.contains(&omission.detail.as_str())
+            || (!omission.examples.is_empty() && omission.examples.iter().all(|example| {
+                example.starts_with(".ai-docs/")
+                    || example.starts_with("global:")
+                    || example == &format!("context node cap {MAX_DERIVED_CONTEXT_NODES}")
+            }));
+    }
+
+    matches!(
+        omission.reason,
+        WorkGraphOmissionReason::ProjectKnowledgeUnavailable
+            | WorkGraphOmissionReason::SourceUnreadable
+    ) && !omission.examples.is_empty() && omission.examples.iter().all(|example| {
+        example.ends_with(".ai-docs") || example.starts_with(".ai-docs/")
+    })
 }
 
 /// Load the repository's tracked-file inventory without exposing Git or OS
@@ -813,11 +838,14 @@ pub fn derive_project_context<R: TouchesResolver>(
     let coverage = match resolver.resolve_touches(graph) {
         Ok(coverage) if coverage.available => coverage,
         Ok(_) => {
-            graph.omissions.push(WorkGraphOmission::new(
-                WorkGraphOmissionReason::CodegraphUnavailable,
-                1,
-                vec!["touches-resolver".to_string()],
-            ));
+            graph.omissions.push(
+                WorkGraphOmission::new(
+                    WorkGraphOmissionReason::CodegraphUnavailable,
+                    1,
+                    vec!["touches-resolver".to_string()],
+                )
+                .with_producer(OmissionProducer::KnowledgeDerivation),
+            );
             append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
             return ContextDerivationReport {
                 gotchas: load.gotchas,
@@ -829,11 +857,14 @@ pub fn derive_project_context<R: TouchesResolver>(
             };
         }
         Err(error) => {
-            graph.omissions.push(WorkGraphOmission::new(
-                WorkGraphOmissionReason::SourceUnreadable,
-                1,
-                vec![format!("touches-resolver: {error}")],
-            ));
+            graph.omissions.push(
+                WorkGraphOmission::new(
+                    WorkGraphOmissionReason::SourceUnreadable,
+                    1,
+                    vec![format!("touches-resolver: {error}")],
+                )
+                .with_producer(OmissionProducer::KnowledgeDerivation),
+            );
             append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
             return ContextDerivationReport {
                 gotchas: load.gotchas,
@@ -887,11 +918,14 @@ pub(crate) fn derive_project_context_from_knowledge(
     let expanded_available = declared_coverage.available
         || (config.file_inventory_fallback && path_resolver.is_some());
     if !expanded_available {
-        graph.omissions.push(WorkGraphOmission::new(
-            WorkGraphOmissionReason::CodegraphUnavailable,
-            1,
-            vec!["touches-resolver".to_string()],
-        ));
+        graph.omissions.push(
+            WorkGraphOmission::new(
+                WorkGraphOmissionReason::CodegraphUnavailable,
+                1,
+                vec!["touches-resolver".to_string()],
+            )
+            .with_producer(OmissionProducer::KnowledgeDerivation),
+        );
         append_context_nodes(graph, &load.gotchas, &load.inferred_scope_provenance);
         return ContextDerivationReport {
             gotchas: load.gotchas,
@@ -930,15 +964,18 @@ fn derive_loaded_context(
         .collect();
     let missing_task_ids = declared_coverage.unresolved_task_ids.clone();
     if !missing_task_ids.is_empty() {
-        graph.omissions.push(WorkGraphOmission::new(
-            WorkGraphOmissionReason::ResolutionIncomplete,
-            missing_task_ids.len(),
-            missing_task_ids
-                .iter()
-                .take(MAX_OMISSION_EXAMPLES)
-                .cloned()
-                .collect(),
-        ));
+        graph.omissions.push(
+            WorkGraphOmission::new(
+                WorkGraphOmissionReason::ResolutionIncomplete,
+                missing_task_ids.len(),
+                missing_task_ids
+                    .iter()
+                    .take(MAX_OMISSION_EXAMPLES)
+                    .cloned()
+                    .collect(),
+            )
+            .with_producer(OmissionProducer::KnowledgeDerivation),
+        );
     }
     // Anti-hub fractions use the full planned Task universe. A partial
     // resolver must not shrink the denominator until generic context appears
@@ -1188,11 +1225,14 @@ fn load_project_knowledge(
             gotchas: Vec::new(),
             inferred_scope_provenance: BTreeMap::new(),
             fingerprints: Vec::new(),
-            omissions: vec![WorkGraphOmission::new(
-                WorkGraphOmissionReason::ProjectKnowledgeUnavailable,
-                1,
-                vec![ai_docs.display().to_string()],
-            )],
+            omissions: vec![
+                WorkGraphOmission::new(
+                    WorkGraphOmissionReason::ProjectKnowledgeUnavailable,
+                    1,
+                    vec![ai_docs.display().to_string()],
+                )
+                .with_producer(OmissionProducer::KnowledgeLoad),
+            ],
             available: false,
         };
     }
@@ -1316,6 +1356,10 @@ fn load_project_knowledge(
             omitted,
             vec![format!("context node cap {MAX_DERIVED_CONTEXT_NODES}")],
         ));
+    }
+
+    for omission in &mut omissions {
+        omission.producer = Some(OmissionProducer::KnowledgeLoad);
     }
 
     KnowledgeLoad {

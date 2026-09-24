@@ -810,6 +810,8 @@ pub struct Session {
     pub max_qa_iterations: u8,
     pub qa_timeout_secs: u64,
     #[serde(default)]
+    pub qa_inconclusive_at: Option<crate::storage::QaInconclusiveCheckpoint>,
+    #[serde(default)]
     pub auth_strategy: AuthStrategy,
     /// Primary git worktree path for this session (e.g. Queen or first Fusion variant), for UI.
     #[serde(default)]
@@ -941,7 +943,20 @@ fn is_qa_phase_state(state: &SessionState) -> bool {
     )
 }
 
-fn qa_in_progress_state(state: &SessionState) -> SessionState {
+fn qa_in_progress_state(
+    state: &SessionState,
+    checkpoint: Option<&crate::storage::QaInconclusiveCheckpoint>,
+) -> SessionState {
+    if matches!(state, SessionState::QaInconclusive) {
+        return SessionState::QaInProgress {
+            iteration: Some(
+                checkpoint
+                    .and_then(|value| value.prior_iteration)
+                    .unwrap_or(0)
+                    .saturating_add(1),
+            ),
+        };
+    }
     let preserves_iteration = super::transitions::has_rule(
         state.kind(),
         super::transitions::SessionStateKind::QaInProgress,
@@ -1359,6 +1374,7 @@ impl SessionController {
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
@@ -6690,6 +6706,8 @@ Managed principals are visible Hive agents with their own lifecycle and task con
 6. Keep native Queen children read-only for planning, scouting, and review. Delegate implementation to managed principals.
 7. The Queen coordinates and integrates; do not become a coding principal.
 
+When you finish a Queen-owned plan task, post a `completed` heartbeat with its exact plan node ID in `completed_nodes`, for example `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat`. Then retry the same `task_id` spawn. This task completion heartbeat does not end the Queen's session; keep coordinating and send `working` heartbeats while further work remains.
+
 Heartbeat while coordinating:
 {queen_heartbeat}
 
@@ -7856,6 +7874,7 @@ running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
 - Workers spawn in a new Windows Terminal tab (visible window)
 - Treat the absolute `task_file` returned by the API as authoritative; do not reconstruct it from the worker ID
 - When spawning a plan task, send its exact `task_id` from `plan.md`. Never guess, fuzzy-match, or derive it from `initial_task`; explicit or null is the safe contract.
+- If a prerequisite is Queen-owned, finish that task and POST `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat` using its exact node ID. Then retry the same `task_id` spawn. A `working` heartbeat does not satisfy the prerequisite; the Queen session remains open after this task completion heartbeat.
 - Shared-cell Hive: the task file is under `.hive-manager/tasks/` in the shared primary workspace
 - Isolated-cell Hive: the task file is under `.hive-manager/tasks/` in that worker's isolated workspace
 - Research/no-worktree Hive: the task file is under `.hive-manager/{session_id}/tasks/` in the operator project
@@ -8670,6 +8689,7 @@ Last updated: {timestamp}
             qa_workers: qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: Some(solo_cwd.clone()),
             worktree_branch: Some(solo_branch.clone()),
@@ -9218,6 +9238,7 @@ Last updated: {timestamp}
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: use_worktrees.then_some(queen_cwd.clone()),
             worktree_branch: if use_worktrees {
@@ -9501,6 +9522,7 @@ phases and do EXACTLY this, then stop:
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: variants.first().map(|v| v.worktree_path.clone()),
             worktree_branch: variants.first().map(|v| v.branch.clone()),
@@ -9766,6 +9788,7 @@ phases and do EXACTLY this, then stop:
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: debaters.first().map(|d| d.worktree_path.clone()),
             worktree_branch: debaters.first().map(|d| d.branch.clone()),
@@ -10705,6 +10728,7 @@ The backend composed and persisted the following authoritative skeleton before l
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path,
             worktree_branch,
@@ -10843,6 +10867,7 @@ The backend composed and persisted the following authoritative skeleton before l
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
@@ -10974,6 +10999,7 @@ The backend composed and persisted the following authoritative skeleton before l
             qa_workers: Vec::new(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
@@ -11585,6 +11611,7 @@ The backend composed and persisted the following authoritative skeleton before l
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
@@ -12356,6 +12383,14 @@ The backend composed and persisted the following authoritative skeleton before l
                 ));
             }
             let previous_session = session.clone();
+            let prior_iteration = match &session.state {
+                SessionState::QaInProgress { iteration } => Some(iteration.unwrap_or(1)),
+                _ => None,
+            };
+            session.qa_inconclusive_at = Some(crate::storage::QaInconclusiveCheckpoint {
+                at: Utc::now(),
+                prior_iteration,
+            });
             let changes = self.set_session_state_with_events(session, SessionState::QaInconclusive);
             (previous_session, session.clone(), changes)
         };
@@ -12443,6 +12478,11 @@ The backend composed and persisted the following authoritative skeleton before l
         } else {
             None
         };
+        let inconclusive_iteration = if matches!(&target_state, SessionState::QaInconclusive) {
+            self.qa_verdict_iteration_for_prince(session_id)
+        } else {
+            None
+        };
 
         let (previous_session, updated_session, changes) = {
             let mut sessions = self.sessions.write();
@@ -12459,6 +12499,12 @@ The backend composed and persisted the following authoritative skeleton before l
             let now = Utc::now();
             if now > session.last_activity_at {
                 session.last_activity_at = now;
+            }
+            if matches!(&target_state, SessionState::QaInconclusive) {
+                session.qa_inconclusive_at = Some(crate::storage::QaInconclusiveCheckpoint {
+                    at: now,
+                    prior_iteration: inconclusive_iteration,
+                });
             }
             let changes = self.set_session_state_with_events(session, target_state.clone());
             (previous_session, session.clone(), changes)
@@ -12624,14 +12670,14 @@ The backend composed and persisted the following authoritative skeleton before l
 
     /// Surface a dropped milestone-ready signal to the UI. Reuses the existing
     /// `qa-inconclusive` event rather than introducing a new one.
-    fn emit_qa_inconclusive_event(&self, session_id: &str) {
+    fn emit_qa_inconclusive_event(&self, session_id: &str, reason: &str) {
         if let Some(ref app_handle) = self.app_handle {
             let _ = app_handle.emit(
                 "qa-inconclusive",
                 serde_json::json!({
                     "session_id": session_id,
                     "action": "milestone-ready-dropped",
-                    "reason": "QA is inconclusive; resolve with qa/force-pass or qa/force-fail",
+                    "reason": reason,
                 }),
             );
         }
@@ -12649,7 +12695,10 @@ The backend composed and persisted the following authoritative skeleton before l
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
-            let next_state = qa_in_progress_state(&session.state);
+            let next_state = qa_in_progress_state(
+                &session.state,
+                session.qa_inconclusive_at.as_ref(),
+            );
             let changes = self.set_session_state_with_events(session, next_state);
             (session.qa_timeout_secs, changes)
         };
@@ -12668,35 +12717,99 @@ The backend composed and persisted the following authoritative skeleton before l
 
     #[allow(dead_code)]
     pub fn on_milestone_ready(&self, session_id: &str) -> Result<(), String> {
-        let (maybe_evaluator, config) = {
+        self.on_milestone_ready_with_mtime(session_id, None)
+    }
+
+    /// File-watcher entry point. Missing metadata is not evidence of a new
+    /// milestone, so an unreadable file cannot reopen inconclusive QA.
+    pub fn on_milestone_ready_from_file(
+        &self,
+        session_id: &str,
+        path: &Path,
+    ) -> Result<(), String> {
+        let modified = match std::fs::metadata(path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified,
+            Err(error) => {
+                tracing::warn!(session_id, path = %path.display(), %error,
+                    "Ignoring milestone-ready file without a readable mtime");
+                return Ok(());
+            }
+        };
+        self.on_milestone_ready_with_mtime(session_id, Some(DateTime::<Utc>::from(modified)))
+    }
+
+    fn rotate_inconclusive_verdicts(&self, session_id: &str) -> Result<(), String> {
+        let session = self
+            .get_session(session_id)
+            .ok_or_else(|| format!("Session not found: {}", session_id))?;
+        let peer_dir = session.project_path.join(".hive-manager").join(session_id).join("peer");
+        let unix = Utc::now().timestamp();
+        for verdict in ["qa-verdict", "prince-verdict"] {
+            let verdict_path = peer_dir.join(format!("{}.json", verdict));
+            if !verdict_path.exists() {
+                continue;
+            }
+            let mut rotated = false;
+            for suffix in 0..1000 {
+                let filename = if suffix == 0 {
+                    format!("{}.inconclusive-{}.json", verdict, unix)
+                } else {
+                    format!("{}.inconclusive-{}-{}.json", verdict, unix, suffix)
+                };
+                let archive = peer_dir.join(filename);
+                if archive.exists() {
+                    continue;
+                }
+                std::fs::rename(&verdict_path, &archive).map_err(|error| {
+                    format!("Cannot rotate old {} for {}: {}", verdict, session_id, error)
+                })?;
+                rotated = true;
+                break;
+            }
+            if !rotated {
+                return Err(format!(
+                    "No available {} archive name for {}",
+                    verdict, session_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn on_milestone_ready_with_mtime(
+        &self,
+        session_id: &str,
+        file_mtime: Option<DateTime<Utc>>,
+    ) -> Result<(), String> {
+        let (maybe_evaluator, config, reentering, ceiling_exceeded) = {
             let sessions = self.sessions.read();
             let session = sessions
                 .get(session_id)
                 .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
-            // #175(b): a milestone-ready signal arriving while the session is
-            // QaInconclusive is still dropped, but it must not be dropped
-            // SILENTLY -- that is how a Queen submitting the real milestone after
-            // a spurious timeout got no QA and no explanation. Recovery (re-entry
-            // into QaInProgress) is deliberately deferred; the operator path via
-            // force-pass / force-fail already accepts QaInconclusive.
-            if matches!(&session.state, SessionState::QaInconclusive) {
-                tracing::warn!(
-                    session_id = %session_id,
-                    "Dropping milestone-ready signal: QA is inconclusive for this session. \
-                     Operator must resolve it with qa/force-pass or qa/force-fail."
-                );
-                if let Some(storage) = self.storage.as_ref() {
-                    let msg = crate::coordination::CoordinationMessage::system(
-                        "OPERATOR",
-                        "milestone-ready was received but ignored: QA is inconclusive. \
-                         Resolve with POST /qa/force-pass or POST /qa/force-fail \
-                         (body: {\"confirm\":true}).",
-                    );
-                    let _ = storage.append_coordination_log(session_id, &msg);
+            let reentering = matches!(&session.state, SessionState::QaInconclusive);
+            if reentering {
+                let fresh = match file_mtime {
+                    None => true, // A live HTTP POST is fresh by construction.
+                    Some(modified) => session
+                        .qa_inconclusive_at
+                        .as_ref()
+                        .map(|checkpoint| modified > checkpoint.at)
+                        .unwrap_or(false),
+                };
+                if !fresh {
+                    let reason = "milestone-ready file is not newer than the inconclusive QA verdict";
+                    tracing::warn!(session_id, "Ignoring stale milestone-ready file");
+                    if let Some(storage) = self.storage.as_ref() {
+                        let msg = crate::coordination::CoordinationMessage::system(
+                            "OPERATOR",
+                            reason,
+                        );
+                        let _ = storage.append_coordination_log(session_id, &msg);
+                    }
+                    self.emit_qa_inconclusive_event(session_id, reason);
+                    return Ok(());
                 }
-                self.emit_qa_inconclusive_event(session_id);
-                return Ok(());
             }
 
             if matches!(
@@ -12733,8 +12846,29 @@ The backend composed and persisted the following authoritative skeleton before l
                     initial_prompt: None,
                 });
 
-            (maybe_evaluator, config)
+            let next_iteration = session
+                .qa_inconclusive_at
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.prior_iteration)
+                .unwrap_or(0) as u16 + 1;
+            let ceiling_exceeded = reentering && next_iteration > session.max_qa_iterations as u16;
+            (maybe_evaluator, config, reentering, ceiling_exceeded)
         };
+
+        if ceiling_exceeded {
+            let changes = {
+                let mut sessions = self.sessions.write();
+                let session = sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| format!("Session not found: {}", session_id))?;
+                session.auth_strategy = AuthStrategy::None;
+                self.set_session_state_with_events(session, SessionState::QaMaxRetriesExceeded)
+            };
+            self.update_session_storage(session_id);
+            self.emit_session_update(session_id);
+            self.emit_cell_status_changes(session_id, changes);
+            return Ok(());
+        }
 
         let evaluator_alive = maybe_evaluator
             .as_ref()
@@ -12755,7 +12889,12 @@ The backend composed and persisted the following authoritative skeleton before l
                 reason = if maybe_evaluator.is_some() { "dead_evaluator" } else { "missing_evaluator" },
                 "Launching evaluator from milestone-ready signal"
             );
-            let result = self.launch_evaluator(session_id, config, false);
+            let result = if reentering {
+                self.rotate_inconclusive_verdicts(session_id)
+                    .and_then(|_| self.launch_evaluator(session_id, config, false))
+            } else {
+                self.launch_evaluator(session_id, config, false)
+            };
             self.finish_evaluator_respawn(session_id);
             result?;
             // #175(a) THE TRAP: this branch used to rely on `launch_evaluator`'s
@@ -12768,6 +12907,9 @@ The backend composed and persisted the following authoritative skeleton before l
             return Ok(());
         }
 
+        if reentering {
+            self.rotate_inconclusive_verdicts(session_id)?;
+        }
         self.begin_qa_window(session_id)
     }
 
@@ -12833,6 +12975,9 @@ The backend composed and persisted the following authoritative skeleton before l
         let event_emitter = self.event_emitter.clone();
         let storage = self.storage.clone();
         let principal_bindings = Arc::clone(&self.principal_bindings);
+        let armed_qa_generation = self.sessions.read().get(session_id).and_then(|session| {
+            session.qa_inconclusive_at.clone()
+        });
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)).await;
@@ -12859,19 +13004,39 @@ The backend composed and persisted the following authoritative skeleton before l
                 let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
-                        let previous_state = session.state.clone();
-                        let changes = SessionController::set_session_state_with_snapshot(
-                            storage.as_deref(),
-                            session,
-                            SessionState::QaInconclusive,
-                        );
-                        Some((previous_state, changes, session.clone()))
+                        if !matches!(session.state, SessionState::QaInProgress { .. })
+                            || session.qa_inconclusive_at != armed_qa_generation
+                        {
+                            None
+                        } else {
+                            let previous_state = session.state.clone();
+                            let previous_checkpoint = session.qa_inconclusive_at.clone();
+                            let prior_iteration = match &session.state {
+                                SessionState::QaInProgress { iteration } => {
+                                    Some(iteration.unwrap_or(1))
+                                }
+                                _ => None,
+                            };
+                            session.qa_inconclusive_at =
+                                Some(crate::storage::QaInconclusiveCheckpoint {
+                                    at: Utc::now(),
+                                    prior_iteration,
+                                });
+                            let changes = SessionController::set_session_state_with_snapshot(
+                                storage.as_deref(),
+                                session,
+                                SessionState::QaInconclusive,
+                            );
+                            Some((previous_state, previous_checkpoint, changes, session.clone()))
+                        }
                     } else {
                         None
                     }
                 };
 
-                if let Some((previous_state, changes, updated_session)) = transition {
+                if let Some((previous_state, previous_checkpoint, changes, updated_session)) =
+                    transition
+                {
                     if let Some(storage) = storage.as_ref() {
                         if let Err(error) = SessionController::persist_session_snapshot(
                             storage,
@@ -12886,6 +13051,7 @@ The backend composed and persisted the following authoritative skeleton before l
                             );
                             let mut sessions = sessions.write();
                             if let Some(session) = sessions.get_mut(&sid) {
+                                session.qa_inconclusive_at = previous_checkpoint;
                                 let _ = SessionController::set_session_state_with_snapshot(
                                     Some(storage.as_ref()),
                                     session,
@@ -14611,6 +14777,7 @@ The backend composed and persisted the following authoritative skeleton before l
             qa_workers: persisted.qa_workers.clone(),
             max_qa_iterations: persisted.max_qa_iterations,
             qa_timeout_secs: persisted.qa_timeout_secs,
+            qa_inconclusive_at: persisted.qa_inconclusive_at.clone(),
             auth_strategy,
             worktree_path: persisted.worktree_path.clone(),
             worktree_branch: persisted.worktree_branch.clone(),
@@ -14918,6 +15085,7 @@ The backend composed and persisted the following authoritative skeleton before l
             qa_workers: config.qa_workers.clone().unwrap_or_default(),
             max_qa_iterations,
             qa_timeout_secs,
+            qa_inconclusive_at: None,
             auth_strategy,
             worktree_path: None,
             worktree_branch: None,
@@ -16332,6 +16500,7 @@ The backend composed and persisted the following authoritative skeleton before l
             qa_workers: session.qa_workers.clone(),
             max_qa_iterations: session.max_qa_iterations,
             qa_timeout_secs: session.qa_timeout_secs,
+            qa_inconclusive_at: session.qa_inconclusive_at.clone(),
             auth_strategy: auth_strategy.persist_value(),
             worktree_path: session.worktree_path.clone(),
             worktree_branch: session.worktree_branch.clone(),
@@ -18384,6 +18553,8 @@ mod tests {
         assert!(worker_content.contains("Omit to inherit principal flags; send `[]` to clear them"));
         assert!(!worker_content.contains(r#"{\"role_type\": \"backend\", \"cli\""#));
         assert!(worker_content.contains("absolute `task_file` returned by the API"));
+        assert!(worker_content.contains(r#""completed_nodes":["T0"]"#));
+        assert!(worker_content.contains("Then retry the same `task_id` spawn"));
         assert!(worker_content.contains("Shared-cell Hive"));
         assert!(worker_content.contains("Isolated-cell Hive"));
         assert!(worker_content.contains("Research/no-worktree Hive"));
@@ -18668,6 +18839,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(prompt.contains("supported; encouraged (authorized)"));
         assert!(prompt.contains("do not drop effort or reasoning settings"));
         assert!(prompt.contains("Shared Cell Integration"));
+        assert!(prompt.contains(r#""completed_nodes":["T0"]"#));
+        assert!(prompt.contains("This task completion heartbeat does not end the Queen's session"));
         // Inject contract: the sender reports measured write/observation facts without
         // claiming that output proves a managed turn.
         assert!(prompt.contains("## Messaging a Running Agent (inject)"));
@@ -19620,6 +19793,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
+            qa_inconclusive_at: None,
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,
@@ -19674,6 +19848,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
+            qa_inconclusive_at: None,
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,
@@ -19903,6 +20078,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
+            qa_inconclusive_at: None,
             auth_strategy: AuthStrategy::default(),
             worktree_path: None,
             worktree_branch: None,
@@ -20492,10 +20668,11 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
     #[test]
     fn milestone_ready_does_not_regress_gated_states() {
         // Regression: a duplicate milestone-ready must not drag PrinceRemediation /
-        // QaInconclusive back to QaInProgress (which would re-arm the QA timeout).
+        // terminal QA states back to QaInProgress (which would re-arm the QA timeout).
         for state in [
             SessionState::PrinceRemediation,
-            SessionState::QaInconclusive,
+            SessionState::QaPassed,
+            SessionState::QaMaxRetriesExceeded,
         ] {
             let controller = test_controller();
             controller.insert_test_session(qa_session_with(
@@ -20700,6 +20877,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             qa_workers: Vec::new(),
             max_qa_iterations: 3,
             qa_timeout_secs: 300,
+            qa_inconclusive_at: None,
             auth_strategy: AuthStrategy::default(),
             worktree_path: None, // Key: no session worktree for planning/swarm
             worktree_branch: None,

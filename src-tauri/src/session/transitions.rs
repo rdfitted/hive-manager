@@ -164,6 +164,8 @@ pub const SESSION_STATE_TRANSITIONS: &[SessionTransition] = &[
     transition!(SpawningEvaluator => QaInProgress, EvaluatorSpawnFinished),
     transition!(Running => QaInProgress, MilestoneReady),
     transition!(QaFailed => QaInProgress, MilestoneReady),
+    transition!(QaInconclusive => QaInProgress, MilestoneReady),
+    transition!(QaInconclusive => QaMaxRetriesExceeded, MilestoneReady),
     transition!(QaInProgress => QaInProgress, MilestoneReady),
     // QA and Prince verdicts.
     transition!(QaInProgress => PrinceRemediation, EvaluatorVerdictPass),

@@ -298,6 +298,7 @@ mod tests {
             qa_workers: Vec::new(),
             max_qa_iterations: DEFAULT_MAX_QA_ITERATIONS,
             qa_timeout_secs: 300,
+            qa_inconclusive_at: None,
             auth_strategy: AuthStrategy::None,
             worktree_path: None,
             worktree_branch: None,
