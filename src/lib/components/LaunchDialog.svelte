@@ -562,7 +562,7 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
 
   let withPlanning = true;
   let withEvaluator = true;
-  let withSoloEvaluator = false;
+  let withSoloEvaluator = true;
   $: if (workGraphArchetype.trim() && !withPlanning) withPlanning = true;
   let evaluatorConfig: AgentConfig = {
     cli: defaultRoles.evaluator.cli,
@@ -1264,8 +1264,8 @@ Use /resolveprcomments style workflow to systematically address quality issues.`
                     <input type="checkbox" bind:checked={withEvaluator} />
                   {/if}
                   <div class="checkbox-text">
-                    <span class="checkbox-title">Enable Evaluator Peer</span>
-                    <span class="checkbox-description">Independently verifies milestones and coordinates QA workers.</span>
+                    <span class="checkbox-title">QA: Evaluator + QA workers</span>
+                    <span class="checkbox-description">Gates milestones before push. UI and A11Y workers need a rendered browser; for desktop-only projects, select API or other terminal-checkable QA workers.</span>
                   </div>
                 </label>
               </div>

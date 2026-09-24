@@ -4438,6 +4438,8 @@ Last updated: {timestamp}
             return format!(
                 r#"## Post-Workers Protocol (MANDATORY)
 
+QA is disabled for this session. Tell the operator that the milestone QA gate will not run before push.
+
 1. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
 2. You MUST wait 10 minutes, collect PR comments plus any remaining integrity concerns, and use this `gh api` workflow:
    ```bash
@@ -18162,6 +18164,25 @@ mod tests {
             assert!(blocked_step.contains("At `QaMaxRetriesExceeded`, STOP and surface to the operator"));
             assert!(blocked_step.contains("Force-pass and force-fail are operator-only"));
         }
+    }
+
+    #[test]
+    fn queen_protocol_reports_when_qa_is_disabled() {
+        let session_root = Path::new("/repo/.hive-manager/session-123");
+        let qa_off = SessionController::queen_post_workers_protocol(
+            "session-123",
+            session_root,
+            false,
+        );
+        assert!(qa_off.contains("QA is disabled for this session"));
+        assert!(qa_off.contains("milestone QA gate will not run before push"));
+
+        let qa_on = SessionController::queen_post_workers_protocol(
+            "session-123",
+            session_root,
+            true,
+        );
+        assert!(!qa_on.contains("QA is disabled for this session"));
     }
 
     #[test]

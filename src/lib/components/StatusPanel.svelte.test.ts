@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
+import type { Session } from '$lib/stores/sessions';
 import StatusPanel from './StatusPanel.svelte';
 
 const tauriMocks = vi.hoisted(() => ({
@@ -16,6 +17,39 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@tauri-apps/api/event', () => ({
   listen: tauriMocks.listen,
 }));
+
+const storeMocks = vi.hoisted(() => ({
+  setActiveSession: undefined as ((session: Session | null) => void) | undefined,
+}));
+
+vi.mock('$lib/stores/sessions', async () => {
+  const actual = await vi.importActual<typeof import('$lib/stores/sessions')>('$lib/stores/sessions');
+  const { derived, writable } = await import('svelte/store');
+  const activeSession = writable<Session | null>(null);
+  storeMocks.setActiveSession = activeSession.set;
+  return {
+    ...actual,
+    activeSession,
+    activeAgents: derived(activeSession, (session) => session?.agents ?? []),
+  };
+});
+
+function fakeSession(mode: 'Hive' | 'Solo' | 'Fusion', withEvaluator: boolean): Session {
+  return {
+    id: `qa-${mode.toLowerCase()}`,
+    session_type: mode === 'Hive'
+      ? { Hive: { worker_count: 1 } }
+      : mode === 'Solo'
+        ? { Solo: { cli: 'claude' } }
+        : { Fusion: { variants: [] } },
+    project_path: 'C:/code/project',
+    state: 'Running',
+    created_at: '2026-09-24T12:00:00Z',
+    agents: withEvaluator
+      ? [{ id: 'evaluator', role: 'Evaluator', status: 'Running', config: { cli: 'claude', flags: [] }, parent_id: null }]
+      : [],
+  } as Session;
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -48,9 +82,30 @@ function expectCliState(
 
 afterEach(() => {
   cleanup();
+  storeMocks.setActiveSession?.(null);
   tauriMocks.invoke.mockReset();
   tauriMocks.isTauri.mockReset();
   tauriMocks.isTauri.mockReturnValue(true);
+});
+
+describe('StatusPanel QA status', () => {
+  it.each(['Hive', 'Solo'] as const)('shows QA Off for a %s session without an Evaluator', async (mode) => {
+    tauriMocks.invoke.mockResolvedValue(null);
+    const view = render(StatusPanel);
+    storeMocks.setActiveSession?.(fakeSession(mode, false));
+    await waitFor(() => expect(view.getByText('QA Off')).toBeTruthy());
+    expect(view.getByText('QA Off').classList.contains('status-warning')).toBe(true);
+  });
+
+  it('does not show QA Off when an Evaluator is present or for Fusion', async () => {
+    tauriMocks.invoke.mockResolvedValue(null);
+    const view = render(StatusPanel);
+    storeMocks.setActiveSession?.(fakeSession('Hive', true));
+    await waitFor(() => expect(view.getByText('Session Info')).toBeTruthy());
+    expect(view.queryByText('QA Off')).toBeNull();
+    storeMocks.setActiveSession?.(fakeSession('Fusion', false));
+    await waitFor(() => expect(view.queryByText('QA Off')).toBeNull());
+  });
 });
 
 describe('StatusPanel CLI health', () => {

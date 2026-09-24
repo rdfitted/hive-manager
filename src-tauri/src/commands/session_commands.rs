@@ -305,7 +305,7 @@ pub async fn launch_solo(
         initial_prompt: None,
     };
 
-    // Build evaluator_config: validate if provided, else fall back to cli silently
+    // An omitted evaluator CLI uses the session default when the evaluator launches.
     let evaluator_config = if let Some(ref eval_cli) = evaluator_cli {
         Some(AgentConfig {
             cli: eval_cli.clone(),
@@ -320,7 +320,7 @@ pub async fn launch_solo(
     } else {
         None
     };
-    let with_evaluator = evaluator_config.is_some();
+    let with_evaluator = true;
 
     let config = HiveLaunchConfig {
         project_path,
