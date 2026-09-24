@@ -5616,6 +5616,206 @@ async fn inconclusive_reentry_rotates_old_qa_verdict_before_new_window() {
     assert_eq!(std::fs::read(&rotated[0]).unwrap(), b"old BLOCKED verdict");
 }
 
+#[tokio::test]
+async fn first_qa_inconclusive_checkpoint_enforces_one_iteration_ceiling() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-first-ceiling-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: None };
+    session.max_qa_iterations = 1;
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    controller.read().on_qa_timeout(&session_id).unwrap();
+    let inconclusive = controller.read().get_session(&session_id).unwrap();
+    assert_eq!(inconclusive.state, SessionState::QaInconclusive);
+    assert_eq!(
+        inconclusive.qa_inconclusive_at.unwrap().prior_iteration,
+        Some(1)
+    );
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaMaxRetriesExceeded
+    );
+    assert!(!controller.read().qa_timeout_armed(&session_id));
+}
+
+#[tokio::test]
+async fn first_qa_timer_checkpoint_reenters_at_iteration_two() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-first-timer-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: None };
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+    controller.read().start_qa_timeout(&session_id, 0);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if controller.read().get_session(&session_id).unwrap().state
+                == SessionState::QaInconclusive
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the armed QA timer must fire");
+    assert_eq!(
+        controller
+            .read()
+            .get_session(&session_id)
+            .unwrap()
+            .qa_inconclusive_at
+            .unwrap()
+            .prior_iteration,
+        Some(1)
+    );
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) }
+    );
+}
+
+#[tokio::test]
+async fn inconclusive_reentry_archives_blocked_prince_verdict() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-prince-rotation-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let peer_dir = project.path().join(".hive-manager").join(&session_id).join("peer");
+    let mut session = make_test_session(&session_id, project.path().to_str().unwrap());
+    session.state = SessionState::QaInProgress { iteration: Some(1) };
+    session.agents.push(make_test_agent(
+        &format!("{session_id}-evaluator"),
+        AgentRole::Evaluator,
+    ));
+    session.agents.push(make_test_agent(&format!("{session_id}-prince"), AgentRole::Prince));
+    controller.write().insert_test_session(session);
+    register_live_pty(&state, &format!("{session_id}-evaluator"), AgentRole::Evaluator);
+
+    let qa_fail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/qa/verdict"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"FAIL","rationale":"needs remediation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(qa_fail.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::PrinceRemediation
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/prince/verdict"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"verdict":"BLOCKED","rationale":"needs remediation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInconclusive
+    );
+    let prince_verdict = peer_dir.join("prince-verdict.json");
+    assert!(prince_verdict.exists(), "Prince must have written the old verdict");
+    let old_prince_content = std::fs::read(&prince_verdict).unwrap();
+    let qa_verdict = peer_dir.join("qa-verdict.json");
+    assert!(qa_verdict.exists(), "Evaluator must have written the old verdict");
+
+    assert_eq!(post_qa_reentry_milestone(&app, &session_id).await.status(), StatusCode::OK);
+    assert_eq!(
+        controller.read().get_session(&session_id).unwrap().state,
+        SessionState::QaInProgress { iteration: Some(2) }
+    );
+    assert!(!qa_verdict.exists(), "old QA verdict must leave the live path");
+    assert!(!prince_verdict.exists(), "old Prince verdict must leave the live path");
+    let archived_prince: Vec<_> = std::fs::read_dir(&peer_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("prince-verdict.inconclusive-")
+        })
+        .collect();
+    assert_eq!(archived_prince.len(), 1);
+    assert_eq!(std::fs::read(&archived_prince[0]).unwrap(), old_prince_content);
+}
+
+#[tokio::test]
+async fn inconclusive_respawn_rotates_verdicts_before_failed_launch() {
+    let storage_dir = TempDir::new().unwrap();
+    let (app, controller, _storage, _state) =
+        setup_test_app_full(storage_dir.path().to_path_buf()).await;
+    let session_id = format!("qa-dead-evaluator-{}", uuid::Uuid::new_v4());
+    let project = TempDir::new().unwrap();
+    let peer_dir = project.path().join(".hive-manager").join(&session_id).join("peer");
+    std::fs::create_dir_all(&peer_dir).unwrap();
+    let qa_verdict = peer_dir.join("qa-verdict.json");
+    let prince_verdict = peer_dir.join("prince-verdict.json");
+    std::fs::write(&qa_verdict, b"old QA verdict").unwrap();
+    std::fs::write(&prince_verdict, b"old Prince verdict").unwrap();
+    let prompt_file = project
+        .path()
+        .join(".hive-manager")
+        .join(&session_id)
+        .join("prompts")
+        .join("evaluator-prompt.md");
+    std::fs::create_dir_all(&prompt_file).unwrap();
+    controller.write().insert_test_session(make_inconclusive_qa_session(
+        &session_id,
+        project.path(),
+        Some(1),
+    ));
+
+    assert_eq!(
+        post_qa_reentry_milestone(&app, &session_id).await.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the prompt path occupied by a directory must fail the replacement launch"
+    );
+    assert!(!qa_verdict.exists(), "the old QA verdict must rotate before launch");
+    assert!(!prince_verdict.exists(), "the old Prince verdict must rotate before launch");
+    let archives: Vec<_> = std::fs::read_dir(&peer_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.contains(".inconclusive-"))
+        .collect();
+    assert_eq!(archives.len(), 2);
+}
+
 /// G-prince-reachable: use the HTTP handlers for BLOCKED, the next milestone,
 /// FAIL, and the Prince verdict, with a rostered live Prince peer.
 #[tokio::test]

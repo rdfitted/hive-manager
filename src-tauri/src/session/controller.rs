@@ -12384,7 +12384,7 @@ The backend composed and persisted the following authoritative skeleton before l
             }
             let previous_session = session.clone();
             let prior_iteration = match &session.state {
-                SessionState::QaInProgress { iteration } => *iteration,
+                SessionState::QaInProgress { iteration } => Some(iteration.unwrap_or(1)),
                 _ => None,
             };
             session.qa_inconclusive_at = Some(crate::storage::QaInconclusiveCheckpoint {
@@ -12738,32 +12738,42 @@ The backend composed and persisted the following authoritative skeleton before l
         self.on_milestone_ready_with_mtime(session_id, Some(DateTime::<Utc>::from(modified)))
     }
 
-    fn rotate_inconclusive_qa_verdict(&self, session_id: &str) -> Result<(), String> {
+    fn rotate_inconclusive_verdicts(&self, session_id: &str) -> Result<(), String> {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| format!("Session not found: {}", session_id))?;
         let peer_dir = session.project_path.join(".hive-manager").join(session_id).join("peer");
-        let verdict_path = peer_dir.join("qa-verdict.json");
-        if !verdict_path.exists() {
-            return Ok(());
-        }
         let unix = Utc::now().timestamp();
-        for suffix in 0..1000 {
-            let filename = if suffix == 0 {
-                format!("qa-verdict.inconclusive-{}.json", unix)
-            } else {
-                format!("qa-verdict.inconclusive-{}-{}.json", unix, suffix)
-            };
-            let archive = peer_dir.join(filename);
-            if archive.exists() {
+        for verdict in ["qa-verdict", "prince-verdict"] {
+            let verdict_path = peer_dir.join(format!("{}.json", verdict));
+            if !verdict_path.exists() {
                 continue;
             }
-            std::fs::rename(&verdict_path, &archive).map_err(|error| {
-                format!("Cannot rotate old QA verdict for {}: {}", session_id, error)
-            })?;
-            return Ok(());
+            let mut rotated = false;
+            for suffix in 0..1000 {
+                let filename = if suffix == 0 {
+                    format!("{}.inconclusive-{}.json", verdict, unix)
+                } else {
+                    format!("{}.inconclusive-{}-{}.json", verdict, unix, suffix)
+                };
+                let archive = peer_dir.join(filename);
+                if archive.exists() {
+                    continue;
+                }
+                std::fs::rename(&verdict_path, &archive).map_err(|error| {
+                    format!("Cannot rotate old {} for {}: {}", verdict, session_id, error)
+                })?;
+                rotated = true;
+                break;
+            }
+            if !rotated {
+                return Err(format!(
+                    "No available {} archive name for {}",
+                    verdict, session_id
+                ));
+            }
         }
-        Err(format!("No available QA verdict archive name for {}", session_id))
+        Ok(())
     }
 
     fn on_milestone_ready_with_mtime(
@@ -12879,7 +12889,12 @@ The backend composed and persisted the following authoritative skeleton before l
                 reason = if maybe_evaluator.is_some() { "dead_evaluator" } else { "missing_evaluator" },
                 "Launching evaluator from milestone-ready signal"
             );
-            let result = self.launch_evaluator(session_id, config, false);
+            let result = if reentering {
+                self.rotate_inconclusive_verdicts(session_id)
+                    .and_then(|_| self.launch_evaluator(session_id, config, false))
+            } else {
+                self.launch_evaluator(session_id, config, false)
+            };
             self.finish_evaluator_respawn(session_id);
             result?;
             // #175(a) THE TRAP: this branch used to rely on `launch_evaluator`'s
@@ -12888,15 +12903,12 @@ The backend composed and persisted the following authoritative skeleton before l
             // itself -- otherwise the fix for a spurious-timeout bug becomes a
             // never-times-out bug, and a real milestone would sit unreviewed
             // forever.
-            if reentering {
-                self.rotate_inconclusive_qa_verdict(session_id)?;
-            }
             self.begin_qa_window(session_id)?;
             return Ok(());
         }
 
         if reentering {
-            self.rotate_inconclusive_qa_verdict(session_id)?;
+            self.rotate_inconclusive_verdicts(session_id)?;
         }
         self.begin_qa_window(session_id)
     }
@@ -13000,7 +13012,9 @@ The backend composed and persisted the following authoritative skeleton before l
                             let previous_state = session.state.clone();
                             let previous_checkpoint = session.qa_inconclusive_at.clone();
                             let prior_iteration = match &session.state {
-                                SessionState::QaInProgress { iteration } => *iteration,
+                                SessionState::QaInProgress { iteration } => {
+                                    Some(iteration.unwrap_or(1))
+                                }
                                 _ => None,
                             };
                             session.qa_inconclusive_at =
