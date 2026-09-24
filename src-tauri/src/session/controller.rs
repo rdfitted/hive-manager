@@ -4478,7 +4478,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    ```
 3. You MUST inspect the verdict.
    - If it says `PASS` or `FAIL`, the Prince automatically takes over remediation of the QA findings. Continue to Step 4.
-   - If it says `BLOCKED`, QA could not produce a usable verdict (read the rationale — typically a missing UI/host or a transport failure). STOP. Do NOT push. Surface to the operator (they will force-pass / force-fail).
+   - If it says `BLOCKED`, QA could not produce a usable verdict. Surface the stated reason and do NOT push. Fix the cause if it is yours (for example, start the missing UI/host or repair the transport), then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
 4. You MUST wait for the Prince to finish remediation by polling `{prince_verdict_path}` inline. The Prince reads the QA findings, fixes them with its OWN fix team, and self-certifies. You MUST NOT spawn Reconciler or Resolver workers for QA findings — remediating QA findings is the Prince's job, not yours.
    ```bash
    while [ ! -f "{prince_verdict_path}" ]; do
@@ -4490,7 +4490,7 @@ Hard rule: The Evaluator AND the Prince are created PROGRAMMATICALLY by the back
    cat "{prince_verdict_path}"
    ```
    - If the Prince verdict is `PASS`/`DONE`, continue to Step 5.
-   - If the Prince verdict is `BLOCKED`, STOP. Do NOT push. Surface to the operator.
+   - If the Prince verdict is `BLOCKED`, surface the stated reason and do NOT push. Fix the cause if it is yours, then rewrite `peer/milestone-ready.json` to re-enter QA. A newer file mtime counts as fresh; HTTP `POST /milestone-ready` is always fresh. Re-entry counts against the iteration limit. At `QaMaxRetriesExceeded`, STOP and surface to the operator. Force-pass and force-fail are operator-only.
 5. You MUST commit and push the PR branch. This triggers CodeRabbit and Gemini external reviewers.
 6. You MUST wait 10 minutes, then collect EXTERNAL PR review comments and resolve them. The Reconciler/Resolver workers here are for PR review comments ONLY — a separate concern from the QA findings the Prince already handled. Whenever unresolved PR comments remain, spawn them, integrate their fixes, and return to Step 5:
    ```bash
@@ -12361,9 +12361,9 @@ The backend composed and persisted the following authoritative skeleton before l
 
     /// Mark QA inconclusive — the Evaluator reported BLOCKED, or the verdict timed
     /// out with no usable response. Transitions QaInProgress -> QaInconclusive,
-    /// which blocks PR push / completion and surfaces to the operator. Writes a
-    /// BLOCKED verdict file so the Queen's poll loop terminates (instead of hanging)
-    /// and escalates rather than pushing. Operator unblocks via force-pass / force-fail.
+    /// which blocks PR push / completion. Writes a BLOCKED verdict file so the
+    /// Queen's poll loop terminates. After fixing the cause, the Queen can re-arm
+    /// QA with a fresh milestone; force-pass and force-fail remain operator-only.
     pub fn mark_qa_inconclusive(
         &self,
         session_id: &str,
@@ -12715,7 +12715,6 @@ The backend composed and persisted the following authoritative skeleton before l
         self.qa_timeout_handles.lock().contains_key(session_id)
     }
 
-    #[allow(dead_code)]
     pub fn on_milestone_ready(&self, session_id: &str) -> Result<(), String> {
         self.on_milestone_ready_with_mtime(session_id, None)
     }
@@ -12943,7 +12942,14 @@ The backend composed and persisted the following authoritative skeleton before l
         Ok(new_state)
     }
 
-    #[allow(dead_code)]
+    fn qa_timeout_reason(timeout_secs: u64) -> String {
+        format!(
+            "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Queen: surface the reason, fix the cause if it is yours, then rewrite peer/milestone-ready.json to re-enter QA (a newer mtime counts as fresh; HTTP POST /milestone-ready is always fresh). Re-entry counts against the iteration limit. At QaMaxRetriesExceeded, stop and surface to the operator. Force-pass and force-fail are operator-only.",
+            timeout_secs
+        )
+    }
+
+    #[cfg(test)]
     pub fn on_qa_timeout(&self, session_id: &str) -> Result<(), String> {
         let timeout_secs = self
             .get_session(session_id)
@@ -12954,17 +12960,15 @@ The backend composed and persisted the following authoritative skeleton before l
             session_id,
             timeout_secs
         );
-        let reason = format!(
-            "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
-            timeout_secs
-        );
+        let reason = Self::qa_timeout_reason(timeout_secs);
         self.mark_qa_inconclusive(session_id, &reason)?;
         Ok(())
     }
 
     /// Start a QA timeout timer. On expiry, marks QA inconclusive, writes a
-    /// BLOCKED verdict, and surfaces the session for operator action. Cancel by
-    /// calling `cancel_qa_timeout`.
+    /// BLOCKED verdict. The Queen may fix the cause and re-arm QA with a fresh
+    /// milestone; force-pass and force-fail remain operator-only. Cancel by calling
+    /// `cancel_qa_timeout`.
     pub fn start_qa_timeout(&self, session_id: &str, timeout_secs: u64) {
         // Cancel any existing timer
         self.cancel_qa_timeout(session_id);
@@ -12999,8 +13003,8 @@ The backend composed and persisted the following authoritative skeleton before l
                 );
 
                 // A timed-out QA must NOT silently ship. Transition to QaInconclusive,
-                // which blocks PR push / completion and surfaces to the operator. The
-                // operator unblocks with force-pass / force-fail.
+                // which blocks PR push / completion. The Queen may fix the cause
+                // and re-arm QA; force-pass and force-fail remain operator-only.
                 let transition = {
                     let mut sessions = sessions.write();
                     if let Some(session) = sessions.get_mut(&sid) {
@@ -13068,10 +13072,7 @@ The backend composed and persisted the following authoritative skeleton before l
 
                     // Write a BLOCKED verdict file so the Queen's poll loop terminates
                     // (instead of hanging forever) and she escalates rather than pushes.
-                    let reason = format!(
-                        "QA verdict timed out after {}s with no response. Likely a verdict that could not be delivered over HTTP, or a pass-criterion that needs a UI/host that isn't running. Operator action required (force-pass / force-fail).",
-                        timeout_secs
-                    );
+                    let reason = SessionController::qa_timeout_reason(timeout_secs);
                     let verdict_content = serde_json::json!({
                         "kind": "qa-verdict",
                         "verdict": "BLOCKED",
@@ -18128,6 +18129,40 @@ mod tests {
     }
 
     #[test]
+    fn queen_protocol_rearms_blocked_qa_and_prince_with_operator_only_overrides() {
+        let protocol = SessionController::queen_post_workers_protocol(
+            "session-123",
+            Path::new("/repo/.hive-manager/session-123"),
+            true,
+        );
+        for blocked_step in [
+            protocol
+                .split("- If it says `BLOCKED`")
+                .nth(1)
+                .expect("QA BLOCKED step")
+                .split("4. You MUST wait for the Prince")
+                .next()
+                .unwrap(),
+            protocol
+                .split("- If the Prince verdict is `BLOCKED`")
+                .nth(1)
+                .expect("Prince BLOCKED step")
+                .split("5. You MUST commit")
+                .next()
+                .unwrap(),
+        ] {
+            assert!(blocked_step.to_lowercase().contains("surface the stated reason"));
+            assert!(blocked_step.contains("Fix the cause if it is yours"));
+            assert!(blocked_step.contains("rewrite `peer/milestone-ready.json`"));
+            assert!(blocked_step.contains("newer file mtime counts as fresh"));
+            assert!(blocked_step.contains("HTTP `POST /milestone-ready` is always fresh"));
+            assert!(blocked_step.contains("counts against the iteration limit"));
+            assert!(blocked_step.contains("At `QaMaxRetriesExceeded`, STOP and surface to the operator"));
+            assert!(blocked_step.contains("Force-pass and force-fail are operator-only"));
+        }
+    }
+
+    #[test]
     fn worker_task_file_path_uses_worktree_local_hive_manager_dir() {
         let path = SessionController::task_file_path_for_worker(
             Path::new("/repo/.hive-manager/worktrees/session-123/worker-2"),
@@ -20600,6 +20635,34 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
             blocked_pattern.is_match(&body),
             "Solo's shell guard must match the actual PeerMessageRecord envelope"
         );
+    }
+
+    #[test]
+    fn qa_timeout_verdict_explains_reentry_and_operator_only_overrides() {
+        let temp = tempfile::tempdir().expect("temp");
+        let controller = test_controller();
+        controller.insert_test_session(qa_session_with(
+            "timeout-guidance",
+            SessionState::QaInProgress { iteration: Some(1) },
+            temp.path().to_path_buf(),
+            true,
+        ));
+        controller.on_qa_timeout("timeout-guidance").expect("timeout");
+        let verdict_path = temp
+            .path()
+            .join(".hive-manager/timeout-guidance/peer/qa-verdict.json");
+        let body = std::fs::read_to_string(verdict_path).expect("verdict body");
+        for guidance in [
+            "fix the cause if it is yours",
+            "rewrite peer/milestone-ready.json",
+            "newer mtime counts as fresh",
+            "HTTP POST /milestone-ready is always fresh",
+            "counts against the iteration limit",
+            "At QaMaxRetriesExceeded, stop and surface to the operator",
+            "Force-pass and force-fail are operator-only",
+        ] {
+            assert!(body.contains(guidance), "missing timeout guidance: {guidance}");
+        }
     }
 
     #[test]

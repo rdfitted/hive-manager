@@ -106,7 +106,7 @@
     if (v === 'QaInProgress') return 'QA In Progress';
     if (v === 'PrinceRemediation') return 'Prince Remediation';
     if (v === 'QaPassed') return 'QA Passed';
-    if (v === 'QaInconclusive') return 'QA Inconclusive — operator action needed';
+    if (v === 'QaInconclusive') return 'QA Inconclusive — awaiting re-entry';
     if (v === 'QaMaxRetriesExceeded') return 'QA Max Retries Exceeded';
     return v ?? 'Unknown';
   }

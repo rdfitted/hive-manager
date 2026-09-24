@@ -1,18 +1,4 @@
 <script lang="ts">
-  import { Check, X } from 'phosphor-svelte';
-  import { onMount } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
-  import { activeSession } from '$lib/stores/sessions';
-
-  interface LegacyContract {
-    id: string;
-    milestone_id: string;
-    content: string;
-    passed: boolean | null;
-    grading_weights: Record<string, number>;
-    threshold: number;
-  }
-
   type CompareOp = 'Lt' | 'Le' | 'Eq' | 'Ge' | 'Gt';
   type CriterionKind =
     | 'PassFail'
@@ -49,39 +35,6 @@
   }
 
   let { contract: typedContract = null }: Props = $props();
-
-  let loadedContract = $state<LegacyContract | null>(null);
-  let loading = $state(false);
-  let error = $state<string | null>(null);
-
-  async function loadContract(sessionId: string) {
-    loading = true;
-    error = null;
-    try {
-      const data = await invoke<LegacyContract | null>('get_current_contract', { sessionId });
-      loadedContract = data;
-    } catch (e) {
-      console.error('Failed to load contract:', e);
-    } finally {
-      loading = false;
-    }
-  }
-
-  onMount(() => {
-    if (!typedContract && $activeSession) {
-      loadContract($activeSession.id);
-    }
-  });
-
-  $effect(() => {
-    if (typedContract) {
-      loadedContract = null;
-    } else if ($activeSession?.id) {
-      loadContract($activeSession.id);
-    } else {
-      loadedContract = null;
-    }
-  });
 
   const compareOpLabels: Record<CompareOp, string> = {
     Lt: '<',
@@ -132,52 +85,9 @@
       </ul>
     </section>
   </div>
-{:else if loadedContract}
+{:else}
   <div class="contract-viewer lattice-forced-colors-boundary">
-    <div class="contract-header lattice-forced-colors-boundary">
-      <div class="header-info">
-        <h3>Sprint Contract</h3>
-        <span class="milestone-id">Milestone: {loadedContract.milestone_id}</span>
-      </div>
-      <div class="threshold-badge">
-        Threshold: {loadedContract.threshold}%
-      </div>
-    </div>
-
-    <div class="contract-content-wrapper lattice-scroll-content">
-      {#if loadedContract.passed !== null}
-        <div class="status-overlay" class:passed={loadedContract.passed}>
-          <div class="overlay-icon">
-            {#if loadedContract.passed}
-              <Check size={80} weight="fill" />
-            {:else}
-              <X size={80} weight="fill" />
-            {/if}
-          </div>
-          <div class="overlay-text">
-            {loadedContract.passed ? 'PASSED' : 'FAILED'}
-          </div>
-        </div>
-      {/if}
-      
-      <div class="content">
-        <pre>{loadedContract.content}</pre>
-      </div>
-    </div>
-
-    {#if Object.keys(loadedContract.grading_weights).length > 0}
-      <div class="weights-section lattice-forced-colors-boundary">
-        <h4>Grading Weights</h4>
-        <div class="weights-grid">
-          {#each Object.entries(loadedContract.grading_weights) as [key, weight]}
-            <div class="weight-item lattice-panel">
-              <span class="weight-key">{key}</span>
-              <span class="weight-value">{weight}%</span>
-            </div>
-          {/each}
-        </div>
-      </div>
-    {/if}
+    <p class="contract-empty">No sprint contract available.</p>
   </div>
 {/if}
 
@@ -212,87 +122,11 @@
     color: var(--text-secondary);
   }
 
-  .threshold-badge {
-    font-size: 11px;
-    padding: 3px 8px;
-    background: var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
-  }
-
-  .contract-content-wrapper {
-    position: relative;
-    flex: 1;
-    min-height: 200px;
-    max-height: 400px;
-    overflow-y: auto;
-  }
-
-  .status-overlay {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    background: color-mix(in srgb, var(--status-error) 10%, transparent);
-    pointer-events: none;
-    z-index: 1;
-  }
-
-  .status-overlay.passed {
-    background: color-mix(in srgb, var(--status-success) 10%, transparent);
-  }
-
-  .overlay-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0.3;
-  }
-
-  .status-overlay:not(.passed) .overlay-icon {
-    color: var(--status-error);
-  }
-
-  .status-overlay.passed .overlay-icon {
-    color: var(--status-success);
-  }
-
-  .overlay-text {
-    font-size: 24px;
-    font-weight: 800;
-    letter-spacing: 4px;
-    opacity: 0.3;
-    margin-top: -10px;
-  }
-
-  .status-overlay:not(.passed) .overlay-text {
-    color: var(--status-error);
-  }
-
-  .status-overlay.passed .overlay-text {
-    color: var(--status-success);
-  }
-
-  .content {
-    padding: 16px;
-  }
-
-  pre {
+  .contract-empty {
     margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--font-body);
+    padding: 16px;
+    color: var(--text-secondary);
     font-size: 13px;
-    color: var(--text-primary);
-    line-height: 1.5;
-  }
-
-  .weights-section {
-    padding: 12px 16px;
-    background: var(--bg-void);
-    box-shadow: var(--edge-seam-top);
   }
 
   .typed-criteria,
@@ -346,26 +180,4 @@
     letter-spacing: 0.5px;
   }
 
-  .weights-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-    gap: 8px;
-  }
-
-  .weight-item {
-    display: flex;
-    justify-content: space-between;
-    padding: 4px 8px;
-  }
-
-  .weight-key {
-    font-size: 11px;
-    color: var(--text-primary);
-  }
-
-  .weight-value {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--accent-cyan);
-  }
 </style>
