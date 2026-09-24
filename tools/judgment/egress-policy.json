@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "default": "deny",
+  "projects": {
+    "rdfitted/hive-manager": {
+      "allow": true,
+      "decided": "2026-09-24",
+      "by": "rdfitted"
+    }
+  },
+  "surfaces": {
+    "hive.review.finding": {
+      "allow": true,
+      "redact": "names",
+      "decided": "2026-09-24",
+      "by": "rdfitted"
+    },
+    "hive.qa.criterion": {
+      "allow": true,
+      "redact": "names",
+      "decided": "2026-09-24",
+      "by": "rdfitted"
+    }
+  }
+}
