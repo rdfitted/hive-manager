@@ -18,8 +18,8 @@
     },
     "audit.py": {
       "source": "~/.claude/tools/judgment/audit.py",
-      "upstream_sha256": "2235b39a10c0068e237222fd4e93f8dd56a01ff111f25208d4ee6bd36f1bf24b",
-      "normalized_sha256": "a862692ff0848facf2f7fd7ffaf1e06c8599a1167eb45c4ab5675e608cc6750c"
+      "upstream_sha256": "b417a484ebd5edd9512de53ce5c622aaaf40d875b9ad9f04f5cb41837bf97f06",
+      "normalized_sha256": "b1a26623c29a7a69409897eb0d8d4d4db06917e8e036ef6d688c0d8f2fcf22ba"
     }
   }
 }
