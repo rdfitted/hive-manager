@@ -940,6 +940,7 @@ fn record_typed_criteria(
         subject_ref.insert("session_id".to_string(), json!(session_id));
         subject_ref.insert("milestone_id".to_string(), json!(record.milestone_id));
         subject_ref.insert("criterion_number".to_string(), json!(criterion.number));
+        subject_ref.insert("iteration".to_string(), json!(record.iteration));
         let observations = json!({
             "criterion": {
                 "number": criterion.number,
@@ -949,10 +950,9 @@ fn record_typed_criteria(
             "evidence": submitted.evidence,
             "evidence_refs": submitted.evidence_refs,
         });
-        let answer = json!({
-            "result": submitted.result,
-            "rationale": rationale,
-        });
+        let answer = json!({ "result": submitted.result });
+        let mut extra = Map::new();
+        extra.insert("rationale".to_string(), json!(rationale));
         let decision = ledger.record_decision(DecisionInput {
             decision_id: None,
             surface: "hive.qa.criterion".to_string(),
@@ -972,7 +972,7 @@ fn record_typed_criteria(
             latency_ms: None,
             cost_usd: None,
             error: None,
-            extra: Map::new(),
+            extra,
         });
         state_hashes.push(decision.as_ref().and_then(|decision| decision.state_hash.clone()));
         record.criteria.push(QaCriterionVerdictRecord {
@@ -1022,7 +1022,7 @@ fn record_operator_override_outcomes(
         extra.insert("criterion_number".to_string(), json!(criterion.number));
         let _ = ledger.record_outcome(OutcomeInput {
             decision_id,
-            label: json!(label),
+            label: json!({ "result": label }),
             source: OutcomeSource::OperatorOverride,
             note: rationale.map(str::to_string),
             extra,
@@ -1725,6 +1725,9 @@ pub async fn post_verdict(
                     .collect::<Vec<_>>()),
             );
             extra.insert("unchanged_evidence_flips".to_string(), json!(flips));
+            extra.insert("evaluator_verdict".to_string(), json!(verdict));
+            extra.insert("advisory_verdict".to_string(), json!(verdict_record.advisory_verdict));
+            extra.insert("disagrees".to_string(), json!(verdict_record.advisory_disagrees));
             extra.insert(
                 "threshold_disagreement".to_string(),
                 json!(verdict_record.advisory_threshold_disagreement),
@@ -1737,11 +1740,7 @@ pub async fn post_verdict(
                     "contract_path": verdict_record.contract_path,
                     "criterion_numbers": verdict_record.criteria.iter().map(|item| item.number).collect::<Vec<_>>(),
                 }),
-                answer: json!({
-                    "evaluator_verdict": verdict,
-                    "advisory_verdict": verdict_record.advisory_verdict,
-                    "disagrees": verdict_record.advisory_disagrees,
-                }),
+                answer: json!({ "result": verdict_record.advisory_verdict }),
                 question_id: Some("hive.qa.milestone".to_string()),
                 question_version: None,
                 judge: Judge::Code,
@@ -2218,6 +2217,20 @@ mod tests {
             .filter(|row| row["kind"] == "decision")
             .collect();
         assert_eq!(decision_rows.len(), 2);
+        let pinned: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tools/judgment/tests/fixtures/hive-scorecard-shapes.json"
+        ))
+        .unwrap();
+        let pass_row = decision_rows
+            .iter()
+            .find(|row| row["subject_ref"]["criterion_number"] == 1)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&pass_row["answer"]).unwrap(),
+            pinned["criterion_answer_json"].as_str().unwrap()
+        );
+        assert_eq!(pass_row["rationale"], pinned["criterion_rationale"]);
+        assert_eq!(pass_row["subject_ref"]["iteration"], pinned["criterion_iteration"]);
         assert!(decision_rows
             .iter()
             .all(|row| row["judge"] == "incumbent-llm"));
@@ -2241,7 +2254,8 @@ mod tests {
         assert_eq!(downstream_outcomes.len(), 2);
         assert!(downstream_outcomes
             .iter()
-            .all(|row| row["label"] == "pass"));
+            .all(|row| serde_json::to_string(&row["label"]).unwrap()
+                == pinned["terminal_label_json"].as_str().unwrap()));
         let expected_decision_ids: BTreeSet<_> = verdict_record
             .criteria
             .iter()
@@ -2284,7 +2298,8 @@ mod tests {
             .all(|row| row["source"] == "operator-override"));
         assert!(outcomes
             .iter()
-            .all(|row| row["label"] == "fail"));
+            .all(|row| serde_json::to_string(&row["label"]).unwrap()
+                == pinned["override_label_json"].as_str().unwrap()));
         assert!(outcomes
             .iter()
             .all(|row| row["note"] == "Operator found a regression"));
@@ -2350,6 +2365,17 @@ mod tests {
         assert_eq!(advisory[0]["judge"], "code");
         assert_eq!(advisory[0]["mode"], "advisory");
         assert_eq!(advisory[0]["routed"], "advisory-shown");
+        let pinned: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tools/judgment/tests/fixtures/hive-scorecard-shapes.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&advisory[0]["answer"]).unwrap(),
+            pinned["advisory_answer_json"].as_str().unwrap()
+        );
+        assert_eq!(advisory[0]["evaluator_verdict"], "PASS");
+        assert_eq!(advisory[0]["advisory_verdict"], "fail");
+        assert_eq!(advisory[0]["disagrees"], true);
         assert_eq!(
             advisory[0]["source_decision_ids"].as_array().unwrap().len(),
             2

@@ -12154,7 +12154,7 @@ The backend composed and persisted the following authoritative skeleton before l
             );
             let _ = ledger.record_outcome(OutcomeInput {
                 decision_id,
-                label: serde_json::json!(label),
+                label: serde_json::json!({ "result": label }),
                 source: OutcomeSource::Downstream,
                 note: None,
                 extra,
@@ -20226,7 +20226,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
         assert!(outcomes.iter().all(|row| {
             row["kind"] == "outcome"
-                && row["label"] == "pass"
+                && row["label"] == serde_json::json!({ "result": "pass" })
                 && row["source"] == "downstream"
         }));
     }
@@ -20287,7 +20287,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         let outcomes = read_test_outcomes(&storage);
         assert_eq!(outcomes.len(), 2);
         assert!(outcomes.iter().all(|row| {
-            row["label"] == "fail" && row["source"] == "downstream"
+            row["label"] == serde_json::json!({ "result": "fail" })
+                && row["source"] == "downstream"
         }));
     }
 
@@ -20529,7 +20530,7 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         );
         assert!(outcomes.iter().all(|row| {
             row["kind"] == "outcome"
-                && row["label"] == "pass"
+                && row["label"] == serde_json::json!({ "result": "pass" })
                 && row["source"] == "downstream"
         }));
     }
