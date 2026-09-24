@@ -28,6 +28,7 @@ use crate::orchestrator::org_graph::composition::{
 use crate::orchestrator::org_graph::definitions::{
     resolve_role_definition, role_prompt_template, ResolvedRoleDefinition,
 };
+use crate::orchestrator::org_graph::retrieval_ledger::record_spawn_rows;
 use crate::orchestrator::org_graph::{KnowledgeRef, KnowledgeSource, RoleDefinition};
 use crate::orchestrator::session_orchestrator::SessionOrchestrator;
 use crate::orchestrator::work_graph::schema::TaskTier;
@@ -15817,7 +15818,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 return Err(err);
             }
         };
-        let sidecar = worker_build.sidecar(
+        let mut sidecar = worker_build.sidecar(
             &worker_id,
             session_id,
             plan_task_id,
@@ -15831,6 +15832,19 @@ The backend composed and persisted the following authoritative skeleton before l
             },
             &spawn_context.edge_captures,
         );
+        if spawn_context.context_available
+            && plan_task_id.is_some_and(|id| !id.trim().is_empty())
+        {
+            if let (Some(storage), Ok(serialized_sidecar)) =
+                (self.storage.as_ref(), serde_json::to_value(&sidecar))
+            {
+                sidecar.decision_ids = record_spawn_rows(
+                    &storage.base_dir().join("judgments").join("ledger.jsonl"),
+                    &session.project_path,
+                    &serialized_sidecar,
+                );
+            }
+        }
         Self::write_spawn_artifacts_fail_open(
             &session.project_path,
             session_id,
@@ -17280,9 +17294,13 @@ mod tests {
 
     #[test]
     fn plan_task_spawn_persists_principal_only_for_the_spawned_worker() {
+        let _retrieval_env_guard =
+            crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
+                .lock()
+                .unwrap();
         const SESSION_ID: &str = "principal-spawn";
         let temp = tempfile::tempdir().expect("temporary principal fixture");
-        let project_path = temp.path().join("project");
+        let project_path = temp.path().join("synthetic-repo");
         std::fs::create_dir_all(&project_path).unwrap();
         let storage = Arc::new(
             SessionStorage::new_with_base(temp.path().join("storage"))
@@ -17416,7 +17434,23 @@ mod tests {
         assert_eq!(sidecar.delivery_path.as_deref(), Some("read-work-graph-fallback"));
         assert_eq!(sidecar.global_summary_included, Some(false));
         assert!(sidecar.rendered_knowledge_chars.unwrap() > 0);
-        assert!(sidecar.decision_ids.is_empty());
+        let ledger_content = std::fs::read_to_string(
+            storage.base_dir().join("judgments").join("ledger.jsonl"),
+        )
+        .expect("plan-bound retrieval rows");
+        let decisions: Vec<serde_json::Value> = ledger_content
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|row: &serde_json::Value| {
+                row["kind"] == "decision" && row["surface"] == "hive.retrieval.spawn"
+            })
+            .collect();
+        assert_eq!(decisions.len(), sidecar.kept.len() + sidecar.dropped.len());
+        assert_eq!(sidecar.decision_ids.len(), decisions.len());
+        for (captured, row) in sidecar.decision_ids.iter().zip(&decisions) {
+            assert_eq!(captured.as_deref(), row["decision_id"].as_str());
+            assert_eq!(row["subject_ref"]["repo"], "synthetic-repo");
+        }
         let kept = sidecar
             .kept
             .iter()
@@ -17426,6 +17460,33 @@ mod tests {
         assert_eq!(
             kept.edge_rationale.as_deref(),
             Some("knowledge attachment matched inferred-scope:exact")
+        );
+
+        let ledger_path = storage.base_dir().join("judgments").join("ledger.jsonl");
+        std::fs::remove_file(&ledger_path).unwrap();
+        std::fs::create_dir(&ledger_path).unwrap();
+        let next = controller
+            .add_worker_for_plan_task(
+                SESSION_ID,
+                AgentConfig {
+                    cli: test_cli.clone(),
+                    ..AgentConfig::default()
+                },
+                WorkerRole::new("general", "General", &test_cli),
+                None,
+                Some(4),
+                Some("T1"),
+                None,
+            )
+            .expect("ledger write failure must not abort a plan-bound spawn");
+        let failed_sidecar: SpawnContextSidecar = serde_json::from_str(
+            &std::fs::read_to_string(durable_dir.join(format!("{}-context.json", next.id)))
+                .expect("fail-open context sidecar"),
+        )
+        .unwrap();
+        assert_eq!(
+            failed_sidecar.decision_ids,
+            vec![None; failed_sidecar.kept.len() + failed_sidecar.dropped.len()]
         );
     }
 
