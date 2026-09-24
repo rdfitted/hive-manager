@@ -898,7 +898,7 @@ mod tests {
     async fn absent_knowledge_ack_is_distinct_from_an_explicit_empty_ack_on_disk() {
         let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = fixture();
         write_retrieval_sidecar(&fixture, true);
         let session_dir = fixture.state.storage.session_dir(SESSION_ID);
@@ -997,7 +997,7 @@ mod tests {
     async fn sampled_knowledge_ack_joins_kept_decisions_once() {
         let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = fixture();
         write_retrieval_sidecar(&fixture, true);
 
@@ -1045,7 +1045,7 @@ mod tests {
     async fn unsampled_and_out_of_context_acks_write_no_retrieval_outcomes() {
         let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let unsampled = fixture();
         write_retrieval_sidecar(&unsampled, false);
         let response = expect_success(
@@ -1081,7 +1081,7 @@ mod tests {
     async fn retrieval_ledger_failure_preserves_completed_heartbeat_response() {
         let _environment_lock = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = fixture();
         write_retrieval_sidecar(&fixture, true);
         let ledger_path = retrieval_ledger_path(&fixture);
@@ -1106,7 +1106,7 @@ mod tests {
     async fn retrieval_kill_switch_preserves_ack_without_outcomes() {
         let _guard = crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var_os("HIVE_RETRIEVAL_LEDGER");
         std::env::set_var("HIVE_RETRIEVAL_LEDGER", "off");
         let fixture = fixture();

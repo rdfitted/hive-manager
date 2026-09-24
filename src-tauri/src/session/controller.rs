@@ -17297,7 +17297,7 @@ mod tests {
         let _retrieval_env_guard =
             crate::orchestrator::org_graph::retrieval_ledger::RETRIEVAL_ENV_LOCK
                 .lock()
-                .unwrap();
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         const SESSION_ID: &str = "principal-spawn";
         let temp = tempfile::tempdir().expect("temporary principal fixture");
         let project_path = temp.path().join("synthetic-repo");
