@@ -165,6 +165,27 @@ impl JudgmentLedger {
         }
     }
 
+    pub(crate) fn record_decisions(&self, inputs: Vec<DecisionInput>) -> Vec<Option<DecisionRecord>> {
+        let mut records = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            match self.prepare_decision(input) {
+                Ok(record) => records.push(Some(record)),
+                Err(error) => {
+                    tracing::warn!(ledger = %self.ledger_path.display(), %error, "judgment decision was not written");
+                    records.push(None);
+                }
+            }
+        }
+        let ready: Vec<_> = records.iter().filter_map(Option::as_ref).collect();
+        if !ready.is_empty() {
+            if let Err(error) = append_records(&self.ledger_path, &ready) {
+                tracing::warn!(ledger = %self.ledger_path.display(), %error, "judgment decisions were not written");
+                return vec![None; records.len()];
+            }
+        }
+        records
+    }
+
     pub(crate) fn record_outcome(&self, input: OutcomeInput) -> Option<OutcomeRecord> {
         match self.record_outcome_inner(input) {
             Ok(record) => Some(record),
@@ -179,7 +200,34 @@ impl JudgmentLedger {
         }
     }
 
+    pub(crate) fn record_outcomes(&self, inputs: Vec<OutcomeInput>) -> Vec<Option<OutcomeRecord>> {
+        let mut records = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            match self.prepare_outcome(input) {
+                Ok(record) => records.push(Some(record)),
+                Err(error) => {
+                    tracing::warn!(ledger = %self.ledger_path.display(), %error, "judgment outcome was not written");
+                    records.push(None);
+                }
+            }
+        }
+        let ready: Vec<_> = records.iter().filter_map(Option::as_ref).collect();
+        if !ready.is_empty() {
+            if let Err(error) = append_records(&self.ledger_path, &ready) {
+                tracing::warn!(ledger = %self.ledger_path.display(), %error, "judgment outcomes were not written");
+                return vec![None; records.len()];
+            }
+        }
+        records
+    }
+
     fn record_decision_inner(&self, input: DecisionInput) -> io::Result<DecisionRecord> {
+        let record = self.prepare_decision(input)?;
+        append_record(&self.ledger_path, &record)?;
+        Ok(record)
+    }
+
+    fn prepare_decision(&self, input: DecisionInput) -> io::Result<DecisionRecord> {
         validate_extra_fields(&input.extra, DECISION_CORE_FIELDS)?;
         if input.surface.is_empty() {
             return Err(io::Error::new(
@@ -231,11 +279,16 @@ impl JudgmentLedger {
             extra: input.extra,
         };
         let clean = scrub_record(record)?;
-        append_record(&self.ledger_path, &clean)?;
         Ok(clean)
     }
 
     fn record_outcome_inner(&self, input: OutcomeInput) -> io::Result<OutcomeRecord> {
+        let record = self.prepare_outcome(input)?;
+        append_record(&self.ledger_path, &record)?;
+        Ok(record)
+    }
+
+    fn prepare_outcome(&self, input: OutcomeInput) -> io::Result<OutcomeRecord> {
         validate_extra_fields(&input.extra, OUTCOME_CORE_FIELDS)?;
         if input.decision_id.is_empty() {
             return Err(io::Error::new(
@@ -254,7 +307,6 @@ impl JudgmentLedger {
             extra: input.extra,
         };
         let clean = scrub_record(record)?;
-        append_record(&self.ledger_path, &clean)?;
         Ok(clean)
     }
 }
@@ -323,6 +375,10 @@ fn lock_path(ledger_path: &Path) -> PathBuf {
 }
 
 fn append_record<T: Serialize>(ledger_path: &Path, record: &T) -> io::Result<()> {
+    append_records(ledger_path, &[record])
+}
+
+fn append_records<T: Serialize>(ledger_path: &Path, records: &[T]) -> io::Result<()> {
     let parent = ledger_path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no parent"))?;
@@ -337,16 +393,20 @@ fn append_record<T: Serialize>(ledger_path: &Path, record: &T) -> io::Result<()>
     FileExt::lock_exclusive(&lock_file)?;
 
     let result = (|| {
-        let serialized = serde_json::to_string(record).map_err(io::Error::other)?;
-        let line = scrub(&serialized);
+        let mut lines = Vec::new();
+        for record in records {
+            let serialized = serde_json::to_string(record).map_err(io::Error::other)?;
+            lines.extend_from_slice(scrub(&serialized).as_bytes());
+            lines.push(b'\n');
+        }
         let mut ledger = OpenOptions::new()
             .create(true)
             .truncate(false)
             .append(true)
             .open(ledger_path)?;
-        ledger.write_all(line.as_bytes())?;
-        ledger.write_all(b"\n")?;
-        ledger.flush()
+        ledger.write_all(&lines)?;
+        ledger.flush()?;
+        Ok(())
     })();
 
     let _ = FileExt::unlock(&lock_file);
@@ -511,6 +571,52 @@ mod tests {
         let rows = read_rows(&path);
         assert!(rows[0]["sampling"].is_null());
         assert_eq!(rows[1]["sampling"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn batched_rows_match_single_row_api_and_fail_open() {
+        let single_dir = TempDir::new().unwrap();
+        let batch_dir = TempDir::new().unwrap();
+        let single_path = single_dir.path().join("ledger.jsonl");
+        let batch_path = batch_dir.path().join("ledger.jsonl");
+        let single = JudgmentLedger::new(single_path.clone());
+        let batch = JudgmentLedger::new(batch_path.clone());
+        for id in ["synthetic-1", "synthetic-2"] {
+            assert!(single.record_decision(decision(id)).is_some());
+        }
+        let decisions = batch.record_decisions(vec![decision("synthetic-1"), decision("synthetic-2")]);
+        assert!(decisions.iter().all(Option::is_some));
+        let outcome = |id: &str| OutcomeInput {
+            decision_id: id.to_string(),
+            label: serde_json::json!({ "result": "pass" }),
+            source: OutcomeSource::Downstream,
+            note: None,
+            extra: Map::new(),
+        };
+        for id in ["synthetic-1", "synthetic-2"] {
+            assert!(single.record_outcome(outcome(id)).is_some());
+        }
+        let outcomes = batch.record_outcomes(vec![outcome("synthetic-1"), outcome("synthetic-2")]);
+        assert!(outcomes.iter().all(Option::is_some));
+        let mut single_rows = read_rows(&single_path);
+        let mut batch_rows = read_rows(&batch_path);
+        for row in single_rows.iter_mut().chain(batch_rows.iter_mut()) {
+            row.as_object_mut().unwrap().remove("ts");
+        }
+        assert_eq!(batch_rows, single_rows);
+
+        let mut invalid = decision("bad");
+        invalid.surface.clear();
+        let mixed = batch.record_decisions(vec![invalid, decision("synthetic-3")]);
+        assert!(mixed[0].is_none());
+        assert!(mixed[1].is_some());
+        assert_eq!(read_rows(&batch_path).len(), 5);
+
+        let blocked_path = batch_dir.path().join("blocked-ledger.jsonl");
+        fs::create_dir(&blocked_path).unwrap();
+        let blocked = JudgmentLedger::new(blocked_path);
+        assert!(blocked.record_decisions(vec![decision("synthetic-4")])[0].is_none());
+        assert!(blocked.record_outcomes(vec![outcome("synthetic-4")])[0].is_none());
     }
 
     #[test]

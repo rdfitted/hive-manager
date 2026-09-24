@@ -12142,6 +12142,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 .join("judgments")
                 .join("ledger.jsonl"),
         );
+        let mut outcomes = Vec::with_capacity(record.criteria.len());
         for criterion in record.criteria {
             let Some(decision_id) = criterion.decision_id else {
                 continue;
@@ -12152,7 +12153,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 "criterion_number".to_string(),
                 serde_json::json!(criterion.number),
             );
-            let _ = ledger.record_outcome(OutcomeInput {
+            outcomes.push(OutcomeInput {
                 decision_id,
                 label: serde_json::json!({ "result": label }),
                 source: OutcomeSource::Downstream,
@@ -12160,6 +12161,7 @@ The backend composed and persisted the following authoritative skeleton before l
                 extra,
             });
         }
+        let _ = ledger.record_outcomes(outcomes);
     }
 
     fn apply_qa_verdict_to_session(
