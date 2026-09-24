@@ -3505,6 +3505,144 @@ fn later_queue_row_remains_authoritative_over_an_external_completion() {
     assert!(repo.try_claim("queued-t1", 0, 7).unwrap().is_some());
 }
 
+#[test]
+fn operational_projection_keeps_a_nonfinal_queue_row_above_external_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(queue_repo());
+    let manager = QueueManager::new(
+        Arc::clone(&repo),
+        EventBus::new(temp.path().to_path_buf()),
+    );
+    repo.record_external_completions(SESSION_ID, "queen", &["T0".to_string()], 1)
+        .unwrap();
+    repo.enqueue(&queued_row("queued-t0", "worker-t0", Some("T0"), 2))
+        .unwrap();
+    let graph = TaskGraph::new(
+        vec![queue_test_node("T0", NodeStatus::Pending)],
+        Vec::new(),
+    );
+
+    let projected = manager.project_queue_statuses(SESSION_ID, &graph).unwrap();
+    assert_eq!(projected.nodes[0].status, NodeStatus::Ready);
+}
+
+#[tokio::test]
+async fn queen_external_completion_keeps_dependent_code_conflict_serialized() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state, controller) = dependency_http_fixture(&temp);
+    let session_id = "http-dependency-session";
+    let queen_id = format!("{session_id}-queen");
+    let project = temp.path().join("queen-conflict-project");
+    std::fs::create_dir_all(&project).unwrap();
+    state.storage.create_session_dir(session_id).unwrap();
+    let mut session = quiet_hive_session(session_id, &project);
+    session.execution_policy.workspace_strategy = crate::domain::WorkspaceStrategy::SharedCell;
+    session.agents.push(AgentInfo {
+        id: queen_id.clone(),
+        role: AgentRole::Queen,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+        role_definition_id: None,
+        role_definition_version: None,
+    });
+    controller.read().insert_test_session(session);
+
+    let graph = TaskGraph::new(
+        vec![
+            WorkNode::new(
+                "T0",
+                NodeKind::Task,
+                "Queen prerequisite",
+                NodeContract::default(),
+                BindingRef::Role("Queen".to_string()),
+                NodeStatus::Ready,
+            ),
+            queue_test_node("T1", NodeStatus::Pending),
+            queue_test_node("T2", NodeStatus::Ready),
+        ],
+        vec![WorkEdge::new(
+            "T0",
+            "T1",
+            EdgeKind::DependsOn,
+            EdgeProvenance::Planner,
+        )],
+    );
+    let composition = queue_test_composition(
+        graph,
+        BTreeMap::from([
+            (
+                "T1".to_string(),
+                BTreeSet::from(["src/shared.rs".to_string()]),
+            ),
+            (
+                "T2".to_string(),
+                BTreeSet::from(["src/shared.rs".to_string()]),
+            ),
+        ]),
+        Vec::new(),
+    );
+    let state_manager = StateManager::new(state.storage.session_dir(session_id));
+    state_manager.write_graph_composition_state(&composition).unwrap();
+    state_manager
+        .update_hierarchy(&[crate::coordination::HierarchyNode {
+            id: queen_id,
+            role: "Queen".to_string(),
+            principal: None,
+            parent_id: None,
+            children: Vec::new(),
+        }])
+        .unwrap();
+
+    assert_eq!(
+        post_task_worker(&app, "T2").await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        post_heartbeat_with_completed_nodes(&app, session_id, "queen", &["T0"])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let projected = state
+        .queue_manager
+        .project_queue_statuses(session_id, &composition.graph)
+        .unwrap();
+    assert_eq!(projected.nodes[0].status, NodeStatus::Completed);
+    assert_eq!(projected.nodes[1].status, NodeStatus::Ready);
+
+    let waiting = post_task_worker(&app, "T1").await;
+    assert_eq!(waiting.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(waiting.into_body(), usize::MAX).await.unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "conflicts_pending");
+    assert_eq!(body["blocking_task_ids"], json!(["T2"]));
+    let queued = state.queue_manager.queue_snapshot(session_id).unwrap();
+    let t1 = queued
+        .rows
+        .iter()
+        .find(|row| row.task_id.as_deref() == Some("T1"))
+        .unwrap();
+    assert_eq!(
+        state.queue_manager.repo().pending_conflicts(&t1.id).unwrap().len(),
+        1
+    );
+
+    state
+        .queue_manager
+        .record_heartbeat(session_id, "http-dependency-session-worker-1", "completed")
+        .await
+        .unwrap();
+    assert_eq!(
+        post_task_worker(&app, "T1").await.status(),
+        StatusCode::CREATED
+    );
+}
+
 #[tokio::test]
 async fn queen_legacy_completion_for_another_principal_does_not_unblock() {
     let temp = tempfile::tempdir().unwrap();

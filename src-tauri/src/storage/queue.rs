@@ -21,6 +21,7 @@
 //! The queue table is the SOURCE OF TRUTH for sub-agent runs; the in-memory
 //! `Session.agents` Vec is a UI cache that is reconciled against this table on resume.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -409,6 +410,24 @@ impl QueueRepo {
             }
             tx.commit()?;
             Ok(())
+        })
+    }
+
+    /// Task IDs backed by validated row-less completion declarations for one session.
+    /// Callers must still prefer any queue row for the same task ID.
+    pub fn external_completion_task_ids(
+        &self,
+        session_id: &str,
+    ) -> Result<BTreeSet<String>, StorageError> {
+        self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT task_id FROM agent_run_queue_external_completions
+                 WHERE session_id = ?1 ORDER BY task_id",
+            )?;
+            let task_ids = stmt
+                .query_map(params![session_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            Ok(task_ids)
         })
     }
 

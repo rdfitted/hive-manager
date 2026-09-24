@@ -1095,6 +1095,7 @@ impl QueueManager {
         graph: &TaskGraph,
     ) -> Result<TaskGraph, StorageError> {
         let latest = self.latest_queue_rows_by_task(session_id)?;
+        let external_completion_ids = self.repo.external_completion_task_ids(session_id)?;
         let mut projected = Self::overlay_queue_rows(graph, &latest);
 
         for node in &mut projected.nodes {
@@ -1108,9 +1109,14 @@ impl QueueManager {
                         | NodeStatus::Cancelled
                 )
             {
-                // A persisted runtime-looking status without a queue row cannot satisfy the SQL
-                // prerequisite lookup. Reset it conservatively before readiness promotion.
+                // A persisted runtime-looking status without queue evidence cannot satisfy the
+                // SQL prerequisite lookup. Reset it before applying validated declarations.
                 node.status = NodeStatus::Pending;
+            }
+        }
+        for node in &mut projected.nodes {
+            if !latest.contains_key(&node.id) && external_completion_ids.contains(&node.id) {
+                node.status = NodeStatus::Completed;
             }
         }
         promote_initial_ready_nodes(&mut projected);
