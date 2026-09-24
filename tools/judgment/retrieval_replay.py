@@ -188,6 +188,63 @@ def observed_production_attachments(
     )
 
 
+def _match_types_for_task(
+    session_store_root: Path, session_id: str, task_id: object
+) -> dict[tuple[str, str], str]:
+    """Resolve persisted knowledge-edge rationales by the spawned reference.
+
+    A missing, blank, or conflicting rationale is deliberately unclassified.
+    Edge provenance is only a filter here; it is not the match type.
+    """
+    if not isinstance(task_id, str) or not task_id:
+        return {}
+    path = session_store_root / session_id / "state" / "work-graph.json"
+    try:
+        graph = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(graph, dict):
+        return {}
+    nodes = {}
+    for node in graph.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        expansion = node.get("expansion")
+        parameters = (
+            expansion.get("parameters") if isinstance(expansion, dict) else None
+        )
+        if isinstance(parameters, dict) and isinstance(
+            parameters.get("source_ref"), str
+        ):
+            nodes[node.get("id")] = parameters["source_ref"].strip()
+    matches: dict[tuple[str, str], set[str]] = {}
+    for edge in graph.get("edges", []):
+        if not isinstance(edge, dict) or edge.get("target") != task_id:
+            continue
+        if edge.get("kind") != "informs" or edge.get("provenance") != "knowledge":
+            continue
+        source_ref = nodes.get(edge.get("source"))
+        if not source_ref:
+            continue
+        if source_ref.startswith("institutional:"):
+            source, pointer = "institutional", source_ref[len("institutional:") :]
+        elif source_ref.startswith("global:"):
+            source, pointer = "institutional", source_ref[len("global:") :]
+        else:
+            source, pointer = "project", source_ref
+        key = (source, pointer.strip().replace("\\", "/"))
+        rationale = edge.get("rationale")
+        matches.setdefault(key, set()).add(
+            rationale.strip()
+            if isinstance(rationale, str) and rationale.strip()
+            else "unknown"
+        )
+    return {
+        key: next(iter(values)) if len(values) == 1 else "unknown"
+        for key, values in matches.items()
+    }
+
+
 def load_spawn_contexts(session: Path) -> tuple[list[dict], list[str]]:
     contexts = []
     errors = []
@@ -434,6 +491,7 @@ def summarize_knowledge_acks(
             "by_position": _grouped_precision(kept, "position"),
             "by_origin": _grouped_precision(kept, "origin"),
             "by_provenance": _grouped_precision(kept, "provenance"),
+            "by_match_type": _grouped_precision(kept, "match_type"),
         },
         "miss_rate": miss_summary,
         "proxy_agreement": {
@@ -539,6 +597,7 @@ def _evaluate_spawn_ack(
     completed: bool,
     cli: str,
     changed: Optional[set[str]],
+    match_types: dict[tuple[str, str], str],
 ) -> tuple[Optional[dict], list[dict], Optional[dict], list[str]]:
     if not context.get("sampled"):
         return None, [], None, []
@@ -607,6 +666,13 @@ def _evaluate_spawn_ack(
                 "position": answer["position"],
                 "origin": answer["origin"],
                 "provenance": answer["provenance"],
+                "match_type": match_types.get(
+                    (
+                        str(reference.get("source")),
+                        str(reference.get("pointer")).replace("\\", "/"),
+                    ),
+                    "unknown",
+                ),
                 "miss_sample": answer["miss_sample"],
                 "proxy_mentioned": mentioned,
                 "cli": cli,
@@ -658,14 +724,20 @@ def _evaluate_session_acks(
     observations = []
     spot_checks = []
     out_of_context = []
+    match_types_by_task = {}
     for context in contexts:
         agent_id = context["agent_id"]
         acknowledgement = acknowledgements.get(agent_id)
         plan_task_id = context.get("plan_task_id")
+        match_task_id = plan_task_id if isinstance(plan_task_id, str) else ""
         completed = acknowledgement is not None or (
             isinstance(plan_task_id, str)
             and (agent_id, plan_task_id) in completed_spawn_keys
         )
+        if context.get("sampled") and match_task_id not in match_types_by_task:
+            match_types_by_task[match_task_id] = _match_types_for_task(
+                session_store_root, session.name, match_task_id
+            )
         (
             sampled_spawn,
             context_observations,
@@ -681,6 +753,7 @@ def _evaluate_session_acks(
             completed=completed,
             cli=agent_clis.get(agent_id, "unknown"),
             changed=changed,
+            match_types=match_types_by_task.get(match_task_id, {}),
         )
         if sampled_spawn is not None:
             sampled_spawns.append(sampled_spawn)

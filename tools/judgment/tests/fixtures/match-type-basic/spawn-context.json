@@ -1,0 +1,17 @@
+{
+  "schema_version": "hive.spawn-context/v1",
+  "session_id": "44444444-4444-4444-8444-444444444444",
+  "agent_id": "44444444-4444-4444-8444-444444444444-worker-1",
+  "plan_task_id": "T1",
+  "sampled": true,
+  "question_version": 1,
+  "kept": [
+    {"tag": "k1", "position": 1, "origin": "task", "source": "project", "pointer": ".ai-docs/one.md"},
+    {"tag": "k2", "position": 2, "origin": "task", "source": "institutional", "pointer": "engineering/two.md"},
+    {"tag": "k3", "position": 3, "origin": "task", "source": "project", "pointer": ".ai-docs/three.md"},
+    {"tag": "k4", "position": 4, "origin": "task", "source": "institutional", "pointer": "engineering/four.md"},
+    {"tag": "k5", "position": 5, "origin": "task", "source": "project", "pointer": ".ai-docs/five.md"}
+  ],
+  "dropped": [],
+  "miss_sample_references": []
+}
