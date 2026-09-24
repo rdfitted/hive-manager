@@ -19,10 +19,11 @@ use crate::http::handlers::evaluator::read_qa_verdict_record;
 use crate::judgment::ledger::{JudgmentLedger, OutcomeInput, OutcomeSource};
 use crate::orchestrator::org_graph::composition::{
     admit_ack_miss_sample, compose_context_with_remaining, is_ack_sampled,
-    knowledge_reference_chars, knowledge_refs_from_work_graph, render_composed_context,
+    knowledge_edge_captures_from_work_graph_task, knowledge_reference_chars,
+    knowledge_refs_from_work_graph, render_composed_context,
     render_composed_context_with_ack_tags, spawn_context_from_work_graph_task, ComposedContext,
-    ContextBudget, ContextOrigin, DroppedContext, SpawnContext, ACK_QUESTION_VERSION,
-    ACK_SAMPLE_RATE,
+    ContextBudget, ContextOrigin, DroppedContext, KnowledgeEdgeCapture, SpawnContext,
+    ACK_QUESTION_VERSION, ACK_SAMPLE_RATE,
 };
 use crate::orchestrator::org_graph::definitions::{
     resolve_role_definition, role_prompt_template, ResolvedRoleDefinition,
@@ -70,8 +71,10 @@ const SPAWN_CONTEXT_SCHEMA_VERSION: &str = "hive.spawn-context/v1";
 #[derive(Debug, Clone, Default)]
 struct ResolvedSpawnContext {
     context: SpawnContext,
+    context_available: bool,
     ack_eligible: bool,
     miss_candidates: Vec<KnowledgeRef>,
+    edge_captures: Vec<KnowledgeEdgeCapture>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +84,7 @@ struct BuiltWorkerPrompt {
     budget: ContextBudget,
     sampled: bool,
     miss_sample_positions: Vec<usize>,
+    rendered_knowledge_chars: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +101,14 @@ struct SpawnContextSidecar {
     sample_rate: f64,
     question_version: u32,
     miss_sample_references: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    global_summary_included: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rendered_knowledge_chars: Option<usize>,
+    #[serde(default)]
+    decision_ids: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +120,21 @@ struct SpawnKeptReference {
     pointer: String,
     priority: u16,
     chars: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    match_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edge_rationale: Option<String>,
+}
+
+fn rendered_knowledge_section_chars(prompt: &str) -> usize {
+    let marker = "### Knowledge References\n\n";
+    prompt
+        .split_once(marker)
+        .map(|(_, tail)| {
+            let section = tail.split_once("\n### ").map_or(tail, |(section, _)| section);
+            marker.chars().count() + section.chars().count()
+        })
+        .unwrap_or(0)
 }
 
 impl BuiltWorkerPrompt {
@@ -117,20 +144,32 @@ impl BuiltWorkerPrompt {
         session_id: &str,
         plan_task_id: Option<&str>,
         role_definition_id: Option<&str>,
+        delivery_path: &str,
+        edge_captures: &[KnowledgeEdgeCapture],
     ) -> SpawnContextSidecar {
         let kept = self
             .context
             .knowledge
             .iter()
             .enumerate()
-            .map(|(index, item)| SpawnKeptReference {
-                tag: self.sampled.then(|| format!("k{}", index + 1)),
-                position: index + 1,
-                origin: item.origin,
-                source: item.reference.source,
-                pointer: item.reference.pointer.clone(),
-                priority: item.reference.priority,
-                chars: knowledge_reference_chars(&item.reference),
+            .map(|(index, item)| {
+                let mut matching = edge_captures.iter().filter(|edge| {
+                    edge.source == item.reference.source
+                        && edge.pointer == item.reference.pointer
+                });
+                let first = matching.next();
+                let unique = first.filter(|_| matching.next().is_none());
+                SpawnKeptReference {
+                    tag: self.sampled.then(|| format!("k{}", index + 1)),
+                    position: index + 1,
+                    origin: item.origin,
+                    source: item.reference.source,
+                    pointer: item.reference.pointer.clone(),
+                    priority: item.reference.priority,
+                    chars: knowledge_reference_chars(&item.reference),
+                    match_type: unique.and_then(|edge| edge.match_type.clone()),
+                    edge_rationale: unique.and_then(|edge| edge.rationale.clone()),
+                }
             })
             .collect();
         let miss_sample_references = self
@@ -155,6 +194,18 @@ impl BuiltWorkerPrompt {
             sample_rate: ACK_SAMPLE_RATE,
             question_version: ACK_QUESTION_VERSION,
             miss_sample_references,
+            delivery_path: Some(delivery_path.to_string()),
+            global_summary_included: Some(self.context.knowledge.iter().any(|item| {
+                let mut matching = edge_captures.iter().filter(|edge| {
+                    edge.source == item.reference.source
+                        && edge.pointer == item.reference.pointer
+                });
+                matching.next().is_some_and(|edge| {
+                    edge.is_global_summary && matching.next().is_none()
+                })
+            })),
+            rendered_knowledge_chars: Some(self.rendered_knowledge_chars),
+            decision_ids: Vec::new(),
         }
     }
 }
@@ -167,8 +218,9 @@ impl SpawnContextSidecar {
             budget: ContextBudget::default(),
             sampled: false,
             miss_sample_positions: Vec::new(),
+            rendered_knowledge_chars: 0,
         }
-        .sidecar(agent_id, session_id, None, None)
+        .sidecar(agent_id, session_id, None, None, "composition-free", &[])
     }
 }
 
@@ -7032,6 +7084,7 @@ When the objective and every configured gate are complete, send this `completed`
         } else {
             (false, render_composed_context(&composition.context))
         };
+        let rendered_knowledge_chars = rendered_knowledge_section_chars(&composed_context);
         let activation_wait_heartbeat = heartbeat_snippet(
             "http://localhost:18800",
             session_id,
@@ -7241,6 +7294,7 @@ treated as stuck and requeued.
             budget: spawn_context.budget,
             sampled,
             miss_sample_positions,
+            rendered_knowledge_chars,
         }
     }
 
@@ -9197,6 +9251,8 @@ Last updated: {timestamp}
                 &session_id,
                 None,
                 resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+                "composition-free",
+                &[],
             );
             Self::write_spawn_artifacts_fail_open(
                 &project_path,
@@ -10299,10 +10355,12 @@ phases and do EXACTLY this, then stop:
         }
         ResolvedSpawnContext {
             context: spawn_context_from_work_graph_task(&graph, plan_task_id),
+            context_available: true,
             ack_eligible,
             miss_candidates: ack_eligible
                 .then(|| knowledge_refs_from_work_graph(&graph))
                 .unwrap_or_default(),
+            edge_captures: knowledge_edge_captures_from_work_graph_task(&graph, plan_task_id),
         }
     }
 
@@ -11890,6 +11948,8 @@ The backend composed and persisted the following authoritative skeleton before l
             session_id,
             None,
             resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+            "composition-free",
+            &[],
         );
         Self::write_spawn_artifacts_fail_open(
             &session.project_path,
@@ -15752,6 +15812,14 @@ The backend composed and persisted the following authoritative skeleton before l
             session_id,
             plan_task_id,
             resolved_role.definition.as_ref().map(|definition| definition.id.as_str()),
+            if plan_task_id.is_none() || !spawn_context.context_available {
+                "composition-free"
+            } else if spawn_context.ack_eligible {
+                "read-work-graph-fallback"
+            } else {
+                "task-bound"
+            },
+            &spawn_context.edge_captures,
         );
         Self::write_spawn_artifacts_fail_open(
             &session.project_path,
@@ -17213,8 +17281,10 @@ mod tests {
         let session_dir = storage
             .create_session_dir(SESSION_ID)
             .expect("session state directory");
+        let mut graph = test_task_graph("guides/fallback.md");
+        graph.edges[0].rationale = Some("knowledge attachment matched inferred-scope:exact".to_string());
         StateManager::new(session_dir.clone())
-            .write_work_graph(&test_task_graph("guides/fallback.md"))
+            .write_work_graph(&graph)
             .unwrap();
 
         let mut controller = SessionController::new(Arc::new(RwLock::new(PtyManager::new())));
@@ -17333,10 +17403,20 @@ mod tests {
         )
         .expect("valid context sidecar");
         assert_eq!(sidecar.plan_task_id.as_deref(), Some("T1"));
-        assert!(sidecar
+        assert_eq!(sidecar.delivery_path.as_deref(), Some("read-work-graph-fallback"));
+        assert_eq!(sidecar.global_summary_included, Some(false));
+        assert!(sidecar.rendered_knowledge_chars.unwrap() > 0);
+        assert!(sidecar.decision_ids.is_empty());
+        let kept = sidecar
             .kept
             .iter()
-            .any(|reference| reference.pointer == "guides/fallback.md"));
+            .find(|reference| reference.pointer == "guides/fallback.md")
+            .expect("plan-bound knowledge reference");
+        assert_eq!(kept.match_type.as_deref(), Some("inferred-scope:exact"));
+        assert_eq!(
+            kept.edge_rationale.as_deref(),
+            Some("knowledge attachment matched inferred-scope:exact")
+        );
     }
 
     #[test]
@@ -17460,12 +17540,21 @@ mod tests {
             budget: ContextBudget::default(),
             sampled: true,
             miss_sample_positions: vec![0],
+            rendered_knowledge_chars: 0,
         };
         let sidecar = build.sidecar(
             "sidecar-worker-1",
             "sidecar",
             Some("T1"),
             Some("backend"),
+            "task-bound",
+            &[crate::orchestrator::org_graph::composition::KnowledgeEdgeCapture {
+                source: KnowledgeSource::Institutional,
+                pointer: "roles/backend.md".to_string(),
+                match_type: Some("inferred-scope:exact".to_string()),
+                rationale: Some("inferred-scope:exact".to_string()),
+                is_global_summary: true,
+            }],
         );
         let encoded = serde_json::to_string_pretty(&sidecar).unwrap();
         let decoded: SpawnContextSidecar = serde_json::from_str(&encoded).unwrap();
@@ -17478,6 +17567,12 @@ mod tests {
         assert_eq!(decoded.kept[0].source, context.knowledge[0].reference.source);
         assert_eq!(decoded.kept[0].pointer, context.knowledge[0].reference.pointer);
         assert_eq!(decoded.kept[0].priority, context.knowledge[0].reference.priority);
+        assert_eq!(decoded.kept[0].match_type.as_deref(), Some("inferred-scope:exact"));
+        assert_eq!(decoded.kept[0].edge_rationale.as_deref(), Some("inferred-scope:exact"));
+        assert_eq!(decoded.delivery_path.as_deref(), Some("task-bound"));
+        assert_eq!(decoded.global_summary_included, Some(true));
+        assert_eq!(decoded.rendered_knowledge_chars, Some(0));
+        assert!(decoded.decision_ids.is_empty());
         assert_eq!(decoded.dropped, context.dropped);
         assert_eq!(decoded.miss_sample_references, vec!["k1"]);
 
@@ -17492,6 +17587,10 @@ mod tests {
         assert_eq!(composition_free["dropped"], serde_json::json!([]));
         assert_eq!(composition_free["sampled"], false);
         assert_eq!(composition_free["miss_sample_references"], serde_json::json!([]));
+        assert_eq!(composition_free["delivery_path"], "composition-free");
+        assert_eq!(composition_free["global_summary_included"], false);
+        assert_eq!(composition_free["rendered_knowledge_chars"], 0);
+        assert_eq!(composition_free["decision_ids"], serde_json::json!([]));
     }
 
     #[test]
@@ -17544,7 +17643,14 @@ mod tests {
         assert!(!build.sampled);
         assert!(!build.prompt.contains(ACK_INSTRUCTION));
         assert!(!build
-            .sidecar("empty-sampled-worker-1", &sampled_session, Some("T1"), None)
+            .sidecar(
+                "empty-sampled-worker-1",
+                &sampled_session,
+                Some("T1"),
+                None,
+                "task-bound",
+                &[],
+            )
             .sampled);
     }
 
@@ -18183,6 +18289,34 @@ mod tests {
             .find("while [ ! -f \"/repo/.hive-manager/solo-123/peer/prince-verdict.json\" ]")
             .expect("Prince wait loop");
         assert!(blocked_guard < prince_wait);
+    }
+
+    #[test]
+    fn legacy_v1_spawn_sidecar_without_capture_fields_deserializes() {
+        let legacy = r#"{
+            "schema_version": "hive.spawn-context/v1",
+            "agent_id": "legacy-worker-1",
+            "session_id": "legacy",
+            "plan_task_id": "T1",
+            "role_definition_id": null,
+            "budget": {"role_chars": 4096, "task_chars": 4096, "conversation_chars": 4096},
+            "kept": [{"tag": null, "position": 1, "origin": "task", "source": "project", "pointer": "guides/legacy.md", "priority": 80, "chars": 20}],
+            "dropped": [],
+            "sampled": false,
+            "sample_rate": 0.33,
+            "question_version": 1,
+            "miss_sample_references": []
+        }"#;
+        let decoded: SpawnContextSidecar = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.delivery_path, None);
+        assert_eq!(decoded.global_summary_included, None);
+        assert_eq!(decoded.rendered_knowledge_chars, None);
+        assert!(decoded.decision_ids.is_empty());
+        assert_eq!(decoded.kept[0].match_type, None);
+        assert_eq!(decoded.kept[0].edge_rationale, None);
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert!(encoded["kept"][0].get("match_type").is_none());
+        assert!(encoded["kept"][0].get("edge_rationale").is_none());
     }
 
     #[test]

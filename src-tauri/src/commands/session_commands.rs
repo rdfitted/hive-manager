@@ -293,6 +293,7 @@ pub async fn launch_solo(
     flags: Option<Vec<String>>,
     evaluator_cli: Option<String>,
     evaluator_model: Option<String>,
+    with_evaluator: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     let agent_config = AgentConfig {
         cli: cli.clone(),
@@ -320,7 +321,7 @@ pub async fn launch_solo(
     } else {
         None
     };
-    let with_evaluator = true;
+    let with_evaluator = with_evaluator.unwrap_or(true);
 
     let config = HiveLaunchConfig {
         project_path,

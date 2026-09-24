@@ -137,6 +137,16 @@ pub struct CompositionResult {
     pub remaining: ContextBudget,
 }
 
+/// Facts from a persisted task Informs edge, kept separate from prompt composition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEdgeCapture {
+    pub source: KnowledgeSource,
+    pub pointer: String,
+    pub match_type: Option<String>,
+    pub rationale: Option<String>,
+    pub is_global_summary: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleKnowledgeHubLint {
     pub source: KnowledgeSource,
@@ -324,6 +334,57 @@ pub fn spawn_context_from_work_graph_task(
         .filter(|summary| !summary.is_empty()),
         ..SpawnContext::default()
     }
+}
+
+/// Observe the same task knowledge edges used by `spawn_context_from_work_graph_task`.
+/// This does not change which references composition admits or their order.
+pub fn knowledge_edge_captures_from_work_graph_task(
+    graph: &TaskGraph,
+    plan_task_id: &str,
+) -> Vec<KnowledgeEdgeCapture> {
+    graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.target == plan_task_id
+                && edge.kind == EdgeKind::Informs
+                && edge.provenance == EdgeProvenance::Knowledge
+        })
+        .filter_map(|edge| {
+            let node = graph.nodes.iter().find(|node| node.id == edge.source)?;
+            let reference = knowledge_ref_from_work_node(node)?;
+            let is_global_summary = node
+                .expansion
+                .as_ref()
+                .and_then(|expansion| expansion.parameters.get("source_ref"))
+                .is_some_and(|source_ref| source_ref.starts_with("global:"));
+            let rationale = edge
+                .rationale
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+                .cloned();
+            let match_types = rationale
+                .as_deref()
+                .into_iter()
+                .flat_map(|text| {
+                    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != ':')
+                })
+                .filter(|word| {
+                    word.strip_prefix("inferred-scope:")
+                        .is_some_and(|value| !value.is_empty())
+                })
+                .collect::<BTreeSet<_>>();
+            let match_type = (match_types.len() == 1)
+                .then(|| (*match_types.iter().next().unwrap()).to_string());
+            Some(KnowledgeEdgeCapture {
+                source: reference.source,
+                pointer: reference.pointer,
+                match_type,
+                rationale,
+                is_global_summary,
+            })
+        })
+        .collect()
 }
 
 /// Collect every bounded knowledge reference represented in a work graph. The
