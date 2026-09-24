@@ -2418,7 +2418,7 @@ mod tests {
         std::fs::create_dir_all(storage.path().join("judgments").join("ledger.jsonl"))
             .unwrap();
         let contract = super::parse_sprint_contract(
-            "# Sprint Contract: Synthetic\n\n## Acceptance Criteria\n1. [FUNC] One pass\n",
+            "# Sprint Contract: Synthetic\n\n## Acceptance Criteria\n1. [FUNC] One pass\n\n## Pass Threshold\n- All pass/fail criteria must pass\n",
         ).unwrap();
         let criterion = contract.acceptance_criteria[0].clone();
         let context = super::ContractContext {
