@@ -25,8 +25,9 @@
     "hive.qa.criterion.pass_fail": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reserved for a future split; current rows use hive.qa.criterion." },
     "hive.qa.criterion.scored": { "mode": "shadow", "question_type": "scored", "_doc": "Reserved until numeric answer and label rows are implemented." },
     "hive.fusion.rank": { "mode": "shadow", "question_type": "multiclass" },
-    "hive.retrieval.spawn": { "mode": "shadow", "question_type": "multiclass" },
-    "hive.review.finding": { "mode": "shadow", "question_type": "multiclass", "_doc": "V supplies the final finding policy in T16." }
+    "hive.retrieval.spawn": { "mode": "shadow", "question_type": "multiclass", "judge": "code", "reason": "Local inclusion decision per kept or dropped reference; sampled model acknowledgements may supply outcomes." },
+    "hive.retrieval.delivery": { "mode": "shadow", "question_type": "multiclass", "_doc": "Reserved for a future delivery-integrity question and outcome; no live writer in 0.54.0." },
+    "hive.review.finding": { "mode": "shadow", "question_type": "multiclass", "judge": null, "reason": "incumbent review adjudication plus optional gated Jev shadow; promotion awaits held-out labels and #291" }
   },
   "policy_targets": {
     "_doc": "Surface-specific #291 targets for operator review. The vendored audit reads global targets, not these metadata fields.",
