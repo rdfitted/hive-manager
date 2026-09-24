@@ -878,6 +878,17 @@ impl QueueManager {
             .await
     }
 
+    /// Make validated row-less task completions visible to atomic queue claims.
+    pub fn record_external_completions(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        task_ids: &[String],
+    ) -> Result<(), StorageError> {
+        self.repo
+            .record_external_completions(session_id, agent_id, task_ids, Self::now_ms())
+    }
+
     /// Record a heartbeat for one durable assignment, falling back deterministically only
     /// when an older caller omits `assignment_id`.
     pub async fn record_heartbeat_for_assignment(

@@ -6706,6 +6706,8 @@ Managed principals are visible Hive agents with their own lifecycle and task con
 6. Keep native Queen children read-only for planning, scouting, and review. Delegate implementation to managed principals.
 7. The Queen coordinates and integrates; do not become a coding principal.
 
+When you finish a Queen-owned plan task, post a `completed` heartbeat with its exact plan node ID in `completed_nodes`, for example `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat`. Then retry the same `task_id` spawn. This task completion heartbeat does not end the Queen's session; keep coordinating and send `working` heartbeats while further work remains.
+
 Heartbeat while coordinating:
 {queen_heartbeat}
 
@@ -7872,6 +7874,7 @@ running, use `DELETE /api/sessions/{session_id}/agents/{{agent_id}}` instead.
 - Workers spawn in a new Windows Terminal tab (visible window)
 - Treat the absolute `task_file` returned by the API as authoritative; do not reconstruct it from the worker ID
 - When spawning a plan task, send its exact `task_id` from `plan.md`. Never guess, fuzzy-match, or derive it from `initial_task`; explicit or null is the safe contract.
+- If a prerequisite is Queen-owned, finish that task and POST `{{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}}` to `/api/sessions/{session_id}/heartbeat` using its exact node ID. Then retry the same `task_id` spawn. A `working` heartbeat does not satisfy the prerequisite; the Queen session remains open after this task completion heartbeat.
 - Shared-cell Hive: the task file is under `.hive-manager/tasks/` in the shared primary workspace
 - Isolated-cell Hive: the task file is under `.hive-manager/tasks/` in that worker's isolated workspace
 - Research/no-worktree Hive: the task file is under `.hive-manager/{session_id}/tasks/` in the operator project
@@ -18536,6 +18539,8 @@ mod tests {
         assert!(worker_content.contains("Omit to inherit principal flags; send `[]` to clear them"));
         assert!(!worker_content.contains(r#"{\"role_type\": \"backend\", \"cli\""#));
         assert!(worker_content.contains("absolute `task_file` returned by the API"));
+        assert!(worker_content.contains(r#""completed_nodes":["T0"]"#));
+        assert!(worker_content.contains("Then retry the same `task_id` spawn"));
         assert!(worker_content.contains("Shared-cell Hive"));
         assert!(worker_content.contains("Isolated-cell Hive"));
         assert!(worker_content.contains("Research/no-worktree Hive"));
@@ -18820,6 +18825,8 @@ End with `PLAN READY FOR REVIEW`. Produce no second plan and no implementation c
         assert!(prompt.contains("supported; encouraged (authorized)"));
         assert!(prompt.contains("do not drop effort or reasoning settings"));
         assert!(prompt.contains("Shared Cell Integration"));
+        assert!(prompt.contains(r#""completed_nodes":["T0"]"#));
+        assert!(prompt.contains("This task completion heartbeat does not end the Queen's session"));
         // Inject contract: the sender reports measured write/observation facts without
         // claiming that output proves a managed turn.
         assert!(prompt.contains("## Messaging a Running Agent (inject)"));

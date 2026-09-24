@@ -3292,6 +3292,7 @@ fn quiet_fusion_session(session_id: &str, project_path: &Path) -> Session {
         qa_workers: Vec::new(),
         max_qa_iterations: 3,
         qa_timeout_secs: 300,
+        qa_inconclusive_at: None,
         auth_strategy: AuthStrategy::default(),
         worktree_path: None,
         worktree_branch: None,
@@ -3343,4 +3344,259 @@ fn mark_session_completed_schedules_archive_after_persistence() {
         })
         .expect("completion schedules the idempotent work-graph archive");
     assert!(archive.is_file());
+}
+
+#[tokio::test]
+async fn queen_completed_node_unblocks_the_same_task_spawn_only_after_ownership_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state, controller) = dependency_http_fixture(&temp);
+    let session_id = "http-dependency-session";
+    let queen_id = format!("{session_id}-queen");
+    let principal_id = format!("{session_id}-worker-9");
+    let project = temp.path().join("queen-prerequisite-project");
+    std::fs::create_dir_all(&project).unwrap();
+    state.storage.create_session_dir(session_id).unwrap();
+
+    let graph = TaskGraph::new(
+        vec![
+            WorkNode::new(
+                "T0",
+                NodeKind::Task,
+                "Queen pre-flight",
+                NodeContract::default(),
+                BindingRef::Role("Queen".to_string()),
+                NodeStatus::Ready,
+            ),
+            queue_test_node("T1", NodeStatus::Ready),
+            WorkNode::new(
+                "T2",
+                NodeKind::Task,
+                "Unrelated Queen task",
+                NodeContract::default(),
+                BindingRef::Role("Queen".to_string()),
+                NodeStatus::Ready,
+            ),
+        ],
+        vec![WorkEdge::new(
+            "T0",
+            "T1",
+            EdgeKind::DependsOn,
+            EdgeProvenance::Planner,
+        )],
+    );
+    let state_manager = StateManager::new(state.storage.session_dir(session_id));
+    state_manager.write_work_graph(&graph).unwrap();
+    let hierarchy = [
+        crate::coordination::HierarchyNode {
+            id: queen_id.clone(),
+            role: "Queen".to_string(),
+            principal: None,
+            parent_id: None,
+            children: vec![principal_id.clone()],
+        },
+        crate::coordination::HierarchyNode {
+            id: principal_id.clone(),
+            role: "Worker-9".to_string(),
+            principal: Some("P1".to_string()),
+            parent_id: Some(queen_id.clone()),
+            children: Vec::new(),
+        },
+    ];
+    state_manager.update_hierarchy(&hierarchy).unwrap();
+
+    let mut session = quiet_hive_session(session_id, &project);
+    session.agents.push(AgentInfo {
+        id: queen_id.clone(),
+        role: AgentRole::Queen,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+        role_definition_id: None,
+        role_definition_version: None,
+    });
+    session.agents.push(AgentInfo {
+        id: principal_id.clone(),
+        role: AgentRole::Worker {
+            index: 9,
+            parent: Some(queen_id.clone()),
+        },
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: Some(queen_id.clone()),
+        commit_sha: None,
+        base_commit_sha: None,
+        role_definition_id: None,
+        role_definition_version: None,
+    });
+    controller.read().insert_test_session(session);
+
+    let blocked = post_task_worker(&app, "T1").await;
+    assert_eq!(blocked.status(), StatusCode::CONFLICT);
+    let blocked_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(blocked.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(blocked_body["reason"], "dependencies_pending");
+    assert_eq!(blocked_body["blocking_task_ids"], json!(["T0"]));
+    let queued = state.queue_manager.queue_snapshot(session_id).unwrap();
+    let task_row = queued
+        .rows
+        .iter()
+        .find(|row| row.task_id.as_deref() == Some("T1"))
+        .unwrap();
+    let queued_id = task_row.id.clone();
+    let repo = state.queue_manager.repo();
+    assert_eq!(repo.pending_dependencies(&queued_id).unwrap(), vec!["T0"]);
+
+    state_manager.update_hierarchy(&hierarchy).unwrap();
+    let wrong_owner =
+        post_heartbeat_with_completed_nodes(&app, session_id, &principal_id, &["T0"]).await;
+    assert_eq!(wrong_owner.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(repo.pending_dependencies(&queued_id).unwrap(), vec!["T0"]);
+    assert_eq!(post_heartbeat(&app, session_id, "queen", "working").await.status(), StatusCode::OK);
+    assert_eq!(repo.pending_dependencies(&queued_id).unwrap(), vec!["T0"]);
+    assert_eq!(
+        post_heartbeat_with_completed_nodes(&app, session_id, "queen", &["T2"])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(repo.pending_dependencies(&queued_id).unwrap(), vec!["T0"]);
+
+    assert_eq!(
+        post_heartbeat_with_completed_nodes(&app, session_id, "queen", &["T0"])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert!(repo.pending_dependencies(&queued_id).unwrap().is_empty());
+    let spawned = post_task_worker(&app, "T1").await;
+    assert_eq!(spawned.status(), StatusCode::CREATED);
+    let claimed = state.queue_manager.queue_snapshot(session_id).unwrap();
+    let task_row = claimed
+        .rows
+        .iter()
+        .find(|row| row.task_id.as_deref() == Some("T1"))
+        .unwrap();
+    assert_eq!(task_row.id, queued_id, "retry must claim the queued task row");
+    assert_eq!(task_row.status, QueueStatus::Running);
+}
+
+#[test]
+fn later_queue_row_remains_authoritative_over_an_external_completion() {
+    let repo = queue_repo();
+    repo.record_external_completions(SESSION_ID, "queen", &["T0".to_string()], 1)
+        .unwrap();
+    repo.enqueue(&queued_row("queued-t0", "worker-t0", Some("T0"), 2))
+        .unwrap();
+    repo.enqueue_with_dependencies(
+        &queued_row("queued-t1", "worker-t1", Some("T1"), 3),
+        &["T0".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(repo.pending_dependencies("queued-t1").unwrap(), vec!["T0"]);
+    assert_eq!(repo.try_claim("queued-t1", 0, 4).unwrap(), None);
+    assert!(repo.try_claim("queued-t0", 0, 5).unwrap().is_some());
+    assert!(repo
+        .record_heartbeat(SESSION_ID, "worker-t0", "completed", 6)
+        .unwrap());
+    assert!(repo.pending_dependencies("queued-t1").unwrap().is_empty());
+    assert!(repo.try_claim("queued-t1", 0, 7).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn queen_legacy_completion_for_another_principal_does_not_unblock() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state, controller) = dependency_http_fixture(&temp);
+    let session_id = "http-dependency-session";
+    let queen_id = format!("{session_id}-queen");
+    let project = temp.path().join("legacy-queen-completion-project");
+    std::fs::create_dir_all(&project).unwrap();
+    state.storage.create_session_dir(session_id).unwrap();
+
+    let graph = TaskGraph::new(
+        vec![
+            WorkNode::new(
+                "T0",
+                NodeKind::Task,
+                "Principal-owned task",
+                NodeContract::default(),
+                BindingRef::Role("P1".to_string()),
+                NodeStatus::Ready,
+            ),
+            queue_test_node("T1", NodeStatus::Ready),
+        ],
+        vec![WorkEdge::new(
+            "T0",
+            "T1",
+            EdgeKind::DependsOn,
+            EdgeProvenance::Planner,
+        )],
+    );
+    let state_manager = StateManager::new(state.storage.session_dir(session_id));
+    state_manager.write_work_graph(&graph).unwrap();
+    state_manager
+        .update_hierarchy(&[crate::coordination::HierarchyNode {
+            id: queen_id.clone(),
+            role: "Queen".to_string(),
+            principal: None,
+            parent_id: None,
+            children: Vec::new(),
+        }])
+        .unwrap();
+
+    let mut session = quiet_hive_session(session_id, &project);
+    session.agents.push(AgentInfo {
+        id: queen_id,
+        role: AgentRole::Queen,
+        status: AgentStatus::Running,
+        config: AgentConfig::default(),
+        parent_id: None,
+        commit_sha: None,
+        base_commit_sha: None,
+        role_definition_id: None,
+        role_definition_version: None,
+    });
+    controller.read().insert_test_session(session);
+
+    assert_eq!(post_task_worker(&app, "T1").await.status(), StatusCode::CONFLICT);
+    let queued = state.queue_manager.queue_snapshot(session_id).unwrap();
+    let queued_id = queued
+        .rows
+        .iter()
+        .find(|row| row.task_id.as_deref() == Some("T1"))
+        .unwrap()
+        .id
+        .clone();
+
+    let completed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{session_id}/heartbeat"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"agent_id":"queen","status":"completed","completed_nodes":["T0"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    let facts = state_manager.read_node_completion_facts().unwrap();
+    assert_eq!(facts.len(), 1, "legacy completion fact must still persist");
+    assert_eq!(facts[0].task_id, "T0");
+    assert_eq!(
+        state.queue_manager.repo().pending_dependencies(&queued_id).unwrap(),
+        vec!["T0"]
+    );
+
+    let retry = post_task_worker(&app, "T1").await;
+    assert_eq!(retry.status(), StatusCode::CONFLICT);
+    let retry_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(retry.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(retry_body["reason"], "dependencies_pending");
+    assert_eq!(retry_body["blocking_task_ids"], json!(["T0"]));
 }
