@@ -8103,8 +8103,8 @@ final-label.json          {"result":"ACCEPT"}
 python tools/judgment/judge.py record --surface hive.review.finding --subject-ref review-subject.json --observations review-observations.json --answer incumbent-answer.json --question-id review-finding --model incumbent-model
 # Copy the decision_id from the record result into --source-decision-id:
 python tools/judgment/judge.py --redact-dictionary names.json ask --surface hive.review.finding --subject-ref review-subject.json --observations review-observations.json --question-id review-finding --question review-question.json --source-decision-id <incumbent-decision-id>
-# Copy the decision_id from the ask result to attach a final local outcome:
-python tools/judgment/judge.py outcome --decision-id <jev-decision-id> --label final-label.json --source human-label
+# Attach verified fix evidence to the incumbent; the linked Jev row inherits its outcome:
+python tools/judgment/judge.py outcome --decision-id <incumbent-decision-id> --label final-label.json --source downstream --note "evidence_tier=fixed test=synthetic-review-regression"
 ```
 
 For a dry run, add `--dry-run` after `ask`. It performs all gates and writes a row, with zero transport calls.
@@ -18705,6 +18705,8 @@ mod tests {
         let judge_content = std::fs::read_to_string(judge_tool_path).expect("read judge tool doc");
         assert!(judge_content.contains("python tools/judgment/judge.py"));
         assert!(judge_content.contains("A Jev answer never gates any hive action"));
+        assert!(judge_content.contains("outcome --decision-id <incumbent-decision-id>"));
+        assert!(judge_content.contains("--source downstream --note \"evidence_tier=fixed"));
 
         let learning_tool_path = temp_dir
             .path()
