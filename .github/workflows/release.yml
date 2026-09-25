@@ -1,70 +1,199 @@
 name: Release
+
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release (e.g., 0.2.0)"
+      tag:
+        description: "Existing tag to release (required when dry_run is false; dispatch from that tag)"
+        required: false
+        type: string
+      dry_run:
+        description: "Build and validate without publishing"
         required: true
+        type: boolean
+        default: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+      - name: Check release version
+        id: version
+        shell: bash
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == "true" ]]; then
+            node scripts/release/check-version.mjs --dry-run
+            TAG="v$(node -p "require('./package.json').version")"
+          else
+            [[ "$GITHUB_REF" == refs/tags/v* ]] || { echo 'Real publishing requires a tag ref'; exit 1; }
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+              [[ -n "$INPUT_TAG" && "$INPUT_TAG" == "$TAG" ]] || { echo 'Dispatch tag must equal the existing ref tag'; exit 1; }
+            fi
+            git show-ref --verify --quiet "refs/tags/$TAG" || { echo 'Release tag is missing'; exit 1; }
+            node scripts/release/check-version.mjs --tag "$TAG"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-
+            rust_targets: x86_64-pc-windows-msvc
+            bundles: nsis
+          - platform: macos-latest
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundles: app,dmg
     runs-on: ${{ matrix.platform }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 20
           cache: npm
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
-          targets: ${{ matrix.target }}
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
+          targets: ${{ matrix.rust_targets }}
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: ./src-tauri -> target
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+      - run: npm ci
+      - name: Build signed updater artifacts
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
-          releaseName: Hive Manager ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
-          releaseBody: |
-            ## Highlights
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          uploadUpdaterJson: false
+      - name: Upload Windows installers and signatures
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows
+          if-no-files-found: error
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe.sig
+      - name: Upload macOS installer and signatures
+        if: matrix.platform == 'macos-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos
+          if-no-files-found: error
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
 
-            - Adds model presets/defaults for Claude Fable 5, OpenAI GPT-5.6, and Droid GLM 5.1
-            - Adds operator-controlled Hive delegation and shared/isolated workspace policies
+  assemble:
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: '*'
+          path: artifacts
+      - name: Assemble and validate one manifest
+        shell: bash
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          node scripts/release/assemble-latest.mjs --artifacts artifacts --release-assets release-assets --tag "$TAG" --repository "$REPOSITORY" --output release-assets/latest.json
+          node scripts/release/validate-latest.mjs --artifacts release-assets --tag "$TAG" --repository "$REPOSITORY" --manifest release-assets/latest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          if-no-files-found: error
+          path: release-assets/
 
-            ## Installation
-
-            - **Windows**: Download the `.msi` or `.exe` installer below
-            - **Auto-update**: Existing installations will update automatically
-          releaseDraft: true
-          prerelease: false
-          updaterJsonKeepUniversal: true
+  publish:
+    needs: [preflight, assemble]
+    if: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Draft, verify, and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/$REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body > generated-notes.md
+          if [[ "$TAG" == v0.55.0 ]]; then
+            printf '%s\n\n' 'If you installed Hive Manager before v0.55.0, download and install v0.55.0 once. Those older installs cannot update themselves. Official v0.55.0 and later installs can check for future updates in the app.' > release-notes.md
+            cat generated-notes.md >> release-notes.md
+          else
+            cp generated-notes.md release-notes.md
+          fi
+          gh release create "$TAG" --repo "$REPOSITORY" --draft --verify-tag --title "Hive Manager $TAG" --notes-file release-notes.md
+          gh release upload "$TAG" release-assets/* --repo "$REPOSITORY"
+          mkdir verified-assets
+          gh release download "$TAG" --repo "$REPOSITORY" --dir verified-assets
+          mapfile -t local_names < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          mapfile -t draft_names < <(gh api "repos/$REPOSITORY/releases/tags/$TAG" --jq '.assets[].name' | LC_ALL=C sort)
+          [[ "${local_names[*]}" == "${draft_names[*]}" ]] || { echo 'Draft release asset names differ from assembled asset names'; exit 1; }
+          for asset in release-assets/*; do
+            name="$(basename "$asset")"
+            [[ -f "verified-assets/$name" ]] || { echo "Missing uploaded asset: $name"; exit 1; }
+            [[ "$(sha256sum "$asset" | cut -d ' ' -f1)" == "$(sha256sum "verified-assets/$name" | cut -d ' ' -f1)" ]] || { echo "Uploaded asset hash mismatch: $name"; exit 1; }
+          done
+          gh release edit "$TAG" --repo "$REPOSITORY" --draft=false --latest
+          for asset in release-assets/*; do
+            name="$(basename "$asset")"
+            encoded="$(node -p 'encodeURIComponent(process.argv[1])' "$name")"
+            status=000
+            for attempt in {1..10}; do
+              status="$(curl -L -sS -o /dev/null -w '%{http_code}' "https://github.com/$REPOSITORY/releases/download/$TAG/$encoded")" || status=000
+              [[ "$status" == 200 ]] && break
+              sleep 3
+            done
+            [[ "$status" == 200 ]] || { echo "Public asset URL did not return 200: $name ($status)"; exit 1; }
+          done

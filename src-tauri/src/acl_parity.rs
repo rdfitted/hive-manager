@@ -27,6 +27,8 @@ const LIB_RS: &str = include_str!("lib.rs");
 
 /// The real capability permission manifest, captured at compile time.
 const MANIFEST_TOML: &str = include_str!("../permissions/main-window-commands.toml");
+const DEFAULT_CAPABILITY: &str = include_str!("../capabilities/default.json");
+const PREVIEW_CAPABILITY: &str = include_str!("../capabilities/operator-preview.json");
 
 /// Non-zero floor so a parser that silently matches nothing can never pass green.
 /// The real count was 52 when this test was written; this only needs to be a
@@ -425,5 +427,38 @@ fn bracket_depth_matching_does_not_truncate() {
             "last_command",
         ],
         "bracket-depth matching truncated or mis-split the handler block"
+    );
+}
+
+#[test]
+fn updater_and_restart_permissions_are_main_window_only() {
+    let default: serde_json::Value =
+        serde_json::from_str(DEFAULT_CAPABILITY).expect("default capability must be valid JSON");
+    let preview: serde_json::Value =
+        serde_json::from_str(PREVIEW_CAPABILITY).expect("preview capability must be valid JSON");
+    assert_eq!(default["windows"], serde_json::json!(["main"]));
+    assert_eq!(preview["windows"], serde_json::json!(["operator-preview"]));
+
+    let main_permissions = default["permissions"]
+        .as_array()
+        .expect("default permissions must be an array");
+    let preview_permissions = preview["permissions"]
+        .as_array()
+        .expect("preview permissions must be an array");
+    assert!(preview_permissions.is_empty(), "operator-preview must have no permissions");
+
+    let sensitive: BTreeSet<&str> = main_permissions
+        .iter()
+        .map(|value| value.as_str().expect("permission identifier must be a string"))
+        .filter(|permission| permission.starts_with("updater:") || permission.starts_with("process:"))
+        .collect();
+    assert_eq!(
+        sensitive,
+        BTreeSet::from([
+            "updater:allow-check",
+            "updater:allow-download-and-install",
+            "process:allow-restart",
+        ]),
+        "main window must have exactly the updater and restart grants it uses"
     );
 }
