@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { checkVersion } from './check-version.mjs';
 import { assembleLatest } from './assemble-latest.mjs';
 import { validateLatest } from './validate-latest.mjs';
@@ -184,5 +186,55 @@ describe('latest.json assembly and validation', () => {
     const options = signedArtifacts();
     writeFileSync(join(options.artifactsDir, 'Hive.Manager.app.tar.gz'), 'collision');
     assert.throws(() => assembleLatest(options), /collide after normalization/);
+  });
+});
+
+describe('release CLI', () => {
+  const run = (script, args, cwd) => spawnSync(process.execPath, [fileURLToPath(new URL(script, import.meta.url)), ...args], { encoding: 'utf8', cwd });
+
+  it('runs check-version with a dry-run root and rejects a missing flag value', () => {
+    const root = versionTree();
+    const result = run('./check-version.mjs', ['--root', root, '--dry-run']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Version sources agree: 0\.55\.0/);
+    const missingValue = run('./check-version.mjs', ['--root', '--dry-run']);
+    assert.equal(missingValue.status, 1);
+    assert.match(missingValue.stderr, /Missing value for --root/);
+  });
+
+  it('assembles and validates through the workflow CLI arguments', () => {
+    const options = signedArtifacts();
+    const cwd = temp();
+    mkdirSync(join(cwd, 'src-tauri'));
+    const manifestPath = join(options.releaseAssetsDir, 'latest.json');
+    writeFileSync(join(cwd, 'src-tauri/tauri.conf.json'), JSON.stringify({ plugins: { updater: { pubkey: options.publicKey } } }));
+    const assembled = run('./assemble-latest.mjs', [
+      '--artifacts', options.artifactsDir,
+      '--release-assets', options.releaseAssetsDir,
+      '--tag', options.tag,
+      '--repository', options.repository,
+      '--output', manifestPath,
+    ], cwd);
+    assert.equal(assembled.status, 0, assembled.stderr);
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    assert.match(manifest.platforms['windows-x86_64'].url, /Hive\.Manager_0\.55\.0_x64-setup\.exe$/);
+    assert.equal(manifest.platforms['windows-x86_64'].signature, readFileSync(join(options.releaseAssetsDir, 'Hive.Manager_0.55.0_x64-setup.exe.sig'), 'utf8'));
+
+    const validated = run('./validate-latest.mjs', [
+      '--artifacts', options.releaseAssetsDir,
+      '--tag', options.tag,
+      '--repository', options.repository,
+      '--manifest', manifestPath,
+    ], cwd);
+    assert.equal(validated.status, 0, validated.stderr);
+    assert.match(validated.stdout, /all updater signatures verify/);
+  });
+
+  it('reports missing required CLI flags before reading config', () => {
+    for (const script of ['./assemble-latest.mjs', './validate-latest.mjs']) {
+      const result = run(script, []);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /Missing required --artifacts/);
+    }
   });
 });

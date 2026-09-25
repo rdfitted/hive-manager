@@ -2,6 +2,7 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { flagValue } from './cli-args.mjs';
 
 export const PLATFORM_KEYS = ['windows-x86_64', 'darwin-aarch64', 'darwin-x86_64'];
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -96,14 +97,17 @@ export function validateLatest({ manifest, artifactsDir, tag, repository, public
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
-  const value = (flag) => args[args.indexOf(flag) + 1];
   try {
-    const config = JSON.parse(readFileSync(value('--config') ?? 'src-tauri/tauri.conf.json', 'utf8'));
+    const artifactsDir = flagValue(args, '--artifacts', { required: true });
+    const tag = flagValue(args, '--tag', { required: true });
+    const repository = flagValue(args, '--repository', { required: true });
+    const manifestPath = flagValue(args, '--manifest', { required: true });
+    const config = JSON.parse(readFileSync(flagValue(args, '--config') ?? 'src-tauri/tauri.conf.json', 'utf8'));
     validateLatest({
-      manifest: JSON.parse(readFileSync(value('--manifest'), 'utf8')),
-      artifactsDir: value('--artifacts'),
-      tag: value('--tag'),
-      repository: value('--repository'),
+      manifest: JSON.parse(readFileSync(manifestPath, 'utf8')),
+      artifactsDir,
+      tag,
+      repository,
       publicKey: config.plugins.updater.pubkey,
     });
     console.log('latest.json is complete and all updater signatures verify');

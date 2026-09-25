@@ -1,6 +1,7 @@
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { flagValue } from './cli-args.mjs';
 import { collectAssets, validateLatest } from './validate-latest.mjs';
 
 function exactlyOne(assets, suffix) {
@@ -46,17 +47,20 @@ export function assembleLatest({ artifactsDir, releaseAssetsDir, tag, repository
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
-  const value = (flag) => args[args.indexOf(flag) + 1];
   try {
-    const config = JSON.parse(readFileSync(value('--config') ?? 'src-tauri/tauri.conf.json', 'utf8'));
+    const artifactsDir = flagValue(args, '--artifacts', { required: true });
+    const releaseAssetsDir = flagValue(args, '--release-assets', { required: true });
+    const tag = flagValue(args, '--tag', { required: true });
+    const repository = flagValue(args, '--repository', { required: true });
+    const config = JSON.parse(readFileSync(flagValue(args, '--config') ?? 'src-tauri/tauri.conf.json', 'utf8'));
     const manifest = assembleLatest({
-      artifactsDir: value('--artifacts'),
-      releaseAssetsDir: value('--release-assets'),
-      tag: value('--tag'),
-      repository: value('--repository'),
+      artifactsDir,
+      releaseAssetsDir,
+      tag,
+      repository,
       publicKey: config.plugins.updater.pubkey,
     });
-    writeFileSync(value('--output') ?? 'latest.json', `${JSON.stringify(manifest, null, 2)}\n`);
+    writeFileSync(flagValue(args, '--output') ?? 'latest.json', `${JSON.stringify(manifest, null, 2)}\n`);
     console.log('Assembled one validated latest.json');
   } catch (error) {
     console.error(error.message);

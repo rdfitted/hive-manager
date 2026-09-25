@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { flagValue } from './cli-args.mjs';
 
 function cargoVersion(text) {
   const match = text.match(/^version\s*=\s*"([^"]+)"/m);
@@ -44,11 +45,10 @@ export function checkVersion({ root = '.', tag, dryRun = false } = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
-  const value = (flag) => args[args.indexOf(flag) + 1];
   try {
     const version = checkVersion({
-      root: args.includes('--root') ? value('--root') : '.',
-      tag: args.includes('--tag') ? value('--tag') : undefined,
+      root: flagValue(args, '--root') ?? '.',
+      tag: flagValue(args, '--tag'),
       dryRun: args.includes('--dry-run'),
     });
     console.log(`Version sources agree: ${version}`);
