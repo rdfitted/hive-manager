@@ -65,3 +65,7 @@ jobs:
 
       - name: Cargo test
         run: cargo test
+
+      - name: Overhead benchmarks (isolated)
+        working-directory: src-tauri
+        run: cargo test --lib -- --ignored --exact --test-threads=1 --nocapture http::handlers::evaluator::tests::typed_verdict_recording_overhead_under_50ms_median orchestrator::org_graph::retrieval_ledger::tests::benchmark_retrieval_spawn_overhead

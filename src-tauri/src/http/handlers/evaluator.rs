@@ -2317,6 +2317,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "timing benchmark: run isolated via --ignored --test-threads=1 (CI step 'Overhead benchmarks')"]
     async fn typed_verdict_recording_overhead_under_50ms_median() {
         const CRITERIA: usize = 20;
         const MEASURED_RUNS: usize = 21;

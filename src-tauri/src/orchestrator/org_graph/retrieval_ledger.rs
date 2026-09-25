@@ -381,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing benchmark: run isolated via --ignored --test-threads=1 (CI step 'Overhead benchmarks')"]
     fn benchmark_retrieval_spawn_overhead() {
         let _guard = RETRIEVAL_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().unwrap();
