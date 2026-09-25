@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use crate::adapters::VALID_CLIS;
+use crate::adapters::{CursorAdapter, VALID_CLIS};
 use crate::http::state::AppState;
 use crate::orchestrator::work_graph::schema::TaskTier;
 use crate::storage::AppConfig;
@@ -107,6 +107,18 @@ impl CliHealthRegistry {
     }
 
     async fn check_cli(cli: &str, refreshed_path: Option<&OsStr>) -> CliHealth {
+        if cli == "cursor" {
+            if let Some(reason) = CursorAdapter::cursor_unsupported_reason() {
+                return CliHealth {
+                    cli: cli.to_string(),
+                    resolved: false,
+                    bin_path: None,
+                    logged_in: LoginStatus::Unknown,
+                    detail: reason.to_string(),
+                    stale_hint: false,
+                };
+            }
+        }
         let binary = executable_for_cli(cli);
         let binary_label = if cli == "cursor" { "WSL" } else { binary };
         let Some(bin_path) = resolve_executable(binary) else {
@@ -1040,6 +1052,46 @@ mod tests {
     fn remapped_clis_use_the_real_launch_executable() {
         assert_eq!(executable_for_cli("cursor"), "wsl");
         assert_eq!(executable_for_cli("codex"), "codex");
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn cursor_health_is_unavailable_before_wsl_lookup() {
+        let health = CliHealthRegistry::check_cli("cursor", None).await;
+        assert!(!health.resolved);
+        assert!(health.bin_path.is_none());
+        assert!(!health.stale_hint);
+        assert_eq!(health.logged_in, LoginStatus::Unknown);
+        assert_eq!(
+            health.detail,
+            "Cursor launches through WSL; macOS is not supported yet"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merged_finder_path_resolves_claude_and_codex() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home_cli = temp.path().join("home/.local/bin");
+        let homebrew = temp.path().join("homebrew/bin");
+        std::fs::create_dir_all(&home_cli).unwrap();
+        std::fs::create_dir_all(&homebrew).unwrap();
+        let claude = home_cli.join("claude");
+        let codex = homebrew.join("codex");
+        for binary in [&claude, &codex] {
+            std::fs::write(binary, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let merged = crate::cli::env_path::merge_paths(
+            OsStr::new("/usr/bin:/bin"),
+            None,
+            &[home_cli, homebrew],
+        );
+        assert_eq!(resolve_executable_in_path("claude", &merged, None), Some(claude));
+        assert_eq!(resolve_executable_in_path("codex", &merged, None), Some(codex));
     }
 
     #[test]

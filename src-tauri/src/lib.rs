@@ -85,6 +85,9 @@ pub fn run() {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    #[cfg(target_os = "macos")]
+    cli::env_path::initialize_macos_cli_environment();
+
     // Initialize session storage
     let storage = Arc::new(SessionStorage::new().expect("Failed to initialize session storage"));
 

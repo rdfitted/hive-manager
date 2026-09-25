@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type ScratchShell = 'powershell' | 'cmd';
+export type ScratchShell = 'powershell' | 'cmd' | 'login';
 
 export interface ScratchTerminalPane {
   kind: 'scratch';
@@ -29,9 +29,12 @@ function scratchId(sessionId: string): string {
 }
 
 export function shellCommand(shell: ScratchShell): { command: string; args: string[] } {
-  return shell === 'powershell'
-    ? { command: 'powershell.exe', args: ['-NoLogo'] }
-    : { command: 'cmd.exe', args: [] };
+  switch (shell) {
+    case 'powershell': return { command: 'powershell.exe', args: ['-NoLogo'] };
+    case 'cmd': return { command: 'cmd.exe', args: [] };
+    // The backend resolves this token to $SHELL (or /bin/zsh) before spawning.
+    case 'login': return { command: 'login', args: ['-l'] };
+  }
 }
 
 function createScratchTerminalStore() {
@@ -44,7 +47,7 @@ function createScratchTerminalStore() {
         kind: 'scratch',
         id: scratchId(sessionId),
         sessionId,
-        title: shell === 'powershell' ? 'PowerShell' : 'Command Prompt',
+        title: shell === 'powershell' ? 'PowerShell' : shell === 'cmd' ? 'Command Prompt' : 'Login Shell',
         cwd,
         shell,
         createdAt: new Date().toISOString(),

@@ -11,6 +11,28 @@ use super::{AgentLaunchSpec, AgentSignal, BootstrapContext, CliAdapter, LaunchCo
 /// - Prompts: positional argument after the WSL agent command
 pub struct CursorAdapter;
 
+impl CursorAdapter {
+    pub(crate) fn cursor_unsupported_reason() -> Option<&'static str> {
+        if cfg!(windows) {
+            None
+        } else {
+            Some("Cursor launches through WSL; macOS is not supported yet")
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[allow(dead_code)] // The controller guard is the production launch path.
+    pub(crate) fn checked_launch_command(
+        &self,
+        spec: &AgentLaunchSpec,
+    ) -> Result<LaunchCommand, &'static str> {
+        if let Some(reason) = Self::cursor_unsupported_reason() {
+            return Err(reason);
+        }
+        Ok(self.build_launch_command(spec))
+    }
+}
+
 impl CliAdapter for CursorAdapter {
     fn cli_name(&self) -> &'static str {
         "cursor"
@@ -111,6 +133,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_build_launch_command() {
         let adapter = CursorAdapter;
@@ -120,6 +143,17 @@ mod tests {
         assert_eq!(cmd.binary, "wsl");
         assert_eq!(cmd.args[0..4], ["-d", "Ubuntu", "/root/.local/bin/agent", "--force"]);
         assert!(cmd.args.iter().any(|arg| arg.contains("Read /project/task.md and execute.")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn cursor_adapter_refuses_non_windows_launch() {
+        let reason = CursorAdapter::cursor_unsupported_reason().unwrap();
+        assert_eq!(
+            reason,
+            "Cursor launches through WSL; macOS is not supported yet"
+        );
+        assert_eq!(CursorAdapter.checked_launch_command(&make_spec()).unwrap_err(), reason);
     }
 
     #[test]
