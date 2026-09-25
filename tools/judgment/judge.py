@@ -9,6 +9,14 @@ Path overrides: --ledger, --tables, --policy, --redact-dictionary (or the
 JUDGMENT_LEDGER, JUDGMENT_TABLES, JUDGMENT_EGRESS_POLICY, and
 JUDGMENT_REDACT_DICTIONARY environment variables). A dry run checks every
 gate, writes a local row, and never calls the provider.
+
+The API key comes from TYPESAFE_API_KEY, else from the TYPESAFE_API_KEY= line
+of ~/.ai-gateway.env (override the file with JUDGMENT_KEY_FILE). It is never
+printed or written to the ledger.
+
+Question types: the built-in hive surfaces keep their fixed types. Any other
+allowlisted surface declares "question_type" ("noul" or "choice") and, for
+choice, optional "choice_keys" in its egress-policy entry.
 """
 
 from __future__ import annotations
@@ -34,6 +42,7 @@ HERE = Path(__file__).resolve().parent
 FORBIDDEN = {"answer", "rationale", "severity", "verdict", "result", "measured"}
 MAX_REQUEST_BYTES = 32 * 1024
 QUESTION_TYPES = {"hive.qa.criterion": "noul", "hive.review.finding": "choice"}
+REVIEW_CHOICES = {"ACCEPT", "PARTIAL", "DECLINE"}
 GITHUB_REMOTE = re.compile(
     r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
@@ -118,16 +127,62 @@ def _json_bytes(value: Any) -> bytes:
     return ledger.canonical_json(value).encode("utf-8")
 
 
-def _question(surface: str, value: Any) -> dict:
-    if surface not in QUESTION_TYPES or not isinstance(value, dict):
+def _api_key() -> str | None:
+    """TYPESAFE_API_KEY from the environment, else from ~/.ai-gateway.env.
+
+    The file fallback makes the tool independent of how the host process was
+    launched (a desktop app started from the Start menu has no key in its
+    environment). A key found in the file is placed in this process's
+    environment only, so the ledger's scrub-by-value keeps covering it.
+    """
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if key:
+        return key
+    path = Path(os.environ.get("JUDGMENT_KEY_FILE") or Path.home() / ".ai-gateway.env")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in lines:
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == "TYPESAFE_API_KEY":
+            value = value.strip().strip('"').strip("'")
+            if value:
+                os.environ["TYPESAFE_API_KEY"] = value
+                return value
+            return None
+    return None
+
+
+def _question_spec(surface: str, entry: dict | None) -> tuple[str, set[str] | None]:
+    """(question type, allowed choice keys or None) for a surface."""
+    if surface in QUESTION_TYPES:
+        expected = QUESTION_TYPES[surface]
+        return expected, (REVIEW_CHOICES if expected == "choice" else None)
+    declared = entry.get("question_type") if isinstance(entry, dict) else None
+    if declared not in {"noul", "choice"}:
         raise InputError("unsupported surface or question")
-    expected = QUESTION_TYPES[surface]
+    keys = entry.get("choice_keys")
+    if declared == "choice" and keys is not None:
+        if not isinstance(keys, list) or len(keys) < 2 or not all(isinstance(k, str) and k for k in keys):
+            raise InputError("choice_keys must list at least two non-empty strings")
+        return declared, set(keys)
+    return declared, None
+
+
+def _question(surface: str, value: Any, entry: dict | None = None) -> dict:
+    if not isinstance(value, dict):
+        raise InputError("unsupported surface or question")
+    expected, keys = _question_spec(surface, entry)
     if value.get("type") != expected or "instructions" not in value:
         raise InputError("question type or instructions missing")
     if expected == "choice":
         criteria = value.get("criteria")
-        if not isinstance(criteria, dict) or set(criteria) != {"ACCEPT", "PARTIAL", "DECLINE"}:
-            raise InputError("choice criteria must contain ACCEPT, PARTIAL, DECLINE")
+        if surface == "hive.review.finding":
+            if not isinstance(criteria, dict) or set(criteria) != REVIEW_CHOICES:
+                raise InputError("choice criteria must contain ACCEPT, PARTIAL, DECLINE")
+        elif not isinstance(criteria, dict) or len(criteria) < 2 or (keys is not None and set(criteria) != keys):
+            raise InputError("choice criteria must match the surface's choice_keys")
     elif "criteria" in value:
         criteria = value["criteria"]
         if not isinstance(criteria, dict) or set(criteria) != {"true", "false"}:
@@ -136,24 +191,28 @@ def _question(surface: str, value: Any) -> dict:
     return value
 
 
-def _answer(surface: str, response: Any, question_id: str) -> tuple[dict, dict]:
+def _answer(surface: str, response: Any, question_id: str,
+            question: dict | None = None) -> tuple[dict, dict]:
     if not isinstance(response, dict) or not isinstance(response.get("model"), str):
         raise jev_transport.TransportError("invalid-response")
     answers = response.get("answers")
     item = answers.get(question_id) if isinstance(answers, dict) else None
     if not isinstance(item, dict):
         raise jev_transport.TransportError("invalid-answer")
-    if surface == "hive.qa.criterion":
+    qtype = (question or {}).get("type") if surface not in QUESTION_TYPES else QUESTION_TYPES[surface]
+    if qtype == "noul":
         probability = item.get("noul")
         if item.get("type") != "noul" or isinstance(probability, bool) or not isinstance(probability, (int, float)) or not math.isfinite(probability) or not 0 <= probability <= 1:
             raise jev_transport.TransportError("invalid-answer")
-        return {"result": "pass" if probability >= 0.5 else "fail"}, {
-            "probabilities": {"pass": probability, "fail": 1 - probability},
+        yes, no = ("pass", "fail") if surface == "hive.qa.criterion" else ("true", "false")
+        return {"result": yes if probability >= 0.5 else no}, {
+            "probabilities": {yes: probability, no: 1 - probability},
             "threshold_id": "noul-0.5", "noul": probability, "confidence": None,
         }
+    allowed = REVIEW_CHOICES if surface == "hive.review.finding" else set(((question or {}).get("criteria") or {}).keys())
     choice = item.get("choice")
     probabilities = item.get("probabilities")
-    if item.get("type") != "choice" or choice not in {"ACCEPT", "PARTIAL", "DECLINE"} or not isinstance(probabilities, dict):
+    if item.get("type") != "choice" or choice not in allowed or not isinstance(probabilities, dict):
         raise jev_transport.TransportError("invalid-answer")
     return {"result": choice}, {
         "probabilities": probabilities, "confidence": item.get("confidence"),
@@ -203,7 +262,7 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
             project = _project_identity()
             project_entry = _policy_entry(policy, "projects", project)
             if project_entry:
-                question = _question(surface, question)
+                question = _question(surface, question, surface_entry)
                 redact_mode = surface_entry["redact"]
                 try:
                     dictionary = redaction.load_dictionary(
@@ -225,15 +284,15 @@ def _decision(args: argparse.Namespace, ledger_path: Path, *, ask: bool) -> int:
                         safe_state = None
                     elif args.dry_run:
                         status, exit_code = "dry-run", 0
-                    elif not os.environ.get("TYPESAFE_API_KEY"):
+                    elif not (api_key := _api_key()):
                         status, exit_code = "no-key", 0
                     else:
                         sent = True
                         start = time.monotonic()
                         try:
-                            response = jev_transport.send(request_bytes, os.environ["TYPESAFE_API_KEY"])
+                            response = jev_transport.send(request_bytes, api_key)
                             latency_ms = round((time.monotonic() - start) * 1000)
-                            answer, diagnostics = _answer(surface, response, args.question_id)
+                            answer, diagnostics = _answer(surface, response, args.question_id, question)
                             model = response["model"]
                             usage = response.get("usage")
                             status, exit_code = "recorded", 0
@@ -274,9 +333,8 @@ def _outcome(args: argparse.Namespace, ledger_path: Path) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = JudgeParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--ledger", type=Path, default=Path(os.environ.get("JUDGMENT_LEDGER") or
-                        (Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") /
-                         "hive-manager" / "judgments" / "ledger.jsonl")))
+    parser.add_argument("--ledger", type=Path, default=None,
+                        help="default: JUDGMENT_LEDGER, else the policy's \"ledger\" path, else the hive ledger")
     parser.add_argument("--tables", type=Path, default=Path(os.environ.get("JUDGMENT_TABLES") or HERE / "decision-tables.json"))
     parser.add_argument("--policy", type=Path, default=Path(os.environ.get("JUDGMENT_EGRESS_POLICY") or HERE / "egress-policy.json"))
     parser.add_argument("--redact-dictionary", default=os.environ.get("JUDGMENT_REDACT_DICTIONARY"))
@@ -304,8 +362,26 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _default_ledger(policy_path: Path) -> Path:
+    """JUDGMENT_LEDGER, else the egress policy's optional "ledger" path, else the hive ledger.
+
+    The policy field lets a second install (e.g. ~/.claude/tools/judgment for normal
+    sessions) write to its own ledger without a flag on every call.
+    """
+    env = os.environ.get("JUDGMENT_LEDGER")
+    if env:
+        return Path(env)
+    configured = _policy(policy_path).get("ledger")
+    if isinstance(configured, str) and configured.strip():
+        return Path(os.path.expandvars(os.path.expanduser(configured.strip())))
+    return (Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") /
+            "hive-manager" / "judgments" / "ledger.jsonl")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.ledger is None:
+        args.ledger = _default_ledger(args.policy)
     try:
         if args.command == "ask":
             return _decision(args, args.ledger, ask=True)
